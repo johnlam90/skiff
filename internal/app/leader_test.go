@@ -118,6 +118,25 @@ func TestHandleKey_LeaderToggleLineComment(t *testing.T) {
 	}
 }
 
+// TestHandleKey_LeaderGitChanges flips the sidebar to the Git panel via
+// Esc-g inside a real repo — pinning both the binding and the fact that
+// the panel's guard passes when a branch is detected.
+func TestHandleKey_LeaderGitChanges(t *testing.T) {
+	requireGit(t)
+	dir := initRepo(t)
+	writeFileT(t, filepath.Join(dir, "f.txt"), "x\n")
+	gitRun(t, dir, "add", ".")
+	gitRun(t, dir, "commit", "-q", "-m", "seed")
+	a := newTestApp(t, dir)
+
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	a.handleKey(keyEv(tcell.KeyRune, 'g'))
+
+	if !a.gitPanelActive {
+		t.Fatal("Esc-g should switch the sidebar to the Git panel")
+	}
+}
+
 // TestHandleKey_LeaderQuit sets a.quit via Esc-q. We test this directly
 // rather than through Run() so we don't have to drive the event loop —
 // the quit flag is what Run() polls each tick.

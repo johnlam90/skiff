@@ -59,6 +59,11 @@ The goals, in order:
 - **External change detection** — if a file on disk changes underneath
   an open clean buffer, the editor reloads it; if your buffer is dirty,
   you get a heads-up; if the file is deleted, the tab is flagged once.
+- **Git awareness** — changed files tint the file tree, gutter bars mark
+  added/modified/deleted lines (click one for a diff popup), the status
+  bar shows the branch plus a change count, and the sidebar's
+  [GIT tab](#git-changes) lists every uncommitted change with
+  click-to-diff — VS Code's Source Control view, one click away.
 - **Toggleable, draggable sidebar** — show/hide the file tree from the
   menu, or drag the splitter to resize it.
 - **Clipboard over SSH** — OSC 52, including a `tmux` passthrough so
@@ -191,6 +196,7 @@ within half a second tap one of the letters below.
 | `Esc /`     | Toggle line comment  |
 | `Esc f`     | Find in file         |
 | `Esc p`     | Find file in project |
+| `Esc g`     | Git changes          |
 
 A lone `Esc` is harmless — if you don't follow it with a bound key
 within the window, your next keystroke goes to the editor as normal,
@@ -249,6 +255,69 @@ fuzzy file finder over every non-ignored file in the project:
   as the file tree, plus immediately after any create/rename/delete
   inside the editor.
 - Only files are listed — no directories, no symlinked duplicates.
+
+### Git changes
+
+The sidebar has two tabs: **EXPLORER** and **GIT**. Click `GIT` (or
+press `Esc g`, pick **Git changes** from the `≡` menu, or click the
+branch segment in the status bar) and the sidebar flips to the
+uncommitted-changes list — VS Code's Source Control view, shrunk to a
+SpiceEdit panel:
+
+```
+ EXPLORER   GIT
+ main
+ M app.go  internal/app
+ A gitchanges.go  internal/app
+ D old.go  internal/app
+```
+
+- Every changed path in the project, sorted, with a colored status
+  letter: **M** modified, **A** added/untracked, **D** deleted,
+  **R** renamed — the same colors the file tree uses. The file name
+  leads and the directory trails dimmed, so the narrow sidebar stays
+  scannable.
+- **Click a row to see its diff** — side-by-side on a wide terminal
+  (old text left, new text right, line numbers on both, changes
+  aligned row-for-row like VS Code's diff editor), automatically
+  adapting to the classic unified view when the window is too narrow
+  for two readable columns. Resizing the terminal reflows the open
+  diff live. On paired modifications the exact characters that
+  changed are highlighted within the line, and context lines get full
+  syntax highlighting. Scroll with the trackpad/wheel or
+  `↑`/`↓`/`PgUp`/`PgDn`; long lines scroll sideways with
+  Shift+wheel or `←`/`→`. The `[ Open file ]` button (focused by
+  default, so `Enter` works too) opens the file with the cursor
+  parked on its first changed line; from there the gutter bars mark
+  each hunk — and clicking a gutter bar opens this same diff view for
+  that hunk. **Diff this file** in the `≡` menu shows the active
+  tab's own diff without a trip through the panel.
+- The `GIT` tab wears a change-count badge (`GIT 4`), and git status
+  collection runs on a background goroutine — a slow `git status` on
+  a huge or network-mounted repo can never stall typing.
+- The status bar shows ` main ↑2 ↓1 · 4 ` when the branch has
+  diverged from its upstream — the "you haven't pushed" nudge, before
+  you quit the editor.
+- **Commit history** (`≡` menu, or click the branch row in the GIT
+  panel) lists recent commits — SHA, subject, relative age — and a
+  click opens that commit's full diff, with per-file boundary rows
+  for multi-file commits. **History of this file** does the same
+  scoped to the active tab (with `--follow`, so renames don't
+  truncate the story). Both are read-only: no checkout, no rebase,
+  no cherry-pick — rewriting history stays in your shell.
+- An **untracked** file shows its whole content as an added diff. A
+  **deleted** file shows what was removed, with no open button — there
+  is nothing left to open. An untracked **directory** flips back to
+  the explorer and reveals itself.
+- The status bar shows ` branch · N ` while anything is uncommitted;
+  clicking it is the mouse-first way in from anywhere.
+- The list refreshes live on the same 10-second cadence as the file
+  tree, so a `git checkout` in the next tmux pane empties it on its
+  own. `Esc g` toggles back to the explorer, or just click `EXPLORER`.
+
+Read-only by design: staging, committing, and discarding stay in your
+shell. SpiceEdit shows you what changed and takes you there — it
+doesn't try to be a git client.
 
 ## Custom actions (open remote files on your laptop)
 

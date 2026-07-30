@@ -251,7 +251,7 @@ func (a *App) openFormatInstallPrompt(idx int, ext string, argvTemplate []string
 		// waiting for the 10-second tick. Same pair fileops.go uses
 		// after every other directory mutation we make.
 		app.tree.Refresh()
-		app.refreshGitStatus()
+		app.refreshGitStatusAsync()
 		// Substitute $FILE at run time, never at install time. This
 		// keeps the on-disk template portable while still pointing
 		// the formatter at the file the user just saved.

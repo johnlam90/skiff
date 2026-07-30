@@ -81,6 +81,22 @@ func (a *App) closeAllModals() {
 	a.confirmInfo = false
 	a.confirmMessageLines = nil
 	a.confirmInfoScroll = 0
+	a.diffOpen = false
+	a.diffTitle = ""
+	a.diffRaw = nil
+	a.diffRows = nil
+	a.diffOpenPath = ""
+	a.diffScroll = 0
+	a.diffScrollX = 0
+	a.diffHover = 0
+	a.diffRowStyles = nil
+	a.diffMaxLen = 0
+	a.gitLogOpen = false
+	a.gitLogEntries = nil
+	a.gitLogTitle = ""
+	a.gitLogPath = ""
+	a.gitLogSelected = 0
+	a.gitLogScroll = 0
 	// confirmCancelHook is parked here so an unrelated confirm modal
 	// opened after a format-trust / format-install prompt can't
 	// accidentally inherit the cancel hook. The flows that need a
@@ -98,7 +114,7 @@ func (a *App) closeAllModals() {
 // is what the user wants), but a key/mouse handler can use this to know
 // "is the user mid-task in some overlay surface".
 func (a *App) anyModalOpen() bool {
-	return a.menuOpen || a.promptOpen || a.confirmOpen || a.contextOpen || a.dirtyOpen || a.formOpen || a.findOpen || a.finderOpen
+	return a.menuOpen || a.promptOpen || a.confirmOpen || a.contextOpen || a.dirtyOpen || a.formOpen || a.findOpen || a.finderOpen || a.diffOpen || a.gitLogOpen
 }
 
 // -----------------------------------------------------------------------------
@@ -448,11 +464,17 @@ func (a *App) handleConfirmMouse(x, y int, btn tcell.ButtonMask) {
 	if a.confirmInfo {
 		// Single OK button at row mh-3, centered. Outside the modal
 		// dismisses too — same convention as the rest of the modals.
-		if btn&tcell.Button4 != 0 {
+		//
+		// Wheel scrolling matches the masks tcell actually emits for
+		// wheels and trackpads: WheelUp/WheelDown. (An earlier version
+		// checked Button4/Button5 — the X11 wheel convention — which
+		// tcell reserves for real extra mouse buttons, so trackpad
+		// scrolling in long output silently did nothing.)
+		if btn&tcell.WheelUp != 0 {
 			a.scrollConfirmInfo(-3)
 			return
 		}
-		if btn&tcell.Button5 != 0 {
+		if btn&tcell.WheelDown != 0 {
 			a.scrollConfirmInfo(3)
 			return
 		}
@@ -497,6 +519,19 @@ func (a *App) handleConfirmMouse(x, y int, btn tcell.ButtonMask) {
 			return
 		}
 	}
+}
+
+// btnRect is a one-row button hit zone shared by a modal's draw and
+// mouse paths so the highlight and the click can't disagree. Used by
+// the diff view's [ Open file ] / [ Close ] pair.
+type btnRect struct {
+	x, y, w int
+}
+
+// contains reports whether the cell (px, py) falls inside the button.
+// A zero-width rect (an unarmed button) contains nothing.
+func (r btnRect) contains(px, py int) bool {
+	return r.w > 0 && py == r.y && px >= r.x && px < r.x+r.w
 }
 
 // confirmModalRect returns the on-screen rectangle of the confirm modal,

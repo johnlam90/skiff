@@ -59,4 +59,4 @@ The single column between the sidebar and the editor is the splitter.
 
 ## Status bar
 
-The status bar shows the active file's path, language, cursor position, dirty marker, git branch (when applicable), and any flash messages from background work. It's display-only — the status bar does not respond to clicks.
+The status bar shows the active file's path, language, cursor position, dirty marker, git branch and change count (when applicable), and any flash messages from background work. One region is clickable: the branch segment on the right flips the sidebar to the GIT panel — the mouse-first sibling of `Esc g`. The sidebar's own header is clickable too: the `EXPLORER` and `GIT` tabs switch between the file tree and the uncommitted-changes list, and clicking a change row opens its diff — side-by-side on wide terminals, unified on narrow ones — with an `[ Open file ]` button that jumps to the first changed line.

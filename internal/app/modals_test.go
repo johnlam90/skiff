@@ -103,6 +103,30 @@ func TestConfirmInfoScroll_ClampsToViewport(t *testing.T) {
 	}
 }
 
+// TestHandleConfirmMouse_WheelScrollsInfoBody is the regression test
+// for trackpad scrolling in diff previews: tcell reports wheels as
+// WheelUp/WheelDown, and an earlier version listened for Button4/5 (the
+// X11 wheel convention) so wheel events fell through to the click
+// handling and did nothing.
+func TestHandleConfirmMouse_WheelScrollsInfoBody(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.width = 100
+	a.height = 12
+	a.openInfo("Diff · long.go", make([]string, 40))
+
+	a.handleConfirmMouse(50, 6, tcell.WheelDown)
+	if a.confirmInfoScroll != 3 {
+		t.Fatalf("WheelDown should scroll the body, scroll = %d", a.confirmInfoScroll)
+	}
+	a.handleConfirmMouse(50, 6, tcell.WheelUp)
+	if a.confirmInfoScroll != 0 {
+		t.Fatalf("WheelUp should scroll back, scroll = %d", a.confirmInfoScroll)
+	}
+	if !a.confirmOpen {
+		t.Fatal("wheel events must never dismiss the modal")
+	}
+}
+
 // TestAnyModalOpen returns true for any one flag and false for none.
 func TestAnyModalOpen(t *testing.T) {
 	a := newTestApp(t, t.TempDir())

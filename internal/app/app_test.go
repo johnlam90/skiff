@@ -58,6 +58,10 @@ func newTestApp(t *testing.T, root string) *App {
 	}
 	a.setActiveFolder(tree.Root.Path)
 	a.width, a.height = scr.Size()
+	// New() seeds git state synchronously before the loop starts; the
+	// cached branch is what gates the Git panel, so tests need the same
+	// seeding to see the app the way a real session does.
+	a.refreshGitStatus()
 	return a
 }
 
@@ -1655,7 +1659,7 @@ func TestDrawStatusBar_OmitsBranchWhenEmpty(t *testing.T) {
 }
 
 // TestMenuLayout_NoCustomActions pins down the baseline geometry: with
-// zero custom actions the modal still has seven built-in groups and the
+// zero custom actions the modal still has eight built-in groups and the
 // height matches the expected layout total. Catches accidental
 // off-by-one regressions when someone tweaks the layout helper.
 func TestMenuLayout_NoCustomActions(t *testing.T) {
@@ -1663,13 +1667,13 @@ func TestMenuLayout_NoCustomActions(t *testing.T) {
 	a.customActions = nil
 	items, dividers, h := a.menuLayout()
 
-	if h != 31 {
-		t.Errorf("modalHeight = %d, want 31", h)
+	if h != 36 {
+		t.Errorf("modalHeight = %d, want 36", h)
 	}
-	if got := len(items); got != 21 {
-		t.Errorf("item count = %d, want 21 built-ins", got)
+	if got := len(items); got != 25 {
+		t.Errorf("item count = %d, want 25 built-ins", got)
 	}
-	wantDiv := []int{2, 6, 10, 13, 21, 26, 28}
+	wantDiv := []int{2, 6, 10, 13, 18, 26, 31, 33}
 	if len(dividers) != len(wantDiv) {
 		t.Fatalf("dividers = %v, want %v", dividers, wantDiv)
 	}
@@ -1830,8 +1834,8 @@ func TestMenuLayout_WithCustomActions(t *testing.T) {
 	}
 	items, _, h := a.menuLayout()
 
-	if h != 34 { // 31 + 2 items + 1 divider
-		t.Errorf("modalHeight = %d, want 34", h)
+	if h != 39 { // 36 + 2 items + 1 divider
+		t.Errorf("modalHeight = %d, want 39", h)
 	}
 	// Custom actions should be the second-to-last and third-to-last
 	// rows, with Quit as the final row.

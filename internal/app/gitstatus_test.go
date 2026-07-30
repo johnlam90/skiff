@@ -21,9 +21,11 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cloudmanic/spice-edit/internal/editor"
 	"github.com/cloudmanic/spice-edit/internal/filetree"
+	"github.com/gdamore/tcell/v2"
 )
 
 // TestLoadGitStatus_NotARepo verifies that pointing the loader at a
@@ -91,6 +93,209 @@ func TestLoadGitLineChanges_IncludesStagedChanges(t *testing.T) {
 	}
 	if got := changes[1]; got != editor.GitLineModified {
 		t.Fatalf("line 2 marker = %v, want modified", got)
+	}
+}
+
+// TestLoadGitAheadBehind_CountsBothDirections builds a repo with a
+// bare upstream, pushes, then creates one unpushed commit and rewinds
+// past one pushed commit — landing 1 ahead and 1 behind at once. Pins
+// the left/right order of rev-list's symmetric difference, the mistake
+// this helper exists to encapsulate.
+func TestLoadGitAheadBehind_CountsBothDirections(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	bare := t.TempDir()
+	gitRun(t, bare, "init", "-q", "--bare")
+	writeFileT(t, filepath.Join(repo, "a.txt"), "one\n")
+	gitRun(t, repo, "add", ".")
+	gitRun(t, repo, "commit", "-q", "-m", "c1")
+	writeFileT(t, filepath.Join(repo, "a.txt"), "two\n")
+	gitRun(t, repo, "commit", "-q", "-am", "c2")
+	gitRun(t, repo, "remote", "add", "origin", bare)
+	gitRun(t, repo, "push", "-q", "-u", "origin", "main")
+
+	// Rewind one pushed commit (now behind 1), then commit something
+	// new on top (now also ahead 1).
+	gitRun(t, repo, "reset", "-q", "--hard", "HEAD~1")
+	writeFileT(t, filepath.Join(repo, "b.txt"), "local\n")
+	gitRun(t, repo, "add", ".")
+	gitRun(t, repo, "commit", "-q", "-m", "local-only")
+
+	ahead, behind := loadGitAheadBehind(repo)
+	if ahead != 1 || behind != 1 {
+		t.Fatalf("ahead=%d behind=%d, want 1/1", ahead, behind)
+	}
+}
+
+// TestLoadGitAheadBehind_NoUpstreamIsZero verifies branches without an
+// upstream (and non-repos) degrade to 0/0 so the arrows just don't
+// render.
+func TestLoadGitAheadBehind_NoUpstreamIsZero(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	writeFileT(t, filepath.Join(repo, "a.txt"), "x\n")
+	gitRun(t, repo, "add", ".")
+	gitRun(t, repo, "commit", "-q", "-m", "c1")
+	if a, b := loadGitAheadBehind(repo); a != 0 || b != 0 {
+		t.Fatalf("no-upstream: got %d/%d, want 0/0", a, b)
+	}
+	if a, b := loadGitAheadBehind(t.TempDir()); a != 0 || b != 0 {
+		t.Fatalf("non-repo: got %d/%d, want 0/0", a, b)
+	}
+}
+
+// TestRefreshGitStatusAsync_PostsEventAndApplies drives the full async
+// round trip: the kick collects on a goroutine and posts a
+// gitStatusEvent; feeding that event through handleEvent applies the
+// snapshot to the tree and clears the in-flight flag — exactly what
+// the real event loop does, minus the loop.
+func TestRefreshGitStatusAsync_PostsEventAndApplies(t *testing.T) {
+	requireGit(t)
+	dir := initRepo(t)
+	writeFileT(t, filepath.Join(dir, "f.txt"), "x\n")
+	a := newTestApp(t, dir)
+	a.tree.DirtyFiles = nil // prove the event repopulates it
+
+	a.refreshGitStatusAsync()
+	if !a.gitRefreshInFlight {
+		t.Fatal("kick should mark a collection in flight")
+	}
+
+	evCh := make(chan tcell.Event, 1)
+	go func() { evCh <- a.screen.PollEvent() }()
+	select {
+	case ev := <-evCh:
+		gse, ok := ev.(*gitStatusEvent)
+		if !ok {
+			t.Fatalf("expected gitStatusEvent, got %T", ev)
+		}
+		a.handleEvent(gse)
+	case <-time.After(5 * time.Second):
+		t.Fatal("background collection never posted its event")
+	}
+
+	if a.gitRefreshInFlight {
+		t.Fatal("event should clear the in-flight flag")
+	}
+	if len(a.tree.DirtyFiles) != 1 {
+		t.Fatalf("event should stamp dirty files, got %v", a.tree.DirtyFiles)
+	}
+}
+
+// TestRefreshGitStatusAsync_CoalescesKicks pins the burst behaviour: a
+// second kick while one is in flight queues exactly one follow-up run
+// rather than piling up goroutines, and the follow-up fires when the
+// first result lands.
+func TestRefreshGitStatusAsync_CoalescesKicks(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.gitRefreshInFlight = true // simulate a collection mid-flight
+
+	a.refreshGitStatusAsync()
+	a.refreshGitStatusAsync()
+	if !a.gitRefreshQueued {
+		t.Fatal("kicks during flight should queue a follow-up")
+	}
+
+	a.handleGitStatusEvent(&gitStatusEvent{res: gitStatusResult{}})
+	if !a.gitRefreshInFlight || a.gitRefreshQueued {
+		t.Fatalf("landing should fire the queued follow-up, inFlight=%v queued=%v",
+			a.gitRefreshInFlight, a.gitRefreshQueued)
+	}
+}
+
+// TestApplyGitStatus_UpdatesOpenTabGutters verifies a collection's
+// per-tab line changes reach the matching open tabs, and that tabs
+// absent from the result keep their existing markers.
+func TestApplyGitStatus_UpdatesOpenTabGutters(t *testing.T) {
+	dir := t.TempDir()
+	tracked := filepath.Join(dir, "a.txt")
+	other := filepath.Join(dir, "b.txt")
+	writeFileT(t, tracked, "x\n")
+	writeFileT(t, other, "y\n")
+	a := newTestApp(t, dir)
+	a.openFile(tracked)
+	a.openFile(other)
+	keep := map[int]editor.GitLineChange{3: editor.GitLineAdded}
+	a.tabs[1].GitLines = keep
+
+	a.applyGitStatus(gitStatusResult{
+		st: gitStatus{IsRepo: true, Root: dir, Branch: "main", DirtyFiles: map[string]filetree.GitChangeKind{}},
+		tabLines: map[string]map[int]editor.GitLineChange{
+			tracked: {0: editor.GitLineModified},
+		},
+	})
+
+	if got := a.tabs[0].GitLines[0]; got != editor.GitLineModified {
+		t.Fatalf("tab 0 gutter should update, got %v", got)
+	}
+	if got := a.tabs[1].GitLines[3]; got != editor.GitLineAdded {
+		t.Fatalf("tab 1 (absent from result) should keep its markers, got %v", got)
+	}
+}
+
+// TestLoadGitFileDiff_DeletedFile pins the loader the Git changes modal
+// leans on for deleted rows: the full diff against HEAD, including the
+// removed content, comes back as display lines.
+func TestLoadGitFileDiff_DeletedFile(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	path := filepath.Join(repo, "gone.txt")
+	writeFileT(t, path, "farewell\n")
+	gitRun(t, repo, "add", "gone.txt")
+	gitRun(t, repo, "commit", "-m", "init")
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	lines := loadGitFileDiff(repo, path, false)
+	if len(lines) == 0 {
+		t.Fatal("deleted file should produce a diff")
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "-farewell") {
+		t.Fatalf("diff should contain the removed line, got:\n%s", joined)
+	}
+}
+
+// TestLoadGitFileDiff_UntrackedFallsBackToNoIndex pins the untracked
+// path: a file git has never seen still renders as an all-added diff
+// via --no-index, so the Git panel's preview is never empty for new
+// files.
+func TestLoadGitFileDiff_UntrackedFallsBackToNoIndex(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	fresh := filepath.Join(repo, "fresh.txt")
+	writeFileT(t, fresh, "hello\n")
+
+	lines := loadGitFileDiff(repo, fresh, true)
+	if joined := strings.Join(lines, "\n"); !strings.Contains(joined, "+hello") {
+		t.Fatalf("untracked diff should show the file as added, got:\n%s", joined)
+	}
+}
+
+// TestLoadGitFileDiff_Degrades confirms the best-effort contract: a
+// non-repo, empty arguments, and a clean file all yield nil rather than
+// an error the UI would have to route somewhere. The clean-file case
+// doubly matters now that untracked=true has a fallback — a tracked,
+// unchanged file must never be painted as brand new.
+func TestLoadGitFileDiff_Degrades(t *testing.T) {
+	if got := loadGitFileDiff(t.TempDir(), "x.txt", false); got != nil {
+		t.Fatalf("non-repo diff = %v, want nil", got)
+	}
+	if got := loadGitFileDiff("", "x.txt", false); got != nil {
+		t.Fatalf("empty root diff = %v, want nil", got)
+	}
+	if got := loadGitFileDiff(t.TempDir(), "", true); got != nil {
+		t.Fatalf("empty path diff = %v, want nil", got)
+	}
+	requireGit(t)
+	repo := initRepo(t)
+	clean := filepath.Join(repo, "clean.txt")
+	writeFileT(t, clean, "steady\n")
+	gitRun(t, repo, "add", "clean.txt")
+	gitRun(t, repo, "commit", "-m", "init")
+	if got := loadGitFileDiff(repo, clean, false); got != nil {
+		t.Fatalf("clean file diff = %v, want nil", got)
 	}
 }
 

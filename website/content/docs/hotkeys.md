@@ -25,6 +25,7 @@ So `Esc` is the leader. Tap `Esc`, then within half a second tap a bound letter.
 | `Esc /`     | Toggle line comment   |
 | `Esc f`     | Find in file          |
 | `Esc p`     | Find file in project  |
+| `Esc g`     | Git changes           |
 
 ## Editor keys (no Esc needed)
 

@@ -196,6 +196,13 @@ func builtinMenuGroups() [][]menuItemDef {
 			{label: "Find in file", shortcut: "Esc f", action: (*App).menuFind, enabled: (*App).hasFindable},
 			{label: "Find file in project", shortcut: "Esc p", action: (*App).menuFindFile, enabled: (*App).hasFinder},
 		},
+		// Git
+		{
+			{label: "Git changes", shortcut: "Esc g", action: (*App).menuGitChanges, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
+			{label: "Diff this file", action: (*App).menuDiffFile, enabled: (*App).hasDiffableTab},
+			{label: "History of this file", action: (*App).menuFileHistory, enabled: (*App).hasFileHistoryTab},
+			{label: "Commit history", action: (*App).menuCommitHistory, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
+		},
 		// File actions
 		{
 			{shortcut: "Esc n", action: (*App).menuNewFile, enabled: alwaysTrue, labelFor: (*App).newFileLabel},
@@ -449,6 +456,18 @@ type App struct {
 	// a git repo. Updated on the same 10-second tick as refreshGitStatus.
 	gitBranch string
 
+	// gitAhead / gitBehind count commits versus the branch's upstream —
+	// the status bar's ↑ ↓ arrows. Zero when in sync or no upstream.
+	gitAhead  int
+	gitBehind int
+
+	// gitRefreshInFlight marks a background status collection currently
+	// running; gitRefreshQueued remembers that more refresh requests
+	// arrived meanwhile, so exactly one follow-up run fires when the
+	// in-flight one lands. Both are main-thread-only state.
+	gitRefreshInFlight bool
+	gitRefreshQueued   bool
+
 	// customActions is the list of user-configured shell-out actions
 	// loaded from ~/.config/spiceedit/actions.json at startup. When
 	// non-empty they prepend a new group to the action menu — see
@@ -466,6 +485,47 @@ type App struct {
 	finderScroll   int
 	finderSelected int
 	finderResults  []finder.Result
+
+	// Git panel state — the sidebar's second tab ("Esc g", ≡ → Git
+	// changes, the GIT header tab, or a click on the status bar's
+	// branch segment). When active the sidebar shows the uncommitted-
+	// changes list instead of the file tree. Rows are rebuilt from
+	// tree.DirtyFiles on activation and on every git-status refresh
+	// while the panel is up.
+	gitPanelActive bool
+	gitPanelRows   []gitChangeRow
+	gitPanelScroll int
+
+	// Diff view modal state — the side-by-side (or, when the terminal
+	// is narrow, unified) git diff opened from the Git panel and the
+	// editor's gutter markers. diffRaw keeps the verbatim `git diff`
+	// lines for the unified layout; diffRows is the same diff parsed
+	// into aligned two-column rows. diffOpenPath, when non-empty, arms
+	// the [ Open file ] button; diffHover tracks which button Enter
+	// activates (1 = Open file, 0 = Close).
+	diffOpen     bool
+	diffTitle    string
+	diffRaw      []string
+	diffRows     []diffRow
+	diffOpenPath string
+	diffScroll   int
+	diffScrollX  int
+	diffHover    int
+	// diffRowStyles carries per-rune Chroma styles for context rows
+	// (nil for changed/hunk rows, which keep the git colors); diffMaxLen
+	// is the longest line in the diff, bounding horizontal scroll.
+	diffRowStyles [][]tcell.Style
+	diffMaxLen    int
+
+	// Commit history modal state — the branch log or a single file's
+	// log (gitLogPath non-empty), opened from the ≡ menu or the Git
+	// panel's branch row. Enter/click opens the commit's diff.
+	gitLogOpen     bool
+	gitLogTitle    string
+	gitLogPath     string
+	gitLogEntries  []gitLogEntry
+	gitLogSelected int
+	gitLogScroll   int
 
 	// confirmCancelHook runs when the active confirm modal is dismissed
 	// without a Yes — i.e. the user picked No, hit Esc, or clicked
@@ -623,43 +683,100 @@ func (a *App) refreshTree() {
 
 // refreshGitStatus re-runs `git status --porcelain` against the project
 // root and stamps the resulting dirty-paths sets onto the file tree, so
-// changed files render in the Modified color on the next draw. It's
-// cheap (a couple of forks) but not free — we only call it from the
-// 10-second tree-refresh tick and right after our own file operations,
-// not on every keystroke. A non-git project leaves the tree's dirty
-// maps empty, which the renderer treats as "everything clean".
+// changed files render in the Modified color on the next draw. This is
+// the synchronous flavour — it blocks until git answers — used at
+// startup (nothing is interactive yet) and by tests. Interactive code
+// paths use refreshGitStatusAsync so a slow `git status` on a huge or
+// network-mounted repo can never stall typing.
 func (a *App) refreshGitStatus() {
-	if a.tree == nil {
-		// Single-file mode has no tree to stamp dirty-path sets onto,
-		// but the open tab can still show per-line gutter markers —
-		// those come from a single `git diff` on the file itself and
-		// don't need the (deliberately skipped) directory walk. Skip
-		// the whole-repo `git status` and just refresh the gutter.
-		a.refreshGitLineChanges()
-		return
-	}
-	st := loadGitStatus(a.rootDir)
-	if !st.IsRepo {
-		a.tree.DirtyFiles = nil
-		a.tree.DirtyFolders = nil
-		a.gitBranch = ""
-		a.refreshGitLineChanges()
-		return
-	}
-	dirtyFiles := rebaseGitPaths(st.DirtyFiles, a.tree.Root.Path)
-	a.tree.DirtyFiles = dirtyFiles
-	a.tree.DirtyFolders = dirtyFolderSet(dirtyFiles, a.tree.Root.Path)
-	a.gitBranch = st.Branch
-	a.refreshGitLineChanges()
+	a.applyGitStatus(collectGitStatus(a.rootDir, a.openTabPaths(), a.tree == nil))
 }
 
-// refreshGitLineChanges refreshes gutter markers for every open text tab.
-func (a *App) refreshGitLineChanges() {
+// refreshGitStatusAsync collects git status on a background goroutine
+// and posts the result back to the main loop as a gitStatusEvent —
+// the same goroutine → custom event pattern the auto-scroller and the
+// finder indexer use, so no UI state is ever touched off-thread.
+// Kicks while a collection is already in flight coalesce into a single
+// follow-up run, so a burst of file operations costs at most two
+// status calls rather than one each.
+func (a *App) refreshGitStatusAsync() {
+	if a.gitRefreshInFlight {
+		a.gitRefreshQueued = true
+		return
+	}
+	a.gitRefreshInFlight = true
+	rootDir, paths, skipStatus := a.rootDir, a.openTabPaths(), a.tree == nil
+	scr := a.screen
+	go func() {
+		res := collectGitStatus(rootDir, paths, skipStatus)
+		_ = scr.PostEvent(&gitStatusEvent{when: time.Now(), res: res})
+	}()
+}
+
+// handleGitStatusEvent applies a finished background collection and
+// launches the follow-up run if more refresh requests arrived while
+// this one was in flight.
+func (a *App) handleGitStatusEvent(e *gitStatusEvent) {
+	a.gitRefreshInFlight = false
+	a.applyGitStatus(e.res)
+	if a.gitRefreshQueued {
+		a.gitRefreshQueued = false
+		a.refreshGitStatusAsync()
+	}
+}
+
+// openTabPaths returns the file paths of every open text tab — the set
+// whose gutter markers a status collection should refresh. Image tabs
+// and untitled buffers have no diff to compute.
+func (a *App) openTabPaths() []string {
+	paths := make([]string, 0, len(a.tabs))
 	for _, tab := range a.tabs {
 		if tab == nil || tab.Path == "" || tab.IsImage() {
 			continue
 		}
-		tab.GitLines = loadGitLineChanges(a.rootDir, tab.Path)
+		paths = append(paths, tab.Path)
+	}
+	return paths
+}
+
+// applyGitStatus stamps a collection result onto the UI: tree tint
+// maps, branch, per-tab gutter markers, and the Git panel rows when the
+// panel is up. Main-thread only — the async path hands results here
+// via gitStatusEvent.
+func (a *App) applyGitStatus(res gitStatusResult) {
+	if a.tree != nil {
+		if !res.st.IsRepo {
+			a.tree.DirtyFiles = nil
+			a.tree.DirtyFolders = nil
+			a.gitBranch = ""
+			a.gitAhead, a.gitBehind = 0, 0
+			// No repo, no Git panel — fall back to the explorer rather
+			// than strand the user on a view with nothing behind it.
+			a.gitPanelActive = false
+			a.gitPanelRows = nil
+		} else {
+			dirtyFiles := rebaseGitPaths(res.st.DirtyFiles, a.tree.Root.Path)
+			a.tree.DirtyFiles = dirtyFiles
+			a.tree.DirtyFolders = dirtyFolderSet(dirtyFiles, a.tree.Root.Path)
+			a.gitBranch = res.st.Branch
+			a.gitAhead, a.gitBehind = res.st.Ahead, res.st.Behind
+		}
+	}
+	// Tabs opened after the collection started aren't in the map and
+	// keep the gutter lines they loaded on open; tabs closed since are
+	// simply skipped by the path lookup.
+	for _, tab := range a.tabs {
+		if tab == nil || tab.Path == "" || tab.IsImage() {
+			continue
+		}
+		if lines, ok := res.tabLines[tab.Path]; ok {
+			tab.GitLines = lines
+		}
+	}
+	// Keep the Git panel live: whatever refreshed the status (the 10s
+	// tick, a save, a file op) also refreshes the visible list.
+	if a.gitPanelActive {
+		a.rebuildGitChangesRows()
 	}
 }
 
@@ -747,6 +864,8 @@ func (a *App) handleEvent(ev tcell.Event) {
 		if a.finderOpen {
 			a.refreshFinderResults()
 		}
+	case *gitStatusEvent:
+		a.handleGitStatusEvent(e)
 	}
 }
 
@@ -760,7 +879,7 @@ func (a *App) handleEvent(ev tcell.Event) {
 func (a *App) refreshTreeNow() {
 	a.refreshTree()
 	a.reconcileOpenTabsWithDisk()
-	a.refreshGitStatus()
+	a.refreshGitStatusAsync()
 	a.invalidateFinder()
 }
 
@@ -1020,6 +1139,14 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		a.handleFinderKey(ev)
 		return
 	}
+	if a.diffOpen {
+		a.handleDiffKey(ev)
+		return
+	}
+	if a.gitLogOpen {
+		a.handleGitLogKey(ev)
+		return
+	}
 
 	if ev.Key() == tcell.KeyEsc {
 		// Esc is the editor's only command key. Behavior:
@@ -1172,6 +1299,14 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		a.handleFinderMouse(x, y, btn)
 		return
 	}
+	if a.diffOpen {
+		a.handleDiffMouse(x, y, btn)
+		return
+	}
+	if a.gitLogOpen {
+		a.handleGitLogMouse(x, y, btn)
+		return
+	}
 
 	if a.menuOpen {
 		a.updateMenuHover(x, y)
@@ -1257,6 +1392,8 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 			a.sidebarClick(x, y)
 		case y == 0:
 			a.tabBarClick(x, y)
+		case y == a.height-1:
+			a.statusBarClick(x)
 		case y > 0 && y < a.height-1:
 			a.editorPress(x, y)
 			a.dragMode = "editor"
@@ -1297,7 +1434,11 @@ func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
 // scrollAt scrolls whichever panel the (x, y) cursor is over.
 func (a *App) scrollAt(x, y, delta int) {
 	if sw := a.sidebarW(); sw > 0 && x < sw {
-		a.tree.Scroll(delta)
+		if a.gitPanelActive {
+			a.scrollGitPanel(delta)
+		} else {
+			a.tree.Scroll(delta)
+		}
 		return
 	}
 	if y > 0 && y < a.height-1 {
@@ -1333,6 +1474,11 @@ func (a *App) tryTreeContextClick(x, y int) bool {
 	if sw <= 0 {
 		return false
 	}
+	// The Git panel has no per-row context actions — the tree isn't
+	// what's on screen, so tree.HitTest would map to invisible rows.
+	if a.gitPanelActive {
+		return false
+	}
 	splitX := a.splitterX()
 	if x >= splitX {
 		return false
@@ -1360,6 +1506,22 @@ func (a *App) tryTreeContextClick(x, y int) bool {
 // root" state.
 func (a *App) sidebarClick(x, y int) {
 	sx, sy, _, _ := a.sidebarRect()
+	// Header row: the EXPLORER / GIT tabs switch which panel the
+	// sidebar shows. Handled before any panel-specific hit-testing so
+	// the tabs behave identically from either side.
+	if y-sy == 0 {
+		switch a.sidebarHeaderHit(x - sx) {
+		case "explorer":
+			a.showExplorerPanel()
+		case "git":
+			a.showGitPanel()
+		}
+		return
+	}
+	if a.gitPanelActive {
+		a.gitPanelClick(y - sy)
+		return
+	}
 	n, ok := a.tree.HitTest(x-sx, y-sy)
 	if !ok {
 		return
@@ -1466,7 +1628,9 @@ func (a *App) openGitHunkAt(tab *editor.Tab, localX, localY int) bool {
 		a.openInfo("Git change", []string{"No git diff found for this line."})
 		return true
 	}
-	a.openInfo("Git change · "+filepath.Base(tab.Path), lines)
+	// The file is already open in front of the user, so the diff view
+	// gets no [ Open file ] button — Close is the only way out.
+	a.openDiffView("Git change · "+filepath.Base(tab.Path), lines, "", tab.Path)
 	return true
 }
 
@@ -1722,7 +1886,7 @@ func (a *App) saveTabAt(idx int) bool {
 		a.flash(fmt.Sprintf("Save failed: %v", err))
 		return false
 	}
-	a.refreshGitStatus()
+	a.refreshGitStatusAsync()
 	a.flash(fmt.Sprintf("Saved %s", filepath.Base(tab.Path)))
 	// Format-on-save runs after the disk write succeeds, so a broken
 	// formatter never blocks the user's save from landing. The
@@ -2127,7 +2291,7 @@ func (a *App) menuSaveAndClose() {
 		a.flash(fmt.Sprintf("Save failed: %v", err))
 		return
 	}
-	a.refreshGitStatus()
+	a.refreshGitStatusAsync()
 	a.flash(fmt.Sprintf("Saved %s — closed", filepath.Base(tab.Path)))
 	a.closeTab(a.activeTab)
 }
@@ -2268,7 +2432,15 @@ func (a *App) draw() {
 
 	if a.sidebarShown {
 		sx, sy, sw, sh := a.sidebarRect()
-		a.tree.Render(a.screen, a.theme, sx, sy, sw, sh)
+		if a.gitPanelActive {
+			a.drawGitPanel(sx, sy, sw, sh)
+		} else {
+			a.tree.Render(a.screen, a.theme, sx, sy, sw, sh)
+			// Overdraw the tree's plain header with the EXPLORER / GIT
+			// tab row — the tree keeps rendering its own header so its
+			// geometry (and tests) stay untouched.
+			a.drawSidebarHeader(sx, sy, sw)
+		}
 		a.drawSplitter()
 	}
 
@@ -2309,6 +2481,12 @@ func (a *App) draw() {
 	}
 	if a.finderOpen {
 		a.drawFinder()
+	}
+	if a.diffOpen {
+		a.drawDiffView()
+	}
+	if a.gitLogOpen {
+		a.drawGitLog()
 	}
 }
 
@@ -2499,12 +2677,13 @@ func (a *App) drawStatusBar() {
 		a.screen.SetContent(cx, sy, ' ', nil, style)
 	}
 
-	// Right-side text: current git branch when we're inside a repo. Drawn
-	// first so the left-side text can be clipped against it and the two
-	// pieces never overlap on a narrow window.
+	// Right-side text: current git branch (plus a changed-path count when
+	// there is one) when we're inside a repo. Drawn first so the left-side
+	// text can be clipped against it and the two pieces never overlap on a
+	// narrow window. The segment doubles as the click target that opens
+	// the Git changes modal — see statusBarClick.
 	var rightWidth int
-	if a.gitBranch != "" {
-		right := " " + a.gitBranch + " "
+	if right := a.statusGitSegment(); right != "" {
 		rw := len([]rune(right))
 		if rw < sw {
 			drawAt(a.screen, sx+sw-rw, sy, right, style)

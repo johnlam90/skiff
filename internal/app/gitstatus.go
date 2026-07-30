@@ -21,14 +21,52 @@ package app
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cloudmanic/spice-edit/internal/editor"
 	"github.com/cloudmanic/spice-edit/internal/filetree"
 )
+
+// gitStatusResult bundles everything one status collection produces:
+// the repo-level snapshot and the per-tab gutter line changes. Built by
+// collectGitStatus — possibly on a background goroutine — and applied
+// to the UI in one shot by App.applyGitStatus on the main thread.
+type gitStatusResult struct {
+	st       gitStatus
+	tabLines map[string]map[int]editor.GitLineChange
+}
+
+// gitStatusEvent carries a finished background collection back to the
+// main event loop, following the same custom-event pattern as
+// treeRefreshEvent and finderRebuiltEvent.
+type gitStatusEvent struct {
+	when time.Time
+	res  gitStatusResult
+}
+
+// When satisfies the tcell.Event interface.
+func (e *gitStatusEvent) When() time.Time { return e.when }
+
+// collectGitStatus runs the git side of a status refresh: the repo
+// snapshot (skipped in single-file mode, which deliberately avoids the
+// whole-repo walk) plus one `git diff` of gutter lines per open tab.
+// It only shells out and builds data — no App state — so it is safe to
+// run off the main thread.
+func collectGitStatus(rootDir string, tabPaths []string, skipStatus bool) gitStatusResult {
+	res := gitStatusResult{tabLines: map[string]map[int]editor.GitLineChange{}}
+	if !skipStatus {
+		res.st = loadGitStatus(rootDir)
+	}
+	for _, path := range tabPaths {
+		res.tabLines[path] = loadGitLineChanges(rootDir, path)
+	}
+	return res
+}
 
 // gitStatus is the snapshot of a single git status run. IsRepo distinguishes
 // "not a git repo" (don't bother trying again) from "git error" (we tried
@@ -41,6 +79,10 @@ type gitStatus struct {
 	Root       string
 	DirtyFiles map[string]filetree.GitChangeKind
 	Branch     string
+	// Ahead/Behind count commits versus the branch's upstream — the
+	// status bar's ↑ ↓ arrows. Both zero when there is no upstream.
+	Ahead  int
+	Behind int
 }
 
 // loadGitStatus inspects rootDir and returns the set of dirty file paths
@@ -66,16 +108,38 @@ func loadGitStatus(rootDir string) gitStatus {
 		return gitStatus{}
 	}
 
+	ahead, behind := loadGitAheadBehind(rootDir)
 	out, err := exec.Command("git", "-C", rootDir, "status", "--porcelain").Output()
 	if err != nil {
 		// We *are* in a repo (rev-parse succeeded) but couldn't read
 		// status. Mark the result as a repo with no known dirty files
 		// so the caller at least knows we tried.
-		return gitStatus{IsRepo: true, Root: toplevel, DirtyFiles: map[string]filetree.GitChangeKind{}, Branch: loadGitBranch(rootDir)}
+		return gitStatus{IsRepo: true, Root: toplevel, DirtyFiles: map[string]filetree.GitChangeKind{}, Branch: loadGitBranch(rootDir), Ahead: ahead, Behind: behind}
 	}
 
 	dirty := parsePorcelain(out, toplevel)
-	return gitStatus{IsRepo: true, Root: toplevel, DirtyFiles: dirty, Branch: loadGitBranch(rootDir)}
+	return gitStatus{IsRepo: true, Root: toplevel, DirtyFiles: dirty, Branch: loadGitBranch(rootDir), Ahead: ahead, Behind: behind}
+}
+
+// loadGitAheadBehind counts commits versus the current branch's
+// upstream: how many the user has that the upstream lacks (ahead — the
+// "you haven't pushed" nudge) and vice versa (behind). A branch with no
+// upstream, a detached HEAD, or any git failure yields 0/0 — the
+// arrows simply don't render.
+func loadGitAheadBehind(rootDir string) (ahead, behind int) {
+	out, err := exec.Command("git", "-C", rootDir, "rev-list", "--left-right", "--count", "@{upstream}...HEAD").Output()
+	if err != nil {
+		return 0, 0
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) != 2 {
+		return 0, 0
+	}
+	// Left side of the symmetric difference is the upstream's commits
+	// (we are behind by that many); the right side is ours (ahead).
+	behind, _ = strconv.Atoi(fields[0])
+	ahead, _ = strconv.Atoi(fields[1])
+	return ahead, behind
 }
 
 // rebaseGitPaths rewrites dirty paths to match the file tree root casing.
@@ -256,6 +320,41 @@ func loadGitLineChanges(rootDir, path string) map[int]editor.GitLineChange {
 		return nil
 	}
 	return parseGitDiffLines(out)
+}
+
+// loadGitFileDiff returns the full unified diff for path, one display
+// line per entry — the Git panel's per-file diff preview. Tracked files
+// diff against HEAD. untracked=true enables a fallback for files git
+// has never seen (they don't appear in `git diff HEAD` at all):
+// `git diff --no-index /dev/null <path>` renders the whole file as an
+// all-added diff. The flag comes from the caller's porcelain status —
+// gating on it keeps the fallback from painting a *clean* tracked file
+// as brand new just because its HEAD diff is empty. Same best-effort
+// contract as every other loader here: nil on any failure and the
+// caller shows a friendly placeholder instead.
+func loadGitFileDiff(rootDir, path string, untracked bool) []string {
+	if rootDir == "" || path == "" {
+		return nil
+	}
+	out, err := exec.Command("git", "-C", rootDir, "diff", "HEAD", "--", path).Output()
+	if err != nil || len(out) == 0 {
+		if !untracked {
+			return nil
+		}
+		// Hand --no-index a path relative to rootDir when we can — git
+		// echoes the argument verbatim into the +++ header, and a full
+		// absolute path there is noise the user has to scan past.
+		if rel, relErr := filepath.Rel(rootDir, path); relErr == nil && !strings.HasPrefix(rel, "..") {
+			path = rel
+		}
+		// --no-index exits 1 whenever the files differ, so the error is
+		// expected; the output being non-empty is the success signal.
+		out, _ = exec.Command("git", "-C", rootDir, "diff", "--no-index", "--", os.DevNull, path).Output()
+		if len(out) == 0 {
+			return nil
+		}
+	}
+	return strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 }
 
 // loadGitHunkPreview returns the unified diff hunk covering zero-based line.
