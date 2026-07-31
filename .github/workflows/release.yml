@@ -118,6 +118,11 @@ jobs:
             echo "Tag v$NEW already exists, skipping."
             exit 0
           fi
+          # Configure identity here too: the hand-edited-version path
+          # skips the bump step above, and an annotated tag without an
+          # ident fails the whole release.
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "v$NEW" -m "Release v$NEW"
           git push origin "v$NEW"
 
