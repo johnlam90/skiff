@@ -78,8 +78,11 @@ func TestScore_CaseInsensitive(t *testing.T) {
 // TestScore_MatchedIndexesAlignWithRunes checks that the indexes
 // returned for highlighting actually point at the right runes. A
 // regression here would let the UI underline the wrong characters.
+// The basename here ("main.txt") can't fit the query, so the
+// leftmost walk is the winning alignment and its indexes must be
+// the ones returned.
 func TestScore_MatchedIndexesAlignWithRunes(t *testing.T) {
-	_, idx := Score("ago", "app/go/main.go")
+	_, idx := Score("ago", "app/go/main.txt")
 	// Greedy walk: 'a' at 0, 'g' at 4, 'o' at 5.
 	want := []int{0, 4, 5}
 	if len(idx) != len(want) {
@@ -126,5 +129,39 @@ func TestScore_MinimumOne(t *testing.T) {
 	s, _ := Score("ze", "abcdefghijklmnopqrstuvwxyzfffe")
 	if s < 1 {
 		t.Fatalf("expected score >= 1 for any real match, got %d", s)
+	}
+}
+
+// TestScore_NestedBasenameBeatsScatteredElsewhere is the regression
+// test for the ranking bug the README example promises against:
+// "tab" must rank internal/editor/tab.go above paths that merely
+// scatter t-a-b across directories and unrelated basenames. The pure
+// left-to-right greedy walk bound 't','a' inside "internal" and
+// scored the real basename hit a 1, sinking it below files like
+// copy-button.js (39) in this repo's own index.
+func TestScore_NestedBasenameBeatsScatteredElsewhere(t *testing.T) {
+	nested, _ := Score("tab", "internal/editor/tab.go")
+	scattered, _ := Score("tab", "website/assets/js/copy-button.js")
+	if nested <= scattered {
+		t.Fatalf("nested basename hit (%d) should outrank scattered match (%d)",
+			nested, scattered)
+	}
+}
+
+// TestScore_BasenameRetryHighlightsBasename pins that when the
+// basename-anchored walk wins, the returned MatchedIndexes point at
+// the basename runes — the highlight must follow the alignment that
+// produced the score, or the UI underlines the wrong characters.
+func TestScore_BasenameRetryHighlightsBasename(t *testing.T) {
+	_, idx := Score("tab", "internal/editor/tab.go")
+	// Basename "tab.go" starts at rune 16; t=16, a=17, b=18.
+	want := []int{16, 17, 18}
+	if len(idx) != len(want) {
+		t.Fatalf("expected %d matched indexes, got %v", len(want), idx)
+	}
+	for i, w := range want {
+		if idx[i] != w {
+			t.Fatalf("matched indexes = %v, want %v", idx, want)
+		}
 	}
 }

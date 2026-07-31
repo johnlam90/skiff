@@ -134,26 +134,26 @@ func TestRenameFile_SamePathNoop(t *testing.T) {
 	}
 }
 
-// TestDeletePath_File removes an existing file and confirms it's gone.
-func TestDeletePath_File(t *testing.T) {
+// TestDoDeletePath_File removes an existing file from its original
+// location (the content lives on in the session trash — see the
+// trash/undo tests further down for that half of the contract).
+func TestDoDeletePath_File(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "trash.txt")
 	if err := os.WriteFile(target, []byte("nope"), 0644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if err := deletePath(target); err != nil {
-		t.Fatalf("deletePath: %v", err)
-	}
+	a := newTestApp(t, dir)
+	a.doDeletePath(target)
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("file still exists after delete: err=%v", err)
 	}
 }
 
-// TestDeletePath_DirectoryRecursive pins the new folder-delete
-// behaviour: an os.RemoveAll under the hood that takes nested files
-// and subdirectories down with the parent. Without this the user
-// would have to walk leaf-to-root one file at a time.
-func TestDeletePath_DirectoryRecursive(t *testing.T) {
+// TestDoDeletePath_DirectoryRecursive pins folder-delete behaviour:
+// the whole subtree leaves its original location in one action (moved
+// to the trash as a unit), so the user never walks leaf-to-root.
+func TestDoDeletePath_DirectoryRecursive(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "subdir")
 	nested := filepath.Join(sub, "deeper", "leaf.txt")
@@ -163,10 +163,9 @@ func TestDeletePath_DirectoryRecursive(t *testing.T) {
 	if err := os.WriteFile(nested, []byte("x"), 0644); err != nil {
 		t.Fatalf("seed leaf: %v", err)
 	}
+	a := newTestApp(t, dir)
 
-	if err := deletePath(sub); err != nil {
-		t.Fatalf("deletePath: %v", err)
-	}
+	a.doDeletePath(sub)
 	if _, err := os.Stat(sub); !os.IsNotExist(err) {
 		t.Fatalf("directory still exists: err=%v", err)
 	}
@@ -175,13 +174,14 @@ func TestDeletePath_DirectoryRecursive(t *testing.T) {
 	}
 }
 
-// TestDeletePath_Missing returns the underlying os error so callers
-// can surface a useful message rather than letting RemoveAll's silent
-// success on a missing path mask a typo or race.
-func TestDeletePath_Missing(t *testing.T) {
+// TestDoDeletePath_Missing surfaces a useful flash when the target is
+// already gone, rather than silently claiming success on a typo/race.
+func TestDoDeletePath_Missing(t *testing.T) {
 	dir := t.TempDir()
-	if err := deletePath(filepath.Join(dir, "ghost")); err == nil {
-		t.Fatal("expected error deleting a missing path")
+	a := newTestApp(t, dir)
+	a.doDeletePath(filepath.Join(dir, "ghost"))
+	if !strings.Contains(a.statusMsg, "Delete failed") {
+		t.Fatalf("expected a Delete failed flash for a missing path, got %q", a.statusMsg)
 	}
 }
 
@@ -596,5 +596,125 @@ func TestCopyPathToSystemClipboard_FlashMessage(t *testing.T) {
 	if !strings.Contains(a.statusMsg, "/tmp/sample.go") &&
 		!strings.Contains(a.statusMsg, "Copy failed") {
 		t.Fatalf("status flash didn't mention the path or an error: %q", a.statusMsg)
+	}
+}
+
+// TestHasActiveSubfolder_RelativeRootNeverSubfolder is the regression
+// test for the root-delete P0: launched as `skiff` or `skiff .`, the
+// verbatim rootDir "." never string-matched the abs-resolved active
+// folder, so the project root registered as a deletable subfolder and
+// ≡ → Delete folder offered — and performed — recursive deletion of
+// the whole workspace. The root must be recognized in any spelling.
+func TestHasActiveSubfolder_RelativeRootNeverSubfolder(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	t.Chdir(dir)
+	a.rootDir = "." // what New() received on a default launch
+	a.setActiveFolder(a.tree.Root.Path)
+
+	if a.hasActiveSubfolder() {
+		t.Fatal("project root must never register as an active subfolder (rootDir given as \".\")")
+	}
+}
+
+// TestDoDeletePath_RefusesProjectRoot pins the defense-in-depth layer:
+// even if every menu guard fails, doDeletePath itself must refuse to
+// remove the project root and say so, instead of deleting the tree out
+// from under the running session.
+func TestDoDeletePath_RefusesProjectRoot(t *testing.T) {
+	dir := t.TempDir()
+	writeFileT(t, filepath.Join(dir, "keep.txt"), "x")
+	a := newTestApp(t, dir)
+
+	a.doDeletePath(a.tree.Root.Path)
+
+	if _, err := os.Stat(filepath.Join(dir, "keep.txt")); err != nil {
+		t.Fatal("doDeletePath deleted the project root's contents")
+	}
+	if !strings.Contains(a.statusMsg, "project root") {
+		t.Fatalf("expected a refusal flash naming the project root, got %q", a.statusMsg)
+	}
+}
+
+// TestDoDeletePath_MovesToTrashAndUndoRestores pins the session-trash
+// contract: Delete relocates instead of destroying, and ≡ → Undo
+// delete puts the item back with its content intact.
+func TestDoDeletePath_MovesToTrashAndUndoRestores(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "doomed.txt")
+	writeFileT(t, target, "precious content")
+	a := newTestApp(t, dir)
+
+	a.doDeletePath(target)
+
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatal("deleted file should be gone from its original path")
+	}
+	if !a.hasTrashedEntry() {
+		t.Fatal("delete should leave an entry in the session trash")
+	}
+
+	a.menuUndoDelete()
+
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("undo should restore the file: %v", err)
+	}
+	if string(got) != "precious content" {
+		t.Fatalf("restored content = %q", got)
+	}
+	if a.hasTrashedEntry() {
+		t.Fatal("successful undo should pop the trash entry")
+	}
+}
+
+// TestMenuUndoDelete_RefusesClobber covers the collision case: if
+// something new occupies the original path, Undo must not overwrite
+// it — the entry stays in the trash and the flash explains why.
+func TestMenuUndoDelete_RefusesClobber(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	writeFileT(t, target, "old")
+	a := newTestApp(t, dir)
+
+	a.doDeletePath(target)
+	writeFileT(t, target, "new occupant")
+
+	a.menuUndoDelete()
+
+	got, _ := os.ReadFile(target)
+	if string(got) != "new occupant" {
+		t.Fatalf("undo must not clobber, file now = %q", got)
+	}
+	if !a.hasTrashedEntry() {
+		t.Fatal("failed undo should keep the trash entry for later")
+	}
+	if !strings.Contains(a.statusMsg, "already exists") {
+		t.Fatalf("expected an already-exists flash, got %q", a.statusMsg)
+	}
+}
+
+// TestEmptyTrash_DiscardsStored pins the "session trash" half of the
+// name: on exit the stored items are permanently discarded, so the
+// undo window is exactly the editor session.
+func TestEmptyTrash_DiscardsStored(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	writeFileT(t, target, "x")
+	a := newTestApp(t, dir)
+
+	a.doDeletePath(target)
+	if !a.hasTrashedEntry() {
+		t.Fatal("setup: expected a trash entry")
+	}
+	stored := a.trashed[len(a.trashed)-1].stored
+
+	a.emptyTrash()
+
+	if _, err := os.Stat(stored); !os.IsNotExist(err) {
+		t.Fatal("emptyTrash should remove the stored copy")
+	}
+	if a.hasTrashedEntry() {
+		t.Fatal("emptyTrash should clear the entries")
 	}
 }

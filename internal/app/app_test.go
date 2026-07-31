@@ -185,14 +185,19 @@ func TestMenuModalRect_Centered(t *testing.T) {
 	}
 }
 
-// TestMenuModalRect_ClampsTinyWindow ensures the origin never goes negative
-// even if the window is smaller than the modal.
+// TestMenuModalRect_ClampsTinyWindow ensures a window smaller than the
+// modal never yields a negative origin, and that the height clamp keeps
+// the modal inside the screen instead of letting it overflow (the old
+// behavior, which made bottom rows unreachable).
 func TestMenuModalRect_ClampsTinyWindow(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.width, a.height = 10, 5
-	x, y, _, _ := a.menuModalRect()
-	if x != 0 || y != 0 {
-		t.Fatalf("expected clamped origin (0,0), got (%d,%d)", x, y)
+	x, y, _, h := a.menuModalRect()
+	if x != 0 || y < 0 {
+		t.Fatalf("expected non-negative origin at column 0, got (%d,%d)", x, y)
+	}
+	if h > a.height {
+		t.Fatalf("modal height %d overflows the %d-row window", h, a.height)
 	}
 }
 
@@ -1667,13 +1672,13 @@ func TestMenuLayout_NoCustomActions(t *testing.T) {
 	a.customActions = nil
 	items, dividers, h := a.menuLayout()
 
-	if h != 36 {
-		t.Errorf("modalHeight = %d, want 36", h)
+	if h != 37 {
+		t.Errorf("modalHeight = %d, want 37", h)
 	}
-	if got := len(items); got != 25 {
-		t.Errorf("item count = %d, want 25 built-ins", got)
+	if got := len(items); got != 26 {
+		t.Errorf("item count = %d, want 26 built-ins", got)
 	}
-	wantDiv := []int{2, 6, 10, 13, 18, 26, 31, 33}
+	wantDiv := []int{2, 6, 10, 13, 18, 27, 32, 34}
 	if len(dividers) != len(wantDiv) {
 		t.Fatalf("dividers = %v, want %v", dividers, wantDiv)
 	}
@@ -1834,8 +1839,8 @@ func TestMenuLayout_WithCustomActions(t *testing.T) {
 	}
 	items, _, h := a.menuLayout()
 
-	if h != 39 { // 36 + 2 items + 1 divider
-		t.Errorf("modalHeight = %d, want 39", h)
+	if h != 40 { // 37 + 2 items + 1 divider
+		t.Errorf("modalHeight = %d, want 40", h)
 	}
 	// Custom actions should be the second-to-last and third-to-last
 	// rows, with Quit as the final row.
@@ -2370,5 +2375,351 @@ func TestDrawTabBar_NoIconWhenDisabled(t *testing.T) {
 		if len(c.Runes) > 0 && c.Runes[0] == wantGlyph {
 			t.Fatalf("did not expect glyph %q at x=%d when icons off", string(wantGlyph), x)
 		}
+	}
+}
+
+// resizeTestApp shrinks the simulation screen and keeps the App's cached
+// width/height in sync, mirroring what the EventResize path does live.
+func resizeTestApp(t *testing.T, a *App, w, h int) {
+	t.Helper()
+	a.screen.(tcell.SimulationScreen).SetSize(w, h)
+	a.width, a.height = w, h
+}
+
+// screenHasText reports whether s appears left-to-right on any single row
+// of the front buffer. Show() must have been called first — the
+// SimulationScreen serves GetContents from the front buffer.
+func screenHasText(t *testing.T, a *App, s string) bool {
+	t.Helper()
+	cells, w, h := a.screen.(tcell.SimulationScreen).GetContents()
+	want := []rune(s)
+	for y := 0; y < h; y++ {
+		for x := 0; x+len(want) <= w; x++ {
+			match := true
+			for i, r := range want {
+				c := cells[y*w+x+i]
+				if len(c.Runes) == 0 || c.Runes[0] != r {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestMenuModalRect_ClampsToShortTerminal is the geometry half of the
+// clipped-menu regression: at the app's declared 80×24 minimum the modal
+// must fit the screen (with a one-row margin) instead of rendering its
+// natural ~38-row layout off the bottom edge.
+func TestMenuModalRect_ClampsToShortTerminal(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 80, 24)
+	_, _, _, h := a.menuModalRect()
+	if h > a.height-2 {
+		t.Fatalf("modal height %d exceeds screen height-2 (%d)", h, a.height-2)
+	}
+	if a.menuMaxScroll() <= 0 {
+		t.Fatal("expected the clamped menu to report scrollable overflow")
+	}
+}
+
+// TestMenuScroll_KeyboardScrollsQuitIntoView is the regression test for
+// the P1 "Quit editor is unreachable at 80×24" bug: selecting the last
+// row via keyboard must scroll it into the visible region and actually
+// paint it. Before the fix the row was drawn past the screen edge and
+// silently dropped.
+func TestMenuScroll_KeyboardScrollsQuitIntoView(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 80, 24)
+	a.openMenu()
+	a.menuMoveSelection(-1) // wrap from the first row to the last (Quit — always enabled)
+
+	items, _, _ := a.menuLayout()
+	if a.hoveredMenuRow != len(items)-1 {
+		t.Fatalf("expected wrap-around to select the last row, got %d", a.hoveredMenuRow)
+	}
+
+	a.drawMenu()
+	a.screen.Show()
+	if !screenHasText(t, a, "Quit editor") {
+		t.Fatal("Quit editor row should be scrolled into view and drawn at 80×24")
+	}
+}
+
+// TestMenuMouse_WheelScrollsAndClamps drives the wheel over the open
+// menu: down-ticks must advance menuScroll toward menuMaxScroll and
+// never past it; up-ticks must clamp back at zero.
+func TestMenuMouse_WheelScrollsAndClamps(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 80, 24)
+	a.openMenu()
+	mx, my, mw, mh := a.menuModalRect()
+	cx, cy := mx+mw/2, my+mh/2
+
+	max := a.menuMaxScroll()
+	for i := 0; i < max+5; i++ {
+		a.handleMenuMouse(cx, cy, tcell.WheelDown)
+	}
+	if a.menuScroll != max {
+		t.Fatalf("wheel-down should clamp at maxScroll %d, got %d", max, a.menuScroll)
+	}
+	for i := 0; i < max+5; i++ {
+		a.handleMenuMouse(cx, cy, tcell.WheelUp)
+	}
+	if a.menuScroll != 0 {
+		t.Fatalf("wheel-up should clamp at 0, got %d", a.menuScroll)
+	}
+}
+
+// TestMenuClick_MapsThroughScroll pins the click hit-test under scroll:
+// with the menu scrolled to the bottom, clicking the on-screen row where
+// Quit now sits must activate Quit, not whichever row used to own that
+// screen line. A click that lands on the bottom border must do nothing.
+func TestMenuClick_MapsThroughScroll(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 80, 24)
+	a.openMenu()
+	a.menuScroll = a.menuMaxScroll()
+
+	items, _, _ := a.menuLayout()
+	quit := items[len(items)-1]
+	mx, my, _, mh := a.menuModalRect()
+
+	borderY := my + mh - 1
+	a.handleMenuMouse(mx+2, borderY, tcell.Button1)
+	if a.quit {
+		t.Fatal("clicking the bottom border must not activate a hidden row")
+	}
+
+	quitY := my + quit.relY - a.menuScroll
+	if quitY < my+3 || quitY > my+mh-2 {
+		t.Fatalf("test setup: Quit row not in visible region (y=%d)", quitY)
+	}
+	a.handleMenuMouse(mx+2, quitY, tcell.Button1)
+	if !a.quit {
+		t.Fatal("clicking the scrolled Quit row should quit the editor")
+	}
+}
+
+// openManyTabs seeds count files with distinctive names in dir and
+// opens them all, leaving the last one active. Icons are forced off so
+// tab widths are deterministic across environments.
+func openManyTabs(t *testing.T, a *App, dir string, count int) []string {
+	t.Helper()
+	if a.tree != nil {
+		a.tree.IconsEnabled = false
+	}
+	names := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		name := fmt.Sprintf("longtabname%02d.txt", i)
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("x"), 0644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		a.openFile(p)
+		names = append(names, name)
+	}
+	return names
+}
+
+// TestTabBar_ActiveTabScrollsIntoView is the regression test for the
+// invisible-active-tab P1: with more tabs than the strip can hold at
+// 80 columns, activating the last tab must scroll the strip so its
+// name is actually painted, with a ‹ marker showing tabs are hidden
+// to the left. Before the fix the active tab rendered nowhere.
+func TestTabBar_ActiveTabScrollsIntoView(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	names := openManyTabs(t, a, dir, 5)
+
+	a.drawTabBar()
+	a.screen.Show()
+
+	if !screenHasText(t, a, names[len(names)-1]) {
+		t.Fatal("active tab's name should be scrolled into view at 80 columns")
+	}
+	if !screenHasText(t, a, "‹") {
+		t.Fatal("expected a ‹ marker for tabs hidden to the left")
+	}
+}
+
+// TestTabBar_ChevronsMarkOverflow pins the marker rules: at scroll 0
+// with overflow only a › shows; scrolled to the end only a ‹ shows.
+func TestTabBar_ChevronsMarkOverflow(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	openManyTabs(t, a, dir, 5)
+
+	a.tabScroll = 0
+	a.drawTabBar()
+	a.screen.Show()
+	if screenHasText(t, a, "‹") {
+		t.Fatal("no ‹ expected at scroll 0")
+	}
+	if !screenHasText(t, a, "›") {
+		t.Fatal("expected › with tabs hidden to the right")
+	}
+
+	a.tabScroll = a.maxTabScroll()
+	a.drawTabBar()
+	a.screen.Show()
+	if !screenHasText(t, a, "‹") {
+		t.Fatal("expected ‹ when scrolled to the end")
+	}
+	if screenHasText(t, a, "›") {
+		t.Fatal("no › expected at max scroll")
+	}
+}
+
+// TestTabBar_ClickMapsThroughScroll pins hit-testing under scroll: the
+// stored rects are in screen coordinates, so clicking the visible
+// active tab must select it and clicking the ‹ cell must scroll the
+// strip instead of activating whatever tab is drawn beneath it.
+func TestTabBar_ClickMapsThroughScroll(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	openManyTabs(t, a, dir, 5)
+
+	a.drawTabBar()
+	a.screen.Show()
+
+	// Click inside the second-to-last tab's visible rect.
+	target := len(a.tabs) - 2
+	var rect tabRect
+	found := false
+	for _, r := range a.lastTabRects {
+		if r.Index == target {
+			rect, found = r, true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("second-to-last tab should have a stored rect")
+	}
+	a.tabBarClick(rect.X+3, 0)
+	if a.activeTab != target {
+		t.Fatalf("click on scrolled tab selected %d, want %d", a.activeTab, target)
+	}
+
+	// Clicking the ‹ marker cell scrolls left rather than selecting.
+	a.tabScroll = a.maxTabScroll()
+	before := a.tabScroll
+	stripX, _ := a.tabStripRegion()
+	a.tabBarClick(stripX, 0)
+	if a.tabScroll >= before {
+		t.Fatalf("clicking ‹ should scroll the strip left (scroll %d -> %d)", before, a.tabScroll)
+	}
+}
+
+// TestDrawMenu_HoveredShortcutUsesTextFg pins the hover-row contrast
+// fix: the shortcut hint on the highlighted row used to render in Muted
+// on the Selection background (~2.6:1, illegible on the very row the
+// user is reading). It must use the Text foreground instead.
+func TestDrawMenu_HoveredShortcutUsesTextFg(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.openMenu()
+	a.menuMoveSelection(-1) // wrap to the last row: Quit editor, "Esc q"
+
+	a.drawMenu()
+	a.screen.Show()
+
+	items, _, _ := a.menuLayout()
+	quit := items[len(items)-1]
+	mx, my, mw, _ := a.menuModalRect()
+	shortcutX := mx + mw - 2 - runeLen(quit.shortcut)
+	cy := my + quit.relY - a.menuScroll
+
+	cells, w, _ := a.screen.(tcell.SimulationScreen).GetContents()
+	fg, bg, _ := cells[cy*w+shortcutX].Style.Decompose()
+	if bg != a.theme.Selection {
+		t.Fatalf("expected hover bg under the shortcut, got %v", bg)
+	}
+	if fg != a.theme.Text {
+		t.Fatalf("hovered shortcut fg: got %v, want Text %v", fg, a.theme.Text)
+	}
+}
+
+// TestHandleEvent_PasteEscIsContentNotCommand is the regression test
+// for the bracketed-paste hole: a raw ESC byte inside pasted text used
+// to arm the Esc leader, so pasting "\x1bq" would quit the editor.
+// Between paste markers, ESC must be stripped and the following rune
+// inserted as plain text.
+func TestHandleEvent_PasteEscIsContentNotCommand(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "t.txt")
+	if err := os.WriteFile(target, []byte(""), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+
+	a.handleEvent(tcell.NewEventPaste(true))
+	a.handleEvent(keyEv(tcell.KeyEsc, 0))
+	a.handleEvent(keyEv(tcell.KeyRune, 'q'))
+	a.handleEvent(tcell.NewEventPaste(false))
+
+	if a.quit {
+		t.Fatal("pasted ESC+q must not fire the quit leader")
+	}
+	if a.menuOpen {
+		t.Fatal("pasted ESC bytes must not open the menu")
+	}
+	if got := a.activeTabPtr().Buffer.Lines[0]; got != "q" {
+		t.Fatalf("pasted rune should insert literally, buffer = %q", got)
+	}
+}
+
+// TestHandleKey_PasteAltRuneInsertsLiteral covers coalescing *inside* a
+// paste: tmux can still merge a pasted ESC+rune into one Alt rune. In
+// normal typing that means "leader", but during a paste the rune is
+// content and must reach the buffer instead of firing an action.
+func TestHandleKey_PasteAltRuneInsertsLiteral(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "t.txt")
+	if err := os.WriteFile(target, []byte(""), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+
+	a.handleEvent(tcell.NewEventPaste(true))
+	a.handleKey(tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModAlt))
+	a.handleEvent(tcell.NewEventPaste(false))
+
+	if a.quit {
+		t.Fatal("Alt rune during a paste must not dispatch the leader")
+	}
+	if got := a.activeTabPtr().Buffer.Lines[0]; got != "q" {
+		t.Fatalf("Alt rune during a paste should insert its rune, buffer = %q", got)
+	}
+}
+
+// TestHandleKey_PasteTabInsertsLiteralTab pins that a Tab key between
+// paste markers inserts a real \t: the tab came from the source
+// document, and expanding it to the file's IndentUnit would silently
+// rewrite pasted code.
+func TestHandleKey_PasteTabInsertsLiteralTab(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "t.txt")
+	if err := os.WriteFile(target, []byte(""), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	a.activeTabPtr().IndentUnit = "    " // spaces, so expansion would be visible
+
+	a.handleEvent(tcell.NewEventPaste(true))
+	a.handleKey(keyEv(tcell.KeyTab, 0))
+	a.handleEvent(tcell.NewEventPaste(false))
+
+	if got := a.activeTabPtr().Buffer.Lines[0]; got != "\t" {
+		t.Fatalf("Tab during a paste should insert \\t, buffer = %q", got)
 	}
 }

@@ -62,11 +62,15 @@ const (
 // path in order (case-insensitive) to score above zero.
 //
 // The matcher is greedy left-to-right: for each query rune we
-// take the first matching path rune we haven't consumed yet. This
-// is faster than a full DP and good enough for "find file" — the
-// degenerate cases people actually type ("foo", "tab.go", "format")
-// produce the same result either way. Pure greedy means N×M
-// runtime is dominated by the path length, not query length.
+// take the first matching path rune we haven't consumed yet. Pure
+// greedy is faster than a full DP, but its leftmost alignment can
+// bind early query runes to directory characters and sink the real
+// basename hit ("tab" against internal/editor/tab.go used to match
+// t,a inside "internal" and score a 1). So the walk runs twice —
+// once from the path start, once anchored at the basename — and the
+// better alignment wins. That keeps the common "type the file's
+// name" pattern ranked the way every other fuzzy finder ranks it,
+// at the cost of one extra bounded walk per candidate.
 func Score(query, path string) (int, []int) {
 	if query == "" {
 		// Empty query matches everything, with no highlighting and
@@ -80,12 +84,34 @@ func Score(query, path string) (int, []int) {
 
 	pathRunes := []rune(path)
 	queryRunes := []rune(query)
+
+	score, matchedIdx := scoreFrom(pathRunes, queryRunes, 0)
+	if score == 0 {
+		// No subsequence anywhere in the path; the anchored walk
+		// searches a subrange and cannot succeed either.
+		return 0, nil
+	}
+	if basenameStart := lastSeparatorIndex(pathRunes) + 1; basenameStart > 0 {
+		if s, idx := scoreFrom(pathRunes, queryRunes, basenameStart); s > score {
+			return s, idx
+		}
+	}
+	return score, matchedIdx
+}
+
+// scoreFrom runs the greedy match walk over pathRunes starting at rune
+// offset start, then scores the alignment it found. Returns (0, nil)
+// when the query doesn't fit in path[start:]. The scoring rules are
+// identical for both walks — only the anchor differs — so a basename
+// alignment wins exactly when its bonuses genuinely beat the leftmost
+// alignment, not because it plays by different rules.
+func scoreFrom(pathRunes, queryRunes []rune, start int) (int, []int) {
 	matchedIdx := make([]int, 0, len(queryRunes))
 
 	// First pass: find the matched indexes via greedy walk. Bail as
 	// soon as we know the query can't fit — saves us scoring paths
 	// that already lost.
-	pi := 0
+	pi := start
 	for qi := 0; qi < len(queryRunes); qi++ {
 		want := unicode.ToLower(queryRunes[qi])
 		found := false
@@ -119,7 +145,12 @@ func Score(query, path string) (int, []int) {
 		if idx >= basenameStart {
 			score += bonusBasename
 		}
-		if idx > 0 && isWordBoundary(pathRunes[idx-1]) {
+		// Position 0 is the start of a word by definition — without
+		// this, "tab" hitting tab.go (10-point first-char bonus) would
+		// lose to the same query hitting a *longer* basename like
+		// tabbar.go, whose match sits after a '/' and collects the
+		// 20-point boundary bonus instead.
+		if idx == 0 || isWordBoundary(pathRunes[idx-1]) {
 			score += bonusWordBoundary
 		}
 		gap := idx - (prevIdx + 1)

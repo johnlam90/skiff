@@ -35,6 +35,13 @@ type Node struct {
 	Children []*Node
 }
 
+// TrashPrefix marks in-place session-trash entries: when moving a
+// deleted item to the app's temp trash dir fails (cross-filesystem
+// rename), the item is renamed to a hidden sibling carrying this
+// prefix instead. The tree and the finder both filter the prefix so
+// a trashed item never resurfaces in the UI before Undo restores it.
+const TrashPrefix = ".skifftrash-"
+
 // GitChangeKind describes the strongest git status a tree row should show.
 type GitChangeKind int
 
@@ -179,8 +186,12 @@ func refreshNode(n *Node) {
 
 // shouldHide is the project's small, opinionated list of names the file
 // tree refuses to show. These are universally noise: VCS metadata, OS
-// junk, language-specific build caches.
+// junk, language-specific build caches — plus in-place session-trash
+// entries, which are deleted content awaiting Undo, not files.
 func shouldHide(name string) bool {
+	if strings.HasPrefix(name, TrashPrefix) {
+		return true
+	}
 	switch name {
 	case ".git", ".svn", ".hg",
 		".DS_Store",
@@ -237,10 +248,12 @@ func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 	if rootActive {
 		rootStyle = tcell.StyleDefault.Background(bg).Foreground(th.Accent).Bold(true)
 	}
-	if rootChange := t.DirtyFolders[t.Root.Path]; rootChange != GitChangeNone {
+	rootChange := t.DirtyFolders[t.Root.Path]
+	if rootChange != GitChangeNone {
 		rootStyle = rootStyle.Foreground(gitChangeColor(th, rootChange))
 	}
 	drawString(scr, x, y+1, w, " "+t.Root.Name, rootStyle)
+	drawChangeLetter(scr, x, y+1, w, rootChange, rootStyle)
 
 	// Build the flat list of visible rows from the root's children.
 	flat := make([]flatNode, 0, 128)
@@ -350,6 +363,7 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 
 	if !withIcons {
 		drawString(scr, x, y, w, prefix+suffix, rowStyle)
+		drawChangeLetter(scr, x, y, w, change, rowStyle)
 		return
 	}
 
@@ -368,6 +382,39 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 	drawString(scr, x+px, y, w-px, glyph, glyphStyle)
 	gx := len([]rune(glyph))
 	drawString(scr, x+px+gx, y, w-px-gx, "  "+suffix, rowStyle)
+	drawChangeLetter(scr, x, y, w, change, rowStyle)
+}
+
+// drawChangeLetter paints the git status letter (with one leading space
+// so it survives long truncated names) at the row's right edge. No-op
+// when the row is clean or the row is too narrow to fit it.
+func drawChangeLetter(scr tcell.Screen, x, y, w int, change GitChangeKind, st tcell.Style) {
+	letter := gitChangeLetter(change)
+	if letter == 0 || w < 4 {
+		return
+	}
+	scr.SetContent(x+w-3, y, ' ', nil, st)
+	scr.SetContent(x+w-2, y, letter, nil, st)
+}
+
+// gitChangeLetter maps git status kinds to the one-cell letter drawn at
+// the row's right edge — the same vocabulary the GIT panel uses (M/A/D/R)
+// plus '~' for a folder's "mixed changes" state. Hue alone can't carry
+// git status for colorblind users; the letter is the non-color channel.
+func gitChangeLetter(change GitChangeKind) rune {
+	switch change {
+	case GitChangeAdded:
+		return 'A'
+	case GitChangeDeleted:
+		return 'D'
+	case GitChangeRenamed:
+		return 'R'
+	case GitChangeMixed:
+		return '~'
+	case GitChangeModified:
+		return 'M'
+	}
+	return 0
 }
 
 // gitChangeColor maps git status kinds to the tree row foreground.

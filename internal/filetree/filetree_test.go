@@ -16,6 +16,7 @@ package filetree
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
@@ -1186,5 +1187,70 @@ func TestFlatIndexOf_MatchesRenderOrder(t *testing.T) {
 		if got := tr.flatIndexOf(fn.Node); got != i {
 			t.Fatalf("flatIndexOf(%s): got %d, want %d", fn.Node.Name, got, i)
 		}
+	}
+}
+
+// TestRender_DirtyRowsShowStatusLetter pins the non-hue git channel:
+// row color alone can't carry status for colorblind users (added-green
+// vs deleted-red is the classic deuteranopia collision), so every dirty
+// row must also show the GIT panel's one-cell letter, right-aligned.
+func TestRender_DirtyRowsShowStatusLetter(t *testing.T) {
+	root := mkTree(t)
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	alpha := findChild(tr.Root, "alpha")
+	if err := alpha.reload(); err != nil {
+		t.Fatalf("reload alpha: %v", err)
+	}
+	alpha.Expanded = true
+	inner := findChild(alpha, "inner.go")
+	if inner == nil {
+		t.Fatal("alpha/inner.go missing from fixture")
+	}
+	tr.DirtyFiles = map[string]GitChangeKind{inner.Path: GitChangeModified}
+	tr.DirtyFolders = map[string]GitChangeKind{alpha.Path: GitChangeAdded}
+
+	cells, w := renderAndCollect(t, tr, 40, 20)
+
+	fileY := findRowY(cells, w, 20, "inner.go")
+	if fileY < 0 {
+		t.Fatal("could not find inner.go row in render output")
+	}
+	c := cells[fileY*w+(w-2)]
+	if len(c.Runes) == 0 || c.Runes[0] != 'M' {
+		t.Fatalf("modified file row should end with an 'M' letter, got %q", c.Runes)
+	}
+
+	folderY := findRowY(cells, w, 20, "alpha")
+	if folderY < 0 {
+		t.Fatal("could not find alpha row in render output")
+	}
+	c = cells[folderY*w+(w-2)]
+	if len(c.Runes) == 0 || c.Runes[0] != 'A' {
+		t.Fatalf("added folder row should end with an 'A' letter, got %q", c.Runes)
+	}
+}
+
+// TestReload_HidesTrashEntries pins the session-trash filter: an
+// in-place trash entry (TrashPrefix rename fallback) is deleted
+// content awaiting Undo and must never appear as a tree row.
+func TestReload_HidesTrashEntries(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "real.txt"), "x")
+	mustWrite(t, filepath.Join(root, TrashPrefix+"0-dead.txt"), "x")
+
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, c := range tr.Root.Children {
+		if strings.HasPrefix(c.Name, TrashPrefix) {
+			t.Fatalf("trash entry %q leaked into the tree", c.Name)
+		}
+	}
+	if len(tr.Root.Children) != 1 || tr.Root.Children[0].Name != "real.txt" {
+		t.Fatalf("expected only real.txt, got %v", tr.Root.Children)
 	}
 }

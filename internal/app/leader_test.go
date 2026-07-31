@@ -206,3 +206,106 @@ func TestHandleKey_EscDoubleTapStillOpensMenu(t *testing.T) {
 		t.Fatal("double-Esc should still open the menu after leader was added")
 	}
 }
+
+// TestHandleKey_EscDoubleTapWideWindowOpensMenu pins the tmux-friendly
+// menu window: tmux's escape-time munches a fast Esc,Esc into ONE
+// delivered Esc, so the only tap spacing that produces two separate
+// events is slower than the old 500ms window allowed. Two Escs up to
+// menuEscMs apart must still open the menu, while the leader keeps its
+// tighter doubleEscMs window (next test).
+func TestHandleKey_EscDoubleTapWideWindowOpensMenu(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	// Simulate a second tap arriving 800ms later — beyond the leader
+	// window, inside the menu window.
+	a.lastEscape = time.Now().Add(-800 * time.Millisecond)
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	if !a.menuOpen {
+		t.Fatal("second Esc 800ms later should still open the menu")
+	}
+}
+
+// TestHandleKey_LeaderWindowStaysTight is the counterpart: the wider
+// menu window must NOT widen the leader. A bound rune 800ms after Esc
+// is typing, not a command — it has to reach the buffer.
+func TestHandleKey_LeaderWindowStaysTight(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "t.txt")
+	if err := os.WriteFile(target, []byte(""), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	a.lastEscape = time.Now().Add(-800 * time.Millisecond)
+	a.handleKey(keyEv(tcell.KeyRune, 's'))
+
+	if got := a.activeTabPtr().Buffer.Lines[0]; got != "s" {
+		t.Fatalf("'s' 800ms after Esc should insert literally, got %q", got)
+	}
+}
+
+// TestHandleKey_AltRuneFiresLeader is the regression test for the tmux
+// coalescing bug: with a non-zero escape-time, a fast Esc,s reaches the
+// editor as a single Alt+s event instead of two keystrokes. That event
+// must fire the leader action — and must NOT type the rune into the
+// buffer, which is what shipped users saw ("Esc-s inserts an s").
+func TestHandleKey_AltRuneFiresLeader(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "t.txt")
+	if err := os.WriteFile(target, []byte(""), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	a.handleKey(keyEv(tcell.KeyRune, 'x')) // dirty the buffer
+	if !a.activeTabPtr().Dirty {
+		t.Fatal("expected dirty buffer before save")
+	}
+
+	a.handleKey(tcell.NewEventKey(tcell.KeyRune, 's', tcell.ModAlt))
+
+	if a.activeTabPtr().Dirty {
+		t.Fatal("Alt+s (coalesced Esc,s) should have saved the buffer")
+	}
+	if got := a.activeTabPtr().Buffer.Lines[0]; got != "x" {
+		t.Fatalf("Alt+s must not insert the rune, buffer = %q", got)
+	}
+}
+
+// TestHandleKey_AltRuneUnboundSwallowed pins the "never insert
+// Alt-modified runes" rule: an Alt rune is always a mangled Esc
+// sequence, so an unbound one is dropped rather than typed. Falling
+// through to InsertRune here is exactly the buffer-corruption bug.
+func TestHandleKey_AltRuneUnboundSwallowed(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "t.txt")
+	if err := os.WriteFile(target, []byte(""), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+
+	a.handleKey(tcell.NewEventKey(tcell.KeyRune, 'z', tcell.ModAlt))
+
+	if got := a.activeTabPtr().Buffer.Lines[0]; got != "" {
+		t.Fatalf("unbound Alt rune must be swallowed, buffer = %q", got)
+	}
+}
+
+// TestHandleKey_AltEscTogglesMenu covers the coalesced double-Esc:
+// tmux turns a fast Esc,Esc into one Alt+Esc event, which must toggle
+// the menu exactly like a real double-tap (open when shut, close when
+// open) instead of merely arming the leader window.
+func TestHandleKey_AltEscTogglesMenu(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.handleKey(tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModAlt))
+	if !a.menuOpen {
+		t.Fatal("Alt+Esc (coalesced double-Esc) should open the menu")
+	}
+	a.handleKey(tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModAlt))
+	if a.menuOpen {
+		t.Fatal("Alt+Esc with the menu open should close it")
+	}
+}

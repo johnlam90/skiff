@@ -32,11 +32,14 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	gitignore "github.com/sabhiram/go-gitignore"
+
+	"github.com/johnlam90/skiff/internal/filetree"
 )
 
 // hardcodedIgnores is the floor we apply in the *fallback* path —
@@ -115,6 +118,12 @@ func buildIndexGit(rootDir string) ([]string, error) {
 			continue
 		}
 		s := string(p)
+		// In-place session-trash entries are untracked-but-not-ignored,
+		// so git ls-files reports them; they are deleted content
+		// awaiting Undo and must not be findable.
+		if strings.HasPrefix(path.Base(s), filetree.TrashPrefix) {
+			continue
+		}
 		// git ls-files already emits forward-slash paths even on
 		// Windows, so we don't need to translate. Sort happens at
 		// the end so we don't have to maintain order here.
@@ -156,6 +165,14 @@ func buildIndexWalk(rootDir string) ([]string, error) {
 		}
 		base := d.Name()
 		if _, hit := hardcodedIgnores[base]; hit {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		// Same trash rule as the git path: in-place session-trash
+		// entries are deleted content awaiting Undo, never results.
+		if strings.HasPrefix(base, filetree.TrashPrefix) {
 			if d.IsDir() {
 				return fs.SkipDir
 			}

@@ -14,6 +14,7 @@
 package theme
 
 import (
+	"math"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
@@ -89,6 +90,95 @@ func TestDefault_ContrastInvariants(t *testing.T) {
 	for _, c := range cases {
 		if c.a == c.b {
 			t.Errorf("Default(): %s collide (%v == %v)", c.name, c.a, c.b)
+		}
+	}
+}
+
+// relativeLuminance implements the WCAG 2.x luminance formula for a
+// tcell RGB color. Kept in the test file on purpose: production code
+// never needs it, but the palette's accessibility contract does.
+func relativeLuminance(c tcell.Color) float64 {
+	ri, gi, bi := c.RGB()
+	lin := func(v int32) float64 {
+		s := float64(v) / 255
+		if s <= 0.03928 {
+			return s / 12.92
+		}
+		return math.Pow((s+0.055)/1.055, 2.4)
+	}
+	return 0.2126*lin(ri) + 0.7152*lin(gi) + 0.0722*lin(bi)
+}
+
+// contrastRatio returns the WCAG contrast ratio (≥1) between two colors.
+func contrastRatio(a, b tcell.Color) float64 {
+	la, lb := relativeLuminance(a), relativeLuminance(b)
+	if la < lb {
+		la, lb = lb, la
+	}
+	return (la + 0.05) / (lb + 0.05)
+}
+
+// TestDefault_WCAGContrast pins the real accessibility bar for every
+// fg/bg pair the UI actually paints (verified against the draw sites in
+// app, editor, and filetree). Text pairs must hit WCAG AA 4.5:1;
+// non-text UI glyphs (borders, splitter, close-×, hover chevron) get
+// the 3:1 graphics bar. This is the regression fence for the "line
+// numbers and comments at 2.76:1" audit finding — a future palette
+// tweak that dips below these bars should fail loudly here.
+func TestDefault_WCAGContrast(t *testing.T) {
+	th := Default()
+
+	cases := []struct {
+		name string
+		fg   tcell.Color
+		bg   tcell.Color
+		min  float64
+	}{
+		// Primary text surfaces.
+		{"Text on BG (editor body)", th.Text, th.BG, 4.5},
+		{"Text on LineHL (cursor line)", th.Text, th.LineHL, 4.5},
+		{"Text on Selection", th.Text, th.Selection, 4.5},
+		{"Text on FindMatch (find tint keeps Text fg)", th.Text, th.FindMatch, 4.5},
+		{"BG on FindCurrent (active match)", th.BG, th.FindCurrent, 4.5},
+		{"BG on StatusBG (status bar)", th.BG, th.StatusBG, 4.5},
+
+		// Secondary text: line numbers, hints, inactive tabs, tree
+		// header, dotfiles, menu shortcuts — everywhere Muted is painted.
+		{"Muted on BG (line numbers, hints)", th.Muted, th.BG, 4.5},
+		{"Muted on SidebarBG (inactive tabs, tree header)", th.Muted, th.SidebarBG, 4.5},
+		{"Muted on LineHL (menu shortcuts, disabled rows)", th.Muted, th.LineHL, 4.5},
+
+		// Comments are content, not chrome — full AA on both line bgs.
+		{"SynComment on BG", th.SynComment, th.BG, 4.5},
+		{"SynComment on LineHL (comment on cursor line)", th.SynComment, th.LineHL, 4.5},
+
+		// Accents and states that carry text.
+		{"Error on BG", th.Error, th.BG, 4.5},
+		{"Modified on SidebarBG (dirty tab dot label)", th.Modified, th.SidebarBG, 4.5},
+		{"Accent on SidebarBG (active tree row)", th.Accent, th.SidebarBG, 4.5},
+		{"Accent on LineHL (menu title)", th.Accent, th.LineHL, 4.5},
+		{"AccentSoft on LineHL (active line number)", th.AccentSoft, th.LineHL, 4.5},
+		{"FolderColor on SidebarBG", th.FolderColor, th.SidebarBG, 4.5},
+		{"FileColor on SidebarBG", th.FileColor, th.SidebarBG, 4.5},
+
+		// Git status colors label file names in the tree.
+		{"GitModified on SidebarBG", th.GitModified, th.SidebarBG, 4.5},
+		{"GitAdded on SidebarBG", th.GitAdded, th.SidebarBG, 4.5},
+		{"GitDeleted on SidebarBG", th.GitDeleted, th.SidebarBG, 4.5},
+		{"GitRenamed on SidebarBG", th.GitRenamed, th.SidebarBG, 4.5},
+		{"GitMixed on SidebarBG", th.GitMixed, th.SidebarBG, 4.5},
+
+		// Non-text UI glyphs: modal border, splitter, close-×, hover
+		// chevron. WCAG 1.4.11 graphics bar.
+		{"Subtle on BG (close-× on active tab)", th.Subtle, th.BG, 3.0},
+		{"Subtle on SidebarBG (idle splitter)", th.Subtle, th.SidebarBG, 3.0},
+		{"Subtle on LineHL (modal border)", th.Subtle, th.LineHL, 3.0},
+		{"AccentSoft on Selection (hover chevron)", th.AccentSoft, th.Selection, 3.0},
+	}
+
+	for _, c := range cases {
+		if got := contrastRatio(c.fg, c.bg); got < c.min {
+			t.Errorf("%s: contrast %.2f:1, need >= %.1f:1", c.name, got, c.min)
 		}
 	}
 }

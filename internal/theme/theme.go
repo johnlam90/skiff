@@ -76,10 +76,16 @@ func Default() Theme {
 		StatusBG:  tcell.NewRGBColor(0x7a, 0xa2, 0xf7),
 		LineHL:    tcell.NewRGBColor(0x1f, 0x20, 0x2e),
 
-		// Foregrounds & accents.
+		// Foregrounds & accents. Muted and Subtle are brighter than
+		// stock Tokyo Night on purpose: they paint real text (line
+		// numbers, hints, inactive tabs) and real controls (splitter,
+		// close-×, modal borders), so Muted must clear WCAG AA 4.5:1
+		// and Subtle the 3:1 graphics bar on every surface they touch.
+		// theme_test.go's WCAG table is the fence — check it before
+		// darkening either.
 		Text:        tcell.NewRGBColor(0xc0, 0xca, 0xf5),
-		Muted:       tcell.NewRGBColor(0x56, 0x5f, 0x89),
-		Subtle:      tcell.NewRGBColor(0x32, 0x34, 0x4a),
+		Muted:       tcell.NewRGBColor(0x80, 0x89, 0xb1),
+		Subtle:      tcell.NewRGBColor(0x60, 0x69, 0x96),
 		Accent:      tcell.NewRGBColor(0x7a, 0xa2, 0xf7),
 		AccentSoft:  tcell.NewRGBColor(0xbb, 0x9a, 0xf7),
 		Selection:   tcell.NewRGBColor(0x33, 0x46, 0x7c),
@@ -92,10 +98,12 @@ func Default() Theme {
 		GitMixed:    tcell.NewRGBColor(0xbb, 0x9a, 0xf7),
 
 		// Find. FindMatch is a desaturated amber so it reads as "all
-		// hits" without competing with the syntax palette. FindCurrent
-		// is full amber — the same shade the dirty indicator uses —
-		// so the active match jumps off the page.
-		FindMatch:   tcell.NewRGBColor(0x6f, 0x52, 0x1f),
+		// hits" without competing with the syntax palette — dark
+		// enough that Text stays readable (4.5:1) on top of it, since
+		// the tint keeps the editor's foreground. FindCurrent is full
+		// amber — the same shade the dirty indicator uses — so the
+		// active match jumps off the page.
+		FindMatch:   tcell.NewRGBColor(0x68, 0x4c, 0x1c),
 		FindCurrent: tcell.NewRGBColor(0xe0, 0xaf, 0x68),
 
 		// Tree.
@@ -103,10 +111,13 @@ func Default() Theme {
 		FileColor:   tcell.NewRGBColor(0xa9, 0xb1, 0xd6),
 
 		// Syntax — Tokyo Night-ish.
-		SynKeyword:  tcell.NewRGBColor(0xbb, 0x9a, 0xf7), // purple
-		SynString:   tcell.NewRGBColor(0x9e, 0xce, 0x6a), // green
-		SynNumber:   tcell.NewRGBColor(0xff, 0x9e, 0x64), // orange
-		SynComment:  tcell.NewRGBColor(0x56, 0x5f, 0x89), // muted slate
+		SynKeyword: tcell.NewRGBColor(0xbb, 0x9a, 0xf7), // purple
+		SynString:  tcell.NewRGBColor(0x9e, 0xce, 0x6a), // green
+		SynNumber:  tcell.NewRGBColor(0xff, 0x9e, 0x64), // orange
+		// Comments are content, not chrome — they get their own value
+		// (not Muted) so dimming UI hints can never drag code comments
+		// below the 4.5:1 readability bar, and vice versa.
+		SynComment:  tcell.NewRGBColor(0x7d, 0x8a, 0xb8), // readable slate-blue
 		SynFunction: tcell.NewRGBColor(0x7a, 0xa2, 0xf7), // blue
 		SynType:     tcell.NewRGBColor(0x2a, 0xc3, 0xde), // cyan
 		SynBuiltin:  tcell.NewRGBColor(0xf7, 0x76, 0x8e), // red

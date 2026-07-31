@@ -650,13 +650,26 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 					p := Position{Line: lineIdx, Col: runeIdx}
 					if !PosLess(p, selStart) && PosLess(p, selEnd) {
 						st = st.Background(th.Selection)
+						// Comment runes keep ~1.5:1 contrast against the
+						// selection blue — unreadable — so they trade
+						// their syntax color for Text while selected.
+						// Every other syntax color clears WCAG AA on
+						// Selection and stays put.
+						if fg, _, _ := st.Decompose(); fg == th.SynComment {
+							st = st.Foreground(th.Text)
+						}
 					}
 				}
 				if mIdx := t.matchAtRune(lineIdx, runeIdx); mIdx >= 0 {
 					if mIdx == t.FindIndex {
 						st = st.Background(th.FindCurrent).Foreground(th.BG)
 					} else {
-						st = st.Background(th.FindMatch)
+						// The match tint drops syntax coloring entirely:
+						// several syntax colors (comments worst, ~1.2:1)
+						// are illegible on the amber, and a find sweep
+						// should read as "here are your hits", not as
+						// code that happens to be tinted.
+						st = st.Background(th.FindMatch).Foreground(th.Text)
 					}
 				}
 				glyph := r

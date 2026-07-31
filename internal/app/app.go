@@ -49,8 +49,17 @@ const (
 	statusFlashFor      = 3 * time.Second
 	doubleClickMs       = 500 * time.Millisecond
 	doubleEscMs         = 500 * time.Millisecond
-	wheelLines          = 3
-	wheelCols           = 6 // horizontal step per WheelLeft/WheelRight event
+
+	// menuEscMs is the double-Esc window for opening the menu — much
+	// wider than the leader's doubleEscMs on purpose. Under tmux's
+	// default escape-time, a fast Esc,Esc reaches tcell as ONE munched
+	// Esc event and a slow pair arrives >500ms apart, so a 500ms window
+	// made the double-tap nearly impossible to land. Two Escs inside
+	// 1.2s is always a deliberate "give me the menu" gesture; a wider
+	// window costs nothing because a lone armed Esc is already inert.
+	menuEscMs  = 1200 * time.Millisecond
+	wheelLines = 3
+	wheelCols  = 6 // horizontal step per WheelLeft/WheelRight event
 
 	// modifierStickyWindow is how long a previously-seen Shift modifier
 	// state is allowed to persist forward onto the next wheel event.
@@ -210,6 +219,7 @@ func builtinMenuGroups() [][]menuItemDef {
 			{label: "Delete file", action: (*App).menuDelete, enabled: (*App).hasFileTab},
 			{action: (*App).menuRenameFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).renameFolderLabel},
 			{action: (*App).menuDeleteFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).deleteFolderLabel},
+			{action: (*App).menuUndoDelete, enabled: (*App).hasTrashedEntry, labelFor: (*App).undoDeleteLabel},
 			{label: "Copy relative path", action: (*App).menuCopyRelativePath, enabled: (*App).hasFileTab},
 			{label: "Copy absolute path", action: (*App).menuCopyAbsolutePath, enabled: (*App).hasFileTab},
 		},
@@ -363,8 +373,33 @@ type App struct {
 	lastShiftAt time.Time
 
 	menuOpen       bool
-	hoveredMenuRow int       // index into menuItems of the row under the mouse, or -1.
-	lastEscape     time.Time // timestamp of the previous Esc press, for double-tap detection.
+	hoveredMenuRow int // index into menuItems of the row under the mouse, or -1.
+	// menuScroll is how many rows the menu's content region is scrolled
+	// when the natural layout is taller than the terminal (tmux splits,
+	// the 80×24 minimum). 0 whenever everything fits.
+	menuScroll int
+	lastEscape time.Time // timestamp of the previous Esc press, for double-tap detection.
+
+	// pasting is true between bracketed-paste markers. While it's set,
+	// every key event is verbatim content from the terminal's paste
+	// buffer — never a command — so handleKey strips raw ESC bytes and
+	// suppresses the Esc leader instead of letting pasted text quit the
+	// editor or fire menu actions.
+	pasting bool
+
+	// Session trash: deleted files/folders are moved here instead of
+	// destroyed, so ≡ → Undo delete can bring them back. trashDir is
+	// created lazily on first delete; trashed is the restore stack.
+	// emptyTrash discards everything when the session ends.
+	trashDir string
+	trashed  []trashEntry
+
+	// tabScroll is how many cells the tab strip is scrolled left when
+	// the open tabs are wider than the bar (narrow tmux panes). It is
+	// adjusted only at activation sites (ensureActiveTabVisible) and by
+	// explicit chevron/wheel scrolling — never in the draw path, for
+	// the same reason tab.go's cursorMoved flag exists.
+	tabScroll int
 
 	// Prompt modal — single-line text input with OK / Cancel. Used by
 	// Rename and New File. See modals.go for render + event handling.
@@ -539,8 +574,15 @@ type App struct {
 }
 
 // New initialises the screen and mouse, builds the file tree at rootDir,
-// and returns an App ready to Run.
+// and returns an App ready to Run. rootDir is canonicalized to an
+// absolute path immediately: every internal path (tree nodes, tabs,
+// activeFolder) is absolute, and keeping the CLI's verbatim "." here
+// is what once let the project root pass the "is this a subfolder?"
+// guards and become deletable.
 func New(rootDir string) (*App, error) {
+	if abs, err := filepath.Abs(rootDir); err == nil {
+		rootDir = abs
+	}
 	scr, err := tcell.NewScreen()
 	if err != nil {
 		return nil, err
@@ -549,6 +591,11 @@ func New(rootDir string) (*App, error) {
 		return nil, err
 	}
 	scr.EnableMouse(tcell.MouseButtonEvents | tcell.MouseDragEvents | tcell.MouseMotionEvents)
+	// Bracketed paste: without it, pasted text arrives as raw
+	// keystrokes and any ESC byte inside the paste arms the leader —
+	// pasting "\x1bq" would quit the editor. See handleKey's pasting
+	// guard.
+	scr.EnablePaste()
 
 	th := theme.Default()
 	scr.SetStyle(tcell.StyleDefault.Background(th.BG).Foreground(th.Text))
@@ -609,6 +656,9 @@ func NewSingleFile(filePath string) (*App, error) {
 		return nil, err
 	}
 	scr.EnableMouse(tcell.MouseButtonEvents | tcell.MouseDragEvents | tcell.MouseMotionEvents)
+	// Same bracketed-paste rationale as New: pasted ESC bytes must be
+	// content, not commands.
+	scr.EnablePaste()
 
 	th := theme.Default()
 	scr.SetStyle(tcell.StyleDefault.Background(th.BG).Foreground(th.Text))
@@ -617,6 +667,10 @@ func NewSingleFile(filePath string) (*App, error) {
 	rootDir := filepath.Dir(filePath)
 	if rootDir == "" {
 		rootDir = "."
+	}
+	// Same canonicalization rationale as New: absolute from the start.
+	if abs, err := filepath.Abs(rootDir); err == nil {
+		rootDir = abs
 	}
 
 	a := &App{
@@ -836,6 +890,9 @@ func (a *App) Run() error {
 		a.draw()
 		a.screen.Show()
 	}
+	// The undo window for deletes is the session: discard the trash on
+	// the way out so removed work doesn't pile up invisibly on disk.
+	a.emptyTrash()
 	return nil
 }
 
@@ -844,9 +901,20 @@ func (a *App) handleEvent(ev tcell.Event) {
 	switch e := ev.(type) {
 	case *tcell.EventResize:
 		a.width, a.height = a.screen.Size()
+		// The tab strip's viewport just changed width — keep the
+		// active tab on screen rather than wherever the old scroll
+		// left it.
+		a.ensureActiveTabVisible()
 		a.screen.Sync()
 	case *tcell.EventKey:
 		a.handleKey(e)
+	case *tcell.EventPaste:
+		// Bracketed-paste markers. The pasted content itself still
+		// arrives as individual key events; the flag tells handleKey
+		// to treat them as verbatim text. The leader window is
+		// dropped so a paste can never complete an armed Esc.
+		a.pasting = e.Start()
+		a.lastEscape = time.Time{}
 	case *tcell.EventMouse:
 		a.handleMouse(e)
 	case *autoScrollEvent:
@@ -1082,10 +1150,15 @@ func (a *App) menuButtonRect() (x, y, w, h int) {
 
 // menuModalRect returns the on-screen rectangle of the action modal,
 // centered in the window. Height is derived from the current layout
-// so adding custom actions grows the modal automatically.
+// so adding custom actions grows the modal automatically — but it is
+// clamped to the screen (one row of margin) so a short terminal can
+// scroll the overflow instead of losing the bottom rows, Quit first.
 func (a *App) menuModalRect() (x, y, w, h int) {
 	w = modalWidth
 	_, _, h = a.menuLayout()
+	if maxH := a.height - 2; h > maxH {
+		h = maxH
+	}
 	x = (a.width - w) / 2
 	y = (a.height - h) / 2
 	if x < 0 {
@@ -1095,6 +1168,46 @@ func (a *App) menuModalRect() (x, y, w, h int) {
 		y = 0
 	}
 	return
+}
+
+// menuMaxScroll returns how many rows the menu content can scroll: the
+// overflow between the natural layout height and the clamped modal
+// height. Zero when the whole menu fits on screen.
+func (a *App) menuMaxScroll() int {
+	_, _, natural := a.menuLayout()
+	_, _, _, h := a.menuModalRect()
+	return natural - h
+}
+
+// clampMenuScroll bounds menuScroll to [0, menuMaxScroll] so the content
+// region can never scroll past its first or last row.
+func (a *App) clampMenuScroll() {
+	if maxS := a.menuMaxScroll(); a.menuScroll > maxS {
+		a.menuScroll = maxS
+	}
+	if a.menuScroll < 0 {
+		a.menuScroll = 0
+	}
+}
+
+// ensureMenuRowVisible scrolls the menu so the item at idx sits inside
+// the visible content region — the keyboard analogue of the editor's
+// EnsureVisible, so arrow-key navigation can reach rows a short terminal
+// pushed out of the frame.
+func (a *App) ensureMenuRowVisible(idx int) {
+	items, _, _ := a.menuLayout()
+	if idx < 0 || idx >= len(items) {
+		return
+	}
+	_, _, _, h := a.menuModalRect()
+	relY := items[idx].relY
+	// Visible virtual rows span [3+menuScroll, h-2+menuScroll].
+	if relY < 3+a.menuScroll {
+		a.menuScroll = relY - 3
+	} else if relY > h-2+a.menuScroll {
+		a.menuScroll = relY - (h - 2)
+	}
+	a.clampMenuScroll()
 }
 
 // -----------------------------------------------------------------------------
@@ -1107,6 +1220,17 @@ func (a *App) menuModalRect() (x, y, w, h int) {
 // only "command" key is Esc, which closes the menu and acts as the leader
 // for the hotkey table in leader.go (Esc s = Save, Esc u = Undo, etc.).
 func (a *App) handleKey(ev *tcell.EventKey) {
+	// During a bracketed paste every key is verbatim content. Raw ESC
+	// bytes inside the paste are stripped — delivering them would close
+	// whatever modal is open or arm the leader — and the leader window
+	// is kept disarmed so pasted text can never fire an action.
+	if a.pasting {
+		a.lastEscape = time.Time{}
+		if ev.Key() == tcell.KeyEsc {
+			return
+		}
+	}
+
 	// Secondary modals own the keyboard while they're up. Each handler
 	// understands Esc (cancel), Enter (submit / activate), and the keys
 	// relevant to its layout (text editing for the prompt, arrow keys for
@@ -1148,21 +1272,45 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		return
 	}
 
+	// tmux (and other multiplexers) with a non-zero escape-time coalesce
+	// a fast Esc-then-key into one Alt-modified event: Esc,s arrives as
+	// Alt+s and a quick double-Esc as Alt+Esc. Treat both as the gesture
+	// the user actually made. An Alt rune is never inserted — outside a
+	// paste it is always a mangled Esc sequence, not text.
+	if !a.pasting && ev.Modifiers()&tcell.ModAlt != 0 {
+		a.lastEscape = time.Time{}
+		switch ev.Key() {
+		case tcell.KeyEsc:
+			if a.menuOpen {
+				a.closeMenu()
+			} else {
+				a.openMenu()
+			}
+			return
+		case tcell.KeyRune:
+			if action := leaderActionFor(ev.Rune()); action != nil {
+				action(a)
+			}
+			return
+		}
+	}
+
 	if ev.Key() == tcell.KeyEsc {
 		// Esc is the editor's only command key. Behavior:
 		//   • menu open  → close it
-		//   • menu shut  → open it on the SECOND Esc within doubleEscMs;
+		//   • menu shut  → open it on the SECOND Esc within menuEscMs;
 		//     a SINGLE Esc arms the leader table (see below).
 		// A lone Esc that isn't followed by a leader binding within the
 		// window is intentionally a no-op so the key still feels harmless
-		// to mash.
+		// to mash — and because tmux can munch a fast double-tap into
+		// one Esc, "mash Esc until the menu appears" must always work.
 		if a.menuOpen {
 			a.closeMenu()
 			a.lastEscape = time.Time{}
 			return
 		}
 		now := time.Now()
-		if !a.lastEscape.IsZero() && now.Sub(a.lastEscape) < doubleEscMs {
+		if !a.lastEscape.IsZero() && now.Sub(a.lastEscape) < menuEscMs {
 			a.openMenu()
 			a.lastEscape = time.Time{}
 			return
@@ -1189,8 +1337,13 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 
 	// While the menu is open, only the navigation keys do anything —
 	// editing keys are blocked, but Down/Up move the highlight and Enter
-	// activates the highlighted row.
+	// activates the highlighted row. Pasted content is ignored outright:
+	// with no text focus behind the menu, dispatching pasted runes as
+	// leader shortcuts would fire arbitrary actions.
 	if a.menuOpen {
+		if a.pasting {
+			return
+		}
 		if ev.Key() == tcell.KeyRune {
 			if action := leaderActionFor(ev.Rune()); action != nil {
 				a.lastEscape = time.Time{}
@@ -1247,7 +1400,13 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 	case tcell.KeyDelete:
 		tab.Delete()
 	case tcell.KeyTab:
-		tab.InsertString(tab.IndentUnit)
+		// A Tab inside a paste is a literal \t from the source text;
+		// expanding it to IndentUnit would rewrite pasted code.
+		if a.pasting {
+			tab.InsertString("\t")
+		} else {
+			tab.InsertString(tab.IndentUnit)
+		}
 	case tcell.KeyRune:
 		tab.InsertRune(ev.Rune())
 	}
@@ -1337,6 +1496,18 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	// We accept "shift was just seen" within modifierStickyWindow as
 	// equivalent to shift-on-this-event, because Zellij and friends
 	// strip the modifier from the actual wheel event.
+	// Wheel over the tab bar scrolls the tab strip when it overflows —
+	// the only way narrow tmux panes can browse many tabs without
+	// pecking at the chevrons.
+	if btn&(tcell.WheelUp|tcell.WheelLeft) != 0 && y == 0 && x >= a.sidebarW() && a.maxTabScroll() > 0 {
+		a.scrollTabStrip(-tabScrollStep)
+		return
+	}
+	if btn&(tcell.WheelDown|tcell.WheelRight) != 0 && y == 0 && x >= a.sidebarW() && a.maxTabScroll() > 0 {
+		a.scrollTabStrip(tabScrollStep)
+		return
+	}
+
 	shift := ev.Modifiers()&tcell.ModShift != 0 ||
 		(!a.lastShiftAt.IsZero() && time.Since(a.lastShiftAt) < modifierStickyWindow)
 	if btn&tcell.WheelUp != 0 {
@@ -1408,8 +1579,19 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 
 // handleMenuMouse processes mouse events while the action menu is open.
 // Left-click outside the modal closes it; left-click on a row runs that
-// row's action (if it is currently enabled).
+// row's action (if it is currently enabled). Wheel events scroll the
+// content when the layout is taller than the terminal.
 func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
+	if btn&tcell.WheelUp != 0 {
+		a.menuScroll--
+		a.clampMenuScroll()
+		return
+	}
+	if btn&tcell.WheelDown != 0 {
+		a.menuScroll++
+		a.clampMenuScroll()
+		return
+	}
 	if btn&tcell.Button1 == 0 {
 		return
 	}
@@ -1418,7 +1600,14 @@ func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
 		a.closeMenu()
 		return
 	}
-	relY := y - my
+	// Only the scrollable content region (below the title and its
+	// divider, above the bottom border) can hold items; clicks on the
+	// chrome rows stay inert even when scrolled rows share their
+	// virtual position.
+	if y < my+3 || y > my+mh-2 {
+		return
+	}
+	relY := y - my + a.menuScroll
 	items, _, _ := a.menuLayout()
 	for _, item := range items {
 		if item.relY != relY {
@@ -1561,6 +1750,17 @@ func (a *App) tabBarClick(x, _ int) {
 		a.openMenu()
 		return
 	}
+	// Chevron cells scroll the strip; they sit on top of whatever tab
+	// is clipped beneath them, so they must win the hit-test.
+	stripX, stripW := a.tabStripRegion()
+	if a.tabScroll > 0 && x == stripX {
+		a.scrollTabStrip(-tabScrollStep)
+		return
+	}
+	if a.tabScroll < a.maxTabScroll() && x == stripX+stripW-1 {
+		a.scrollTabStrip(tabScrollStep)
+		return
+	}
 	for _, r := range a.lastTabRects {
 		if x >= r.X && x < r.X+r.Width {
 			if x == r.CloseX {
@@ -1568,6 +1768,7 @@ func (a *App) tabBarClick(x, _ int) {
 				return
 			}
 			a.activeTab = r.Index
+			a.ensureActiveTabVisible()
 			a.syncActiveTreeFile()
 			return
 		}
@@ -1847,6 +2048,7 @@ func (a *App) openFile(path string) {
 	for i, t := range a.tabs {
 		if t.Path == path {
 			a.activeTab = i
+			a.ensureActiveTabVisible()
 			t.GitLines = loadGitLineChanges(a.rootDir, t.Path)
 			return
 		}
@@ -1858,6 +2060,7 @@ func (a *App) openFile(path string) {
 	}
 	a.tabs = append(a.tabs, t)
 	a.activeTab = len(a.tabs) - 1
+	a.ensureActiveTabVisible()
 	t.GitLines = loadGitLineChanges(a.rootDir, t.Path)
 	a.flash(fmt.Sprintf("Opened %s", filepath.Base(path)))
 }
@@ -1970,6 +2173,7 @@ func (a *App) closeTab(idx int) {
 	if a.activeTab < 0 {
 		a.activeTab = 0
 	}
+	a.ensureActiveTabVisible()
 	a.syncActiveTreeFile()
 }
 
@@ -2025,6 +2229,7 @@ func (a *App) pasteClipboard() {
 func (a *App) openMenu() {
 	a.closeAllModals()
 	a.menuOpen = true
+	a.menuScroll = 0
 	a.menuMoveSelection(1)
 }
 
@@ -2053,6 +2258,7 @@ func (a *App) menuMoveSelection(dir int) {
 		idx := ((start+dir*i)%n + n) % n
 		if items[idx].enabled(a) {
 			a.hoveredMenuRow = idx
+			a.ensureMenuRowVisible(idx)
 			return
 		}
 	}
@@ -2077,6 +2283,7 @@ func (a *App) menuActivate() {
 func (a *App) closeMenu() {
 	a.menuOpen = false
 	a.hoveredMenuRow = -1
+	a.menuScroll = 0
 }
 
 // updateMenuHover sets hoveredMenuRow to the index of the enabled menu row
@@ -2088,7 +2295,12 @@ func (a *App) updateMenuHover(x, y int) {
 	if x < mx || x >= mx+mw || y < my || y >= my+mh {
 		return
 	}
-	relY := y - my
+	// Chrome rows (title, divider, borders) never hover; the content
+	// region maps through the scroll offset like the click hit-test.
+	if y < my+3 || y > my+mh-2 {
+		return
+	}
+	relY := y - my + a.menuScroll
 	items, _, _ := a.menuLayout()
 	for i, item := range items {
 		if item.relY == relY && item.enabled(a) {
@@ -2500,6 +2712,84 @@ func (a *App) iconsOn() bool {
 	return a.tree != nil && a.tree.IconsEnabled
 }
 
+// tabStripRegion returns the screen x and width of the area tabs may
+// occupy: everything in the tab bar right of the ≡ button.
+func (a *App) tabStripRegion() (x, w int) {
+	tx, _, tw, _ := a.tabBarRect()
+	x = a.sidebarW() + menuButtonWidth
+	w = tx + tw - x
+	if w < 0 {
+		w = 0
+	}
+	return
+}
+
+// maxTabScroll returns how far the tab strip can scroll: the overflow
+// between the laid-out tab widths and the strip. Zero when every tab
+// fits.
+func (a *App) maxTabScroll() int {
+	rects := a.layoutTabs()
+	if len(rects) == 0 {
+		return 0
+	}
+	stripX, stripW := a.tabStripRegion()
+	last := rects[len(rects)-1]
+	over := (last.X + last.Width) - (stripX + stripW)
+	if over < 0 {
+		return 0
+	}
+	return over
+}
+
+// clampTabScroll bounds tabScroll to [0, maxTabScroll] so the strip can
+// never scroll past its first or last tab.
+func (a *App) clampTabScroll() {
+	if maxS := a.maxTabScroll(); a.tabScroll > maxS {
+		a.tabScroll = maxS
+	}
+	if a.tabScroll < 0 {
+		a.tabScroll = 0
+	}
+}
+
+// ensureActiveTabVisible scrolls the tab strip so the active tab's full
+// rect sits inside the visible window — the tab-bar analogue of the
+// editor's EnsureVisible. Called from activation sites (open, click,
+// close, resize), never from the draw path, so manual strip scrolling
+// isn't fought by the renderer.
+func (a *App) ensureActiveTabVisible() {
+	rects := a.layoutTabs()
+	if a.activeTab < 0 || a.activeTab >= len(rects) {
+		a.tabScroll = 0
+		return
+	}
+	stripX, stripW := a.tabStripRegion()
+	if stripW <= 0 {
+		return
+	}
+	r := rects[a.activeTab]
+	left := stripX + a.tabScroll
+	if r.X < left {
+		a.tabScroll = r.X - stripX
+	} else if r.X+r.Width > left+stripW {
+		a.tabScroll = r.X + r.Width - stripX - stripW
+	}
+	a.clampTabScroll()
+}
+
+// scrollTabStrip moves the strip by delta cells (negative = toward the
+// first tab), clamped. Fired by the ‹ › chevron clicks and by wheel
+// events over the tab bar.
+func (a *App) scrollTabStrip(delta int) {
+	a.tabScroll += delta
+	a.clampTabScroll()
+}
+
+// tabScrollStep is how many cells one chevron click or wheel tick moves
+// the tab strip — enough to reveal most of a typical tab without
+// disorienting jumps.
+const tabScrollStep = 8
+
 // layoutTabs computes the tabRect geometry for every tab. Tabs are rendered
 // to the right of the menu button, in the format:
 //
@@ -2507,6 +2797,10 @@ func (a *App) iconsOn() bool {
 //	(dot+space, or two spaces), an optional Nerd Font glyph + 1-space
 //	separator (only when icons are enabled), the file name, a separator
 //	space, the close ×, and a trailing space.
+//
+// The X coordinates are virtual (as if the strip never scrolled);
+// drawTabBar subtracts tabScroll before painting and stores the
+// shifted rects, so click hit-testing always works in screen space.
 func (a *App) layoutTabs() []tabRect {
 	out := make([]tabRect, 0, len(a.tabs))
 	cursor := a.sidebarW() + menuButtonWidth
@@ -2539,7 +2833,14 @@ func (a *App) drawTabBar() {
 
 	a.drawMenuButton()
 
+	// Shift the virtual layout by the strip scroll and remember the
+	// shifted rects — hit-testing then stays in screen coordinates.
+	stripX, _ := a.tabStripRegion()
 	rects := a.layoutTabs()
+	for i := range rects {
+		rects[i].X -= a.tabScroll
+		rects[i].CloseX -= a.tabScroll
+	}
 	a.lastTabRects = rects
 	for _, r := range rects {
 		active := r.Index == a.activeTab
@@ -2553,8 +2854,12 @@ func (a *App) drawTabBar() {
 		if active {
 			st = st.Bold(true)
 		}
-		// Background.
+		// Background. Cells scrolled off either edge of the strip are
+		// skipped; the chevrons painted below mark what's hidden.
 		for cx := r.X; cx < r.X+r.Width; cx++ {
+			if cx < stripX {
+				continue
+			}
 			if cx >= tx+tw {
 				break
 			}
@@ -2562,7 +2867,7 @@ func (a *App) drawTabBar() {
 		}
 		tab := a.tabs[r.Index]
 		col := r.X + 1
-		if tab.Dirty {
+		if tab.Dirty && col >= stripX && col < tx+tw {
 			a.screen.SetContent(col, ty, '●', nil, st.Foreground(a.theme.Modified))
 		}
 		col += 2 // skip dirty slot.
@@ -2582,7 +2887,9 @@ func (a *App) drawTabBar() {
 				if col >= tx+tw {
 					break
 				}
-				a.screen.SetContent(col, ty, gr, nil, gst)
+				if col >= stripX {
+					a.screen.SetContent(col, ty, gr, nil, gst)
+				}
 				col++
 			}
 			col++ // separator space after glyph
@@ -2591,17 +2898,30 @@ func (a *App) drawTabBar() {
 			if col >= tx+tw {
 				break
 			}
-			a.screen.SetContent(col, ty, ru, nil, st)
+			if col >= stripX {
+				a.screen.SetContent(col, ty, ru, nil, st)
+			}
 			col++
 		}
 		col++ // separator space before ×
-		if col < tx+tw {
+		if col >= stripX && col < tx+tw {
 			closeStyle := st.Foreground(a.theme.Muted)
 			if active {
 				closeStyle = st.Foreground(a.theme.Subtle)
 			}
 			a.screen.SetContent(col, ty, '×', nil, closeStyle)
 		}
+	}
+
+	// Overflow chevrons — the same ‹ › affordance the editor uses for
+	// clipped lines, painted over the strip's extreme cells in Accent.
+	// Each is also a click target that scrolls the strip (tabBarClick).
+	chevStyle := tcell.StyleDefault.Background(a.theme.SidebarBG).Foreground(a.theme.Accent)
+	if a.tabScroll > 0 {
+		a.screen.SetContent(stripX, ty, '‹', nil, chevStyle)
+	}
+	if a.tabScroll < a.maxTabScroll() {
+		a.screen.SetContent(tx+tw-1, ty, '›', nil, chevStyle)
 	}
 }
 
@@ -2787,9 +3107,18 @@ func (a *App) drawMenu() {
 
 	// Horizontal dividers between action groups. The dy list comes from
 	// menuLayout — including the always-on row under the title — so it
-	// stays in sync with whatever rows are actually being drawn.
+	// stays in sync with whatever rows are actually being drawn. The
+	// title divider (relY 2) is fixed chrome; the rest live in the
+	// scrollable content region and map through menuScroll, dropping
+	// out when they leave the visible window.
 	for _, dy := range dividers {
 		cy := my + dy
+		if dy > 2 {
+			cy -= a.menuScroll
+			if cy < my+3 || cy > my+mh-2 {
+				continue
+			}
+		}
 		a.screen.SetContent(mx, cy, '├', nil, borderStyle)
 		a.screen.SetContent(mx+mw-1, cy, '┤', nil, borderStyle)
 		for cx := mx + 1; cx < mx+mw-1; cx++ {
@@ -2819,7 +3148,12 @@ func (a *App) drawMenu() {
 	hoverStyle := tcell.StyleDefault.Background(hoverBg).Foreground(a.theme.Text).Bold(true)
 	hoverChevStyle := tcell.StyleDefault.Background(hoverBg).Foreground(a.theme.AccentSoft).Bold(true)
 	for i, item := range items {
-		cy := my + item.relY
+		cy := my + item.relY - a.menuScroll
+		// Rows scrolled out of the content window aren't drawn; the
+		// ▲/▼ chrome markers below tell the user they exist.
+		if cy < my+3 || cy > my+mh-2 {
+			continue
+		}
 		enabled := item.enabled(a)
 		hovered := enabled && i == a.hoveredMenuRow
 
@@ -2832,7 +3166,10 @@ func (a *App) drawMenu() {
 			}
 			labelStyle = hoverStyle
 			chevStyle = hoverChevStyle
-			shortcutStyle = tcell.StyleDefault.Background(hoverBg).Foreground(a.theme.Muted).Bold(true)
+			// Text, not Muted: Muted lands around 2.6:1 on the Selection
+			// hover bg — the one row the user is actively reading is the
+			// last place the shortcut hint should go dim.
+			shortcutStyle = tcell.StyleDefault.Background(hoverBg).Foreground(a.theme.Text).Bold(true)
 		case enabled:
 			labelStyle = bgStyle
 			chevStyle = chevronStyle
@@ -2857,6 +3194,18 @@ func (a *App) drawMenu() {
 		label = trimRunes(label, shortcutX-(mx+4)-2)
 		drawAt(a.screen, mx+4, cy, label, labelStyle)
 		drawAt(a.screen, shortcutX, cy, item.shortcut, shortcutStyle)
+	}
+
+	// Overflow markers, drawn into the fixed chrome (the title divider
+	// and the bottom border) so they cost no content rows: ▲ when rows
+	// are hidden above, ▼ when rows are hidden below. Accent-colored —
+	// they're the only hint that more actions exist off-frame.
+	moreStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent)
+	if a.menuScroll > 0 {
+		drawAt(a.screen, mx+2, my+2, " ▲ ", moreStyle)
+	}
+	if a.menuScroll < a.menuMaxScroll() {
+		drawAt(a.screen, mx+2, my+mh-1, " ▼ ", moreStyle)
 	}
 
 	a.screen.HideCursor()

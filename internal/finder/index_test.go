@@ -12,7 +12,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
+
+	"github.com/johnlam90/skiff/internal/filetree"
 )
 
 // TestBuildIndex_FallbackWalk pins the non-git path: a plain
@@ -134,4 +137,26 @@ func sliceEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestBuildIndex_SkipsTrashEntries pins the finder half of the
+// session-trash filter: trash-prefixed entries must not be findable,
+// in either the git or the walk indexing path.
+func TestBuildIndex_SkipsTrashEntries(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, root, "real.go", "x")
+	mustWrite(t, root, filetree.TrashPrefix+"0-dead.go", "x")
+
+	paths, err := buildIndexWalk(root)
+	if err != nil {
+		t.Fatalf("buildIndexWalk: %v", err)
+	}
+	for _, p := range paths {
+		if strings.Contains(p, filetree.TrashPrefix) {
+			t.Fatalf("trash entry %q leaked into the index", p)
+		}
+	}
+	if len(paths) != 1 || paths[0] != "real.go" {
+		t.Fatalf("expected only real.go, got %v", paths)
+	}
 }

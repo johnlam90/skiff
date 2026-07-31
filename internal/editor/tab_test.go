@@ -1118,3 +1118,99 @@ func TestTab_Render_GitMarkerDoesNotOverlapLineNumber(t *testing.T) {
 		}
 	}
 }
+
+// TestTab_Render_SelectedCommentReadable pins the contrast fix for
+// comments inside a selection: the comment foreground sat at 1.47:1
+// against the Selection background, making selected comments unreadable.
+// Render must swap comment-colored runes to the Text foreground when the
+// selection covers them, and leave unselected comment runes alone.
+func TestTab_Render_SelectedCommentReadable(t *testing.T) {
+	scr := newSimScreen(t, 40, 4)
+	defer scr.Fini()
+	th := theme.Default()
+
+	tab, err := NewTab("")
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.Buffer = NewBuffer("// hi")
+	commentStyle := tcell.StyleDefault.Foreground(th.SynComment)
+	tab.Styles = [][]tcell.Style{
+		{commentStyle, commentStyle, commentStyle, commentStyle, commentStyle},
+	}
+	// Freeze the highlight cache so Render keeps the hand-set styles
+	// instead of re-tokenising the (extension-less) buffer.
+	tab.StyleStale = false
+	tab.lastHighlightScrollY = 0
+	tab.lastHighlightHeight = 4
+	// Select the first three runes ("// ") and leave "hi" unselected.
+	tab.Anchor = Position{Line: 0, Col: 0}
+	tab.Cursor = Position{Line: 0, Col: 3}
+
+	tab.Render(scr, th, 0, 0, 40, 4)
+	scr.Show()
+
+	contentX := gutterWidthFor(tab.Buffer.LineCount()) + 1
+	cells, w, _ := scr.GetContents()
+	selCell := cells[0*w+contentX] // first content rune, selected
+	fg, bg, _ := selCell.Style.Decompose()
+	if bg != th.Selection {
+		t.Fatalf("expected Selection bg under selected rune, got %v", bg)
+	}
+	if fg == th.SynComment {
+		t.Fatal("selected comment rune kept the 1.47:1 comment fg; want Text")
+	}
+	if fg != th.Text {
+		t.Fatalf("selected comment fg: got %v, want Text %v", fg, th.Text)
+	}
+
+	unselCell := cells[0*w+contentX+4] // 'i' of "hi", unselected
+	fg, _, _ = unselCell.Style.Decompose()
+	if fg != th.SynComment {
+		t.Fatalf("unselected comment rune should keep SynComment, got %v", fg)
+	}
+}
+
+// TestTab_Render_FindMatchForcesTextFg pins the companion fix for the
+// find tint: FindMatch kept each rune's syntax foreground, which put
+// comments at 1.17:1 against the amber. Every non-current match must
+// render with the Text foreground instead.
+func TestTab_Render_FindMatchForcesTextFg(t *testing.T) {
+	scr := newSimScreen(t, 40, 4)
+	defer scr.Fini()
+	th := theme.Default()
+
+	tab, err := NewTab("")
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.Buffer = NewBuffer("// hi")
+	commentStyle := tcell.StyleDefault.Foreground(th.SynComment)
+	tab.Styles = [][]tcell.Style{
+		{commentStyle, commentStyle, commentStyle, commentStyle, commentStyle},
+	}
+	// Freeze the highlight cache so Render keeps the hand-set styles.
+	tab.StyleStale = false
+	tab.lastHighlightScrollY = 0
+	tab.lastHighlightHeight = 4
+	tab.Cursor = Position{Line: 0, Col: 0}
+	tab.Anchor = tab.Cursor
+	// One match over "hi"; FindIndex points elsewhere so this renders as
+	// a non-current match (the FindMatch tint, not FindCurrent).
+	tab.FindMatches = []Match{{Line: 0, Col: 3, Width: 2}}
+	tab.FindIndex = -1
+
+	tab.Render(scr, th, 0, 0, 40, 4)
+	scr.Show()
+
+	contentX := gutterWidthFor(tab.Buffer.LineCount()) + 1
+	cells, w, _ := scr.GetContents()
+	matchCell := cells[0*w+contentX+3] // 'h' of "hi"
+	fg, bg, _ := matchCell.Style.Decompose()
+	if bg != th.FindMatch {
+		t.Fatalf("expected FindMatch bg under match, got %v", bg)
+	}
+	if fg != th.Text {
+		t.Fatalf("find-match fg: got %v, want Text %v", fg, th.Text)
+	}
+}

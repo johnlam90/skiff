@@ -78,19 +78,122 @@ func tabPathRemoved(tabPath, deletedPath string) bool {
 	return strings.HasPrefix(tabPath, prefix)
 }
 
-// deletePath removes the file or directory at path. Directories are
-// removed recursively (os.RemoveAll), so callers must take a confirm
-// before invoking this on a folder — the operation is unrecoverable
-// from inside the editor. Returns the underlying os error so the
-// caller can surface a useful message; we deliberately don't swallow
-// "no such file or directory" because RemoveAll silently succeeds on
-// missing paths and the caller may want to know the path was already
-// gone (today no callsite cares, but the contract is the safer one).
-func deletePath(path string) error {
-	if _, err := os.Lstat(path); err != nil {
+// samePath reports whether two paths refer to the same location once
+// both are made absolute. The project root can arrive in different
+// spellings ("." from the CLI, the absolute tree root internally), and
+// a verbatim string compare between those spellings is exactly the bug
+// that once let the root masquerade as a deletable subfolder.
+func samePath(a, b string) bool {
+	aa, err1 := filepath.Abs(a)
+	bb, err2 := filepath.Abs(b)
+	if err1 != nil || err2 != nil {
+		return a == b
+	}
+	return aa == bb
+}
+
+// isProjectRoot reports whether folder refers to the project root in
+// any spelling. Every root-destructive path (menu predicates, labels,
+// and doDeletePath itself) checks this instead of comparing raw
+// strings, so no launch form can make the root deletable.
+func (a *App) isProjectRoot(folder string) bool {
+	if samePath(folder, a.rootDir) {
+		return true
+	}
+	return a.tree != nil && a.tree.Root != nil && samePath(folder, a.tree.Root.Path)
+}
+
+// trashEntry records one deleted item so Undo delete can put it back:
+// where it lived, and where the session trash is keeping it.
+type trashEntry struct {
+	orig   string
+	stored string
+}
+
+// moveToTrash relocates path into the session trash instead of
+// destroying it, which is what makes Delete undoable for the life of
+// the session. The primary destination is a per-session temp dir; when
+// that rename crosses filesystems (os.Rename fails on tmpfs /tmp,
+// network mounts, …) the item is instead renamed in place to a hidden
+// filetree.TrashPrefix sibling, which is always same-device. The tree
+// and finder both filter that prefix so a fallback entry never
+// surfaces in the UI.
+func (a *App) moveToTrash(path string) error {
+	if a.trashDir == "" {
+		if dir, err := os.MkdirTemp("", "skiff-trash-"); err == nil {
+			a.trashDir = dir
+		}
+	}
+	base := filepath.Base(path)
+	if a.trashDir != "" {
+		stored := filepath.Join(a.trashDir, fmt.Sprintf("%d-%s", len(a.trashed), base))
+		if err := os.Rename(path, stored); err == nil {
+			a.trashed = append(a.trashed, trashEntry{orig: path, stored: stored})
+			return nil
+		}
+	}
+	stored := filepath.Join(filepath.Dir(path),
+		fmt.Sprintf("%s%d-%s", filetree.TrashPrefix, len(a.trashed), base))
+	if err := os.Rename(path, stored); err != nil {
 		return err
 	}
-	return os.RemoveAll(path)
+	a.trashed = append(a.trashed, trashEntry{orig: path, stored: stored})
+	return nil
+}
+
+// hasTrashedEntry is the menu predicate for the Undo delete row: true
+// while the session trash holds at least one restorable item.
+func (a *App) hasTrashedEntry() bool { return len(a.trashed) > 0 }
+
+// menuUndoDelete restores the most recently deleted item from the
+// session trash. It refuses to clobber: if something new occupies the
+// original path the entry stays in the trash and the flash says why,
+// so a failed restore never destroys newer work.
+func (a *App) menuUndoDelete() {
+	a.closeMenu()
+	if len(a.trashed) == 0 {
+		return
+	}
+	e := a.trashed[len(a.trashed)-1]
+	if _, err := os.Lstat(e.orig); err == nil {
+		a.flash(fmt.Sprintf("Restore failed: %s already exists", filepath.Base(e.orig)))
+		return
+	}
+	if err := os.Rename(e.stored, e.orig); err != nil {
+		a.flash(fmt.Sprintf("Restore failed: %v", err))
+		return
+	}
+	a.trashed = a.trashed[:len(a.trashed)-1]
+	a.refreshTree()
+	a.refreshGitStatusAsync()
+	a.invalidateFinder()
+	a.flash(fmt.Sprintf("Restored %s", filepath.Base(e.orig)))
+}
+
+// undoDeleteLabel is the dynamic label hook for the Undo delete menu
+// row: it names what will come back, matching the "say the target
+// before the click" rule the other file rows follow.
+func (a *App) undoDeleteLabel() string {
+	if len(a.trashed) == 0 {
+		return "Undo delete"
+	}
+	name := filepath.Base(a.trashed[len(a.trashed)-1].orig)
+	return trimRunes("Undo delete ("+name+")", maxLabelSuffix+len("Undo delete"))
+}
+
+// emptyTrash permanently discards everything the session trash holds.
+// Called when the editor exits — the undo window is deliberately the
+// session lifetime, not forever, so deleted work doesn't accumulate
+// invisibly on disk.
+func (a *App) emptyTrash() {
+	for _, e := range a.trashed {
+		_ = os.RemoveAll(e.stored)
+	}
+	if a.trashDir != "" {
+		_ = os.RemoveAll(a.trashDir)
+		a.trashDir = ""
+	}
+	a.trashed = nil
 }
 
 // -----------------------------------------------------------------------------
@@ -163,8 +266,11 @@ func (a *App) doRenameFile(oldPath, newName string) {
 	a.flash(fmt.Sprintf("Renamed to %s", newName))
 }
 
-// doDeletePath removes path (file or directory), closes any open tab
-// whose file is gone as a result, and refreshes the tree.
+// doDeletePath moves path (file or directory) into the session trash,
+// closes any open tab whose file is gone as a result, and refreshes
+// the tree. The refusal to touch the project root is defense-in-depth:
+// the menu predicates already gate root-targeting rows out, but this
+// is the last line before filesystem damage, so it re-checks.
 //
 // For a folder delete we have to close not just an exact-path tab but
 // every tab living *inside* the folder — otherwise the editor would
@@ -173,7 +279,15 @@ func (a *App) doRenameFile(oldPath, newName string) {
 // "is this tab orphaned?" check so the loop reads as the rule it's
 // enforcing rather than path arithmetic.
 func (a *App) doDeletePath(path string) {
-	if err := deletePath(path); err != nil {
+	if a.isProjectRoot(path) {
+		a.flash("Refusing to delete the project root")
+		return
+	}
+	if _, err := os.Lstat(path); err != nil {
+		a.flash(fmt.Sprintf("Delete failed: %v", err))
+		return
+	}
+	if err := a.moveToTrash(path); err != nil {
 		a.flash(fmt.Sprintf("Delete failed: %v", err))
 		return
 	}
@@ -185,7 +299,7 @@ func (a *App) doDeletePath(path string) {
 	a.refreshTree()
 	a.refreshGitStatusAsync()
 	a.invalidateFinder()
-	a.flash(fmt.Sprintf("Deleted %s", filepath.Base(path)))
+	a.flash(fmt.Sprintf("Deleted %s — ≡ Undo delete", filepath.Base(path)))
 }
 
 // -----------------------------------------------------------------------------
@@ -228,7 +342,7 @@ func (a *App) menuNewFile() {
 // where the file will land before they even click.
 func (a *App) newFileLabel() string {
 	folder := a.activeFolder
-	if folder == "" || folder == a.rootDir {
+	if folder == "" || a.isProjectRoot(folder) {
 		return "New file"
 	}
 	rel := a.relativeFolderLabel(folder)
@@ -256,7 +370,7 @@ func (a *App) newFileLabel() string {
 // or just the basename when folder is the root itself. Used in the New
 // File prompt's hint and the menu row's dynamic label.
 func (a *App) relativeFolderLabel(folder string) string {
-	if folder == a.rootDir {
+	if a.isProjectRoot(folder) {
 		return filepath.Base(a.rootDir) + string(filepath.Separator)
 	}
 	rel, err := filepath.Rel(a.rootDir, folder)
@@ -371,7 +485,7 @@ func (a *App) doRenameFolder(oldPath, newName string) {
 func (a *App) menuRenameFolder() {
 	a.closeMenu()
 	folder := a.activeFolder
-	if folder == "" || folder == a.rootDir {
+	if folder == "" || a.isProjectRoot(folder) {
 		return
 	}
 	if info, err := os.Stat(folder); err != nil || !info.IsDir() {
@@ -394,7 +508,7 @@ func (a *App) menuRenameFolder() {
 // have no way to tell what's about to be renamed before clicking.
 func (a *App) renameFolderLabel() string {
 	folder := a.activeFolder
-	if folder == "" || folder == a.rootDir {
+	if folder == "" || a.isProjectRoot(folder) {
 		return "Rename folder"
 	}
 	rel := a.relativeFolderLabel(folder)
@@ -425,7 +539,7 @@ func (a *App) renameFolderLabel() string {
 func (a *App) menuDeleteFolder() {
 	a.closeMenu()
 	folder := a.activeFolder
-	if folder == "" || folder == a.rootDir {
+	if folder == "" || a.isProjectRoot(folder) {
 		return
 	}
 	if info, err := os.Stat(folder); err != nil || !info.IsDir() {
@@ -454,7 +568,7 @@ func (a *App) menuDeleteFolder() {
 // even open the confirm dialog.
 func (a *App) deleteFolderLabel() string {
 	folder := a.activeFolder
-	if folder == "" || folder == a.rootDir {
+	if folder == "" || a.isProjectRoot(folder) {
 		return "Delete folder"
 	}
 	rel := a.relativeFolderLabel(folder)
@@ -479,7 +593,7 @@ func (a *App) deleteFolderLabel() string {
 // hasFileTab so the file/folder predicates form a matched pair.
 func (a *App) hasActiveSubfolder() bool {
 	folder := a.activeFolder
-	if folder == "" || folder == a.rootDir {
+	if folder == "" || a.isProjectRoot(folder) {
 		return false
 	}
 	info, err := os.Stat(folder)
@@ -635,4 +749,3 @@ func ctxDelete(a *App, n *filetree.Node) {
 		app.doDeletePath(target)
 	})
 }
-
