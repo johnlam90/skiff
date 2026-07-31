@@ -12,7 +12,11 @@
 // the syntax colors stay legible against the chrome.
 package theme
 
-import "github.com/gdamore/tcell/v2"
+import (
+	"math"
+
+	"github.com/gdamore/tcell/v2"
+)
 
 // Theme bundles every color the editor renders. UI surfaces, accents, and
 // syntax-highlight colors all live in one struct so that adjusting one
@@ -63,6 +67,45 @@ type Theme struct {
 	SynOperator tcell.Color
 	SynPunct    tcell.Color
 	SynConstant tcell.Color
+}
+
+// relativeLuminance implements the WCAG 2.x luminance formula for a
+// tcell RGB color.
+func relativeLuminance(c tcell.Color) float64 {
+	ri, gi, bi := c.RGB()
+	lin := func(v int32) float64 {
+		s := float64(v) / 255
+		if s <= 0.03928 {
+			return s / 12.92
+		}
+		return math.Pow((s+0.055)/1.055, 2.4)
+	}
+	return 0.2126*lin(ri) + 0.7152*lin(gi) + 0.0722*lin(bi)
+}
+
+// ContrastRatio returns the WCAG contrast ratio (>=1) between two
+// colors. Exported because the renderer makes live readability
+// decisions with it (SelectionFg) and the theme tests fence the
+// palette with it — one implementation for both.
+func ContrastRatio(a, b tcell.Color) float64 {
+	la, lb := relativeLuminance(a), relativeLuminance(b)
+	if la < lb {
+		la, lb = lb, la
+	}
+	return (la + 0.05) / (lb + 0.05)
+}
+
+// SelectionFg returns the foreground to paint fg with when its cell
+// sits on the Selection background: fg itself while it stays readable
+// (>=4.5:1), Text otherwise. Several syntax colors (keyword, function,
+// builtin, type, punct, number) fall to ~3.4-4.5:1 on the selection
+// blue; swapping exactly the failing ones keeps selected code legible
+// without flattening the colors that do pass.
+func (t Theme) SelectionFg(fg tcell.Color) tcell.Color {
+	if ContrastRatio(fg, t.Selection) >= 4.5 {
+		return fg
+	}
+	return t.Text
 }
 
 // Default returns the editor's curated dark theme. It is the only theme the

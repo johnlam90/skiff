@@ -277,14 +277,15 @@ func (a *App) sidebarHeaderHit(localX int) string {
 }
 
 // drawSidebarHeader paints the EXPLORER / GIT tab row at the top of the
-// sidebar. The active tab keeps the header's traditional muted-bold
-// look; the inactive one drops to Subtle so the eye reads one of them
-// as "current". The GIT tab only appears for git projects — a plain
-// directory keeps the original single-header look.
+// sidebar. The active tab is Text bold, the inactive one Muted — both
+// clear WCAG AA on the sidebar (the old Subtle inactive label sat at
+// 3.4:1, below the text bar), and the weight+brightness pair still
+// reads one of them as "current". The GIT tab only appears for git
+// projects — a plain directory keeps the original single-header look.
 func (a *App) drawSidebarHeader(sx, sy, sw int) {
 	bg := a.theme.SidebarBG
-	active := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted).Bold(true)
-	inactive := tcell.StyleDefault.Background(bg).Foreground(a.theme.Subtle)
+	active := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text).Bold(true)
+	inactive := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
 
 	// Clear the row first — the tree's own header text may sit beneath.
 	for cx := sx; cx < sx+sw; cx++ {

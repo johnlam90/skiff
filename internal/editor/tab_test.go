@@ -1214,3 +1214,45 @@ func TestTab_Render_FindMatchForcesTextFg(t *testing.T) {
 		t.Fatalf("find-match fg: got %v, want Text %v", fg, th.Text)
 	}
 }
+
+// TestTab_Render_SelectedLowContrastSyntaxSwaps generalizes the
+// selected-comment fix to every syntax color: a keyword-colored rune
+// (3.9:1 on the selection blue) must swap to Text inside a selection,
+// while a string-colored rune (5.0:1) keeps its identity.
+func TestTab_Render_SelectedLowContrastSyntaxSwaps(t *testing.T) {
+	scr := newSimScreen(t, 40, 4)
+	defer scr.Fini()
+	th := theme.Default()
+
+	tab, err := NewTab("")
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.Buffer = NewBuffer("kw str")
+	kwStyle := tcell.StyleDefault.Foreground(th.SynKeyword)
+	strStyle := tcell.StyleDefault.Foreground(th.SynString)
+	tab.Styles = [][]tcell.Style{
+		{kwStyle, kwStyle, kwStyle, strStyle, strStyle, strStyle},
+	}
+	tab.StyleStale = false
+	tab.lastHighlightScrollY = 0
+	tab.lastHighlightHeight = 4
+	// Select the whole line.
+	tab.Anchor = Position{Line: 0, Col: 0}
+	tab.Cursor = Position{Line: 0, Col: 6}
+
+	tab.Render(scr, th, 0, 0, 40, 4)
+	scr.Show()
+
+	contentX := gutterWidthFor(tab.Buffer.LineCount()) + 1
+	cells, w, _ := scr.GetContents()
+
+	fg, _, _ := cells[0*w+contentX].Style.Decompose() // 'k' of "kw"
+	if fg != th.Text {
+		t.Fatalf("selected keyword rune fg = %v, want Text (keyword is 3.9:1 on Selection)", fg)
+	}
+	fg, _, _ = cells[0*w+contentX+3].Style.Decompose() // 's' of "str"
+	if fg != th.SynString {
+		t.Fatalf("selected string rune fg = %v, want SynString kept (it passes AA)", fg)
+	}
+}

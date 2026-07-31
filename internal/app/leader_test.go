@@ -10,6 +10,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,9 +172,10 @@ func TestHandleKey_LeaderUnboundFallsThrough(t *testing.T) {
 	}
 }
 
-// TestHandleKey_LeaderTimesOut verifies the leader window expires:
-// after doubleEscMs has passed since the last Esc, a bound letter must
-// reach the editor as a normal keystroke instead of firing the action.
+// TestHandleKey_LeaderTimesOut verifies the leader state fully expires:
+// once menuEscMs has passed since the last Esc, a bound letter must
+// reach the editor as a normal keystroke instead of firing the action
+// or the timeout hint.
 func TestHandleKey_LeaderTimesOut(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "t.txt")
@@ -184,13 +186,48 @@ func TestHandleKey_LeaderTimesOut(t *testing.T) {
 	a.openFile(target)
 
 	a.handleKey(keyEv(tcell.KeyEsc, 0))
-	// Backdate the Esc timestamp past the leader window so the next 's'
-	// is treated as a plain keystroke rather than Save.
-	a.lastEscape = time.Now().Add(-2 * doubleEscMs)
+	// Backdate the Esc timestamp past every window so the next 's'
+	// is treated as a plain keystroke rather than Save or a hint.
+	a.lastEscape = time.Now().Add(-2 * menuEscMs)
 	a.handleKey(keyEv(tcell.KeyRune, 's'))
 
 	if got := a.activeTabPtr().Buffer.Lines[0]; got != "s" {
 		t.Fatalf("expired leader window: 's' should insert literally, got %q", got)
+	}
+}
+
+// TestHandleKey_ExpiredLeaderRuneHints is the timing-cliff regression
+// test: a bound rune landing after the leader window but inside the
+// menu window (a slow "Esc s" over a laggy SSH link) used to insert
+// the rune into the buffer while the user believed they had saved.
+// It must be swallowed once with a flash explaining what happened.
+func TestHandleKey_ExpiredLeaderRuneHints(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "t.txt")
+	if err := os.WriteFile(target, []byte(""), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	a.lastEscape = time.Now().Add(-800 * time.Millisecond) // between the windows
+	a.handleKey(keyEv(tcell.KeyRune, 's'))
+
+	if got := a.activeTabPtr().Buffer.Lines[0]; got != "" {
+		t.Fatalf("slow leader rune must not reach the buffer, got %q", got)
+	}
+	if !strings.Contains(a.statusMsg, "timed out") {
+		t.Fatalf("expected a timeout hint flash, got %q", a.statusMsg)
+	}
+
+	// Unbound runes keep the fall-through contract even in the grace
+	// window: a stray Esc must not eat ordinary typing.
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	a.lastEscape = time.Now().Add(-800 * time.Millisecond)
+	a.handleKey(keyEv(tcell.KeyRune, 'z'))
+	if got := a.activeTabPtr().Buffer.Lines[0]; got != "z" {
+		t.Fatalf("unbound rune in the grace window should insert, got %q", got)
 	}
 }
 
@@ -226,8 +263,10 @@ func TestHandleKey_EscDoubleTapWideWindowOpensMenu(t *testing.T) {
 }
 
 // TestHandleKey_LeaderWindowStaysTight is the counterpart: the wider
-// menu window must NOT widen the leader. A bound rune 800ms after Esc
-// is typing, not a command — it has to reach the buffer.
+// menu window must NOT widen the leader itself. A bound rune 800ms
+// after Esc never fires its action — a slow Esc-s must not save behind
+// the user's back; it lands in the expired-leader grace path instead
+// (swallowed with a hint, pinned by TestHandleKey_ExpiredLeaderRuneHints).
 func TestHandleKey_LeaderWindowStaysTight(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "t.txt")
@@ -236,13 +275,17 @@ func TestHandleKey_LeaderWindowStaysTight(t *testing.T) {
 	}
 	a := newTestApp(t, dir)
 	a.openFile(target)
+	a.handleKey(keyEv(tcell.KeyRune, 'x')) // dirty the buffer
 
 	a.handleKey(keyEv(tcell.KeyEsc, 0))
 	a.lastEscape = time.Now().Add(-800 * time.Millisecond)
 	a.handleKey(keyEv(tcell.KeyRune, 's'))
 
-	if got := a.activeTabPtr().Buffer.Lines[0]; got != "s" {
-		t.Fatalf("'s' 800ms after Esc should insert literally, got %q", got)
+	if !a.activeTabPtr().Dirty {
+		t.Fatal("a bound rune 800ms after Esc must not fire the leader action")
+	}
+	if strings.Contains(a.statusMsg, "Saved") {
+		t.Fatalf("no save flash expected, got %q", a.statusMsg)
 	}
 }
 

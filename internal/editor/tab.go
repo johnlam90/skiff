@@ -650,14 +650,13 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 					p := Position{Line: lineIdx, Col: runeIdx}
 					if !PosLess(p, selStart) && PosLess(p, selEnd) {
 						st = st.Background(th.Selection)
-						// Comment runes keep ~1.5:1 contrast against the
-						// selection blue — unreadable — so they trade
-						// their syntax color for Text while selected.
-						// Every other syntax color clears WCAG AA on
-						// Selection and stays put.
-						if fg, _, _ := st.Decompose(); fg == th.SynComment {
-							st = st.Foreground(th.Text)
-						}
+						// Several syntax colors fall below WCAG AA on
+						// the selection blue (comments worst at ~1.5:1,
+						// keywords/functions/builtins ~3.4-4.5:1) —
+						// SelectionFg trades exactly those for Text and
+						// keeps the ones that stay readable.
+						fg, _, _ := st.Decompose()
+						st = st.Foreground(th.SelectionFg(fg))
 					}
 				}
 				if mIdx := t.matchAtRune(lineIdx, runeIdx); mIdx >= 0 {

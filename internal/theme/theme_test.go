@@ -14,7 +14,6 @@
 package theme
 
 import (
-	"math"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
@@ -94,28 +93,47 @@ func TestDefault_ContrastInvariants(t *testing.T) {
 	}
 }
 
-// relativeLuminance implements the WCAG 2.x luminance formula for a
-// tcell RGB color. Kept in the test file on purpose: production code
-// never needs it, but the palette's accessibility contract does.
-func relativeLuminance(c tcell.Color) float64 {
-	ri, gi, bi := c.RGB()
-	lin := func(v int32) float64 {
-		s := float64(v) / 255
-		if s <= 0.03928 {
-			return s / 12.92
-		}
-		return math.Pow((s+0.055)/1.055, 2.4)
-	}
-	return 0.2126*lin(ri) + 0.7152*lin(gi) + 0.0722*lin(bi)
+// contrastRatio delegates to the package's exported ContrastRatio —
+// production code needs the math now (Theme.SelectionFg), so the tests
+// exercise the same implementation the renderer uses.
+func contrastRatio(a, b tcell.Color) float64 {
+	return ContrastRatio(a, b)
 }
 
-// contrastRatio returns the WCAG contrast ratio (≥1) between two colors.
-func contrastRatio(a, b tcell.Color) float64 {
-	la, lb := relativeLuminance(a), relativeLuminance(b)
-	if la < lb {
-		la, lb = lb, la
+// TestSelectionFg_SyntaxReadableOnSelection pins the selection-swap
+// contract: for every syntax color, whatever SelectionFg returns must
+// clear WCAG AA on the Selection background — colors that already pass
+// keep their identity, the rest trade it for Text. Without the swap,
+// keywords/functions/builtins sat at 3.4–4.5:1 inside a selection.
+func TestSelectionFg_SyntaxReadableOnSelection(t *testing.T) {
+	th := Default()
+	cases := []struct {
+		name string
+		fg   tcell.Color
+	}{
+		{"SynKeyword", th.SynKeyword},
+		{"SynString", th.SynString},
+		{"SynNumber", th.SynNumber},
+		{"SynComment", th.SynComment},
+		{"SynFunction", th.SynFunction},
+		{"SynType", th.SynType},
+		{"SynBuiltin", th.SynBuiltin},
+		{"SynVariable", th.SynVariable},
+		{"SynOperator", th.SynOperator},
+		{"SynPunct", th.SynPunct},
+		{"SynConstant", th.SynConstant},
+		{"Text", th.Text},
 	}
-	return (la + 0.05) / (lb + 0.05)
+	for _, c := range cases {
+		got := th.SelectionFg(c.fg)
+		if ratio := ContrastRatio(got, th.Selection); ratio < 4.5 {
+			t.Errorf("SelectionFg(%s) = %v at %.2f:1 on Selection, need >= 4.5", c.name, got, ratio)
+		}
+	}
+	// A color that already passes must keep its identity.
+	if got := th.SelectionFg(th.SynString); got != th.SynString {
+		t.Errorf("SynString passes on Selection and should be kept, got %v", got)
+	}
 }
 
 // TestDefault_WCAGContrast pins the real accessibility bar for every

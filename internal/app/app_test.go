@@ -2646,6 +2646,28 @@ func TestDrawMenu_HoveredShortcutUsesTextFg(t *testing.T) {
 	}
 }
 
+// TestDrawStatusBar_ArmedEscTag pins the pending-gesture indicator:
+// while an Esc is armed (any window still open) the status bar shows
+// an "Esc…" tag, and once the window has fully expired the tag is
+// gone. The editor's only modifier must not have invisible state.
+func TestDrawStatusBar_ArmedEscTag(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+
+	a.handleKey(keyEv(tcell.KeyEsc, 0)) // arm
+	a.drawStatusBar()
+	a.screen.Show()
+	if !screenHasText(t, a, "Esc…") {
+		t.Fatal("armed Esc should show the Esc… tag in the status bar")
+	}
+
+	a.lastEscape = time.Now().Add(-2 * menuEscMs) // fully expired
+	a.drawStatusBar()
+	a.screen.Show()
+	if screenHasText(t, a, "Esc…") {
+		t.Fatal("expired Esc must not keep the Esc… tag")
+	}
+}
+
 // TestHandleEvent_PasteEscIsContentNotCommand is the regression test
 // for the bracketed-paste hole: a raw ESC byte inside pasted text used
 // to arm the Esc leader, so pasting "\x1bq" would quit the editor.

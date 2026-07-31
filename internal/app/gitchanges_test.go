@@ -533,3 +533,31 @@ func TestRefreshGitStatus_RebuildsActivePanel(t *testing.T) {
 		t.Fatalf("active panel should track new changes, got %d rows", len(a.gitPanelRows))
 	}
 }
+
+// TestDrawSidebarHeader_LabelsReadable pins the header contrast fix:
+// the inactive tab label used to render in Subtle (3.4:1 — below the
+// text bar), and the active/inactive split leaned on brightness alone.
+// Now the active label is Text bold and the inactive one Muted, both
+// clearing WCAG AA on the sidebar background.
+func TestDrawSidebarHeader_LabelsReadable(t *testing.T) {
+	a, _, _ := dirtyRepoApp(t)
+	a.toggleGitPanel() // GIT active, EXPLORER inactive
+	a.draw()
+	a.screen.Show()
+
+	scr := a.screen.(tcell.SimulationScreen)
+	cells, w, _ := scr.GetContents()
+	// Row 0: " EXPLORER   GIT n". The 'E' sits at col 1.
+	fg, _, _ := cells[0*w+1].Style.Decompose()
+	if fg == a.theme.Subtle {
+		t.Fatal("inactive header label still uses Subtle (3.4:1); want Muted")
+	}
+	if fg != a.theme.Muted {
+		t.Fatalf("inactive header label fg = %v, want Muted", fg)
+	}
+	gx := 1 + len("EXPLORER") + sidebarHeaderGap
+	fg, _, _ = cells[0*w+gx].Style.Decompose()
+	if fg != a.theme.Text {
+		t.Fatalf("active header label fg = %v, want Text", fg)
+	}
+}

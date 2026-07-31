@@ -115,6 +115,17 @@ type autoScrollEvent struct {
 // When satisfies the tcell.Event interface.
 func (e *autoScrollEvent) When() time.Time { return e.when }
 
+// leaderExpiryEvent is posted shortly after an armed Esc's window
+// closes. It carries no action of its own — reaching the event loop is
+// the point, because Run redraws after every event and that repaint
+// removes the status bar's "Esc…" tag.
+type leaderExpiryEvent struct {
+	when time.Time
+}
+
+// When satisfies the tcell.Event interface.
+func (e *leaderExpiryEvent) When() time.Time { return e.when }
+
 // treeRefreshEvent is the custom tcell event the background tree-refresh
 // goroutine posts every treeRefreshInterval. The main loop reacts by
 // asking the file tree to re-read every loaded directory.
@@ -1316,6 +1327,14 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 			return
 		}
 		a.lastEscape = now
+		// Wake the event loop just after the window closes so the
+		// status bar's "Esc…" tag clears itself — the draw cycle only
+		// runs on events, and an abandoned Esc may not be followed by
+		// one.
+		scr := a.screen
+		time.AfterFunc(menuEscMs+50*time.Millisecond, func() {
+			_ = scr.PostEvent(&leaderExpiryEvent{when: time.Now()})
+		})
 		return
 	}
 	// Esc-leader hotkey: if Esc was pressed within doubleEscMs and this
@@ -1329,6 +1348,20 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 				action(a)
 				return
 			}
+		}
+	}
+	// Expired-leader grace: a bound rune landing after the leader window
+	// but inside the menu window is almost always a slow "Esc s" over a
+	// laggy link, not typing — the old behavior silently inserted the
+	// rune into the buffer while the user believed they had saved.
+	// Swallow it once and say what happened; unbound runes still fall
+	// through so ordinary typing after a stray Esc keeps working.
+	if !a.lastEscape.IsZero() && time.Since(a.lastEscape) < menuEscMs {
+		if ev.Key() == tcell.KeyRune && leaderActionFor(ev.Rune()) != nil {
+			a.lastEscape = time.Time{}
+			r := ev.Rune()
+			a.flash(fmt.Sprintf("Esc %c timed out — tap Esc, then %c right after", r, r))
+			return
 		}
 	}
 	// Any other key cancels a pending Esc so a stale half-tap doesn't
@@ -3008,6 +3041,22 @@ func (a *App) drawStatusBar() {
 		if rw < sw {
 			drawAt(a.screen, sx+sw-rw, sy, right, style)
 			rightWidth = rw
+		}
+	}
+
+	// Pending-gesture tag: while an Esc is armed (leader or double-tap
+	// window still open) show "Esc…" beside the git segment — vim's
+	// showcmd idea sized for a status bar. The editor's only modifier
+	// must not have invisible state: without this, a slow second
+	// keystroke fails with no cue that the gesture died. A
+	// leaderExpiryEvent posted at arming time repaints the bar so the
+	// tag also clears when the user simply abandons the Esc.
+	if !a.lastEscape.IsZero() && time.Since(a.lastEscape) < menuEscMs {
+		tag := "Esc… "
+		tw := len([]rune(tag))
+		if tw+rightWidth < sw {
+			drawAt(a.screen, sx+sw-rightWidth-tw, sy, tag, style)
+			rightWidth += tw
 		}
 	}
 
