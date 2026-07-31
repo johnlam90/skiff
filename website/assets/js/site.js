@@ -29,8 +29,8 @@
           panels.forEach(function (p) {
             p.classList.toggle("is-active", p.getAttribute("data-install-panel") === os);
           });
-          if (window.setSpiceEditOS && os !== "source") {
-            window.setSpiceEditOS(os);
+          if (window.setSkiffOS && os !== "source") {
+            window.setSkiffOS(os);
           }
         });
       });

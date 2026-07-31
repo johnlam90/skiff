@@ -1,13 +1,13 @@
 // =============================================================================
 // File: internal/app/diffview.go
-// Author: Spicer Matthews <spicer@cloudmanic.com>
+// Author: John Lam <johnlam90@gmail.com>
 // Created: 2026-07-30
-// Copyright: 2026 Cloudmanic, LLC. All rights reserved.
+// Copyright: 2026 John Lam. All rights reserved.
 // =============================================================================
 
 package app
 
-// Diff view modal — how SpiceEdit shows a git diff. On a wide terminal
+// Diff view modal — how Skiff shows a git diff. On a wide terminal
 // it renders side-by-side: old text on the left, new text on the right,
 // line numbers on both, deletions and additions aligned row-for-row the
 // way VS Code's diff editor pairs them. When the window is too narrow
@@ -26,10 +26,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudmanic/spice-edit/internal/editor"
-	"github.com/cloudmanic/spice-edit/internal/filetree"
-	"github.com/cloudmanic/spice-edit/internal/theme"
 	"github.com/gdamore/tcell/v2"
+	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/theme"
 )
 
 const (

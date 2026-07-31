@@ -20,8 +20,8 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/filetree"
-	"github.com/cloudmanic/spice-edit/internal/theme"
+	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/theme"
 )
 
 // Layout constants for the secondary modals. Width is wide enough to hold a

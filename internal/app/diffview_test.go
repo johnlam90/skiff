@@ -1,8 +1,8 @@
 // =============================================================================
 // File: internal/app/diffview_test.go
-// Author: Spicer Matthews <spicer@cloudmanic.com>
+// Author: John Lam <johnlam90@gmail.com>
 // Created: 2026-07-30
-// Copyright: 2026 Cloudmanic, LLC. All rights reserved.
+// Copyright: 2026 John Lam. All rights reserved.
 // =============================================================================
 
 // Tests for the diff view modal: the pure unified→side-by-side parser,
@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cloudmanic/spice-edit/internal/theme"
 	"github.com/gdamore/tcell/v2"
+	"github.com/johnlam90/skiff/internal/theme"
 )
 
 // sampleDiff is a small captured `git diff` with one modification

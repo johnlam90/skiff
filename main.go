@@ -5,7 +5,7 @@
 // Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 // =============================================================================
 
-// Command spiceedit is SpiceEdit — an opinionated, mouse-first terminal code editor.
+// Command skiff is Skiff — an opinionated, mouse-first terminal code editor.
 // It is designed for the SSH-into-a-box workflow: a single static binary,
 // drop it on the remote host, run it inside tmux/zellij, and you get a
 // VS-Code-shaped UI (file tree, tabs, syntax highlighting, status bar) you
@@ -17,8 +17,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/cloudmanic/spice-edit/internal/app"
-	"github.com/cloudmanic/spice-edit/internal/version"
+	"github.com/johnlam90/skiff/internal/app"
+	"github.com/johnlam90/skiff/internal/version"
 )
 
 // cliAction is the high-level decision the arg parser hands back: edit
@@ -48,7 +48,7 @@ type cliResult struct {
 //   - a flag (--version / -v / --help / -h) → print-and-exit action
 //   - a directory path → use as the editor's root
 //   - a file path → root at the file's parent dir, open the file in a tab
-//   - a missing path → assume "spiceedit foo.go" means "create foo.go" —
+//   - a missing path → assume "skiff foo.go" means "create foo.go" —
 //     same intuition as `vim foo.go` on a non-existent file.
 //
 // Pure function; no IO beyond os.Stat. Returns a result the caller acts
@@ -97,17 +97,17 @@ func resolveArgs(args []string) cliResult {
 // the editor is itself the help — once running, the ≡ menu lists every
 // action.
 func printHelp() {
-	fmt.Println(`SpiceEdit — opinionated mouse-first terminal code editor.
+	fmt.Println(`Skiff — opinionated mouse-first terminal code editor.
 
 Usage:
-  spiceedit                     Open the current directory.
-  spiceedit <directory>         Open a project directory.
-  spiceedit <file>              Open a file (its parent becomes the project root).
-  spiceedit --version           Print the version and exit.
-  spiceedit --help              Print this help and exit.
+  skiff                     Open the current directory.
+  skiff <directory>         Open a project directory.
+  skiff <file>              Open a file (its parent becomes the project root).
+  skiff --version           Print the version and exit.
+  skiff --help              Print this help and exit.
 
 Once running, click ≡ (top-left), right-click anywhere, or double-tap Esc
-for the action menu. See https://github.com/cloudmanic/spice-edit for
+for the action menu. See https://github.com/johnlam90/skiff for
 hotkeys and the full feature list.`)
 }
 
@@ -118,20 +118,20 @@ hotkeys and the full feature list.`)
 func main() {
 	res := resolveArgs(os.Args[1:])
 	if res.Err != nil {
-		fmt.Fprintln(os.Stderr, "spiceedit:", res.Err)
+		fmt.Fprintln(os.Stderr, "skiff:", res.Err)
 		os.Exit(1)
 	}
 
 	switch res.Action {
 	case actionVersion:
-		fmt.Println("spiceedit", version.Version)
+		fmt.Println("skiff", version.Version)
 		return
 	case actionHelp:
 		printHelp()
 		return
 	}
 
-	// Single-file mode: when the user invoked `spiceedit somefile.md`,
+	// Single-file mode: when the user invoked `skiff somefile.md`,
 	// skip building the file tree and project file index entirely.
 	// They asked for one file — don't pay the CPU to walk the
 	// surrounding directory just so we can render a sidebar they
@@ -147,13 +147,13 @@ func main() {
 		a, err = app.New(res.RootDir)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "spiceedit: failed to start:", err)
+		fmt.Fprintln(os.Stderr, "skiff: failed to start:", err)
 		os.Exit(1)
 	}
 	defer a.Close()
 
 	if err := a.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "spiceedit:", err)
+		fmt.Fprintln(os.Stderr, "skiff:", err)
 		os.Exit(1)
 	}
 }

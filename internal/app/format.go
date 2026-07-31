@@ -11,7 +11,7 @@ package app
 // lives in internal/format; this file is the bridge into the editor's
 // event loop and modals. The flow on every successful save:
 //
-//  1. Load <root>/.spiceedit/format.json. Missing → done.
+//  1. Load <root>/.skiff/format.json. Missing → done.
 //  2. Look up an argv for the file's extension. None → done.
 //  3. Check the trust store. Allowed → run; Denied → done; Unknown
 //     → open the trust prompt and re-enter the run on Allow.
@@ -31,8 +31,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudmanic/spice-edit/internal/format"
 	"github.com/gdamore/tcell/v2"
+	"github.com/johnlam90/skiff/internal/format"
 )
 
 // formatDoneEvent is posted by runFormatter when the goroutine
@@ -111,7 +111,7 @@ func (a *App) runWithTrust(idx int, cfg *format.Config, argv []string) {
 
 // maybeOfferInstall checks whether the user has a global default
 // formatter for this file's extension and, if so, prompts them to
-// install it into the project's .spiceedit/format.json. Skips
+// install it into the project's .skiff/format.json. Skips
 // silently when:
 //
 //   - no global defaults file exists (the common case for users
@@ -201,7 +201,7 @@ func (a *App) openFormatTrustPrompt(idx int, cfg *format.Config, argv []string) 
 
 // openFormatInstallPrompt asks whether to install the user's global
 // default formatter for this extension into the project's
-// .spiceedit/format.json. Yes merges the entry, auto-trusts the
+// .skiff/format.json. Yes merges the entry, auto-trusts the
 // resulting config (the user's consent here implies trust — same
 // reasoning as "you wrote the file yourself"), and runs the
 // formatter on the freshly-saved file. No persists a per-extension
@@ -247,7 +247,7 @@ func (a *App) openFormatInstallPrompt(idx int, ext string, argvTemplate []string
 		app.persistTrust(root, hash, true)
 		app.persistInstallDecline(root, ext, false)
 		// Refresh the file tree immediately so the new
-		// .spiceedit/format.json appears in the sidebar without
+		// .skiff/format.json appears in the sidebar without
 		// waiting for the 10-second tick. Same pair fileops.go uses
 		// after every other directory mutation we make.
 		app.tree.Refresh()

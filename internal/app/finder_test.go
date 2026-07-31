@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cloudmanic/spice-edit/internal/filetree"
-	"github.com/cloudmanic/spice-edit/internal/finder"
 	"github.com/gdamore/tcell/v2"
+	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/finder"
 )
 
 // waitForFinderReady spins until the App's finder reports

@@ -3,13 +3,13 @@
   panels below. JS auto-selects based on data-os and persists user override.
 */}}
 
-{{ $brewInstall := "brew tap cloudmanic/spice-edit https://github.com/cloudmanic/spice-edit\nbrew install cloudmanic/spice-edit/spice-edit" }}
-{{ $brewUpdate := "brew update\nbrew upgrade cloudmanic/spice-edit/spice-edit" }}
-{{ $brewUninstall := "brew uninstall cloudmanic/spice-edit/spice-edit\nbrew untap cloudmanic/spice-edit" }}
-{{ $linuxInstall := "curl -fsSL https://raw.githubusercontent.com/cloudmanic/spice-edit/main/install.sh | sh" }}
-{{ $linuxPin := printf "curl -fsSL https://raw.githubusercontent.com/cloudmanic/spice-edit/main/install.sh | VERSION=%s sh" site.Params.version }}
-{{ $linuxDir := "curl -fsSL https://raw.githubusercontent.com/cloudmanic/spice-edit/main/install.sh | INSTALL_DIR=/opt/bin sh" }}
-{{ $sourceInstall := "git clone https://github.com/cloudmanic/spice-edit.git\ncd spice-edit\nmake install" }}
+{{ $brewInstall := "brew tap johnlam90/skiff https://github.com/johnlam90/skiff\nbrew install johnlam90/skiff/skiff" }}
+{{ $brewUpdate := "brew update\nbrew upgrade johnlam90/skiff/skiff" }}
+{{ $brewUninstall := "brew uninstall johnlam90/skiff/skiff\nbrew untap johnlam90/skiff" }}
+{{ $linuxInstall := "curl -fsSL https://raw.githubusercontent.com/johnlam90/skiff/main/install.sh | sh" }}
+{{ $linuxPin := printf "curl -fsSL https://raw.githubusercontent.com/johnlam90/skiff/main/install.sh | VERSION=%s sh" site.Params.version }}
+{{ $linuxDir := "curl -fsSL https://raw.githubusercontent.com/johnlam90/skiff/main/install.sh | INSTALL_DIR=/opt/bin sh" }}
+{{ $sourceInstall := "git clone https://github.com/johnlam90/skiff.git\ncd skiff\nmake install" }}
 
 <div class="install-block" data-install-block>
   <div role="tablist" aria-label="Install commands by platform" class="tab-list mb-6">
@@ -38,7 +38,7 @@
 
     <p class="mt-4 text-sm" style="color: var(--color-text-soft);">
       The script detects your OS and architecture, downloads the matching archive from the latest
-      GitHub Release, and drops the <code>spiceedit</code> binary into <code>~/.local/bin</code>
+      GitHub Release, and drops the <code>skiff</code> binary into <code>~/.local/bin</code>
       (or <code>/usr/local/bin</code> if <code>~/.local/bin</code> isn't writable). Re-run it to
       upgrade. Plain POSIX <code>sh</code>, no bash required — works on Alpine, BusyBox, and any
       SSH target.
@@ -55,7 +55,7 @@
   <div class="install-panel" data-install-panel="windows" role="tabpanel" aria-label="Windows install">
     <p class="text-sm" style="color: var(--color-text-soft);">
       Windows builds (amd64) ship as a zipped binary on every GitHub Release. Download the archive,
-      unzip <code>spiceedit.exe</code>, and drop it somewhere on your <code>PATH</code>. There is no
+      unzip <code>skiff.exe</code>, and drop it somewhere on your <code>PATH</code>. There is no
       installer or Chocolatey package yet — the binary works in Windows Terminal, ConEmu, and WSL.
     </p>
     <a href="{{ site.Params.releases_url }}" target="_blank" rel="noopener"

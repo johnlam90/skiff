@@ -23,9 +23,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cloudmanic/spice-edit/internal/editor"
-	"github.com/cloudmanic/spice-edit/internal/filetree"
 	"github.com/gdamore/tcell/v2"
+	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/filetree"
 )
 
 // TestLoadGitStatus_NotARepo verifies that pointing the loader at a
@@ -647,10 +647,10 @@ func TestDirtyFolderSet_EmptyInput(t *testing.T) {
 // aligned on case-insensitive filesystems where cwd casing may drift.
 func TestRebaseGitPaths_NormalizesTreeRootCasing(t *testing.T) {
 	dirty := map[string]filetree.GitChangeKind{
-		"/Users/fatih/Documents/Projeler/spice-edit/internal/app/app.go": filetree.GitChangeModified,
+		"/Users/fatih/Documents/Projeler/skiff/internal/app/app.go": filetree.GitChangeModified,
 	}
-	rebased := rebaseGitPaths(dirty, "/Users/fatih/documents/projeler/spice-edit")
-	want := "/Users/fatih/documents/projeler/spice-edit/internal/app/app.go"
+	rebased := rebaseGitPaths(dirty, "/Users/fatih/documents/projeler/skiff")
+	want := "/Users/fatih/documents/projeler/skiff/internal/app/app.go"
 	if rebased[want] != filetree.GitChangeModified {
 		t.Fatalf("rebased path missing: got %v want key %q", rebased, want)
 	}

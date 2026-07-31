@@ -40,7 +40,7 @@
   function applyOS() {
     var detected = detectOS();
     var stored = null;
-    try { stored = localStorage.getItem("spiceedit:os"); } catch (e) { /* ignore */ }
+    try { stored = localStorage.getItem("skiff:os"); } catch (e) { /* ignore */ }
     var os = stored || detected;
     document.documentElement.setAttribute("data-os", os);
     document.documentElement.setAttribute("data-os-detected", detected);
@@ -51,9 +51,9 @@
 
   // setOS is exposed on the global so the install-block tabs can
   // override the OS and persist the choice.
-  window.setSpiceEditOS = function (os) {
+  window.setSkiffOS = function (os) {
     if (["mac", "linux", "windows"].indexOf(os) === -1) return;
-    try { localStorage.setItem("spiceedit:os", os); } catch (e) { /* ignore */ }
+    try { localStorage.setItem("skiff:os", os); } catch (e) { /* ignore */ }
     document.documentElement.setAttribute("data-os", os);
     document.dispatchEvent(new CustomEvent("osdetected", {
       detail: { os: os, detected: document.documentElement.getAttribute("data-os-detected") }

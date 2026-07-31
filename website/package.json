@@ -1,8 +1,8 @@
 {
-  "name": "spice-edit-website",
+  "name": "skiff-website",
   "version": "1.0.0",
   "private": true,
-  "description": "Marketing + docs site for SpiceEdit.",
+  "description": "Marketing + docs site for Skiff.",
   "scripts": {
     "build:css": "tailwindcss -i assets/css/tailwind.css -o static/css/site.css --minify",
     "dev:css": "tailwindcss -i assets/css/tailwind.css -o static/css/site.css --watch",

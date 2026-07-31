@@ -1,7 +1,7 @@
 ---
 title: "Find File in Project"
-metaTitle: "Fuzzy File Finder in SpiceEdit (Esc p)"
-metaDescription: "Esc p opens SpiceEdit's fuzzy file finder. Indexes 50,000 files in ~150ms via git ls-files, with fzy-style ranking and gitignore-aware fallback walks."
+metaTitle: "Fuzzy File Finder in Skiff (Esc p)"
+metaDescription: "Esc p opens Skiff's fuzzy file finder. Indexes 50,000 files in ~150ms via git ls-files, with fzy-style ranking and gitignore-aware fallback walks."
 summary: "Fuzzy-find any file in the project with Esc p."
 weight: 60
 ---
@@ -34,7 +34,7 @@ The result is what your fingers expect: type the beginning of the basename, get 
 
 Two strategies, picked automatically:
 
-- **Git repos.** SpiceEdit shells out to `git ls-files --cached --others --exclude-standard -z` once. One fork, around 150 ms on a 50,000-file repo, and gitignore comes for free — Git already knows.
+- **Git repos.** Skiff shells out to `git ls-files --cached --others --exclude-standard -z` once. One fork, around 150 ms on a 50,000-file repo, and gitignore comes for free — Git already knows.
 - **Non-git projects.** A `filepath.Walk` with the `go-gitignore` library reading any `.gitignore` it finds, plus a hardcoded ignore list (`.git`, `.hg`, `.svn`, `node_modules`, `vendor`, `__pycache__`, `.venv`, `dist`, `build`, `.next`, `.cache`, `.DS_Store`).
 
 The index is capped at 200,000 entries. If you have a project larger than that, the matcher will operate on the first 200k files seen — practically never an issue.

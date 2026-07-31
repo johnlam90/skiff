@@ -1,12 +1,12 @@
 ---
 title: "Hotkeys"
-metaTitle: "SpiceEdit Hotkeys — The Esc-Leader Table"
-metaDescription: "SpiceEdit avoids Ctrl+ shortcuts that fight tmux. Esc is the leader. Tap Esc, then a letter inside half a second. The complete table, with rationale."
+metaTitle: "Skiff Hotkeys — The Esc-Leader Table"
+metaDescription: "Skiff avoids Ctrl+ shortcuts that fight tmux. Esc is the leader. Tap Esc, then a letter inside half a second. The complete table, with rationale."
 summary: "The complete Esc-leader table, plus rationale."
 weight: 30
 ---
 
-SpiceEdit avoids `Ctrl+` shortcuts on purpose. They fight tmux. They fight Zellij. They fight your terminal — `Ctrl+S` is XOFF flow control on a real serial line, and modern emulators still honor it. They fight remote sessions where keystrokes hop through three layers of software.
+Skiff avoids `Ctrl+` shortcuts on purpose. They fight tmux. They fight Zellij. They fight your terminal — `Ctrl+S` is XOFF flow control on a real serial line, and modern emulators still honor it. They fight remote sessions where keystrokes hop through three layers of software.
 
 So `Esc` is the leader. Tap `Esc`, then within half a second tap a bound letter. A lone `Esc` with no follow-up is a no-op — your next keystroke reaches the editor as normal, so accidental Escs never swallow a real character.
 

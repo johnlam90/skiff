@@ -1,7 +1,7 @@
 ---
 title: "Find in File"
-metaTitle: "Find in File with SpiceEdit (Esc f)"
-metaDescription: "Esc f opens SpiceEdit's in-file search bar. Case-insensitive substring, live highlight, Enter for next, Shift+Enter for previous, Esc to close."
+metaTitle: "Find in File with Skiff (Esc f)"
+metaDescription: "Esc f opens Skiff's in-file search bar. Case-insensitive substring, live highlight, Enter for next, Shift+Enter for previous, Esc to close."
 summary: "Search the current file with Esc f."
 weight: 50
 ---

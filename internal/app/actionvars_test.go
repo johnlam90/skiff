@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cloudmanic/spice-edit/internal/customactions"
+	"github.com/johnlam90/skiff/internal/customactions"
 )
 
 // TestCaptureActionVars_NoFileOpen pins the no-file-open case: the

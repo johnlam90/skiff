@@ -1,8 +1,8 @@
 // =============================================================================
 // File: internal/app/gitchanges_test.go
-// Author: Spicer Matthews <spicer@cloudmanic.com>
+// Author: John Lam <johnlam90@gmail.com>
 // Created: 2026-07-30
-// Copyright: 2026 Cloudmanic, LLC. All rights reserved.
+// Copyright: 2026 John Lam. All rights reserved.
 // =============================================================================
 
 // Tests for the sidebar Git panel. Pure row-building and letter/color
@@ -18,9 +18,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cloudmanic/spice-edit/internal/filetree"
-	"github.com/cloudmanic/spice-edit/internal/theme"
 	"github.com/gdamore/tcell/v2"
+	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/theme"
 )
 
 // dirtyRepoApp builds a test App rooted at a fresh git repo containing

@@ -1,5 +1,5 @@
-baseURL = "https://spice-edit.com/"
-title = "SpiceEdit"
+baseURL = "https://johnlam90.github.io/skiff/"
+title = "Skiff"
 locale = "en-us"
 defaultContentLanguage = "en"
 enableGitInfo = true
@@ -21,10 +21,10 @@ disableKinds = ["taxonomy", "term"]
 
 [params]
   description = "A mouse-first terminal code editor for SSH workflows. One static Go binary, no setup."
-  github_url = "https://github.com/cloudmanic/spice-edit"
-  brew_tap = "cloudmanic/spice-edit"
-  install_script_url = "https://raw.githubusercontent.com/cloudmanic/spice-edit/main/install.sh"
-  releases_url = "https://github.com/cloudmanic/spice-edit/releases"
+  github_url = "https://github.com/johnlam90/skiff"
+  brew_tap = "johnlam90/skiff"
+  install_script_url = "https://raw.githubusercontent.com/johnlam90/skiff/main/install.sh"
+  releases_url = "https://github.com/johnlam90/skiff/releases"
   # The Pages workflow rewrites this from internal/version/version.go on
   # every deploy, so it stays in lockstep with the published binary.
   # Bump this manually if you want a fresh local build to display the
@@ -57,7 +57,7 @@ disableKinds = ["taxonomy", "term"]
     weight = 20
   [[menu.main]]
     name = "GitHub"
-    url = "https://github.com/cloudmanic/spice-edit"
+    url = "https://github.com/johnlam90/skiff"
     weight = 30
     [menu.main.params]
       external = true

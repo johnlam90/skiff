@@ -16,7 +16,7 @@
       </h1>
       <p class="mt-6 text-lg sm:text-xl leading-relaxed max-w-2xl"
          style="color: var(--color-text-soft);">
-        SpiceEdit is a mouse-first code editor for SSH workflows. Click a file, tweak a line,
+        Skiff is a mouse-first code editor for SSH workflows. Click a file, tweak a line,
         save, and get back to your agents.
       </p>
       <p class="mt-3 text-sm italic max-w-xl" style="color: var(--color-muted);">
@@ -27,11 +27,11 @@
       <div class="mt-8 flex flex-col sm:flex-row gap-3 sm:items-center sm:gap-4">
         <div class="install-pill" style="max-width: 100%;">
           <span class="prompt" aria-hidden="true">$</span>
-          <span class="cmd" id="hero-install-cmd">brew tap cloudmanic/spice-edit https://github.com/cloudmanic/spice-edit &amp;&amp; brew install cloudmanic/spice-edit/spice-edit</span>
+          <span class="cmd" id="hero-install-cmd">brew tap johnlam90/skiff https://github.com/johnlam90/skiff &amp;&amp; brew install johnlam90/skiff/skiff</span>
           <button
             type="button"
             class="copy-btn"
-            data-copy="brew tap cloudmanic/spice-edit https://github.com/cloudmanic/spice-edit && brew install cloudmanic/spice-edit/spice-edit"
+            data-copy="brew tap johnlam90/skiff https://github.com/johnlam90/skiff && brew install johnlam90/skiff/skiff"
             data-copy-label="Copy install command"
             data-copy-toast="Install command copied. Paste in your terminal."
             aria-label="Copy install command"
@@ -55,14 +55,14 @@
       </p>
     </div>
 
-    {{/* Editor screenshot — SpiceEdit running on its own source tree. */}}
+    {{/* Editor screenshot — Skiff running on its own source tree. */}}
     <div class="mt-14 lg:mt-20 reveal">
       <div class="mock-window">
         <div class="titlebar">
           <span class="dot" aria-hidden="true"></span>
           <span class="dot" aria-hidden="true"></span>
           <span class="dot" aria-hidden="true"></span>
-          <span class="label">spiceedit ~/code/spice-edit</span>
+          <span class="label">skiff ~/code/skiff</span>
         </div>
         <img
           src="/img/screenshots/editor-hero.png"
@@ -70,7 +70,7 @@
           sizes="(min-width: 1024px) 1100px, 100vw"
           width="2000"
           height="1408"
-          alt="SpiceEdit running on its own source tree — sidebar with the project file list, a tab strip, and find.go open in the editor with Tokyo Night syntax highlighting."
+          alt="Skiff running on its own source tree — sidebar with the project file list, a tab strip, and find.go open in the editor with Tokyo Night syntax highlighting."
           class="screenshot-img"
           loading="eager"
           decoding="async"
@@ -95,14 +95,14 @@
         function name, you save. You spend ten minutes in your editor and ten hours in your terminal.
       </p>
       <p class="text-base lg:text-lg leading-relaxed" style="color: var(--color-text-soft);">
-        A tool you touch for ten minutes shouldn't ask you to study for it. SpiceEdit doesn't. It runs
+        A tool you touch for ten minutes shouldn't ask you to study for it. Skiff doesn't. It runs
         inside any terminal, looks like a tiny VS Code, and works with the mouse. Click a file in the
         tree. Drag to select. Scroll wheel scrolls. Drop the splitter where you want it. Open the menu,
         pick Save, get out. There is no vimrc, no plugin manager, no YAML directory. There is one static
         binary. Drop it on a server. Run it.
       </p>
       <p class="lg:col-span-2 text-base lg:text-lg leading-relaxed" style="color: var(--color-text-soft);">
-        SpiceEdit was built for the workflow nobody else solves: SSH into a remote box, attach to tmux
+        Skiff was built for the workflow nobody else solves: SSH into a remote box, attach to tmux
         or Zellij, edit files like a human, copy text back to your laptop's clipboard through three
         layers of network. It runs over SSH because that's where work happens now. It avoids
         <code class="px-1 py-0.5 rounded text-sm" style="background: var(--color-surface); color: var(--color-accent-soft); border: 1px solid var(--color-subtle);">Ctrl+</code>
@@ -132,7 +132,7 @@
         <thead>
           <tr>
             <th>Axis</th>
-            <th class="col-spice">SpiceEdit</th>
+            <th class="col-spice">Skiff</th>
             <th>Neovim</th>
             <th>VS Code</th>
           </tr>
@@ -187,7 +187,7 @@
     {{/* Mobile cards */}}
     <div class="mt-10 md:hidden compare-cards">
       <div class="compare-card is-spice">
-        <h3 style="color: #fff;">SpiceEdit</h3>
+        <h3 style="color: #fff;">Skiff</h3>
         <dl>
           <dt>Setup</dt><dd>Install, run.</dd>
           <dt>Curve</dt><dd>Click around. No curve.</dd>
@@ -226,7 +226,7 @@
 
     <p class="mt-10 max-w-3xl text-base lg:text-lg" style="color: var(--color-text-soft);">
       Use Neovim when you want a programmable IDE in a terminal. Use VS Code when you want an IDE on
-      your desk. Use SpiceEdit when you want to glance at a file on a server, fix one line, and get
+      your desk. Use Skiff when you want to glance at a file on a server, fix one line, and get
       back to your agents.
     </p>
   </div>
@@ -247,9 +247,9 @@
     {{ $features := slice
       (dict "icon" "mouse" "title" "Mouse-first UI" "desc" "Click a file to open it. Click a tab to switch. Drag to select. Scroll wheel actually scrolls. Drop the splitter where you want it. Right-click works when your terminal forwards it; the menu icon and a double-tap of Esc cover when it doesn't.")
       (dict "icon" "search" "title" "Fuzzy file finder" "desc" "Press Esc-p. Type three letters. Open the file. Indexes 50,000 files in roughly 150 ms by shelling out to <code>git ls-files</code>, falls back to a gitignore-aware walker on non-git projects, and rebuilds in the background every ten seconds.")
-      (dict "icon" "format" "title" "Format on save" "desc" "Drop <code>.spiceedit/format.json</code> in a repo. Map extensions to argv arrays — <code>gofmt</code>, <code>prettier</code>, <code>pint</code>, <code>ruff</code>, anything. SpiceEdit prompts once before running anything and re-prompts when the config changes. No shell, no injection surface.")
+      (dict "icon" "format" "title" "Format on save" "desc" "Drop <code>.skiff/format.json</code> in a repo. Map extensions to argv arrays — <code>gofmt</code>, <code>prettier</code>, <code>pint</code>, <code>ruff</code>, anything. Skiff prompts once before running anything and re-prompts when the config changes. No shell, no injection surface.")
       (dict "icon" "tmux" "title" "SSH-native clipboard" "desc" "Copy uses OSC 52 with a tmux passthrough wrapper, so highlighting text on a remote box ends up in your local clipboard. Works in iTerm2, WezTerm, Kitty, Alacritty, Ghostty, gnome-terminal, and the macOS default.")
-      (dict "icon" "actions" "title" "Custom actions" "desc" "Define shell-out actions in <code>~/.config/spiceedit/actions.json</code>. SpiceEdit exports <code>$FILE</code> and <code>$FILENAME</code> to a <code>sh -c</code> subshell. The killer use case: SSH into a server, click <em>Open on Laptop</em>, and your laptop opens the file you were just editing on the box.")
+      (dict "icon" "actions" "title" "Custom actions" "desc" "Define shell-out actions in <code>~/.config/skiff/actions.json</code>. Skiff exports <code>$FILE</code> and <code>$FILENAME</code> to a <code>sh -c</code> subshell. The killer use case: SSH into a server, click <em>Open on Laptop</em>, and your laptop opens the file you were just editing on the box.")
       (dict "icon" "binary" "title" "One static binary" "desc" "No CGO, no runtime, no plugin manager, no language server requirement. Cross-compiled for macOS, Linux, and Windows on amd64 and arm64. <code>scp</code> it onto a box. Run it. That's the install.")
       (dict "icon" "highlight" "title" "Syntax highlighting via Chroma" "desc" "Pure-Go tokenizer with a Tokyo Night-inspired palette. Picks a lexer by filename, falls back to content sniffing, then to plain text. Dozens of languages out of the box, no tree-sitter setup, no language servers to install.")
       (dict "icon" "keys" "title" "Esc-leader hotkeys" "desc" "Tap Esc, then a letter inside half a second. <code>Esc s</code> saves, <code>Esc p</code> finds a file, <code>Esc f</code> searches the buffer. No Ctrl+ shortcuts fighting tmux or your terminal. Double-tap Esc opens the action menu.")

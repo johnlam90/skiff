@@ -5,7 +5,7 @@
 # Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 # =============================================================================
 
-BINARY := spiceedit
+BINARY := skiff
 SITE_DIR := website
 
 .PHONY: run build install build-linux test test-short coverage tidy clean help \
@@ -13,7 +13,7 @@ SITE_DIR := website
 
 # help is the default target so `make` with no args prints what's available.
 help:
-	@echo "SpiceEdit — opinionated mouse-first terminal code editor"
+	@echo "Skiff — opinionated mouse-first terminal code editor"
 	@echo ""
 	@echo "Editor targets:"
 	@echo "  make run          Run the editor in the current directory."
@@ -26,7 +26,7 @@ help:
 	@echo "  make tidy         Run 'go mod tidy'."
 	@echo "  make clean        Remove ./bin and coverage artifacts."
 	@echo ""
-	@echo "Website targets (spice-edit.com — Hugo + Tailwind in ./$(SITE_DIR)):"
+	@echo "Website targets (johnlam90.github.io/skiff — Hugo + Tailwind in ./$(SITE_DIR)):"
 	@echo "  make site-install One-time: install npm deps in $(SITE_DIR)."
 	@echo "  make site-dev     Run the site locally with live reload at http://localhost:1313."
 	@echo "  make site-build   Build a production-ready site into $(SITE_DIR)/public."
@@ -42,7 +42,7 @@ build:
 	mkdir -p bin
 	go build -o bin/$(BINARY) .
 
-# install copies the binary into /usr/local/bin so you can launch it as `spiceedit`.
+# install copies the binary into /usr/local/bin so you can launch it as `skiff`.
 install: build
 	install -m 0755 bin/$(BINARY) /usr/local/bin/$(BINARY)
 
@@ -81,7 +81,7 @@ clean:
 	rm -rf bin coverage.out coverage.html
 
 # -----------------------------------------------------------------------------
-# Website targets — spice-edit.com lives in ./website (Hugo + Tailwind v4).
+# Website targets — johnlam90.github.io/skiff lives in ./website (Hugo + Tailwind v4).
 # Requires Hugo extended (>= 0.135) and Node (>= 18) on PATH.
 # -----------------------------------------------------------------------------
 

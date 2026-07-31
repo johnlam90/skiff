@@ -1,13 +1,13 @@
 // =============================================================================
 // File: internal/app/gitlog.go
-// Author: Spicer Matthews <spicer@cloudmanic.com>
+// Author: John Lam <johnlam90@gmail.com>
 // Created: 2026-07-30
-// Copyright: 2026 Cloudmanic, LLC. All rights reserved.
+// Copyright: 2026 John Lam. All rights reserved.
 // =============================================================================
 
 package app
 
-// Commit history modal — lazygit's commits panel shrunk to a SpiceEdit
+// Commit history modal — lazygit's commits panel shrunk to a Skiff
 // list. Two flavours share everything: the branch log (≡ → Commit
 // history, or a click on the branch row of the Git panel) and a single
 // file's history (≡ → History of this file, `git log --follow` under

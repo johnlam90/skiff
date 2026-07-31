@@ -1,8 +1,8 @@
 // =============================================================================
 // File: internal/app/gitchanges.go
-// Author: Spicer Matthews <spicer@cloudmanic.com>
+// Author: John Lam <johnlam90@gmail.com>
 // Created: 2026-07-30
-// Copyright: 2026 Cloudmanic, LLC. All rights reserved.
+// Copyright: 2026 John Lam. All rights reserved.
 // =============================================================================
 
 package app
@@ -34,10 +34,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/cloudmanic/spice-edit/internal/editor"
-	"github.com/cloudmanic/spice-edit/internal/filetree"
-	"github.com/cloudmanic/spice-edit/internal/theme"
 	"github.com/gdamore/tcell/v2"
+	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/theme"
 )
 
 // sidebarHeaderExplorer / sidebarHeaderGit are the header tab labels.

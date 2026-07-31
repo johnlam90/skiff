@@ -154,7 +154,7 @@ func TestLoadForwardCompat(t *testing.T) {
 func TestDefaultPathHonoursXDG(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/tmp/xdg-test")
 	got := DefaultPath()
-	want := filepath.Join("/tmp/xdg-test", "spiceedit", "config.json")
+	want := filepath.Join("/tmp/xdg-test", "skiff", "config.json")
 	if got != want {
 		t.Fatalf("DefaultPath() = %q, want %q", got, want)
 	}
@@ -167,7 +167,7 @@ func TestDefaultPathFallsBackToHome(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("HOME", "/tmp/home-test")
 	got := DefaultPath()
-	want := filepath.Join("/tmp/home-test", ".config", "spiceedit", "config.json")
+	want := filepath.Join("/tmp/home-test", ".config", "skiff", "config.json")
 	if got != want {
 		t.Fatalf("DefaultPath() = %q, want %q", got, want)
 	}

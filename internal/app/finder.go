@@ -20,8 +20,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/cloudmanic/spice-edit/internal/finder"
 	"github.com/gdamore/tcell/v2"
+	"github.com/johnlam90/skiff/internal/finder"
 )
 
 const (

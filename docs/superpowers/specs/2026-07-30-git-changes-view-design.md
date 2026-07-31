@@ -6,7 +6,7 @@ user feedback asking for a tab "right next to EXPLORER" plus diffs)
 
 ## Goal
 
-Give SpiceEdit the one VS Code / Cursor source-control affordance it is
+Give Skiff the one VS Code / Cursor source-control affordance it is
 still missing: a single place that answers "what have I changed?" with
 one click, and a per-file diff view. PR #42 already delivered per-kind
 tree tinting, editor gutter markers with click-to-preview hunks, and
@@ -33,7 +33,7 @@ into a git client.
    Worked, but a modal hides the list the moment you act on it; a
    panel keeps the worklist visible while you move through files.
 3. **Full git porcelain (stage / commit / discard)** — rejected:
-   SpiceEdit is an editor, not a git client. Its audience lives in
+   Skiff is an editor, not a git client. Its audience lives in
    tmux; the shell is one pane away.
 
 ## Design

@@ -19,7 +19,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/theme"
+	"github.com/johnlam90/skiff/internal/theme"
 )
 
 // TestHighlight_GoSourceShapesGrid verifies that highlighting a snippet of

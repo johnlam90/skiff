@@ -20,8 +20,8 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/icons"
-	"github.com/cloudmanic/spice-edit/internal/theme"
+	"github.com/johnlam90/skiff/internal/icons"
+	"github.com/johnlam90/skiff/internal/theme"
 )
 
 // mkTree is a tiny helper that builds a small directory layout under t.TempDir

@@ -27,15 +27,15 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/clipboard"
-	"github.com/cloudmanic/spice-edit/internal/customactions"
-	"github.com/cloudmanic/spice-edit/internal/editor"
-	"github.com/cloudmanic/spice-edit/internal/filetree"
-	"github.com/cloudmanic/spice-edit/internal/finder"
-	"github.com/cloudmanic/spice-edit/internal/icons"
-	"github.com/cloudmanic/spice-edit/internal/spiceconfig"
-	"github.com/cloudmanic/spice-edit/internal/theme"
-	"github.com/cloudmanic/spice-edit/internal/version"
+	"github.com/johnlam90/skiff/internal/clipboard"
+	"github.com/johnlam90/skiff/internal/customactions"
+	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/finder"
+	"github.com/johnlam90/skiff/internal/icons"
+	"github.com/johnlam90/skiff/internal/spiceconfig"
+	"github.com/johnlam90/skiff/internal/theme"
+	"github.com/johnlam90/skiff/internal/version"
 )
 
 // Layout, behavior, and feel constants. Constants instead of config —
@@ -170,7 +170,7 @@ type menuItemDef struct {
 
 // builtinMenuGroups returns the editor's built-in action groups in
 // display order. Custom actions loaded from
-// ~/.config/spiceedit/actions.json get prepended as their own group
+// ~/.config/skiff/actions.json get prepended as their own group
 // in menuLayout — they're not included here so toggling them on or
 // off doesn't require touching this table.
 //
@@ -251,7 +251,7 @@ func (a *App) menuLayout() (items []menuItemDef, dividers []int, modalHeight int
 			i := i // capture
 			// Custom actions are user-defined shell — we don't try to
 			// guess from the command string whether it needs $FILE.
-			// "Upgrade SpiceEdit" obviously doesn't; "Open on
+			// "Upgrade Skiff" obviously doesn't; "Open on
 			// computer" obviously does. Both should be runnable from
 			// the menu; if a $FILE-dependent command is invoked with
 			// no tab open it'll fail with a real error and our info
@@ -469,7 +469,7 @@ type App struct {
 	gitRefreshQueued   bool
 
 	// customActions is the list of user-configured shell-out actions
-	// loaded from ~/.config/spiceedit/actions.json at startup. When
+	// loaded from ~/.config/skiff/actions.json at startup. When
 	// non-empty they prepend a new group to the action menu — see
 	// menuLayout. nil / empty when the user hasn't configured any.
 	customActions []customactions.Action
@@ -588,7 +588,7 @@ func New(rootDir string) (*App, error) {
 	return a, nil
 }
 
-// NewSingleFile is the lean alternative to New for the "spiceedit
+// NewSingleFile is the lean alternative to New for the "skiff
 // somefile.md" invocation: no file tree, no project finder index,
 // no background tree-refresh goroutine, sidebar hidden. The user
 // asked for one file — we don't pay the cost of walking and watching
@@ -653,7 +653,7 @@ func (a *App) loadCustomActions() {
 	a.customActions = actions
 }
 
-// loadSpiceConfig reads ~/.config/spiceedit/config.json (if any),
+// loadSpiceConfig reads ~/.config/skiff/config.json (if any),
 // resolves the Nerd Fonts auto/on/off mode to a concrete bool via
 // icons.Resolve, and stamps the result onto the file tree so the
 // next render starts drawing glyphs (or doesn't). A malformed
@@ -1814,7 +1814,7 @@ func (a *App) flash(msg string) {
 
 // OpenFile opens the file at path in a new tab — or switches to it if
 // it is already open. Exported so main.go can seed the editor with the
-// file the user named on the command line ("spiceedit foo.go"). Thin
+// file the user named on the command line ("skiff foo.go"). Thin
 // wrapper around openFile so internal callers keep using the lowercase
 // name and the public surface stays small.
 func (a *App) OpenFile(path string) { a.openFile(path) }

@@ -6,7 +6,7 @@
 // =============================================================================
 
 // customactions loads user-defined shell-out actions from
-// ~/.config/spiceedit/actions.json and exposes them to the editor's
+// ~/.config/skiff/actions.json and exposes them to the editor's
 // menu modal. The intended use case is the SSH-into-tmux workflow:
 // the editor runs on a remote box, the user clicks an action like
 // "Open on Rager", and the action shells out to scp the current file
@@ -122,19 +122,19 @@ type fileFormat struct {
 }
 
 // DefaultPath returns the canonical config-file location:
-// $XDG_CONFIG_HOME/spiceedit/actions.json, falling back to
-// ~/.config/spiceedit/actions.json when XDG_CONFIG_HOME isn't set.
+// $XDG_CONFIG_HOME/skiff/actions.json, falling back to
+// ~/.config/skiff/actions.json when XDG_CONFIG_HOME isn't set.
 // Returns "" when neither variable resolves to anything usable —
 // callers should treat that as "no custom actions configured."
 func DefaultPath() string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "spiceedit", "actions.json")
+		return filepath.Join(xdg, "skiff", "actions.json")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return ""
 	}
-	return filepath.Join(home, ".config", "spiceedit", "actions.json")
+	return filepath.Join(home, ".config", "skiff", "actions.json")
 }
 
 // Load reads and parses the actions file at path. The contract:
@@ -241,8 +241,8 @@ func validatePrompts(actionLabel string, prompts []Prompt) error {
 }
 
 // LogPath returns the canonical log location:
-// $XDG_STATE_HOME/spiceedit/actions.log, falling back to
-// ~/.local/state/spiceedit/actions.log when XDG_STATE_HOME isn't set.
+// $XDG_STATE_HOME/skiff/actions.log, falling back to
+// ~/.local/state/skiff/actions.log when XDG_STATE_HOME isn't set.
 // Returns "" when neither resolves to anything usable — callers
 // should treat that as "no logging" and quietly skip.
 //
@@ -251,13 +251,13 @@ func validatePrompts(actionLabel string, prompts []Prompt) error {
 // rules, state is for things the app produces (logs, caches, history).
 func LogPath() string {
 	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
-		return filepath.Join(xdg, "spiceedit", "actions.log")
+		return filepath.Join(xdg, "skiff", "actions.log")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return ""
 	}
-	return filepath.Join(home, ".local", "state", "spiceedit", "actions.log")
+	return filepath.Join(home, ".local", "state", "skiff", "actions.log")
 }
 
 // RunRecord captures everything we want to log about one custom-action

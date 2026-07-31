@@ -1,10 +1,10 @@
 {{- $title := .Title -}}
 {{- if .IsHome -}}
-  {{- $title = "SpiceEdit — Mouse-First Terminal Code Editor" -}}
+  {{- $title = "Skiff — Mouse-First Terminal Code Editor" -}}
 {{- else if .Params.metaTitle -}}
   {{- $title = .Params.metaTitle -}}
 {{- else -}}
-  {{- $title = printf "%s — SpiceEdit" .Title -}}
+  {{- $title = printf "%s — Skiff" .Title -}}
 {{- end -}}
 {{- $desc := .Params.metaDescription | default .Params.description | default site.Params.description -}}
 <meta charset="UTF-8" />
@@ -19,14 +19,14 @@
 <link rel="canonical" href="{{ .Permalink }}" />
 <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
-<link rel="alternate" type="application/rss+xml" title="SpiceEdit Blog" href="/feed.xml" />
+<link rel="alternate" type="application/rss+xml" title="Skiff Blog" href="/feed.xml" />
 
 {{/* Open Graph + Twitter card */}}
 <meta property="og:type" content="website" />
 <meta property="og:title" content="{{ $title }}" />
 <meta property="og:description" content="{{ $desc }}" />
 <meta property="og:url" content="{{ .Permalink }}" />
-<meta property="og:site_name" content="SpiceEdit" />
+<meta property="og:site_name" content="Skiff" />
 <meta property="og:image" content="{{ "/img/og.png" | absURL }}" />
 <meta property="og:image:width" content="1200" />
 <meta property="og:image:height" content="630" />

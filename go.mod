@@ -1,4 +1,4 @@
-module github.com/cloudmanic/spice-edit
+module github.com/johnlam90/skiff
 
 go 1.24.0
 

@@ -24,11 +24,11 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/customactions"
-	"github.com/cloudmanic/spice-edit/internal/editor"
-	"github.com/cloudmanic/spice-edit/internal/filetree"
-	"github.com/cloudmanic/spice-edit/internal/icons"
-	"github.com/cloudmanic/spice-edit/internal/theme"
+	"github.com/johnlam90/skiff/internal/customactions"
+	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/icons"
+	"github.com/johnlam90/skiff/internal/theme"
 )
 
 // newTestApp builds a fully-wired App against a tcell.SimulationScreen. It
@@ -1856,7 +1856,7 @@ func TestMenuLayout_WithCustomActions(t *testing.T) {
 // the form modal owns the file-or-no-file question) nor plain ones
 // (whose commands may not touch $FILE at all, like "brew upgrade").
 // Trying to gate prompt-less actions on hasFileTab guessed wrong
-// for actions like Upgrade SpiceEdit and made them appear broken.
+// for actions like Upgrade Skiff and made them appear broken.
 func TestMenuLayout_CustomActionsAlwaysEnabled(t *testing.T) {
 	a := newTestApp(t, t.TempDir()) // no tabs opened
 
@@ -1942,7 +1942,7 @@ func TestRunCustomAction_OutOfRange(t *testing.T) {
 // marker file that lets the test verify env reached the subprocess.
 func TestRunCustomAction_ExecutesAndPostsEvent(t *testing.T) {
 	// Redirect the action log into the test's temp dir so we don't
-	// scribble into the developer's real ~/.local/state/spiceedit/.
+	// scribble into the developer's real ~/.local/state/skiff/.
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	dir := t.TempDir()
 	target := filepath.Join(dir, "src.txt")

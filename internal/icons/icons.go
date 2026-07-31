@@ -39,7 +39,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/spiceconfig"
+	"github.com/johnlam90/skiff/internal/spiceconfig"
 )
 
 // Resolve maps a user's IconsMode preference to a concrete on/off

@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://spice-edit.com/sitemap.xml
+Sitemap: https://johnlam90.github.io/skiff/sitemap.xml

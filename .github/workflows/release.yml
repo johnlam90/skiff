@@ -5,7 +5,7 @@
 # Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 # =============================================================================
 #
-# Release pipeline for SpiceEdit. Triggers on every push to main:
+# Release pipeline for Skiff. Triggers on every push to main:
 #
 #   1. Determines the next version. If the pushed commit hand-edited
 #      internal/version/version.go (you bumped major/minor manually), the

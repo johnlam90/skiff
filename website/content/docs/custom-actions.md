@@ -1,18 +1,18 @@
 ---
 title: "Custom Actions"
-metaTitle: "Custom Actions in SpiceEdit — Shell Out from the Menu"
-metaDescription: "Define shell-out actions in actions.json — SpiceEdit prepends them to the action menu. The killer use case: open a remote file on your local laptop."
+metaTitle: "Custom Actions in Skiff — Shell Out from the Menu"
+metaDescription: "Define shell-out actions in actions.json — Skiff prepends them to the action menu. The killer use case: open a remote file on your local laptop."
 summary: "Shell-out menu items defined in actions.json."
 weight: 80
 ---
 
-SpiceEdit reads user-defined shell-out actions from `~/.config/spiceedit/actions.json` and prepends them to the action menu. Each action runs against the currently open file when you click it.
+Skiff reads user-defined shell-out actions from `~/.config/skiff/actions.json` and prepends them to the action menu. Each action runs against the currently open file when you click it.
 
 The use case it was built for: you SSH from your laptop into a remote box, edit a file there, and want to _open it on your laptop_ — but Sixel and the Kitty graphics protocol don't survive the trip through tmux/zellij. The trick is to bypass the terminal entirely and pipe the file back over a second SSH connection.
 
 ## File location
 
-`~/.config/spiceedit/actions.json` (or `$XDG_CONFIG_HOME/spiceedit/actions.json` when set). The file is optional — without it, the menu shows only built-in actions.
+`~/.config/skiff/actions.json` (or `$XDG_CONFIG_HOME/skiff/actions.json` when set). The file is optional — without it, the menu shows only built-in actions.
 
 ## Schema
 
@@ -99,7 +99,7 @@ In the form modal: `Tab` / `Shift+Tab` move focus between fields, arrow keys cyc
 
 ## The two-hop SSH gotcha
 
-`$HOME` and `~` outside `ssh "..."` quotes expand to the _SpiceEdit host's_ home directory — that's the remote box, not your laptop. To run something on your laptop, wrap the remote command in quotes:
+`$HOME` and `~` outside `ssh "..."` quotes expand to the _Skiff host's_ home directory — that's the remote box, not your laptop. To run something on your laptop, wrap the remote command in quotes:
 
 ```
 ssh rager "open ~/Downloads/$FILENAME"
@@ -122,7 +122,7 @@ Both example actions assume `rager` and `cascade` are SSH host aliases in the **
      IdentityFile ~/.ssh/id_rager
    ```
 
-4. Test it: `ssh rager echo hi` from the remote. Once that works, SpiceEdit can drive it.
+4. Test it: `ssh rager echo hi` from the remote. Once that works, Skiff can drive it.
 
 If your laptop sits behind NAT, point `HostName` at a Tailscale, WireGuard, or Cloudflare-tunnel address — anywhere the remote can reach the laptop directly. The action itself is `scp` plus `ssh`; it doesn't care how the network gets there.
 
@@ -150,7 +150,7 @@ The schema is deliberately small. Anything `sh` can do, `actions.json` can do:
 
 ## Debug log
 
-Every custom-action invocation appends a record to `~/.local/state/spiceedit/actions.log` (or `$XDG_STATE_HOME/spiceedit/actions.log` when set). One entry per run, human-readable, with the exact command, the env vars exported, the duration, and the combined stdout / stderr:
+Every custom-action invocation appends a record to `~/.local/state/skiff/actions.log` (or `$XDG_STATE_HOME/skiff/actions.log` when set). One entry per run, human-readable, with the exact command, the env vars exported, the duration, and the combined stdout / stderr:
 
 ```
 [2026-04-30T13:26:32-07:00] Open on Rager (1.234s) → ok
@@ -170,4 +170,4 @@ Every custom-action invocation appends a record to `~/.local/state/spiceedit/act
   --- end ---
 ```
 
-Run `tail -f ~/.local/state/spiceedit/actions.log` while you click around to watch entries roll in. There's no rotation — each entry is one line plus a few lines of output, so the file grows slowly. Delete it whenever you want to start fresh.
+Run `tail -f ~/.local/state/skiff/actions.log` while you click around to watch entries roll in. There's no rotation — each entry is one line plus a few lines of output, so the file grows slowly. Delete it whenever you want to start fresh.

@@ -14,7 +14,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/spiceconfig"
+	"github.com/johnlam90/skiff/internal/spiceconfig"
 )
 
 // TestForFolders pins the folder open/closed glyph pairing — flipping

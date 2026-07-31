@@ -1,7 +1,7 @@
 ---
 title: "Getting Started"
-metaTitle: "Getting Started with SpiceEdit in 3 Minutes"
-metaDescription: "Open a project, click a file, edit a line, save. The first three minutes with SpiceEdit — the mouse-first terminal code editor for SSH workflows."
+metaTitle: "Getting Started with Skiff in 3 Minutes"
+metaDescription: "Open a project, click a file, edit a line, save. The first three minutes with Skiff — the mouse-first terminal code editor for SSH workflows."
 summary: "Open a project, click a file, edit a line, save."
 weight: 20
 ---
@@ -13,10 +13,10 @@ This page walks the first three minutes. Open a project, click around, save a fi
 From any directory:
 
 ```sh
-spiceedit              # opens the current directory as the project root
-spiceedit ~/code/app   # opens a specific project root
-spiceedit main.go      # opens that file (project root = its parent dir)
-spiceedit new-file.go  # creates the file on first save (vim-style)
+skiff              # opens the current directory as the project root
+skiff ~/code/app   # opens a specific project root
+skiff main.go      # opens that file (project root = its parent dir)
+skiff new-file.go  # creates the file on first save (vim-style)
 ```
 
 <figure class="screenshot-figure">
@@ -25,7 +25,7 @@ spiceedit new-file.go  # creates the file on first save (vim-style)
     srcset="/img/screenshots/opening-a-project-1200.png 1200w, /img/screenshots/opening-a-project.png 2000w"
     sizes="(min-width: 1024px) 800px, 100vw"
     width="2000" height="1414"
-    alt="SpiceEdit just after opening the spice-edit project — sidebar shows the file tree, the editor area shows 'No file open' with a hint to click a file or press the menu icon."
+    alt="Skiff just after opening the skiff project — sidebar shows the file tree, the editor area shows 'No file open' with a hint to click a file or press the menu icon."
     loading="lazy" decoding="async"
   />
 </figure>
@@ -97,4 +97,4 @@ Drag the column between the tree and the editor. Minimum sidebar width is 18 col
 
 Open the menu and pick **Quit editor**, or press `Esc q`. If any tabs have unsaved changes, you'll see a Save / Discard / Cancel modal — Save & Close blocks the quit if a save fails, so no work is lost.
 
-That's it. You now know enough to use SpiceEdit. The rest of these docs are reference.
+That's it. You now know enough to use Skiff. The rest of these docs are reference.

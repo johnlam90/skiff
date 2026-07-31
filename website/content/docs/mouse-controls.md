@@ -1,12 +1,12 @@
 ---
 title: "Mouse Controls"
-metaTitle: "Mouse Controls in SpiceEdit — Click, Drag, Scroll"
-metaDescription: "Every mouse gesture SpiceEdit responds to — clicks, drags, double-clicks, right-clicks, scroll wheel — across the editor, tree, tab bar, and modals."
-summary: "Every mouse gesture SpiceEdit responds to."
+metaTitle: "Mouse Controls in Skiff — Click, Drag, Scroll"
+metaDescription: "Every mouse gesture Skiff responds to — clicks, drags, double-clicks, right-clicks, scroll wheel — across the editor, tree, tab bar, and modals."
+summary: "Every mouse gesture Skiff responds to."
 weight: 40
 ---
 
-SpiceEdit is mouse-first. Every UI surface is clickable, draggable, or scrollable. This page is the complete reference.
+Skiff is mouse-first. Every UI surface is clickable, draggable, or scrollable. This page is the complete reference.
 
 ## Editor body
 

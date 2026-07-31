@@ -1,16 +1,16 @@
 ---
 title: "Syntax Highlighting"
-metaTitle: "Syntax Highlighting in SpiceEdit (Chroma)"
-metaDescription: "SpiceEdit ships syntax highlighting for dozens of languages via Chroma — pure Go, no CGO, no tree-sitter setup. Tokyo Night palette baked in."
+metaTitle: "Syntax Highlighting in Skiff (Chroma)"
+metaDescription: "Skiff ships syntax highlighting for dozens of languages via Chroma — pure Go, no CGO, no tree-sitter setup. Tokyo Night palette baked in."
 summary: "Pure-Go syntax highlighting via Chroma."
 weight: 110
 ---
 
-SpiceEdit ships syntax highlighting for dozens of languages out of the box, powered by [Chroma](https://github.com/alecthomas/chroma) — a pure-Go syntax tokenizer with no CGO, no tree-sitter setup, and no external grammars to install.
+Skiff ships syntax highlighting for dozens of languages out of the box, powered by [Chroma](https://github.com/alecthomas/chroma) — a pure-Go syntax tokenizer with no CGO, no tree-sitter setup, and no external grammars to install.
 
 ## How it works
 
-When you open a file, SpiceEdit picks a Chroma lexer using these rules, in order:
+When you open a file, Skiff picks a Chroma lexer using these rules, in order:
 
 1. **By filename.** `main.go` → Go lexer. `index.tsx` → TypeScript-with-JSX. `Dockerfile` → Dockerfile.
 2. **By content.** When the filename doesn't match a known lexer, Chroma sniffs the first kilobyte for shebangs, XML prologues, and other magic markers.
@@ -46,4 +46,4 @@ Tokyo Night, baked in. There is no theming config — that's deliberate. A code 
 
 ## Why Chroma instead of tree-sitter
 
-Tree-sitter is great for structural editing — an LSP, an IDE, a linter that needs an AST. SpiceEdit doesn't do any of that. It needs a stream of tokens with colors, and Chroma delivers that in pure Go with no native dependencies. Adding tree-sitter would mean CGO, grammar packaging, per-language setup, and platform-specific build steps. None of that fits a "single static binary" promise.
+Tree-sitter is great for structural editing — an LSP, an IDE, a linter that needs an AST. Skiff doesn't do any of that. It needs a stream of tokens with colors, and Chroma delivers that in pure Go with no native dependencies. Adding tree-sitter would mean CGO, grammar packaging, per-language setup, and platform-specific build steps. None of that fits a "single static binary" promise.

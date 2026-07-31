@@ -23,7 +23,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/theme"
+	"github.com/johnlam90/skiff/internal/theme"
 )
 
 // newSimScreen builds a SimulationScreen of the given dimensions, ready to

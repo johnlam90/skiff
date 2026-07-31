@@ -1,6 +1,6 @@
-# spice-edit.com
+# johnlam90.github.io/skiff
 
-The marketing + docs site for [SpiceEdit](https://github.com/cloudmanic/spice-edit). Hugo + Tailwind v4. Static, single-binary deploy.
+The marketing + docs site for [Skiff](https://github.com/johnlam90/skiff). Hugo + Tailwind v4. Static, single-binary deploy.
 
 ## Requirements
 

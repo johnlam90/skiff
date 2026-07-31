@@ -9,8 +9,8 @@ package format
 
 // Global format-defaults live at:
 //
-//	$XDG_CONFIG_HOME/spiceedit/format-defaults.json   (preferred)
-//	~/.config/spiceedit/format-defaults.json          (fallback)
+//	$XDG_CONFIG_HOME/skiff/format-defaults.json   (preferred)
+//	~/.config/skiff/format-defaults.json          (fallback)
 //
 // The shape is identical to a per-project format.json:
 //
@@ -26,7 +26,7 @@ package format
 // a save fires in a project where the project's format.json has no
 // entry for that file's extension, the editor offers to "install"
 // the default into the project's config (writing it into
-// .spiceedit/format.json on consent). That's the only time defaults
+// .skiff/format.json on consent). That's the only time defaults
 // are consulted; without an install, the per-project config is the
 // sole source of truth at save time.
 
@@ -46,8 +46,8 @@ const DefaultsFile = "format-defaults.json"
 var defaultsPathEnv = "SPICEEDIT_DEFAULTS_FILE"
 
 // DefaultsPath returns the canonical defaults-file location:
-// $XDG_CONFIG_HOME/spiceedit/format-defaults.json, falling back to
-// ~/.config/spiceedit/format-defaults.json. Returns "" when neither
+// $XDG_CONFIG_HOME/skiff/format-defaults.json, falling back to
+// ~/.config/skiff/format-defaults.json. Returns "" when neither
 // resolves — the caller treats that as "no defaults file possible"
 // and skips the install-prompt feature entirely.
 //
@@ -57,13 +57,13 @@ func DefaultsPath() string {
 		return override
 	}
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "spiceedit", DefaultsFile)
+		return filepath.Join(xdg, "skiff", DefaultsFile)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return ""
 	}
-	return filepath.Join(home, ".config", "spiceedit", DefaultsFile)
+	return filepath.Join(home, ".config", "skiff", DefaultsFile)
 }
 
 // LoadDefaults reads the user's global format-defaults file. A
@@ -94,7 +94,7 @@ func LoadDefaults(path string) (*Config, error) {
 
 // InstallCommandIntoProject merges (ext, argv) into the project's
 // format.json, preserving any existing entries. Creates the
-// .spiceedit directory and the file if either is missing. Writes
+// .skiff directory and the file if either is missing. Writes
 // atomically (temp + rename) so a crash mid-write can't corrupt the
 // config a teammate just pulled.
 //
