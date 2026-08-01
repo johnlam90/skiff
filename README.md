@@ -245,7 +245,7 @@ key that works right now — no memorizing required.
 Everything reachable by hotkey is also reachable from the `≡` menu —
 the hotkeys are just a faster path for the actions you reach for most.
 
-### Find in file
+### Find in file (and replace)
 
 `Esc f` (or **Find in file** from the `≡` menu) opens a search bar
 above the status bar:
@@ -258,6 +258,11 @@ above the status bar:
   highlight live as you type.
 - `Enter` jumps to the next match (wraps at the end), `Shift+Enter`
   jumps to the previous one.
+- `Tab` grows the bar a **replace** field (`Find: foo ⇒ bar`): `Enter`
+  replaces the current match and walks forward, `Shift+Enter` replaces
+  every match in the file as one undo step, `Tab` hops back to the
+  query. Replace is per-file; project-wide replace is deliberately not
+  offered yet.
 - `Esc` closes the bar and clears the highlights — each `Esc f` opens
   a fresh search.
 - The active match is painted a brighter color than the rest, so you

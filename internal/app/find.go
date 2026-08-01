@@ -53,6 +53,10 @@ func (a *App) closeFind() {
 	a.findValue = nil
 	a.findCursor = 0
 	a.findScroll = 0
+	a.replaceOpen = false
+	a.replaceValue = nil
+	a.replaceCursor = 0
+	a.findFocusReplace = false
 	if tab := a.activeTabPtr(); tab != nil {
 		tab.ClearFind()
 	}
@@ -124,31 +128,89 @@ func (a *App) handleFindKey(ev *tcell.EventKey) {
 	switch ev.Key() {
 	case tcell.KeyEsc:
 		a.closeFind()
+	case tcell.KeyTab:
+		// Tab grows the bar a replace field (druk's gesture) and then
+		// toggles which field owns the keyboard.
+		if !a.replaceOpen {
+			a.replaceOpen = true
+			a.findFocusReplace = true
+		} else {
+			a.findFocusReplace = !a.findFocusReplace
+		}
 	case tcell.KeyEnter:
+		if a.findFocusReplace {
+			tab := a.activeTabPtr()
+			if tab == nil {
+				return
+			}
+			if ev.Modifiers()&tcell.ModShift != 0 {
+				if n := tab.ReplaceAllMatches(string(a.replaceValue)); n > 0 {
+					a.flash(fmt.Sprintf("Replaced %d match(es)", n))
+				}
+				return
+			}
+			if !tab.ReplaceCurrentMatch(string(a.replaceValue)) {
+				a.flash("Nothing to replace")
+			}
+			return
+		}
 		if ev.Modifiers()&tcell.ModShift != 0 {
 			a.findPrev()
 		} else {
 			a.findNext()
 		}
 	case tcell.KeyLeft:
+		if a.findFocusReplace {
+			if a.replaceCursor > 0 {
+				a.replaceCursor--
+			}
+			return
+		}
 		if a.findCursor > 0 {
 			a.findCursor--
 		}
 	case tcell.KeyRight:
+		if a.findFocusReplace {
+			if a.replaceCursor < len(a.replaceValue) {
+				a.replaceCursor++
+			}
+			return
+		}
 		if a.findCursor < len(a.findValue) {
 			a.findCursor++
 		}
 	case tcell.KeyHome:
+		if a.findFocusReplace {
+			a.replaceCursor = 0
+			return
+		}
 		a.findCursor = 0
 	case tcell.KeyEnd:
+		if a.findFocusReplace {
+			a.replaceCursor = len(a.replaceValue)
+			return
+		}
 		a.findCursor = len(a.findValue)
 	case tcell.KeyBackspace, tcell.KeyBackspace2:
+		if a.findFocusReplace {
+			if a.replaceCursor > 0 {
+				a.replaceValue = append(a.replaceValue[:a.replaceCursor-1], a.replaceValue[a.replaceCursor:]...)
+				a.replaceCursor--
+			}
+			return
+		}
 		if a.findCursor > 0 {
 			a.findValue = append(a.findValue[:a.findCursor-1], a.findValue[a.findCursor:]...)
 			a.findCursor--
 			a.findApplyQuery()
 		}
 	case tcell.KeyDelete:
+		if a.findFocusReplace {
+			if a.replaceCursor < len(a.replaceValue) {
+				a.replaceValue = append(a.replaceValue[:a.replaceCursor], a.replaceValue[a.replaceCursor+1:]...)
+			}
+			return
+		}
 		if a.findCursor < len(a.findValue) {
 			a.findValue = append(a.findValue[:a.findCursor], a.findValue[a.findCursor+1:]...)
 			a.findApplyQuery()
@@ -156,6 +218,15 @@ func (a *App) handleFindKey(ev *tcell.EventKey) {
 	case tcell.KeyRune:
 		r := ev.Rune()
 		if r < 0x20 {
+			return
+		}
+		if a.findFocusReplace {
+			next := make([]rune, 0, len(a.replaceValue)+1)
+			next = append(next, a.replaceValue[:a.replaceCursor]...)
+			next = append(next, r)
+			next = append(next, a.replaceValue[a.replaceCursor:]...)
+			a.replaceValue = next
+			a.replaceCursor++
 			return
 		}
 		next := make([]rune, 0, len(a.findValue)+1)
@@ -200,7 +271,10 @@ func (a *App) drawFindBar() {
 
 	// Right side: counter + hint, drawn first so we can clip the input
 	// against them on a narrow window.
-	hint := " Enter: next · Shift+Enter: prev · Esc: close "
+	hint := " Enter: next · Shift+Enter: prev · Tab: replace · Esc: close "
+	if a.replaceOpen && a.findFocusReplace {
+		hint = " Enter: replace · Shift+Enter: all · Tab: query · Esc: close "
+	}
 	counter := a.findCounterText()
 	rightPadding := 1
 	rightTextStart := bx + bw
@@ -230,6 +304,17 @@ func (a *App) drawFindBar() {
 	if inputEnd <= inputStart {
 		inputEnd = bx + bw - 1
 	}
+	// With the replace field open, the query keeps the left half and
+	// the replacement takes the right — both always visible, the caret
+	// in whichever owns the keyboard.
+	replaceStart := 0
+	if a.replaceOpen {
+		half := inputStart + (inputEnd-inputStart)/2
+		rlabel := " ⇒ "
+		drawAt(a.screen, half, by, rlabel, labelStyle)
+		replaceStart = half + runeLen(rlabel)
+		inputEnd = half - 1
+	}
 	inputWidth := inputEnd - inputStart
 	if inputWidth < 1 {
 		inputWidth = 1
@@ -242,9 +327,24 @@ func (a *App) drawFindBar() {
 		}
 		a.screen.SetContent(inputStart+i, by, a.findValue[idx], nil, barStyle)
 	}
+	if a.replaceOpen {
+		for i, r := range a.replaceValue {
+			if replaceStart+i >= rightTextStart-1 {
+				break
+			}
+			a.screen.SetContent(replaceStart+i, by, r, nil, barStyle)
+		}
+	}
 
-	// Place the screen cursor at the input position so the user sees a
-	// blinking caret while typing in the bar.
+	// Place the screen cursor in the focused field so the user sees a
+	// blinking caret where their typing will land.
+	if a.replaceOpen && a.findFocusReplace {
+		caret := replaceStart + a.replaceCursor
+		if caret >= replaceStart && caret < rightTextStart {
+			a.screen.ShowCursor(caret, by)
+		}
+		return
+	}
 	caret := inputStart + (a.findCursor - a.findScroll)
 	if caret >= inputStart && caret <= inputEnd {
 		a.screen.ShowCursor(caret, by)

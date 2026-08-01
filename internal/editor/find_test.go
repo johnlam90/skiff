@@ -221,3 +221,48 @@ func TestMatchAtRune_HitAndMiss(t *testing.T) {
 		t.Fatalf("col 9 should be inside match 1, got %d", got)
 	}
 }
+
+// TestReplaceCurrentMatch pins the single-replace contract: the match
+// text swaps, the query re-runs (count shrinks), the walk stays on the
+// next match forward, and one undo restores everything.
+func TestReplaceCurrentMatch(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("foo bar foo\nfoo end")}
+	tab.initUndo()
+	tab.SetFindQuery("foo")
+	if len(tab.FindMatches) != 3 {
+		t.Fatalf("seed: %d matches", len(tab.FindMatches))
+	}
+	if !tab.ReplaceCurrentMatch("qux") {
+		t.Fatal("replace should succeed")
+	}
+	if tab.Buffer.Lines[0] != "qux bar foo" {
+		t.Fatalf("line 0: %q", tab.Buffer.Lines[0])
+	}
+	if len(tab.FindMatches) != 2 {
+		t.Fatalf("count after replace: %d", len(tab.FindMatches))
+	}
+	if !tab.Undo() || tab.Buffer.Lines[0] != "foo bar foo" {
+		t.Fatalf("undo should restore, got %q", tab.Buffer.Lines[0])
+	}
+}
+
+// TestReplaceAllMatches: every hit swaps in one undo step, including
+// several on one line (applied right-to-left so spans stay valid).
+func TestReplaceAllMatches(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("foo foo\nmid\nfoo")}
+	tab.initUndo()
+	tab.SetFindQuery("foo")
+	if got := tab.ReplaceAllMatches("x"); got != 3 {
+		t.Fatalf("replaced %d, want 3", got)
+	}
+	if tab.Buffer.String() != "x x\nmid\nx" {
+		t.Fatalf("buffer: %q", tab.Buffer.String())
+	}
+	if len(tab.FindMatches) != 0 {
+		t.Fatal("no matches should remain")
+	}
+	tab.Undo()
+	if tab.Buffer.String() != "foo foo\nmid\nfoo" {
+		t.Fatalf("one undo should restore all: %q", tab.Buffer.String())
+	}
+}

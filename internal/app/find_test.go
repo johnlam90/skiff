@@ -204,3 +204,50 @@ func TestCloseAllModals_ClosesFindBar(t *testing.T) {
 		t.Fatal("closeAllModals should close the find bar")
 	}
 }
+
+// TestFindBarReplaceFlow pins the Tab-into-replace gesture: Tab opens
+// the replace field and focuses it, typed runes land there, Enter
+// replaces the current match and advances, Shift+Enter replaces all,
+// and Esc tears the whole bar down.
+func TestFindBarReplaceFlow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "r.txt")
+	if err := os.WriteFile(path, []byte("foo bar foo\nfoo\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(path)
+	a.openFind()
+	for _, r := range "foo" {
+		a.handleFindKey(tcell.NewEventKey(tcell.KeyRune, r, 0))
+	}
+	tab := a.activeTabPtr()
+	if len(tab.FindMatches) != 3 {
+		t.Fatalf("seed matches: %d", len(tab.FindMatches))
+	}
+
+	a.handleFindKey(tcell.NewEventKey(tcell.KeyTab, 0, 0))
+	if !a.replaceOpen || !a.findFocusReplace {
+		t.Fatal("Tab should open and focus the replace field")
+	}
+	for _, r := range "qux" {
+		a.handleFindKey(tcell.NewEventKey(tcell.KeyRune, r, 0))
+	}
+	if string(a.replaceValue) != "qux" || string(a.findValue) != "foo" {
+		t.Fatalf("typing went to the wrong field: %q / %q", a.replaceValue, a.findValue)
+	}
+
+	a.handleFindKey(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
+	if tab.Buffer.Lines[0] != "qux bar foo" {
+		t.Fatalf("replace current: %q", tab.Buffer.Lines[0])
+	}
+	a.handleFindKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModShift))
+	if tab.Buffer.String() != "qux bar qux\nqux\n" {
+		t.Fatalf("replace all: %q", tab.Buffer.String())
+	}
+
+	a.handleFindKey(tcell.NewEventKey(tcell.KeyEsc, 0, 0))
+	if a.findOpen || a.replaceOpen || a.findFocusReplace {
+		t.Fatal("Esc should tear down the whole bar")
+	}
+}

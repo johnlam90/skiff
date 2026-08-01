@@ -187,3 +187,56 @@ func (t *Tab) ClearFind() {
 	t.FindMatches = nil
 	t.FindIndex = -1
 }
+
+// ReplaceCurrentMatch swaps the current find match for repl and
+// re-runs the query so the highlights (and the match count) stay
+// truthful. The cursor lands just after the replacement and the
+// current index stays put, so "replace, replace, replace" walks the
+// file forward naturally. Returns false when there is nothing to
+// replace.
+func (t *Tab) ReplaceCurrentMatch(repl string) bool {
+	if t.IsImage() || t.FindIndex < 0 || t.FindIndex >= len(t.FindMatches) {
+		return false
+	}
+	m := t.FindMatches[t.FindIndex]
+	t.pushUndo(undoGroupStructural)
+	start := Position{Line: m.Line, Col: m.Col}
+	end := Position{Line: m.Line, Col: m.Col + m.Width}
+	t.Buffer.DeleteRange(start, end)
+	after := t.Buffer.InsertString(start, repl)
+	t.Cursor = after
+	t.Anchor = after
+	t.Dirty = true
+	t.StyleStale = true
+	t.cursorMoved = true
+	keep := t.FindIndex
+	t.SetFindQuery(t.FindQuery)
+	if keep >= len(t.FindMatches) {
+		keep = len(t.FindMatches) - 1
+	}
+	t.FindIndex = keep
+	return true
+}
+
+// ReplaceAllMatches swaps every match for repl as ONE undo step and
+// returns how many were replaced. Matches are applied last-to-first so
+// earlier spans stay valid while later ones are rewritten.
+func (t *Tab) ReplaceAllMatches(repl string) int {
+	if t.IsImage() || len(t.FindMatches) == 0 {
+		return 0
+	}
+	t.pushUndo(undoGroupStructural)
+	n := len(t.FindMatches)
+	for i := n - 1; i >= 0; i-- {
+		m := t.FindMatches[i]
+		start := Position{Line: m.Line, Col: m.Col}
+		end := Position{Line: m.Line, Col: m.Col + m.Width}
+		t.Buffer.DeleteRange(start, end)
+		t.Buffer.InsertString(start, repl)
+	}
+	t.Dirty = true
+	t.StyleStale = true
+	t.cursorMoved = true
+	t.SetFindQuery(t.FindQuery)
+	return n
+}

@@ -516,6 +516,11 @@ type App struct {
 	findValue  []rune
 	findCursor int
 	findScroll int
+	// Replace field riding the find bar (Tab opens it) — see find.go.
+	replaceOpen      bool
+	replaceValue     []rune
+	replaceCursor    int
+	findFocusReplace bool
 
 	// Generic filter-list picker modal (see listpick.go) — themes,
 	// branches, any pick-one-of-N flow.
