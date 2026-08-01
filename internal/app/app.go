@@ -242,6 +242,12 @@ func builtinMenuGroups() [][]menuItemDef {
 			{label: "Paste", action: (*App).menuPaste, enabled: (*App).hasClipboard},
 			{label: "Toggle line comment", shortcut: "Esc /", action: (*App).menuToggleLineComment, enabled: (*App).hasCommentableTab},
 		},
+		// Line ops
+		{
+			{label: "Move line up", shortcut: "Esc k", action: (*App).menuMoveLineUp, enabled: (*App).hasEditableTab},
+			{label: "Move line down", shortcut: "Esc j", action: (*App).menuMoveLineDown, enabled: (*App).hasEditableTab},
+			{label: "Duplicate line", shortcut: "Esc d", action: (*App).menuDuplicateLine, enabled: (*App).hasEditableTab},
+		},
 		// View toggle
 		{
 			{shortcut: "Esc t", action: (*App).menuToggleSidebar, enabled: alwaysTrue, labelFor: (*App).sidebarToggleLabel, visible: (*App).hasTree},
@@ -2584,6 +2590,37 @@ func (a *App) menuToggleLineComment() {
 		return
 	}
 	a.flash("Toggled line comment")
+}
+
+// hasEditableTab reports whether the active tab accepts text edits —
+// the gate for the line-op menu rows (image tabs and no-tab both fail).
+func (a *App) hasEditableTab() bool {
+	t := a.activeTabPtr()
+	return t != nil && !t.IsImage()
+}
+
+// menuMoveLineUp nudges the cursor line / selected block up one line.
+func (a *App) menuMoveLineUp() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.MoveLinesUp()
+	}
+}
+
+// menuMoveLineDown nudges the cursor line / selected block down one line.
+func (a *App) menuMoveLineDown() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.MoveLinesDown()
+	}
+}
+
+// menuDuplicateLine copies the cursor line / selected block below itself.
+func (a *App) menuDuplicateLine() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.DuplicateLines()
+	}
 }
 
 // menuRefreshTree forces an immediate sidebar reload. Currently unwired

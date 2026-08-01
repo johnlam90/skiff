@@ -59,9 +59,9 @@
 - All three no-op on image tabs.
 
 **Steps:**
-- [ ] Tests in lineops_test.go: `TestMoveLinesUpSingle`, `TestMoveLinesDownAtBottomNoop`, `TestMoveLinesSelectionSpan`, `TestDuplicateLinesCursorOnCopy`, `TestLineOpsUndoOneStep`. Run, fail.
-- [ ] Implement lineops.go; wire menu group {"Move line up" Esc k, "Move line down" Esc j, "Duplicate line" Esc d} + leader binds.
-- [ ] `make test` green.
+- [x] Tests in lineops_test.go: `TestMoveLinesUpSingle`, `TestMoveLinesDownAtBottomNoop`, `TestMoveLinesSelectionSpan`, `TestDuplicateLinesCursorOnCopy`, `TestLineOpsUndoOneStep`. Run, fail.
+- [x] Implement lineops.go; wire menu group {"Move line up" Esc k, "Move line down" Esc j, "Duplicate line" Esc d} + leader binds.
+- [x] `make test` green.
 
 ### Task 3: Reopen closed tab
 

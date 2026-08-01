@@ -175,6 +175,10 @@ func TestMenuButtonRect(t *testing.T) {
 // to (0,0) when the window is too small to fit it.
 func TestMenuModalRect_Centered(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
+	// The full menu no longer fits a 40-row screen (it clamps + scrolls
+	// there); use a taller viewport so this test keeps pinning the
+	// *centering* rule rather than the clamp.
+	a.width, a.height = 120, 60
 	x, y, w, h := a.menuModalRect()
 	_, _, expectedH := a.menuLayout()
 	if w != modalWidth || h != expectedH {
@@ -1524,6 +1528,9 @@ func TestHandleMouse_SidebarSplitterDrag(t *testing.T) {
 // dismisses on outside click.
 func TestHandleMenuMouse_ClicksRowAndOutside(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
+	// Tall viewport: the toggle row sits near the menu's bottom, which
+	// on a 40-row screen falls into the scrolled-off region.
+	a.width, a.height = 120, 60
 	a.openMenu()
 	mx, my, _, _ := a.menuModalRect()
 	// Click on the sidebar toggle row — flips the sidebar.
@@ -1672,13 +1679,13 @@ func TestMenuLayout_NoCustomActions(t *testing.T) {
 	a.customActions = nil
 	items, dividers, h := a.menuLayout()
 
-	if h != 38 {
-		t.Errorf("modalHeight = %d, want 38", h)
+	if h != 42 {
+		t.Errorf("modalHeight = %d, want 42", h)
 	}
-	if got := len(items); got != 27 {
-		t.Errorf("item count = %d, want 27 built-ins", got)
+	if got := len(items); got != 30 {
+		t.Errorf("item count = %d, want 30 built-ins", got)
 	}
-	wantDiv := []int{2, 6, 10, 14, 19, 28, 33, 35}
+	wantDiv := []int{2, 6, 10, 14, 19, 28, 33, 37, 39}
 	if len(dividers) != len(wantDiv) {
 		t.Fatalf("dividers = %v, want %v", dividers, wantDiv)
 	}
@@ -1839,8 +1846,8 @@ func TestMenuLayout_WithCustomActions(t *testing.T) {
 	}
 	items, _, h := a.menuLayout()
 
-	if h != 41 { // 38 + 2 items + 1 divider
-		t.Errorf("modalHeight = %d, want 41", h)
+	if h != 45 { // 42 + 2 items + 1 divider
+		t.Errorf("modalHeight = %d, want 45", h)
 	}
 	// Custom actions should be the second-to-last and third-to-last
 	// rows, with Quit as the final row.
