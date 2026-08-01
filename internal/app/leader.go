@@ -41,6 +41,7 @@ func leaderBindings() []leaderBinding {
 		{'u', (*App).menuUndo},
 		{'r', (*App).menuRedo},
 		{'w', (*App).menuClose},
+		{'o', (*App).menuReopenTab},
 		{'q', (*App).menuQuit},
 		{'n', (*App).menuNewFile},
 		{'t', (*App).menuToggleSidebar},

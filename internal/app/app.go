@@ -204,6 +204,7 @@ func builtinMenuGroups() [][]menuItemDef {
 			{label: "Save", shortcut: "Esc s", action: (*App).menuSave, enabled: (*App).hasSavableTab},
 			{label: "Save & close tab", action: (*App).menuSaveAndClose, enabled: (*App).hasSavableTab},
 			{label: "Close tab", shortcut: "Esc w", action: (*App).menuClose, enabled: (*App).hasTab},
+			{label: "Reopen closed tab", shortcut: "Esc o", action: (*App).menuReopenTab, enabled: (*App).hasClosedTab},
 		},
 		// History
 		{
@@ -411,6 +412,9 @@ type App struct {
 	// emptyTrash discards everything when the session ends.
 	trashDir string
 	trashed  []trashEntry
+
+	// closedTabs is the reopen stack — newest record last. See reopen.go.
+	closedTabs []closedTabRecord
 
 	// tabScroll is how many cells the tab strip is scrolled left when
 	// the open tabs are wider than the bar (narrow tmux panes). It is
@@ -2201,11 +2205,13 @@ func (a *App) requestCloseTab(idx int) {
 	)
 }
 
-// closeTab removes the tab at idx without any dirty-check.
+// closeTab removes the tab at idx without any dirty-check. The tab is
+// recorded on the reopen stack first so Esc-o can bring it back.
 func (a *App) closeTab(idx int) {
 	if idx < 0 || idx >= len(a.tabs) {
 		return
 	}
+	a.recordClosedTab(a.tabs[idx])
 	a.tabs = append(a.tabs[:idx], a.tabs[idx+1:]...)
 	if a.activeTab >= len(a.tabs) {
 		a.activeTab = len(a.tabs) - 1

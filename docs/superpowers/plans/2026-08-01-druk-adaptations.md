@@ -76,9 +76,9 @@
 - closeTab pushes only when `tab.Path != ""`.
 
 **Steps:**
-- [ ] Tests: `TestReopenRestoresCursor`, `TestReopenSkipsDeletedFile`, `TestReopenStackCap`, `TestCloseUntitledNotRecorded`. Run, fail.
-- [ ] Implement; menu row `{label: "Reopen closed tab", shortcut: "Esc o", action: (*App).menuReopenTab, enabled: (*App).hasClosedTab}`.
-- [ ] `make test` green.
+- [x] Tests: `TestReopenRestoresCursor`, `TestReopenSkipsDeletedFile`, `TestReopenStackCap`, `TestCloseUntitledNotRecorded`. Run, fail.
+- [x] Implement; menu row `{label: "Reopen closed tab", shortcut: "Esc o", action: (*App).menuReopenTab, enabled: (*App).hasClosedTab}`.
+- [x] `make test` green.
 
 ### Task 4: Leader cheat-strip
 
