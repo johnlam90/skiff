@@ -1,11 +1,11 @@
 // =============================================================================
-// File: internal/spiceconfig/spiceconfig_test.go
+// File: internal/userconfig/userconfig_test.go
 // Author: Spicer Matthews <spicer@cloudmanic.com>
 // Created: 2026-04-30
 // Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 // =============================================================================
 
-package spiceconfig
+package userconfig
 
 import (
 	"os"

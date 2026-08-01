@@ -18,8 +18,8 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/johnlam90/skiff/internal/spiceconfig"
 	"github.com/johnlam90/skiff/internal/theme"
+	"github.com/johnlam90/skiff/internal/userconfig"
 )
 
 // TestApplyTheme_SwapsPaletteAndStalesTabs pins the palette-swap
@@ -41,7 +41,7 @@ func TestApplyTheme_SwapsPaletteAndStalesTabs(t *testing.T) {
 	if !a.activeTabPtr().StyleStale {
 		t.Fatal("open tabs must re-tokenise after a theme switch")
 	}
-	cfg, err := spiceconfig.Load(spiceconfig.DefaultPath())
+	cfg, err := userconfig.Load(userconfig.DefaultPath())
 	if err != nil || cfg.Theme != "dracula" {
 		t.Fatalf("persisted config: %+v %v", cfg, err)
 	}
@@ -71,7 +71,7 @@ func TestLoadSpiceConfig_AppliesTheme(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	a := newTestApp(t, t.TempDir())
-	a.loadSpiceConfig()
+	a.loadUserConfig()
 	if a.themeID != "nord" {
 		t.Fatalf("startup theme: got %q, want nord", a.themeID)
 	}
@@ -131,7 +131,7 @@ func TestThemePick_EnterPersists(t *testing.T) {
 	if a.themeID != picked {
 		t.Fatalf("enter must keep the preview: %q vs %q", a.themeID, picked)
 	}
-	cfg, err := spiceconfig.Load(spiceconfig.DefaultPath())
+	cfg, err := userconfig.Load(userconfig.DefaultPath())
 	if err != nil || cfg.Theme != picked {
 		t.Fatalf("persist failed: %+v %v", cfg, err)
 	}

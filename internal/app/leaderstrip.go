@@ -1,8 +1,8 @@
 // =============================================================================
 // File: internal/app/leaderstrip.go
-// Author: Spicer Matthews <spicer@cloudmanic.com>
+// Author: John Lam <johnlam90@gmail.com>
 // Created: 2026-08-01
-// Copyright: 2026 Cloudmanic, LLC. All rights reserved.
+// Copyright: 2026 John Lam. All rights reserved.
 // =============================================================================
 
 // leaderstrip.go renders the leader cheat-strip: while the Esc-leader

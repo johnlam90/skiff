@@ -1,6 +1,0 @@
-{
-  "commands": {
-    "go": ["gofmt", "-w", "$FILE"],
-    "json": ["prettier", "--write", "$FILE"]
-  }
-}

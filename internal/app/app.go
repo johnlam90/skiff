@@ -20,10 +20,10 @@ package app
 import (
 	"fmt"
 	"os"
-	"sync/atomic"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -35,8 +35,8 @@ import (
 	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/icons"
 	"github.com/johnlam90/skiff/internal/search"
-	"github.com/johnlam90/skiff/internal/spiceconfig"
 	"github.com/johnlam90/skiff/internal/theme"
+	"github.com/johnlam90/skiff/internal/userconfig"
 	"github.com/johnlam90/skiff/internal/version"
 )
 
@@ -716,7 +716,7 @@ func New(rootDir string) (*App, error) {
 		sidebarWidth:   defaultSidebarWidth,
 	}
 	a.setActiveFolder(tree.Root.Path)
-	a.loadSpiceConfig()
+	a.loadUserConfig()
 	a.refreshGitStatus()
 	a.loadCustomActions()
 	a.flash("Welcome — click a file to open · click  ≡  for the menu")
@@ -786,7 +786,7 @@ func NewSingleFile(filePath string) (*App, error) {
 		sidebarWidth:   defaultSidebarWidth,
 	}
 	a.setActiveFolder(rootDir)
-	a.loadSpiceConfig()
+	a.loadUserConfig()
 	a.loadCustomActions()
 	// openFile loads the file's git gutter markers itself (a file-scoped
 	// `git diff`), so single-file mode shows change bars on open without
@@ -810,14 +810,14 @@ func (a *App) loadCustomActions() {
 	a.customActions = actions
 }
 
-// loadSpiceConfig reads ~/.config/skiff/config.json (if any),
+// loadUserConfig reads ~/.config/skiff/config.json (if any),
 // resolves the Nerd Fonts auto/on/off mode to a concrete bool via
 // icons.Resolve, and stamps the result onto the file tree so the
 // next render starts drawing glyphs (or doesn't). A malformed
 // config flashes a status message but never blocks startup — the
 // editor falls back to Defaults() and keeps going.
-func (a *App) loadSpiceConfig() {
-	cfg, err := spiceconfig.Load(spiceconfig.DefaultPath())
+func (a *App) loadUserConfig() {
+	cfg, err := userconfig.Load(userconfig.DefaultPath())
 	if err != nil {
 		a.flash("config: " + err.Error())
 	}
@@ -2934,7 +2934,7 @@ func (a *App) draw() {
 
 // iconsOn reports whether Nerd Font glyphs should render in places
 // outside the file tree (e.g. the tab bar). The single source of
-// truth is the file tree — App.loadSpiceConfig stamped the resolved
+// truth is the file tree — App.loadUserConfig stamped the resolved
 // auto/on/off decision onto t.IconsEnabled there, so consulting the
 // tree keeps tabs and tree perfectly in sync (turning icons off via
 // config.json hides them everywhere at once).

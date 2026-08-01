@@ -177,8 +177,8 @@ func TestInstallCommandIntoProject_RejectsEmptyArgs(t *testing.T) {
 // config dir. Catching a regression here means catching a leak of
 // test state into the user's home dir.
 func TestDefaultsPath_Override(t *testing.T) {
-	t.Setenv(defaultsPathEnv, "/tmp/spice-defaults-test.json")
-	if got := DefaultsPath(); got != "/tmp/spice-defaults-test.json" {
+	t.Setenv(defaultsPathEnv, "/tmp/skiff-defaults-test.json")
+	if got := DefaultsPath(); got != "/tmp/skiff-defaults-test.json" {
 		t.Fatalf("override ignored: got %q", got)
 	}
 }

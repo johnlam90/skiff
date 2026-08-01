@@ -11,3 +11,6 @@
 # Test coverage artifacts.
 /coverage.out
 /coverage.html
+
+# Local design-critique scratch (never ship).
+.impeccable/

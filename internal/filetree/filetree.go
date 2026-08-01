@@ -80,7 +80,7 @@ type Tree struct {
 	DirtyFolders map[string]GitChangeKind
 
 	// IconsEnabled toggles the Nerd Font glyph that prefixes each row.
-	// Set by App.loadSpiceConfig at startup based on the user's
+	// Set by App.loadUserConfig at startup based on the user's
 	// config.json + auto-detection. Off means the row is rendered with
 	// only the existing chevron (the legacy look) — important for
 	// terminals or fonts that can't render the private-use glyphs.

@@ -14,10 +14,15 @@ behaves like a tiny VS Code: a file tree on the left, tabs across the top,
 syntax highlighting in the middle, a status bar at the bottom — and it's
 all driven by the **mouse**, not arcane keystrokes.
 
-Skiff is a fork of [SpiceEdit](https://github.com/cloudmanic/spice-edit)
-by Spicer Matthews / Cloudmanic, LLC (MIT), extending it with a deeper
-git integration — a source-control sidebar, side-by-side diffs, and
-commit history. Original copyright is retained in [LICENSE](LICENSE).
+Skiff started life as a fork of
+[SpiceEdit](https://github.com/cloudmanic/spice-edit) by Spicer
+Matthews / Cloudmanic, LLC (MIT) and has since grown into its own
+editor: project-wide search & replace, a full git workflow (commit,
+push, pull, branches, stash, compare-against-ref), 26 live-preview
+themes, per-project sessions, preview tabs, and a remote-first
+performance pass. Original copyright is retained in
+[LICENSE](LICENSE); the theme palettes are ported from
+[druk](https://github.com/letstri/druk) (MIT).
 
 It's built for the workflow most "modern" terminal editors ignore: SSHing
 into a remote box from inside `tmux` / `zellij`, opening a project, clicking

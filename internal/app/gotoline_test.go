@@ -1,8 +1,8 @@
 // =============================================================================
 // File: internal/app/gotoline_test.go
-// Author: Spicer Matthews <spicer@cloudmanic.com>
+// Author: John Lam <johnlam90@gmail.com>
 // Created: 2026-08-01
-// Copyright: 2026 Cloudmanic, LLC. All rights reserved.
+// Copyright: 2026 John Lam. All rights reserved.
 // =============================================================================
 
 // Tests for the Go-to-line prompt flow and the OpenFileAtLine helper the

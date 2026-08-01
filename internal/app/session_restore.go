@@ -1,8 +1,8 @@
 // =============================================================================
 // File: internal/app/session_restore.go
-// Author: Spicer Matthews <spicer@cloudmanic.com>
+// Author: John Lam <johnlam90@gmail.com>
 // Created: 2026-08-01
-// Copyright: 2026 Cloudmanic, LLC. All rights reserved.
+// Copyright: 2026 John Lam. All rights reserved.
 // =============================================================================
 
 // session_restore.go bridges App and the internal/session store: capture

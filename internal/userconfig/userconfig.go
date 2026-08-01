@@ -1,11 +1,11 @@
 // =============================================================================
-// File: internal/spiceconfig/spiceconfig.go
+// File: internal/userconfig/userconfig.go
 // Author: Spicer Matthews <spicer@cloudmanic.com>
 // Created: 2026-04-30
 // Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 // =============================================================================
 
-// Package spiceconfig loads the editor's small user-level config from
+// Package userconfig loads the editor's small user-level config from
 // ~/.config/skiff/config.json. It's separate from customactions on
 // purpose: actions.json is a list of shell-out menu entries, config.json
 // is editor preferences. Keeping them apart means a malformed actions
@@ -23,7 +23,7 @@
 // The loader is best-effort the same way customactions is: missing
 // file → defaults, malformed file → error returned for the app to
 // flash, but the editor still starts cleanly.
-package spiceconfig
+package userconfig
 
 import (
 	"encoding/json"

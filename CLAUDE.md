@@ -55,7 +55,7 @@ internal/filetree/filetree.go Lazy tree, identity-preserving refresh, hit-test, 
 internal/search/search.go     Literal smart-case project search engine
 internal/session/session.go   Per-project session store (~/.local/state/skiff)
 internal/clipboard/clipboard.go OSC 52 to /dev/tty with tmux passthrough wrap
-internal/spiceconfig/spiceconfig.go ~/.config/skiff/config.json (icons, theme)
+internal/userconfig/userconfig.go ~/.config/skiff/config.json (icons, theme)
 internal/icons/icons.go       Nerd Font detection + per-file glyph mapping
 internal/theme/theme.go       Default Tokyo Night palette + contrast helpers
 internal/theme/palettes.go    Theme registry — 25 druk-ported palettes + ByID

@@ -16,8 +16,8 @@ package app
 import (
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/johnlam90/skiff/internal/spiceconfig"
 	"github.com/johnlam90/skiff/internal/theme"
+	"github.com/johnlam90/skiff/internal/userconfig"
 )
 
 // applyTheme switches the live palette to the registry entry id.
@@ -41,7 +41,7 @@ func (a *App) applyTheme(id string, persist bool) {
 	if !persist {
 		return
 	}
-	if err := spiceconfig.SetTheme(spiceconfig.DefaultPath(), id); err != nil {
+	if err := userconfig.SetTheme(userconfig.DefaultPath(), id); err != nil {
 		a.flash("Theme set for this session — saving failed: " + err.Error())
 		return
 	}

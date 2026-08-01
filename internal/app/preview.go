@@ -1,8 +1,8 @@
 // =============================================================================
 // File: internal/app/preview.go
-// Author: Spicer Matthews <spicer@cloudmanic.com>
+// Author: John Lam <johnlam90@gmail.com>
 // Created: 2026-08-01
-// Copyright: 2026 Cloudmanic, LLC. All rights reserved.
+// Copyright: 2026 John Lam. All rights reserved.
 // =============================================================================
 
 // preview.go owns the shared file-open path and the preview-tab rules
