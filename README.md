@@ -77,7 +77,9 @@ The goals, in order:
   groups the hits by file, and opens any hit at its line. `Tab` grows
   a replace field: `Enter` rewrites the selected line, `[ All ]`
   (or `Shift+Enter`) rewrites everything behind one confirm. Every
-  line re-verifies against what the search saw before it's touched —
+  line re-verifies against what the search saw before it's touched
+  (regex replacements expand `$1` / `${name}` groups; `$$` is a
+  literal dollar) —
   files edited since are skipped and reported, never guessed at. Open
   buffers apply through the editor (per-file undo, dirty tabs stay
   dirty); closed files rewrite atomically on disk.

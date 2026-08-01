@@ -169,7 +169,7 @@ func (a *App) projReplaceConfirmAll() {
 		"Replace %d match(es) in %d file(s)? Files change on disk — commit or stash first if unsure.",
 		len(a.projFindMatches), len(files))
 	if a.projFindRegex {
-		msg += " Regex mode replaces with the literal text (no $1 groups yet)."
+		msg += " Regex replacements expand $1 / ${name} groups ($$ for a literal $)."
 	}
 	// Snapshot everything the apply needs — the confirm modal closes
 	// the panel (closeAllModals), taking the live state with it.

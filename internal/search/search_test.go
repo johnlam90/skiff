@@ -240,3 +240,58 @@ func TestApplyReplaceVerifiesAndWrites(t *testing.T) {
 		t.Fatalf("b.txt must be untouched: %q", data)
 	}
 }
+
+// TestReplaceLineRegexGroups pins the expansion contract: $1/${name}
+// insert captures with Go's ReplaceAllString semantics, $$ escapes a
+// literal dollar, literal mode leaves $ alone, and expansion composes
+// with whole-word.
+func TestReplaceLineRegexGroups(t *testing.T) {
+	opts := DefaultOptions()
+	opts.Regex = true
+	got, n := ReplaceLine("a=1 b=2", `(\w+)=(\w+)`, "$2:$1", opts)
+	if got != "1:a 2:b" || n != 2 {
+		t.Fatalf("swap: %q (%d)", got, n)
+	}
+	got, _ = ReplaceLine("price 5", `(?P<num>[0-9]+)`, "$$${num}", opts)
+	if got != "price $5" {
+		t.Fatalf("named+escape: %q", got)
+	}
+	// ${1}x disambiguates from the nonexistent group $1x.
+	got, _ = ReplaceLine("ab", `(a)`, "${1}x", opts)
+	if got != "axb" {
+		t.Fatalf("braced: %q", got)
+	}
+	opts.WholeWord = true
+	got, n = ReplaceLine("cat catalog cat", `(c)at`, "${1}ow", opts)
+	if got != "cow catalog cow" || n != 2 {
+		t.Fatalf("word+groups: %q (%d)", got, n)
+	}
+	// Bare $1ow munches the whole name (Go's documented rule): group
+	// "1ow" doesn't exist, so it expands empty — ${1}ow is the fix.
+	got, _ = ReplaceLine("cat", `(c)at`, "$1ow", opts)
+	if got != "" {
+		t.Fatalf("bare-name munch should match Go semantics: %q", got)
+	}
+	// Literal mode: $ stays a $.
+	got, _ = ReplaceLine("x", "x", "$1", DefaultOptions())
+	if got != "$1" {
+		t.Fatalf("literal mode must not expand: %q", got)
+	}
+}
+
+// TestApplyReplaceRegexGroups: expansion flows through the disk path.
+func TestApplyReplaceRegexGroups(t *testing.T) {
+	root := t.TempDir()
+	f := seed(t, root, "kv.txt", "name=skiff\n")
+	opts := DefaultOptions()
+	opts.Regex = true
+	matches, _ := Search(root, []string{f}, `(\w+)=(\w+)`, opts)
+	rep := ApplyReplace(root, matches, `(\w+)=(\w+)`, `$2 is the $1`, opts)
+	if rep.Replaced != 1 {
+		t.Fatalf("report: %+v", rep)
+	}
+	data, _ := os.ReadFile(filepath.Join(root, "kv.txt"))
+	if string(data) != "skiff is the name\n" {
+		t.Fatalf("expanded write: %q", data)
+	}
+}

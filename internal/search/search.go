@@ -274,10 +274,12 @@ func CompileQuery(query string, opts Options) (needle string, caseSensitive bool
 }
 
 // ReplaceLine rewrites every qualifying occurrence of query on line
-// with repl (literal, even in regex mode — v1 has no group expansion)
-// and returns the new line plus the occurrence count. Scanning walks
-// left to right over the ORIGINAL text, so a replacement can never
-// re-match its own output.
+// with repl and returns the new line plus the occurrence count. In
+// regex mode repl is an expansion template with Go's ReplaceAllString
+// semantics — $1 / ${name} insert capture groups, $$ is a literal
+// dollar. Literal mode writes repl verbatim. Scanning walks left to
+// right over the ORIGINAL text, so a replacement can never re-match
+// its own output.
 func ReplaceLine(line, query, repl string, opts Options) (string, int) {
 	needle, caseSensitive, re, ok := CompileQuery(query, opts)
 	if !ok || query == "" {
@@ -291,7 +293,18 @@ func ReplaceLine(line, query, repl string, opts Options) (string, int) {
 			break
 		}
 		b.WriteString(line[from:idx])
-		b.WriteString(repl)
+		if re != nil {
+			// Expand capture groups against this match. The submatch
+			// scan on the suffix re-finds the same leftmost match
+			// lineMatchFrom just located, so loc[0] is always 0.
+			if loc := re.FindStringSubmatchIndex(line[idx:]); loc != nil && loc[0] == 0 {
+				b.Write(re.Expand(nil, []byte(repl), []byte(line[idx:]), loc))
+			} else {
+				b.WriteString(repl)
+			}
+		} else {
+			b.WriteString(repl)
+		}
 		n++
 		next := idx + length
 		if length == 0 {

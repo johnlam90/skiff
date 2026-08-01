@@ -304,4 +304,5 @@ files? Files change on disk — commit or stash first if unsure."
       single-match Enter apply, [ Replace all N ] + confirm, open-tab
       routing via editor buffers, background runner + report events;
       tests for focus routing, verify-skip, dirty-tab preservation.
+- [x] R4 Regex group expansion in replacements (Go ReplaceAllString semantics) — DONE.
 - [x] R3 Docs: README project-search section + this plan check-off.
