@@ -194,10 +194,10 @@
 - App: restore skips missing files, clamps Active, applies sidebar width/shown; single-file mode (`NewSingleFile`) neither restores nor saves.
 
 **Steps:**
-- [ ] Session pkg tests: `TestSaveLoadRoundTrip`, `TestLoadCorruptFileFreshStart`, `TestPruneKeepsNewest50` (t.Setenv XDG_STATE_HOME). Run, fail. Implement.
-- [ ] Filetree tests: `TestExpandedDirsRoundTrip`, `TestExpandDirsUnknownSkipped`. Run, fail. Implement.
-- [ ] App tests: `TestRestoreSkipsMissingFiles`, `TestCaptureSessionContents`. Run, fail. Implement wiring.
-- [ ] `make test` green; `make build` sanity.
+- [x] Session pkg tests: `TestSaveLoadRoundTrip`, `TestLoadCorruptFileFreshStart`, `TestPruneKeepsNewest50` (t.Setenv XDG_STATE_HOME). Run, fail. Implement.
+- [x] Filetree tests: `TestExpandedDirsRoundTrip`, `TestExpandDirsUnknownSkipped`. Run, fail. Implement.
+- [x] App tests: `TestRestoreSkipsMissingFiles`, `TestCaptureSessionContents`. Run, fail. Implement wiring.
+- [x] `make test` green; `make build` sanity.
 
 ### Task 10: Docs touch-up
 

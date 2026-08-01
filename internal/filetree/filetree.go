@@ -617,6 +617,57 @@ func (t *Tree) flatIndexOf(target *Node) int {
 	return -1
 }
 
+// ExpandedDirs returns the project-relative path of every expanded
+// directory below the root, in depth-first order — the shape the
+// session store persists. The root itself is excluded (it is always
+// expanded).
+func (t *Tree) ExpandedDirs() []string {
+	var out []string
+	var walk func(n *Node)
+	walk = func(n *Node) {
+		for _, c := range n.Children {
+			if !c.IsDir {
+				continue
+			}
+			if c.Expanded {
+				if rel, err := filepath.Rel(t.Root.Path, c.Path); err == nil {
+					out = append(out, rel)
+				}
+			}
+			walk(c)
+		}
+	}
+	walk(t.Root)
+	return out
+}
+
+// ExpandDirs re-expands each project-relative directory path, lazily
+// loading children along the way — the restore half of ExpandedDirs.
+// Paths that no longer exist (or point at files now) are skipped; a
+// saved session may be stale and restore must shrug that off.
+func (t *Tree) ExpandDirs(rels []string) {
+	for _, rel := range rels {
+		n := t.Root
+		ok := true
+		for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+			if part == "" || part == "." {
+				continue
+			}
+			_ = loadChildren(n)
+			child := childByName(n, part)
+			if child == nil || !child.IsDir {
+				ok = false
+				break
+			}
+			n = child
+		}
+		if ok && n != t.Root {
+			n.Expanded = true
+			_ = loadChildren(n)
+		}
+	}
+}
+
 // childByName returns the direct child of n named name, or nil when no such
 // child exists. Reveal uses it to descend the path component by component.
 func childByName(n *Node, name string) *Node {

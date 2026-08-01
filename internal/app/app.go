@@ -677,6 +677,9 @@ func New(rootDir string) (*App, error) {
 	a.finder.Rebuild(func() {
 		_ = scr2.PostEvent(&finderRebuiltEvent{when: time.Now()})
 	})
+	// Put the user back where they left this project: tabs, cursors,
+	// expanded folders, sidebar. Best-effort — no session, no change.
+	a.restoreSession()
 	return a, nil
 }
 
@@ -912,6 +915,7 @@ func (a *App) stopTreeRefresh() {
 
 // Close releases the terminal back to the user. Always call this before exit.
 func (a *App) Close() {
+	a.saveSession()
 	a.stopTreeRefresh()
 	a.stopAutoScroll()
 	if a.screen != nil {
