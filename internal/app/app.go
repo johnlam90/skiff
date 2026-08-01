@@ -33,6 +33,7 @@ import (
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/icons"
+	"github.com/johnlam90/skiff/internal/search"
 	"github.com/johnlam90/skiff/internal/spiceconfig"
 	"github.com/johnlam90/skiff/internal/theme"
 	"github.com/johnlam90/skiff/internal/version"
@@ -215,6 +216,7 @@ func builtinMenuGroups() [][]menuItemDef {
 		// Search
 		{
 			{label: "Find in file", shortcut: "Esc f", action: (*App).menuFind, enabled: (*App).hasFindable},
+			{label: "Find in project", shortcut: "Esc F", action: (*App).menuFindInProject, enabled: (*App).hasFinder, visible: (*App).hasTree},
 			{label: "Go to line", shortcut: "Esc l", action: (*App).menuGoToLine, enabled: (*App).hasFindable},
 			{label: "Find file in project", shortcut: "Esc p", action: (*App).menuFindFile, enabled: (*App).hasFinder},
 		},
@@ -503,6 +505,19 @@ type App struct {
 	findValue  []rune
 	findCursor int
 	findScroll int
+
+	// Project-wide content search (see projfind.go).
+	projFindOpen      bool
+	projFindValue     []rune
+	projFindCursor    int
+	projFindScroll    int
+	projFindGen       int // generation counter; stale sweeps are dropped
+	projFindBusy      bool
+	projFindMatches   []search.Match
+	projFindTruncated bool
+	projFindSelected  int
+	projFindScrollY   int
+	projFindFolded    map[string]bool
 
 	// Auto-scroll while drag-selecting past the editor's top/bottom edge.
 	// lastDragX/Y is the most recent mouse position so the auto-scroll
@@ -964,6 +979,8 @@ func (a *App) handleEvent(ev tcell.Event) {
 		}
 	case *gitStatusEvent:
 		a.handleGitStatusEvent(e)
+	case *projFindDoneEvent:
+		a.handleProjFindDone(e)
 	}
 }
 
@@ -1153,7 +1170,7 @@ func (a *App) tabBarRect() (x, y, w, h int) {
 func (a *App) editorRect() (x, y, w, h int) {
 	sw := a.sidebarW()
 	h = a.height - 2
-	if a.findOpen {
+	if a.findOpen || a.projFindOpen {
 		h -= findBarHeight
 	}
 	return sw, 1, a.width - sw, h
@@ -1287,6 +1304,10 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 	}
 	if a.findOpen {
 		a.handleFindKey(ev)
+		return
+	}
+	if a.projFindOpen {
+		a.handleProjFindKey(ev)
 		return
 	}
 	if a.finderOpen {
@@ -1510,6 +1531,10 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	}
 	if a.contextOpen {
 		a.handleContextMouse(x, y, btn)
+		return
+	}
+	if a.projFindOpen {
+		a.handleProjFindMouse(x, y, btn)
 		return
 	}
 	if a.finderOpen {
@@ -2768,6 +2793,9 @@ func (a *App) draw() {
 		a.drawFindBar()
 	}
 	a.drawStatusBar()
+	if a.projFindOpen {
+		a.drawProjFind()
+	}
 	a.drawLeaderStrip()
 
 	// Modal layering, bottom-up. Only one of these is open at a time

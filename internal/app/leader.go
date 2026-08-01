@@ -53,6 +53,7 @@ func leaderBindings() []leaderBinding {
 		{'j', (*App).menuMoveLineDown, "line down"},
 		{'d', (*App).menuDuplicateLine, "duplicate"},
 		{'f', (*App).openFind, "find"},
+		{'F', (*App).menuFindInProject, "find in project"},
 		{'l', (*App).menuGoToLine, "goto line"},
 		{'p', (*App).openFinder, "open file"},
 		{'g', (*App).toggleGitPanel, "git panel"},

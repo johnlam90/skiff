@@ -65,6 +65,13 @@ func (a *App) closeAllModals() {
 	a.findValue = nil
 	a.findCursor = 0
 	a.findScroll = 0
+	a.projFindOpen = false
+	a.projFindValue = nil
+	a.projFindCursor = 0
+	a.projFindScroll = 0
+	a.projFindMatches = nil
+	a.projFindFolded = nil
+	a.projFindBusy = false
 	a.hoveredMenuRow = -1
 	a.contextNode = nil
 	a.contextItems = nil

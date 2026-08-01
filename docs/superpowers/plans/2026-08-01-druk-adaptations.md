@@ -176,9 +176,9 @@
 - Produces (finder): `(f *Finder) Files() []string` — copy of the indexed list (empty until index ready).
 
 **Steps:**
-- [ ] Engine tests: `TestSearchLiteralHits`, `TestSearchSmartCase`, `TestSearchSkipsBinary`, `TestSearchCapsAndTruncatedFlag`, `TestSearchMissingFileSkipped`. Run, fail. Implement search.go.
-- [ ] App tests: `TestProjFindRowsGroupAndFold`, `TestProjFindStaleGenerationDropped`, `TestProjFindEnterOpensAtLine`, `TestProjFindEscCloses`. Run, fail. Implement projfind.go + wiring.
-- [ ] `make test` green.
+- [x] Engine tests: `TestSearchLiteralHits`, `TestSearchSmartCase`, `TestSearchSkipsBinary`, `TestSearchCapsAndTruncatedFlag`, `TestSearchMissingFileSkipped`. Run, fail. Implement search.go.
+- [x] App tests: `TestProjFindRowsGroupAndFold`, `TestProjFindStaleGenerationDropped`, `TestProjFindEnterOpensAtLine`, `TestProjFindEscCloses`. Run, fail. Implement projfind.go + wiring.
+- [x] `make test` green.
 
 ### Task 9: Per-project session restore
 

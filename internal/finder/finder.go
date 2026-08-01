@@ -136,6 +136,17 @@ func (f *Finder) Stats() (State, int, bool) {
 	return f.state, len(f.paths), f.viaGit
 }
 
+// Files returns a copy of the indexed project-relative paths — the
+// project-search sweep iterates it from a goroutine, so the snapshot
+// must not alias the finder's own slice. Empty until a build finishes.
+func (f *Finder) Files() []string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	out := make([]string, len(f.paths))
+	copy(out, f.paths)
+	return out
+}
+
 // Result is one scored hit returned by Search. Path is project-
 // relative; MatchedIndexes is the list of rune positions inside
 // Path that matched the query (used by the renderer to highlight
