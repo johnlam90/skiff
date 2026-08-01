@@ -13,4 +13,4 @@ package version
 // Version is the Skiff release version, displayed in the menu footer.
 // Bump this constant on each release (or let release automation do it).
 // 0.1.0 is Skiff's first release as its own project.
-const Version = "0.1.2"
+const Version = "0.1.3"
