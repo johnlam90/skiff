@@ -10,6 +10,7 @@ package spiceconfig
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -170,5 +171,50 @@ func TestDefaultPathFallsBackToHome(t *testing.T) {
 	want := filepath.Join("/tmp/home-test", ".config", "skiff", "config.json")
 	if got != want {
 		t.Fatalf("DefaultPath() = %q, want %q", got, want)
+	}
+}
+
+// TestLoadTheme reads the theme key back out, defaulting to "" when
+// absent — the app maps "" to its built-in default.
+func TestLoadTheme(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"icons": "on", "theme": "dracula"}`), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Theme != "dracula" || cfg.Icons != IconsOn {
+		t.Fatalf("got %+v", cfg)
+	}
+}
+
+// TestSetThemePreservesOtherKeys pins the round-trip rule: writing the
+// theme must keep icons — and keys from future skiff versions — intact.
+func TestSetThemePreservesOtherKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"icons": "on", "future-key": 7}`), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := SetTheme(path, "nord"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	for _, want := range []string{`"theme": "nord"`, `"icons": "on"`, `"future-key": 7`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("missing %s in:\n%s", want, data)
+		}
+	}
+	// And a fresh file is created when none exists.
+	fresh := filepath.Join(dir, "sub", "config.json")
+	if err := SetTheme(fresh, "dracula"); err != nil {
+		t.Fatalf("fresh set: %v", err)
+	}
+	cfg, err := Load(fresh)
+	if err != nil || cfg.Theme != "dracula" {
+		t.Fatalf("fresh load: %+v %v", cfg, err)
 	}
 }

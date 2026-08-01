@@ -443,34 +443,9 @@ func (a *App) doRenameFolder(oldPath, newName string) {
 		a.flash(fmt.Sprintf("Rename failed: %v", err))
 		return
 	}
-	prefix := oldPath + string(filepath.Separator)
-	for _, t := range a.tabs {
-		switch {
-		case t.Path == oldPath:
-			// Defensive — tabs shouldn't be backed by directories,
-			// but if one is we still rewrite it cleanly.
-			t.Path = newPath
-		case strings.HasPrefix(t.Path, prefix):
-			t.Path = filepath.Join(newPath, t.Path[len(prefix):])
-		default:
-			continue
-		}
-		if info, err := os.Stat(t.Path); err == nil {
-			t.Mtime = info.ModTime()
-		} else {
-			t.Mtime = time.Time{}
-		}
-		t.DiskGone = false
-	}
-	// Keep activeFolder in sync. If we don't, the next "New file"
-	// would target the deleted path and fail confusingly.
-	if a.activeFolder == oldPath || strings.HasPrefix(a.activeFolder, prefix) {
-		if a.activeFolder == oldPath {
-			a.setActiveFolder(newPath)
-		} else {
-			a.setActiveFolder(filepath.Join(newPath, a.activeFolder[len(prefix):]))
-		}
-	}
+	// Re-attach open tabs and the active folder to the moved paths —
+	// shared with the file-clipboard's move (see fileclip.go).
+	a.repointPaths(oldPath, newPath)
 	a.refreshTree()
 	a.refreshGitStatusAsync()
 	a.invalidateFinder()

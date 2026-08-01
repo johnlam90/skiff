@@ -20,6 +20,7 @@ package app
 import (
 	"fmt"
 	"os"
+	"sync/atomic"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,7 @@ import (
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/icons"
+	"github.com/johnlam90/skiff/internal/search"
 	"github.com/johnlam90/skiff/internal/spiceconfig"
 	"github.com/johnlam90/skiff/internal/theme"
 	"github.com/johnlam90/skiff/internal/version"
@@ -204,6 +206,7 @@ func builtinMenuGroups() [][]menuItemDef {
 			{label: "Save", shortcut: "Esc s", action: (*App).menuSave, enabled: (*App).hasSavableTab},
 			{label: "Save & close tab", action: (*App).menuSaveAndClose, enabled: (*App).hasSavableTab},
 			{label: "Close tab", shortcut: "Esc w", action: (*App).menuClose, enabled: (*App).hasTab},
+			{label: "Reopen closed tab", shortcut: "Esc o", action: (*App).menuReopenTab, enabled: (*App).hasClosedTab},
 		},
 		// History
 		{
@@ -214,6 +217,8 @@ func builtinMenuGroups() [][]menuItemDef {
 		// Search
 		{
 			{label: "Find in file", shortcut: "Esc f", action: (*App).menuFind, enabled: (*App).hasFindable},
+			{label: "Find in project", shortcut: "Esc F", action: (*App).menuFindInProject, enabled: (*App).hasFinder, visible: (*App).hasTree},
+			{label: "Go to line", shortcut: "Esc l", action: (*App).menuGoToLine, enabled: (*App).hasFindable},
 			{label: "Find file in project", shortcut: "Esc p", action: (*App).menuFindFile, enabled: (*App).hasFinder},
 		},
 		// Git
@@ -222,6 +227,11 @@ func builtinMenuGroups() [][]menuItemDef {
 			{label: "Diff this file", action: (*App).menuDiffFile, enabled: (*App).hasDiffableTab},
 			{label: "History of this file", action: (*App).menuFileHistory, enabled: (*App).hasFileHistoryTab},
 			{label: "Commit history", action: (*App).menuCommitHistory, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
+			{label: "Commit changes…", action: (*App).menuGitCommit, enabled: (*App).hasGitChanges, visible: (*App).hasTree},
+			{label: "Push", action: (*App).menuGitPush, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
+			{label: "Pull", action: (*App).menuGitPull, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
+			{label: "Switch branch…", action: (*App).menuGitSwitchBranch, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
+			{label: "More git actions…", action: (*App).menuGitExtras, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
 		},
 		// File actions
 		{
@@ -231,6 +241,10 @@ func builtinMenuGroups() [][]menuItemDef {
 			{action: (*App).menuRenameFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).renameFolderLabel},
 			{action: (*App).menuDeleteFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).deleteFolderLabel},
 			{action: (*App).menuUndoDelete, enabled: (*App).hasTrashedEntry, labelFor: (*App).undoDeleteLabel},
+			{label: "Cut file", action: (*App).menuCutFile, enabled: (*App).hasFileTab},
+			{label: "Copy file", action: (*App).menuCopyFile, enabled: (*App).hasFileTab},
+			{action: (*App).menuPasteEntry, enabled: (*App).hasFileClip, labelFor: (*App).pasteEntryLabel, visible: (*App).hasFileClip},
+			{label: "Duplicate file", action: (*App).menuDuplicateFile, enabled: (*App).hasFileTab},
 			{label: "Copy relative path", action: (*App).menuCopyRelativePath, enabled: (*App).hasFileTab},
 			{label: "Copy absolute path", action: (*App).menuCopyAbsolutePath, enabled: (*App).hasFileTab},
 		},
@@ -241,9 +255,16 @@ func builtinMenuGroups() [][]menuItemDef {
 			{label: "Paste", action: (*App).menuPaste, enabled: (*App).hasClipboard},
 			{label: "Toggle line comment", shortcut: "Esc /", action: (*App).menuToggleLineComment, enabled: (*App).hasCommentableTab},
 		},
+		// Line ops
+		{
+			{label: "Move line up", shortcut: "Esc k", action: (*App).menuMoveLineUp, enabled: (*App).hasEditableTab},
+			{label: "Move line down", shortcut: "Esc j", action: (*App).menuMoveLineDown, enabled: (*App).hasEditableTab},
+			{label: "Duplicate line", shortcut: "Esc d", action: (*App).menuDuplicateLine, enabled: (*App).hasEditableTab},
+		},
 		// View toggle
 		{
 			{shortcut: "Esc t", action: (*App).menuToggleSidebar, enabled: alwaysTrue, labelFor: (*App).sidebarToggleLabel, visible: (*App).hasTree},
+			{label: "Theme…", action: (*App).menuTheme, enabled: alwaysTrue},
 		},
 		// Quit
 		{
@@ -342,6 +363,9 @@ func (a *App) hasTree() bool {
 type App struct {
 	screen tcell.Screen
 	theme  theme.Theme
+	// themeID is the registry id of the active theme — what the picker
+	// pre-selects and what SetTheme persists. See themepick.go.
+	themeID string
 
 	rootDir   string
 	tree      *filetree.Tree
@@ -404,6 +428,14 @@ type App struct {
 	// emptyTrash discards everything when the session ends.
 	trashDir string
 	trashed  []trashEntry
+
+	// closedTabs is the reopen stack — newest record last. See reopen.go.
+	closedTabs []closedTabRecord
+
+	// File clipboard (cut / copy / paste of tree entries) — see fileclip.go.
+	fileClipPath string // absolute path on the clipboard; "" = empty
+	fileClipCut  bool   // true = paste moves; false = paste copies
+	fileOpBusy   bool   // a background move/copy is running
 
 	// tabScroll is how many cells the tab strip is scrolled left when
 	// the open tabs are wider than the bar (narrow tmux panes). It is
@@ -484,6 +516,41 @@ type App struct {
 	findValue  []rune
 	findCursor int
 	findScroll int
+	// Replace field riding the find bar (Tab opens it) — see find.go.
+	replaceOpen      bool
+	replaceValue     []rune
+	replaceCursor    int
+	findFocusReplace bool
+
+	// Generic filter-list picker modal (see listpick.go) — themes,
+	// branches, any pick-one-of-N flow.
+	listPickOpen     bool
+	listPickTitle    string
+	listPickItems    []listPickItem
+	listPickQuery    []rune
+	listPickCursor   int
+	listPickSelected int
+	listPickScroll   int
+	listPickOnPick   func(*App, int)
+	listPickOnMove   func(*App, int)
+	listPickOnCancel func(*App)
+
+	// Project-wide content search (see projfind.go).
+	projFindOpen      bool
+	projFindValue     []rune
+	projFindCursor    int
+	projFindScroll    int
+	projFindGen       int // generation counter; stale sweeps are dropped
+	projFindBusy      bool
+	projFindMatches   []search.Match
+	projFindTruncated bool
+	projFindSelected  int
+	projFindScrollY   int
+	projFindFolded    map[string]bool
+	projFindLiveGen   atomic.Int64 // latest gen, readable from sweep goroutines
+	projFindMatchCase bool
+	projFindWholeWord bool
+	projFindRegex     bool
 
 	// Auto-scroll while drag-selecting past the editor's top/bottom edge.
 	// lastDragX/Y is the most recent mouse position so the auto-scroll
@@ -541,6 +608,17 @@ type App struct {
 	gitPanelActive bool
 	gitPanelRows   []gitChangeRow
 	gitPanelScroll int
+
+	// Write-side git state (see gitops.go / gitchanges.go): the
+	// one-at-a-time mutation gate, the commit checkbox set (absent =
+	// checked), the panel's keyboard/walk selection, and the panel row
+	// the open diff came from (-1 = diff not from the panel).
+	gitOpBusy        bool
+	gitCommitChecks  map[string]bool
+	gitPanelSelected int
+	diffPanelRow     int
+	gitDeleteTarget  string // branch mid-delete, for the force-delete offer
+	diffBase         string // compare-against ref; "" = HEAD (the default)
 
 	// Diff view modal state — the side-by-side (or, when the terminal
 	// is narrow, unified) git diff opened from the Git panel and the
@@ -624,6 +702,7 @@ func New(rootDir string) (*App, error) {
 		rootDir:        rootDir,
 		tree:           tree,
 		hoveredMenuRow: -1,
+		diffPanelRow:   -1,
 		sidebarShown:   true,
 		sidebarWidth:   defaultSidebarWidth,
 	}
@@ -643,6 +722,9 @@ func New(rootDir string) (*App, error) {
 	a.finder.Rebuild(func() {
 		_ = scr2.PostEvent(&finderRebuiltEvent{when: time.Now()})
 	})
+	// Put the user back where they left this project: tabs, cursors,
+	// expanded folders, sidebar. Best-effort — no session, no change.
+	a.restoreSession()
 	return a, nil
 }
 
@@ -690,6 +772,7 @@ func NewSingleFile(filePath string) (*App, error) {
 		rootDir:        rootDir,
 		tree:           nil,
 		hoveredMenuRow: -1,
+		diffPanelRow:   -1,
 		sidebarShown:   false,
 		sidebarWidth:   defaultSidebarWidth,
 	}
@@ -732,6 +815,9 @@ func (a *App) loadSpiceConfig() {
 	if a.tree != nil {
 		a.tree.IconsEnabled = icons.Resolve(cfg.Icons)
 	}
+	if cfg.Theme != "" {
+		a.applyTheme(cfg.Theme, false)
+	}
 }
 
 // refreshTree calls tree.Refresh when the file tree exists, and is a
@@ -754,7 +840,7 @@ func (a *App) refreshTree() {
 // paths use refreshGitStatusAsync so a slow `git status` on a huge or
 // network-mounted repo can never stall typing.
 func (a *App) refreshGitStatus() {
-	a.applyGitStatus(collectGitStatus(a.rootDir, a.openTabPaths(), a.tree == nil))
+	a.applyGitStatus(collectGitStatus(a.rootDir, a.diffBase, a.openTabPaths(), a.tree == nil))
 }
 
 // refreshGitStatusAsync collects git status on a background goroutine
@@ -770,10 +856,10 @@ func (a *App) refreshGitStatusAsync() {
 		return
 	}
 	a.gitRefreshInFlight = true
-	rootDir, paths, skipStatus := a.rootDir, a.openTabPaths(), a.tree == nil
+	rootDir, base, paths, skipStatus := a.rootDir, a.diffBase, a.openTabPaths(), a.tree == nil
 	scr := a.screen
 	go func() {
-		res := collectGitStatus(rootDir, paths, skipStatus)
+		res := collectGitStatus(rootDir, base, paths, skipStatus)
 		_ = scr.PostEvent(&gitStatusEvent{when: time.Now(), res: res})
 	}()
 }
@@ -878,6 +964,7 @@ func (a *App) stopTreeRefresh() {
 
 // Close releases the terminal back to the user. Always call this before exit.
 func (a *App) Close() {
+	a.saveSession()
 	a.stopTreeRefresh()
 	a.stopAutoScroll()
 	if a.screen != nil {
@@ -898,6 +985,19 @@ func (a *App) Run() error {
 			break
 		}
 		a.handleEvent(ev)
+		// Drain everything already queued before paying for a draw. A
+		// wheel flick or mouse sweep — especially over SSH, where events
+		// arrive in bursts — queues dozens of events; drawing once per
+		// burst instead of once per event is the difference between
+		// smooth scrolling and syrup on remote links.
+		for !a.quit && a.screen.HasPendingEvent() {
+			ev = a.screen.PollEvent()
+			if ev == nil {
+				a.quit = true
+				break
+			}
+			a.handleEvent(ev)
+		}
 		a.draw()
 		a.screen.Show()
 	}
@@ -945,6 +1045,18 @@ func (a *App) handleEvent(ev tcell.Event) {
 		}
 	case *gitStatusEvent:
 		a.handleGitStatusEvent(e)
+	case *projFindDoneEvent:
+		a.handleProjFindDone(e)
+	case *projFindKickEvent:
+		a.handleProjFindKick(e)
+	case *gitOpDoneEvent:
+		a.handleGitOpDone(e)
+	case *fileOpDoneEvent:
+		a.handleFileOpDone(e)
+	case *fileOpProgressEvent:
+		a.handleFileOpProgress(e)
+	case *branchListEvent:
+		a.handleBranchList(e)
 	}
 }
 
@@ -952,6 +1064,8 @@ func (a *App) handleEvent(ev tcell.Event) {
 // fires: rescan the file tree (preserving expansion state), reconcile
 // any open tabs with disk, refresh git status, and invalidate the
 // finder index so a freshly-pulled file shows up everywhere at once.
+// The session store piggybacks on the same tick, so a killed terminal
+// loses at most ten seconds of tab state instead of the whole session.
 // Called from the periodic event and from runCustomAction's success
 // path so a Copy-from-remote action's output is visible immediately
 // instead of after the next tick.
@@ -960,6 +1074,7 @@ func (a *App) refreshTreeNow() {
 	a.reconcileOpenTabsWithDisk()
 	a.refreshGitStatusAsync()
 	a.invalidateFinder()
+	a.saveSession()
 }
 
 // handleCustomActionDone surfaces the result of an async custom-action
@@ -1134,7 +1249,7 @@ func (a *App) tabBarRect() (x, y, w, h int) {
 func (a *App) editorRect() (x, y, w, h int) {
 	sw := a.sidebarW()
 	h = a.height - 2
-	if a.findOpen {
+	if a.findOpen || a.projFindOpen {
 		h -= findBarHeight
 	}
 	return sw, 1, a.width - sw, h
@@ -1270,6 +1385,14 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		a.handleFindKey(ev)
 		return
 	}
+	if a.projFindOpen {
+		a.handleProjFindKey(ev)
+		return
+	}
+	if a.listPickOpen {
+		a.handleListPickKey(ev)
+		return
+	}
 	if a.finderOpen {
 		a.handleFinderKey(ev)
 		return
@@ -1333,6 +1456,12 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		// one.
 		scr := a.screen
 		time.AfterFunc(menuEscMs+50*time.Millisecond, func() {
+			_ = scr.PostEvent(&leaderExpiryEvent{when: time.Now()})
+		})
+		// A second, earlier wake-up right after the leader window shuts
+		// so the cheat-strip disappears on time instead of lingering
+		// until the menu-window expiry above.
+		time.AfterFunc(doubleEscMs+50*time.Millisecond, func() {
 			_ = scr.PostEvent(&leaderExpiryEvent{when: time.Now()})
 		})
 		return
@@ -1487,6 +1616,14 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		a.handleContextMouse(x, y, btn)
 		return
 	}
+	if a.projFindOpen {
+		a.handleProjFindMouse(x, y, btn)
+		return
+	}
+	if a.listPickOpen {
+		a.handleListPickMouse(x, y, btn)
+		return
+	}
 	if a.finderOpen {
 		a.handleFinderMouse(x, y, btn)
 		return
@@ -1585,6 +1722,14 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		return
 	}
 
+	// Scrollbar thumb drag: the thumb stays glued to the mouse row even
+	// when the pointer wanders off the bar column.
+	if leftDown && a.dragMode == "scrollbar" {
+		_, ey, _, _ := a.editorRect()
+		a.scrollbarTo(y - ey)
+		return
+	}
+
 	// Initial press dispatch.
 	if leftDown && a.dragMode == "" {
 		sw := a.sidebarW()
@@ -1599,6 +1744,11 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		case y == a.height-1:
 			a.statusBarClick(x)
 		case y > 0 && y < a.height-1:
+			if localY, ok := a.scrollbarHit(x, y); ok {
+				a.scrollbarTo(localY)
+				a.dragMode = "scrollbar"
+				return
+			}
 			a.editorPress(x, y)
 			a.dragMode = "editor"
 		}
@@ -1741,7 +1891,7 @@ func (a *App) sidebarClick(x, y int) {
 		return
 	}
 	if a.gitPanelActive {
-		a.gitPanelClick(y - sy)
+		a.gitPanelClick(x-sx, y-sy)
 		return
 	}
 	n, ok := a.tree.HitTest(x-sx, y-sy)
@@ -1758,7 +1908,7 @@ func (a *App) sidebarClick(x, y int) {
 		return
 	}
 	a.setActiveFolder(filepath.Dir(n.Path))
-	a.openFile(n.Path)
+	a.openFilePreview(n.Path)
 }
 
 // setActiveFolder records path as the editor's current working folder and
@@ -1992,6 +2142,37 @@ func (a *App) handleAutoScroll() {
 	tab.MoveCursorTo(pos, true)
 }
 
+// scrollbarHit reports whether (x, y) lands on the active tab's
+// scrollbar column, returning the bar-local row when it does. The
+// geometry must mirror Render's: rightmost editor column, only when the
+// file is taller than the viewport.
+func (a *App) scrollbarHit(x, y int) (int, bool) {
+	tab := a.activeTabPtr()
+	if tab == nil {
+		return 0, false
+	}
+	ex, ey, ew, eh := a.editorRect()
+	if ew <= 2 || !tab.ScrollbarVisible(eh) {
+		return 0, false
+	}
+	if x != ex+ew-1 || y < ey || y >= ey+eh {
+		return 0, false
+	}
+	return y - ey, true
+}
+
+// scrollbarTo scrolls the active tab so the thumb centers on the
+// bar-local row — shared by the initial press and the drag. Clamping
+// lives in the editor's ScrollTargetForClick.
+func (a *App) scrollbarTo(localY int) {
+	tab := a.activeTabPtr()
+	if tab == nil {
+		return
+	}
+	_, _, _, eh := a.editorRect()
+	tab.ScrollY = tab.ScrollTargetForClick(eh, localY)
+}
+
 // selectWordAt selects the word under the buffer position p (or does
 // nothing if p sits in whitespace / punctuation).
 func (a *App) selectWordAt(tab *editor.Tab, p editor.Position) {
@@ -2053,49 +2234,13 @@ func (a *App) flash(msg string) {
 // name and the public surface stays small.
 func (a *App) OpenFile(path string) { a.openFile(path) }
 
-// openFile opens the file at path in a new tab — or switches to it if it is
-// already open in another tab. Errors are surfaced as a flash message.
-// Whatever the path resolves to, its parent becomes the active folder so
-// the next New File from the main menu lands next to it.
+// openFile opens the file at path in a new permanent tab — or switches
+// to it if it is already open (pinning a preview it lands on). Errors
+// surface as a flash message. Whatever the path resolves to, its parent
+// becomes the active folder so the next New File from the main menu
+// lands next to it. The shared implementation lives in preview.go.
 func (a *App) openFile(path string) {
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
-	}
-	a.setActiveFolder(filepath.Dir(path))
-	if a.tree != nil {
-		a.tree.ActiveFile = path
-		// Reveal the file's location in the sidebar: expand every ancestor
-		// directory and scroll the row into view. Without this, opening a
-		// file via the finder (Esc-p) or the command line leaves the tree
-		// collapsed at the top, so the active-file highlight is set on a
-		// row nobody can see. listH mirrors Render's own list-area height
-		// (sidebarH - 2) so the "already visible" guard inside Reveal uses
-		// the same viewport the next paint will.
-		_, _, _, sh := a.sidebarRect()
-		listH := sh - 2
-		if listH < 0 {
-			listH = 0
-		}
-		a.tree.Reveal(path, listH)
-	}
-	for i, t := range a.tabs {
-		if t.Path == path {
-			a.activeTab = i
-			a.ensureActiveTabVisible()
-			t.GitLines = loadGitLineChanges(a.rootDir, t.Path)
-			return
-		}
-	}
-	t, err := editor.NewTab(path)
-	if err != nil {
-		a.flash(fmt.Sprintf("Error: %v", err))
-		return
-	}
-	a.tabs = append(a.tabs, t)
-	a.activeTab = len(a.tabs) - 1
-	a.ensureActiveTabVisible()
-	t.GitLines = loadGitLineChanges(a.rootDir, t.Path)
-	a.flash(fmt.Sprintf("Opened %s", filepath.Base(path)))
+	a.openFileMode(path, false)
 }
 
 // saveActiveTab writes the active tab's buffer to disk.
@@ -2194,12 +2339,15 @@ func (a *App) requestCloseTab(idx int) {
 	)
 }
 
-// closeTab removes the tab at idx without any dirty-check.
+// closeTab removes the tab at idx without any dirty-check. The tab is
+// recorded on the reopen stack first so Esc-o can bring it back.
 func (a *App) closeTab(idx int) {
 	if idx < 0 || idx >= len(a.tabs) {
 		return
 	}
+	a.recordClosedTab(a.tabs[idx])
 	a.tabs = append(a.tabs[:idx], a.tabs[idx+1:]...)
+	defer a.saveSession()
 	if a.activeTab >= len(a.tabs) {
 		a.activeTab = len(a.tabs) - 1
 	}
@@ -2585,6 +2733,37 @@ func (a *App) menuToggleLineComment() {
 	a.flash("Toggled line comment")
 }
 
+// hasEditableTab reports whether the active tab accepts text edits —
+// the gate for the line-op menu rows (image tabs and no-tab both fail).
+func (a *App) hasEditableTab() bool {
+	t := a.activeTabPtr()
+	return t != nil && !t.IsImage()
+}
+
+// menuMoveLineUp nudges the cursor line / selected block up one line.
+func (a *App) menuMoveLineUp() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.MoveLinesUp()
+	}
+}
+
+// menuMoveLineDown nudges the cursor line / selected block down one line.
+func (a *App) menuMoveLineDown() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.MoveLinesDown()
+	}
+}
+
+// menuDuplicateLine copies the cursor line / selected block below itself.
+func (a *App) menuDuplicateLine() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.DuplicateLines()
+	}
+}
+
 // menuRefreshTree forces an immediate sidebar reload. Currently unwired
 // from the menu — the 10s background poller covers the common case — but
 // the method is kept so re-adding the menu row (see menuItems) only
@@ -2702,6 +2881,10 @@ func (a *App) draw() {
 		a.drawFindBar()
 	}
 	a.drawStatusBar()
+	if a.projFindOpen {
+		a.drawProjFind()
+	}
+	a.drawLeaderStrip()
 
 	// Modal layering, bottom-up. Only one of these is open at a time
 	// (closeAllModals enforces it), but the order still matters so a
@@ -2726,6 +2909,9 @@ func (a *App) draw() {
 	}
 	if a.finderOpen {
 		a.drawFinder()
+	}
+	if a.listPickOpen {
+		a.drawListPick()
 	}
 	if a.diffOpen {
 		a.drawDiffView()
@@ -2887,6 +3073,11 @@ func (a *App) drawTabBar() {
 		if active {
 			st = st.Bold(true)
 		}
+		// Preview tabs render in italics — the visual promise that the
+		// next tree click will replace this tab rather than add one.
+		if a.tabs[r.Index].IsPreview() {
+			st = st.Italic(true)
+		}
 		// Background. Cells scrolled off either edge of the strip are
 		// skipped; the chevrons painted below mark what's hidden.
 		for cx := r.X; cx < r.X+r.Width; cx++ {
@@ -3024,7 +3215,9 @@ func (a *App) drawEmptyEditor() {
 func (a *App) drawStatusBar() {
 	sx, sy, sw, _ := a.statusRect()
 	bg := a.theme.StatusBG
-	fg := a.theme.BG
+	// StatusFg is paired with StatusBG per palette — hardcoding BG here
+	// broke ported themes whose status bar isn't an accent color.
+	fg := a.theme.StatusFg
 	style := tcell.StyleDefault.Background(bg).Foreground(fg).Bold(true)
 	for cx := sx; cx < sx+sw; cx++ {
 		a.screen.SetContent(cx, sy, ' ', nil, style)

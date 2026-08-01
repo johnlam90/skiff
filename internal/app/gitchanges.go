@@ -25,10 +25,14 @@ package app
 // tab, the branch segment in the status bar, and ≡ → Git changes (or
 // Esc-g), which toggle between the two sidebar views.
 //
-// Like everything git in this editor, it is read-only and best-effort.
-// Staging and committing stay in the shell — that's a tmux pane away.
+// The write side lives here too: a branch line (click to switch), a
+// button row ([ Commit ] [ Push ] [ Pull ] [ ⋯ ]), and a commit
+// checkbox on every change row — the mutations themselves are in
+// gitops.go. While a panel-opened diff is up, ↑↓ walk the change list
+// file by file (diffWalk), which is the way to read a review.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -137,6 +141,27 @@ func (a *App) rebuildGitChangesRows() {
 	}
 	a.gitPanelRows = buildGitChangesRows(a.tree.DirtyFiles, a.tree.Root.Path)
 	a.scrollGitPanel(0)
+	// Drop commit-check entries whose paths are no longer dirty, and
+	// keep the walk selection inside the new list. Without the prune, a
+	// file unchecked, committed elsewhere, and dirtied again would come
+	// back silently unchecked.
+	if len(a.gitCommitChecks) > 0 {
+		live := make(map[string]bool, len(a.gitPanelRows))
+		for _, r := range a.gitPanelRows {
+			live[r.Abs] = true
+		}
+		for abs := range a.gitCommitChecks {
+			if !live[abs] {
+				delete(a.gitCommitChecks, abs)
+			}
+		}
+	}
+	if a.gitPanelSelected >= len(a.gitPanelRows) {
+		a.gitPanelSelected = len(a.gitPanelRows) - 1
+	}
+	if a.gitPanelSelected < 0 {
+		a.gitPanelSelected = 0
+	}
 }
 
 // buildGitChangesRows converts the dirty-path map into display rows
@@ -162,19 +187,129 @@ func buildGitChangesRows(dirty map[string]filetree.GitChangeKind, root string) [
 }
 
 // gitPanelClick routes a left press inside the Git panel: row 1 is the
-// branch label — clicking it opens the branch's commit history — and
-// rows 2+ activate the change under the cursor. (Row 0 — the header
-// tabs — is handled by sidebarClick before we get here.)
-func (a *App) gitPanelClick(y int) {
+// branch line (opens the switch-branch picker), row 2 the button row,
+// and rows below activate — or checkbox-toggle — the change under the
+// cursor. (Row 0 — the header tabs — is handled by sidebarClick before
+// we get here.)
+func (a *App) gitPanelClick(x, y int) {
 	if y == 1 {
-		a.openGitLog("History · "+a.gitBranch, "")
+		a.menuGitSwitchBranch()
 		return
 	}
-	idx := a.gitPanelScroll + y - 2
-	if y < 2 || idx < 0 || idx >= len(a.gitPanelRows) {
+	if y == 2 {
+		for _, b := range a.gitPanelButtons() {
+			if x >= b.x0 && x < b.x1 {
+				sx, sy, _, _ := a.sidebarRect()
+				b.action(a, sx+b.x0, sy+3)
+				return
+			}
+		}
 		return
 	}
+	idx := a.gitPanelScroll + y - gitPanelListTop
+	if y < gitPanelListTop || idx < 0 || idx >= len(a.gitPanelRows) {
+		return
+	}
+	row := a.gitPanelRows[idx]
+	// The leading checkbox cell toggles the row in/out of the commit
+	// set without opening anything.
+	if x <= 2 && !row.IsDir {
+		a.toggleCommitCheck(row.Abs)
+		return
+	}
+	a.gitPanelSelected = idx
+	a.activateGitChangeRow(row)
+	if !row.IsDir {
+		// Recorded after activation — openDiffView's closeAllModals
+		// resets the index, and this write is what arms ↑↓ walking.
+		a.diffPanelRow = idx
+	}
+}
+
+// gitPanelListTop is the sidebar row where the change list starts:
+// header tabs, branch line, buttons row, then files.
+const gitPanelListTop = 3
+
+// gitPanelBtn is one clickable action on the panel's button row, with
+// its x-range in sidebar-local cells.
+type gitPanelBtn struct {
+	label  string
+	x0, x1 int
+	action func(a *App, anchorX, anchorY int)
+}
+
+// gitPanelButtons lays out the button row. Computed on the fly so the
+// click handler and the renderer can never disagree about geometry.
+func (a *App) gitPanelButtons() []gitPanelBtn {
+	labels := []string{"[ Commit ]", "[ Push ]", "[ Pull ]", "[ ⋯ ]"}
+	actions := []func(a *App, x, y int){
+		func(app *App, _, _ int) { app.menuGitCommit() },
+		func(app *App, _, _ int) { app.menuGitPush() },
+		func(app *App, _, _ int) { app.menuGitPull() },
+		func(app *App, x, y int) { app.openGitExtras(x, y) },
+	}
+	out := make([]gitPanelBtn, 0, len(labels))
+	x := 1
+	for i, l := range labels {
+		w := runeLen(l)
+		out = append(out, gitPanelBtn{label: l, x0: x, x1: x + w, action: actions[i]})
+		x += w + 1
+	}
+	return out
+}
+
+// toggleCommitCheck flips a path's membership in the commit set.
+// Absent means checked, so the first toggle writes an explicit false.
+func (a *App) toggleCommitCheck(abs string) {
+	if a.gitCommitChecks == nil {
+		a.gitCommitChecks = map[string]bool{}
+	}
+	if checked, explicit := a.gitCommitChecks[abs]; explicit {
+		a.gitCommitChecks[abs] = !checked
+		return
+	}
+	a.gitCommitChecks[abs] = false
+}
+
+// ensureGitRowVisible scrolls the panel list so row idx is on screen.
+func (a *App) ensureGitRowVisible(idx int) {
+	_, _, _, sh := a.sidebarRect()
+	listH := sh - gitPanelListTop
+	if listH < 1 {
+		return
+	}
+	if idx < a.gitPanelScroll {
+		a.gitPanelScroll = idx
+	}
+	if idx >= a.gitPanelScroll+listH {
+		a.gitPanelScroll = idx - listH + 1
+	}
+}
+
+// diffWalk moves the panel-opened diff to the previous/next changed
+// file (druk's ↑↓ walk: the diff is how you read the changes, so the
+// arrows move between them). Returns false when the open diff didn't
+// come from the panel — the caller falls back to plain scrolling.
+// Directory rows (reveal-in-tree, no diff) are skipped; the ends clamp.
+func (a *App) diffWalk(dir int) bool {
+	if a.diffPanelRow < 0 || !a.gitPanelActive {
+		return false
+	}
+	idx := a.diffPanelRow
+	for {
+		idx += dir
+		if idx < 0 || idx >= len(a.gitPanelRows) {
+			return true // consume the key; stay on the current file
+		}
+		if !a.gitPanelRows[idx].IsDir {
+			break
+		}
+	}
+	a.gitPanelSelected = idx
+	a.ensureGitRowVisible(idx)
 	a.activateGitChangeRow(a.gitPanelRows[idx])
+	a.diffPanelRow = idx
+	return true
 }
 
 // activateGitChangeRow performs a row's action. Files show their full
@@ -194,7 +329,7 @@ func (a *App) activateGitChangeRow(row gitChangeRow) {
 		return
 	}
 
-	lines := loadGitFileDiff(a.rootDir, row.Abs, row.Kind == filetree.GitChangeAdded)
+	lines := loadGitFileDiff(a.rootDir, a.diffBase, row.Abs, row.Kind == filetree.GitChangeAdded)
 	if len(lines) == 0 {
 		lines = []string{"No git diff available for this file."}
 	}
@@ -232,7 +367,7 @@ func (a *App) openFileAtFirstChange(path string) {
 // used after the row list shrinks under an existing scroll offset.
 func (a *App) scrollGitPanel(delta int) {
 	_, _, _, sh := a.sidebarRect()
-	max := len(a.gitPanelRows) - (sh - 2)
+	max := len(a.gitPanelRows) - (sh - gitPanelListTop)
 	if max < 0 {
 		max = 0
 	}
@@ -324,10 +459,34 @@ func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 	}
 	a.drawSidebarHeader(sx, sy, sw)
 
+	// Branch line: name plus how far it is from upstream — the same
+	// vocabulary as the status-bar segment, promoted to where the
+	// source-control work happens. Clicking it opens the branch picker.
 	branchStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text).Bold(true)
-	drawClipped(a.screen, sx+1, sy+1, sw-1, a.gitBranch, branchStyle)
+	branchLine := "⎇ " + a.gitBranch
+	if a.diffBase != "" {
+		branchLine += " ⇆ " + a.diffBase
+	}
+	if a.gitAhead > 0 {
+		branchLine += fmt.Sprintf(" ↑%d", a.gitAhead)
+	}
+	if a.gitBehind > 0 {
+		branchLine += fmt.Sprintf(" ↓%d", a.gitBehind)
+	}
+	drawClipped(a.screen, sx+1, sy+1, sw-1, branchLine, branchStyle)
 
-	listH := sh - 2
+	// Buttons row — commit / push / pull / everything else. While a
+	// mutation runs, say so instead of pretending clicks would work.
+	if a.gitOpBusy {
+		muted := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
+		drawClipped(a.screen, sx+1, sy+2, sw-1, "git is working…", muted)
+	} else {
+		for _, b := range a.gitPanelButtons() {
+			drawButton(a.screen, sx+b.x0, sy+2, b.label, bg, a.theme.Accent, false)
+		}
+	}
+
+	listH := sh - gitPanelListTop
 	if listH < 0 {
 		listH = 0
 	}
@@ -335,7 +494,7 @@ func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 
 	if len(a.gitPanelRows) == 0 {
 		muted := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
-		drawClipped(a.screen, sx+1, sy+2, sw-1, "No uncommitted changes", muted)
+		drawClipped(a.screen, sx+1, sy+gitPanelListTop, sw-1, "No uncommitted changes", muted)
 		return
 	}
 	for i := 0; i < listH; i++ {
@@ -343,7 +502,7 @@ func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 		if idx >= len(a.gitPanelRows) {
 			break
 		}
-		a.drawGitPanelRow(sx, sy+2+i, sw, a.gitPanelRows[idx])
+		a.drawGitPanelRow(sx, sy+gitPanelListTop+i, sw, a.gitPanelRows[idx], idx == a.gitPanelSelected)
 	}
 }
 
@@ -352,8 +511,15 @@ func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 // dimmed — basename first because the sidebar is narrow and the file
 // name is what the user scans for (the same reason VS Code's SCM list
 // leads with it).
-func (a *App) drawGitPanelRow(sx, ry, sw int, row gitChangeRow) {
+func (a *App) drawGitPanelRow(sx, ry, sw int, row gitChangeRow, selected bool) {
 	bg := a.theme.SidebarBG
+	if selected {
+		bg = a.theme.LineHL
+	}
+	rowFill := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
+	for cx := sx; cx < sx+sw; cx++ {
+		a.screen.SetContent(cx, ry, ' ', nil, rowFill)
+	}
 	letterStyle := tcell.StyleDefault.Background(bg).Foreground(gitKindColor(a.theme, row.Kind)).Bold(true)
 	nameStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
 	if a.tree != nil && row.Abs == a.tree.ActiveFile {
@@ -368,12 +534,29 @@ func (a *App) drawGitPanelRow(sx, ry, sw int, row gitChangeRow) {
 		dir = row.Rel[:idx]
 	}
 
-	drawAt(a.screen, sx+1, ry, gitKindLetter(row.Kind), letterStyle)
-	x := sx + 3
+	// Commit checkbox: ● in / ○ out of the next commit. Directories
+	// (untracked collapsed entries) reveal in the tree instead — their
+	// contents commit file-by-file once expanded, so no box.
+	if !row.IsDir {
+		check, style := '●', letterStyle
+		if !a.commitCheckOn(row.Abs) {
+			check, style = '○', mutedStyle
+		}
+		a.screen.SetContent(sx+1, ry, check, nil, style)
+	}
+	drawAt(a.screen, sx+3, ry, gitKindLetter(row.Kind), letterStyle)
+	x := sx + 5
 	x = drawClipped(a.screen, x, ry, sx+sw-x, name, nameStyle)
 	if dir != "" {
 		drawClipped(a.screen, x+2, ry, sx+sw-(x+2), dir, mutedStyle)
 	}
+}
+
+// commitCheckOn reports whether abs is in the commit set (absent =
+// checked — see checkedChangePaths).
+func (a *App) commitCheckOn(abs string) bool {
+	checked, explicit := a.gitCommitChecks[abs]
+	return !explicit || checked
 }
 
 // drawClipped draws s at (x, y) using at most maxW cells and returns the
@@ -436,6 +619,9 @@ func (a *App) statusGitSegment() string {
 		return ""
 	}
 	seg := " " + a.gitBranch
+	if a.diffBase != "" {
+		seg += " ⇆ " + a.diffBase
+	}
 	if a.gitAhead > 0 {
 		seg += " ↑" + itoa(a.gitAhead)
 	}

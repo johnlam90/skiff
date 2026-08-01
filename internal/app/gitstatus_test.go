@@ -34,7 +34,7 @@ import (
 // erroring out when run inside a plain folder.
 func TestLoadGitStatus_NotARepo(t *testing.T) {
 	dir := t.TempDir()
-	st := loadGitStatus(dir)
+	st := loadGitStatus(dir, "")
 	if st.IsRepo {
 		t.Fatalf("plain dir should not report as repo, got %+v", st)
 	}
@@ -46,7 +46,7 @@ func TestLoadGitStatus_NotARepo(t *testing.T) {
 // TestLoadGitStatus_EmptyRoot guards the "" early-return so a fresh App
 // (rootDir not yet set) can call refreshGitStatus without spawning git.
 func TestLoadGitStatus_EmptyRoot(t *testing.T) {
-	if st := loadGitStatus(""); st.IsRepo {
+	if st := loadGitStatus("", ""); st.IsRepo {
 		t.Fatalf("empty rootDir should not report as repo, got %+v", st)
 	}
 }
@@ -63,7 +63,7 @@ func TestLoadGitStatus_CleanRepo(t *testing.T) {
 	gitRun(t, repo, "add", "a.txt")
 	gitRun(t, repo, "commit", "-m", "init")
 
-	st := loadGitStatus(repo)
+	st := loadGitStatus(repo, "")
 	if !st.IsRepo {
 		t.Fatal("expected IsRepo=true on a real git repo")
 	}
@@ -87,7 +87,7 @@ func TestLoadGitLineChanges_IncludesStagedChanges(t *testing.T) {
 	writeFileT(t, path, "one\nchanged\nthree\nfour\n")
 	gitRun(t, repo, "add", "a.txt")
 
-	changes := loadGitLineChanges(repo, "a.txt")
+	changes := loadGitLineChanges(repo, "", "a.txt")
 	if len(changes) == 0 {
 		t.Fatal("staged changes should produce gutter markers")
 	}
@@ -247,7 +247,7 @@ func TestLoadGitFileDiff_DeletedFile(t *testing.T) {
 		t.Fatalf("remove: %v", err)
 	}
 
-	lines := loadGitFileDiff(repo, path, false)
+	lines := loadGitFileDiff(repo, "", path, false)
 	if len(lines) == 0 {
 		t.Fatal("deleted file should produce a diff")
 	}
@@ -267,7 +267,7 @@ func TestLoadGitFileDiff_UntrackedFallsBackToNoIndex(t *testing.T) {
 	fresh := filepath.Join(repo, "fresh.txt")
 	writeFileT(t, fresh, "hello\n")
 
-	lines := loadGitFileDiff(repo, fresh, true)
+	lines := loadGitFileDiff(repo, "", fresh, true)
 	if joined := strings.Join(lines, "\n"); !strings.Contains(joined, "+hello") {
 		t.Fatalf("untracked diff should show the file as added, got:\n%s", joined)
 	}
@@ -279,13 +279,13 @@ func TestLoadGitFileDiff_UntrackedFallsBackToNoIndex(t *testing.T) {
 // doubly matters now that untracked=true has a fallback — a tracked,
 // unchanged file must never be painted as brand new.
 func TestLoadGitFileDiff_Degrades(t *testing.T) {
-	if got := loadGitFileDiff(t.TempDir(), "x.txt", false); got != nil {
+	if got := loadGitFileDiff(t.TempDir(), "", "x.txt", false); got != nil {
 		t.Fatalf("non-repo diff = %v, want nil", got)
 	}
-	if got := loadGitFileDiff("", "x.txt", false); got != nil {
+	if got := loadGitFileDiff("", "", "x.txt", false); got != nil {
 		t.Fatalf("empty root diff = %v, want nil", got)
 	}
-	if got := loadGitFileDiff(t.TempDir(), "", true); got != nil {
+	if got := loadGitFileDiff(t.TempDir(), "", "", true); got != nil {
 		t.Fatalf("empty path diff = %v, want nil", got)
 	}
 	requireGit(t)
@@ -294,7 +294,7 @@ func TestLoadGitFileDiff_Degrades(t *testing.T) {
 	writeFileT(t, clean, "steady\n")
 	gitRun(t, repo, "add", "clean.txt")
 	gitRun(t, repo, "commit", "-m", "init")
-	if got := loadGitFileDiff(repo, clean, false); got != nil {
+	if got := loadGitFileDiff(repo, "", clean, false); got != nil {
 		t.Fatalf("clean file diff = %v, want nil", got)
 	}
 }
@@ -381,7 +381,7 @@ func TestLoadGitStatus_FindsModifiedAndUntracked(t *testing.T) {
 	writeFileT(t, filepath.Join(repo, "staged.txt"), "added")
 	gitRun(t, repo, "add", "staged.txt")
 
-	st := loadGitStatus(repo)
+	st := loadGitStatus(repo, "")
 	if !st.IsRepo {
 		t.Fatal("expected IsRepo=true")
 	}
@@ -414,7 +414,7 @@ func TestLoadGitStatus_FromSubdirectory(t *testing.T) {
 	writeFileT(t, filepath.Join(sub, "inside.txt"), "x2")
 	writeFileT(t, filepath.Join(repo, "outside.txt"), "y2")
 
-	st := loadGitStatus(sub)
+	st := loadGitStatus(sub, "")
 	if !st.IsRepo {
 		t.Fatal("subdirectory of a repo should still register as a repo")
 	}

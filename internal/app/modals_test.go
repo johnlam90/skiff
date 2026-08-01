@@ -466,7 +466,7 @@ func TestOpenTreeContext_Folder(t *testing.T) {
 	if !a.contextOpen {
 		t.Fatal("context should open")
 	}
-	wantLabels := []string{"New File", "Rename", "Delete", "Copy rel path", "Copy abs path"}
+	wantLabels := []string{"New File", "Rename", "Delete", "Cut", "Copy", "Duplicate", "Copy rel path", "Copy abs path"}
 	if len(a.contextItems) != len(wantLabels) {
 		t.Fatalf("folder context should have %d items, got %d", len(wantLabels), len(a.contextItems))
 	}
@@ -477,8 +477,8 @@ func TestOpenTreeContext_Folder(t *testing.T) {
 	}
 }
 
-// TestOpenTreeContext_File offers Rename + Delete plus the two clipboard
-// rows. New File is folder-only.
+// TestOpenTreeContext_File offers Rename / Delete / Cut / Copy /
+// Duplicate plus the two path-copy rows. New File is folder-only.
 func TestOpenTreeContext_File(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "f.txt")
@@ -497,7 +497,7 @@ func TestOpenTreeContext_File(t *testing.T) {
 		t.Fatal("file node not in tree")
 	}
 	a.openTreeContext(node, 5, 5)
-	wantLabels := []string{"Rename", "Delete", "Copy rel path", "Copy abs path"}
+	wantLabels := []string{"Rename", "Delete", "Cut", "Copy", "Duplicate", "Copy rel path", "Copy abs path"}
 	if len(a.contextItems) != len(wantLabels) {
 		t.Fatalf("file context should have %d items, got %d", len(wantLabels), len(a.contextItems))
 	}

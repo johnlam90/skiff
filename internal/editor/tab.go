@@ -68,14 +68,15 @@ type Tab struct {
 	StyleStale bool
 	GitLines   map[int]GitLineChange
 
-	// lastHighlightScrollY / lastHighlightHeight record the viewport Render
-	// last tokenised for. Without them, every redraw (mouse moves included)
-	// would re-tokenise the visible rows even when nothing changed. Render
-	// recomputes only when the content changed (StyleStale) or the viewport
-	// shifted (scroll / height), since the grid is indexed by absolute line
-	// number and only carries the visible rows.
-	lastHighlightScrollY int
-	lastHighlightHeight  int
+	// hlWinStart / hlWinEnd bound the span of lines Styles currently
+	// carries (tokenised as one window, viewport + lead each side), and
+	// lastHighlightHeight records the view height it was computed for.
+	// Render re-tokenises only when the content changes (StyleStale),
+	// the height changes, or the viewport nears the window's edge — so
+	// scrolling inside the window is free. See styleWindowStale.
+	hlWinStart          int
+	hlWinEnd            int
+	lastHighlightHeight int
 
 	// Mtime is the file's modification time as of the last successful
 	// read or write. The app's periodic disk-reconcile loop compares it
@@ -119,6 +120,13 @@ type Tab struct {
 	FindQuery   string
 	FindMatches []Match
 	FindIndex   int // -1 = no current match; otherwise an index into FindMatches.
+
+	// Preview marks a tab opened by single-clicking the file tree: the
+	// next single-click preview replaces it in place instead of piling
+	// up tabs (VS Code / druk behavior). Editing or an explicit open
+	// "pins" the tab. Always read through IsPreview(), which treats a
+	// dirty buffer as pinned regardless of this flag.
+	Preview bool
 
 	// IndentUnit is the string the editor inserts when the user presses
 	// Tab. Detected on file open (DetectIndent) so the editor matches
@@ -197,6 +205,20 @@ func newImageTab(path string) (*Tab, error) {
 // dispatch, save, etc.) without having to know about Mode strings.
 func (t *Tab) IsImage() bool {
 	return t.Mode == imageMode
+}
+
+// IsPreview reports whether the tab is still replaceable by the next
+// tree-click preview. A dirty buffer is never a preview — the user's
+// edits pin it implicitly, so a half-typed change can't be silently
+// swapped out from under them.
+func (t *Tab) IsPreview() bool {
+	return t.Preview && !t.Dirty
+}
+
+// Pin makes a preview tab permanent (drops the italic, stops the
+// replace-in-place behavior). Safe to call on any tab.
+func (t *Tab) Pin() {
+	t.Preview = false
 }
 
 // DisplayName returns the basename of Path, or "untitled" for unsaved tabs.
@@ -501,12 +523,70 @@ func (t *Tab) MoveLineEnd(extend bool) {
 	t.breakUndoGroup()
 }
 
+// JumpToLine moves the cursor to column 0 of the 1-based line n,
+// clamping to the buffer. The selection collapses — a goto is
+// navigation, not extension — and cursorMoved is set so the next
+// Render scrolls the target into view even if the caller never
+// centers the viewport.
+func (t *Tab) JumpToLine(n int) {
+	if t.IsImage() {
+		return
+	}
+	p := t.Buffer.Clamp(Position{Line: n - 1, Col: 0})
+	p.Col = 0
+	t.Cursor = p
+	t.Anchor = p
+	t.cursorMoved = true
+	t.breakUndoGroup()
+}
+
+// CenterOnCursor scrolls so the cursor's line sits mid-viewport. Used
+// by goto-line so the target lands with context above and below it
+// instead of hugging the edge the way plain EnsureVisible leaves it.
+// viewH <= 0 (headless callers, pre-first-draw) is a no-op — the next
+// Render's EnsureVisible still guarantees visibility.
+func (t *Tab) CenterOnCursor(viewH int) {
+	if viewH <= 0 {
+		return
+	}
+	t.ScrollY = t.Cursor.Line - viewH/2
+	t.clampScroll(viewH)
+}
+
 // SelectAll selects the entire buffer (anchor at start, cursor at end).
 func (t *Tab) SelectAll() {
 	t.Anchor = Position{Line: 0, Col: 0}
 	t.Cursor = t.Buffer.EndPos()
 	t.cursorMoved = true
 	t.breakUndoGroup()
+}
+
+// hlEdgeGuard is how close (in lines) the viewport may drift toward the
+// cached highlight window's edge before Render re-tokenises. The
+// cushion keeps multi-line constructs that straddle the edge colored
+// correctly and turns "re-lex per wheel tick" into "re-lex per ~190
+// scrolled lines".
+const hlEdgeGuard = 64
+
+// styleWindowStale reports whether the cached highlight window still
+// covers the viewport, with guard cushions at interior edges (the
+// file's own start and end need no cushion — there is nothing beyond
+// them to mis-color).
+func (t *Tab) styleWindowStale(viewH int) bool {
+	if t.StyleStale || viewH != t.lastHighlightHeight {
+		return true
+	}
+	if t.hlWinEnd > t.Buffer.LineCount() {
+		return true // buffer shrank under the cache — defensive
+	}
+	top, bottom := t.ScrollY, t.ScrollY+viewH
+	if t.hlWinStart > 0 && top < t.hlWinStart+hlEdgeGuard {
+		return true
+	}
+	if t.hlWinEnd < t.Buffer.LineCount() && bottom > t.hlWinEnd-hlEdgeGuard {
+		return true
+	}
+	return false
 }
 
 // EnsureVisible scrolls the viewport so the cursor is on screen. The
@@ -545,6 +625,14 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		t.renderImage(scr, th, x, y, w, h)
 		return
 	}
+	// Long files reserve the rightmost column for the scrollbar before
+	// any width-dependent math runs, so EnsureVisible and the overflow
+	// chevrons agree with what's actually paintable.
+	barVisible := t.ScrollbarVisible(h) && w > 2
+	barX := x + w - 1
+	if barVisible {
+		w--
+	}
 	// Only re-center on the cursor if the cursor moved this tick. Doing it
 	// every render fights the user when they scroll with the wheel.
 	if t.cursorMoved {
@@ -552,15 +640,14 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		t.cursorMoved = false
 	}
 	t.clampScroll(h)
-	// Re-tokenise only when the content changed (StyleStale) or the viewport
-	// shifted (scroll / height). Otherwise every redraw, including mouse
-	// moves, would re-tokenise the visible rows for nothing. The grid is
-	// indexed by absolute line number and only carries the visible rows, so
-	// a scroll change means different rows must be filled.
-	if t.StyleStale || t.ScrollY != t.lastHighlightScrollY || h != t.lastHighlightHeight {
-		t.Styles = HighlightVisible(t.Path, t.Buffer.Lines, t.ScrollY, h, th)
+	// Re-tokenise only when the cached highlight window no longer
+	// covers the viewport (content edit, resize, or the view scrolled
+	// near the window's edge). Inside the window, scrolling reuses the
+	// cache — re-lexing ~500 lines per wheel tick is what made
+	// scrolling crawl on remote machines.
+	if t.styleWindowStale(h) {
+		t.Styles, t.hlWinStart, t.hlWinEnd = HighlightWindow(t.Path, t.Buffer.Lines, t.ScrollY, h, th)
 		t.StyleStale = false
-		t.lastHighlightScrollY = t.ScrollY
 		t.lastHighlightHeight = h
 	}
 
@@ -707,6 +794,10 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		if visualCol-scrollVisual > contentW {
 			scr.SetContent(contentX+contentW-1, cy, '›', nil, overflowStyle)
 		}
+	}
+
+	if barVisible {
+		t.renderScrollbar(scr, th, barX, y, h)
 	}
 
 	// Position the hardware cursor at its visual column (so a cursor

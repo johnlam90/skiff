@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/johnlam90/skiff/internal/app"
 	"github.com/johnlam90/skiff/internal/version"
@@ -40,6 +42,7 @@ type cliResult struct {
 	Action   cliAction
 	RootDir  string
 	OpenFile string // empty when no file was named (or for non-edit actions)
+	OpenLine int    // 1-based line from a "file:42" argument; 0 = none
 	Err      error
 }
 
@@ -79,8 +82,21 @@ func resolveArgs(args []string) cliResult {
 		}
 		return cliResult{Action: actionEdit, RootDir: dir, OpenFile: target}
 	case os.IsNotExist(err):
-		// Missing path — treat as a "new file" intent (same as vim does).
-		// The Tab buffer starts empty and is written to disk on first save.
+		// Missing path — before treating it as a new file, try a
+		// trailing ":<line>" spec (`skiff main.go:42`). Only when the
+		// prefix names an existing file does the suffix count as a line
+		// number; otherwise the colon is just an unusual file name.
+		if prefix, line, ok := splitLineSuffix(target); ok {
+			if pInfo, pErr := os.Stat(prefix); pErr == nil && !pInfo.IsDir() {
+				dir := filepath.Dir(prefix)
+				if dir == "" {
+					dir = "."
+				}
+				return cliResult{Action: actionEdit, RootDir: dir, OpenFile: prefix, OpenLine: line}
+			}
+		}
+		// Genuinely new file (same intent as vim). The Tab buffer starts
+		// empty and is written to disk on first save.
 		dir := filepath.Dir(target)
 		if dir == "" {
 			dir = "."
@@ -93,6 +109,21 @@ func resolveArgs(args []string) cliResult {
 	}
 }
 
+// splitLineSuffix splits "path:42" into ("path", 42, true). Line numbers
+// are 1-based, so ":0", a bare trailing ":", or non-digits after the last
+// colon all return ok=false and the argument stays a literal file name.
+func splitLineSuffix(s string) (prefix string, line int, ok bool) {
+	i := strings.LastIndex(s, ":")
+	if i <= 0 || i == len(s)-1 {
+		return "", 0, false
+	}
+	n, err := strconv.Atoi(s[i+1:])
+	if err != nil || n <= 0 {
+		return "", 0, false
+	}
+	return s[:i], n, true
+}
+
 // printHelp writes a short usage block to stdout. Kept brief on purpose:
 // the editor is itself the help — once running, the ≡ menu lists every
 // action.
@@ -103,6 +134,7 @@ Usage:
   skiff                     Open the current directory.
   skiff <directory>         Open a project directory.
   skiff <file>              Open a file (its parent becomes the project root).
+  skiff <file>:<line>       Open a file at a line, e.g. skiff main.go:42.
   skiff --version           Print the version and exit.
   skiff --help              Print this help and exit.
 
@@ -151,6 +183,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer a.Close()
+
+	// A `file:42` argument jumps the freshly-opened tab before the first
+	// draw; Render's EnsureVisible brings the line on screen.
+	if res.OpenLine > 0 {
+		a.OpenFileAtLine(res.OpenFile, res.OpenLine)
+	}
 
 	if err := a.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "skiff:", err)

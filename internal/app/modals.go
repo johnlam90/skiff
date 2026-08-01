@@ -65,6 +65,20 @@ func (a *App) closeAllModals() {
 	a.findValue = nil
 	a.findCursor = 0
 	a.findScroll = 0
+	a.diffPanelRow = -1
+	// A modal opening over a list picker cancels it properly so a
+	// preview hook (the theme picker's live preview) gets reverted
+	// rather than stranded.
+	if a.listPickOpen {
+		a.cancelListPick()
+	}
+	a.projFindOpen = false
+	a.projFindValue = nil
+	a.projFindCursor = 0
+	a.projFindScroll = 0
+	a.projFindMatches = nil
+	a.projFindFolded = nil
+	a.projFindBusy = false
 	a.hoveredMenuRow = -1
 	a.contextNode = nil
 	a.contextItems = nil
@@ -915,6 +929,12 @@ func (a *App) openTreeContext(n *filetree.Node, x, y int) {
 	if n != a.tree.Root {
 		items = append(items, contextItem{label: "Rename", action: ctxRename})
 		items = append(items, contextItem{label: "Delete", action: ctxDelete})
+		items = append(items, contextItem{label: "Cut", action: ctxCutNode})
+		items = append(items, contextItem{label: "Copy", action: ctxCopyNode})
+		items = append(items, contextItem{label: "Duplicate", action: ctxDuplicateNode})
+	}
+	if a.hasFileClip() {
+		items = append(items, contextItem{label: "Paste here", action: ctxPasteNode})
 	}
 	items = append(items, contextItem{label: "Copy rel path", action: ctxCopyRelativePath})
 	items = append(items, contextItem{label: "Copy abs path", action: ctxCopyAbsolutePath})

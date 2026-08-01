@@ -45,8 +45,11 @@ The goals, in order:
    ends up in your local Mac clipboard.
 4. **One static binary.** No runtime, no plugin manager, no config
    directory full of YAML. Drop it on a server and run it.
-5. **Looks reasonable.** Tokyo Night-inspired palette out of the box,
-   syntax highlighting via [chroma](https://github.com/alecthomas/chroma)
+5. **Looks reasonable.** A hand-tuned Tokyo Night palette out of the
+   box, 25 more themes one menu away (`≡` → **Theme…** — Catppuccin,
+   Dracula, Gruvbox, Nord, Rosé Pine, Solarized, and friends, ported
+   from [druk](https://github.com/letstri/druk)), and syntax
+   highlighting via [chroma](https://github.com/alecthomas/chroma)
    (no CGO, no tree-sitter setup).
 
 ## Features
@@ -69,6 +72,29 @@ The goals, in order:
   bar shows the branch plus a change count, and the sidebar's
   [GIT tab](#git-changes) lists every uncommitted change with
   click-to-diff — VS Code's Source Control view, one click away.
+- **Project-wide search** — `Esc F` sweeps every file in the project
+  for your query, groups the hits by file (fold noisy files with `Tab`
+  or a click), and opens any hit at its line.
+- **Preview tabs** — a single tree click opens a file in one reusable
+  *italic* tab, so browsing ten files doesn't leave ten tabs behind.
+  Click the file again, or just start typing, to pin it.
+- **Scrollbar with a change map** — long files get a clickable,
+  draggable scrollbar on the editor's right edge with the file's git
+  changes marked along it, so "where did I change this file" is one
+  glance (and one click) away.
+- **File clipboard** — cut, copy, paste, and duplicate files or folders
+  from the tree's right-click menu or the main `≡` menu. Nothing is
+  ever overwritten: a taken name becomes `name copy.ext`.
+- **Session restore** — reopening a project brings back your open tabs
+  (cursor and scroll included), expanded folders, and sidebar exactly
+  as you left them.
+- **26 themes with live preview** — `≡` → **Theme…** opens a picker
+  that restyles the whole editor as you arrow (or hover) through the
+  list; type to filter ("cat" → the Catppuccins), `Enter` keeps,
+  `Esc` puts your old theme back. The choice persists to
+  `~/.config/skiff/config.json` (`{"theme": "dracula"}`), the same
+  tiny file the Nerd-Font icons preference lives in. Tokyo Night
+  stays the default.
 - **Toggleable, draggable sidebar** — show/hide the file tree from the
   menu, or drag the splitter to resize it.
 - **Clipboard over SSH** — OSC 52, including a `tmux` passthrough so
@@ -162,6 +188,7 @@ make install        # builds and installs to $GOPATH/bin
 skiff              # opens the current directory
 skiff ~/code/app   # opens a specific project root
 skiff main.go      # opens a file (project root = its parent dir)
+skiff main.go:42   # …opened at line 42
 skiff new-file.go  # creates the file on first save (vim-style)
 skiff --version    # print version and exit
 skiff --help       # print short usage
@@ -188,29 +215,37 @@ Skiff deliberately avoids `Ctrl+`-style shortcuts (they fight `tmux`,
 real terminal). Instead, **`Esc` is the leader key**: tap `Esc`, then
 within half a second tap one of the letters below.
 
-| Combo       | Action               |
-| ----------- | -------------------- |
-| `Esc Esc`   | Open ≡ menu          |
-| `Esc s`     | Save                 |
-| `Esc u`     | Undo                 |
-| `Esc r`     | Redo                 |
-| `Esc w`     | Close tab            |
-| `Esc q`     | Quit                 |
-| `Esc n`     | New file             |
-| `Esc t`     | Toggle sidebar       |
-| `Esc /`     | Toggle line comment  |
-| `Esc f`     | Find in file         |
-| `Esc p`     | Find file in project |
-| `Esc g`     | Git changes          |
+| Combo       | Action                 |
+| ----------- | ---------------------- |
+| `Esc Esc`   | Open ≡ menu            |
+| `Esc s`     | Save                   |
+| `Esc u`     | Undo                   |
+| `Esc r`     | Redo                   |
+| `Esc w`     | Close tab              |
+| `Esc o`     | Reopen closed tab      |
+| `Esc q`     | Quit                   |
+| `Esc n`     | New file               |
+| `Esc t`     | Toggle sidebar         |
+| `Esc /`     | Toggle line comment    |
+| `Esc k`     | Move line up           |
+| `Esc j`     | Move line down         |
+| `Esc d`     | Duplicate line         |
+| `Esc f`     | Find in file           |
+| `Esc F`     | Find in project        |
+| `Esc l`     | Go to line             |
+| `Esc p`     | Find file in project   |
+| `Esc g`     | Git changes            |
 
 A lone `Esc` is harmless — if you don't follow it with a bound key
 within the window, your next keystroke goes to the editor as normal,
-so accidental `Esc` taps never swallow a real character.
+so accidental `Esc` taps never swallow a real character. And while the
+window is armed, a one-row cheat-strip above the status bar lists every
+key that works right now — no memorizing required.
 
 Everything reachable by hotkey is also reachable from the `≡` menu —
 the hotkeys are just a faster path for the actions you reach for most.
 
-### Find in file
+### Find in file (and replace)
 
 `Esc f` (or **Find in file** from the `≡` menu) opens a search bar
 above the status bar:
@@ -223,6 +258,11 @@ above the status bar:
   highlight live as you type.
 - `Enter` jumps to the next match (wraps at the end), `Shift+Enter`
   jumps to the previous one.
+- `Tab` grows the bar a **replace** field (`Find: foo ⇒ bar`): `Enter`
+  replaces the current match and walks forward, `Shift+Enter` replaces
+  every match in the file as one undo step, `Tab` hops back to the
+  query. Replace is per-file; project-wide replace is deliberately not
+  offered yet.
 - `Esc` closes the bar and clears the highlights — each `Esc f` opens
   a fresh search.
 - The active match is painted a brighter color than the rest, so you
@@ -271,10 +311,11 @@ Skiff panel:
 
 ```
  EXPLORER   GIT
- main
- M app.go  internal/app
- A gitchanges.go  internal/app
- D old.go  internal/app
+ ⎇ main ↑1
+ [ Commit ] [ Push ] [ Pull ] [ ⋯ ]
+ ● M app.go  internal/app
+ ● A gitchanges.go  internal/app
+ ○ D old.go  internal/app
 ```
 
 - Every changed path in the project, sorted, with a colored status
@@ -303,13 +344,42 @@ Skiff panel:
 - The status bar shows ` main ↑2 ↓1 · 4 ` when the branch has
   diverged from its upstream — the "you haven't pushed" nudge, before
   you quit the editor.
-- **Commit history** (`≡` menu, or click the branch row in the GIT
-  panel) lists recent commits — SHA, subject, relative age — and a
+- **Commit straight from the panel.** Every row carries a checkbox
+  (`●` in, `○` out — click to toggle; everything starts checked).
+  `[ Commit ]` asks for a message and commits exactly the checked
+  files; anything already staged in a shell stays out of it. The
+  same flow lives at `≡` → **Commit changes…**.
+- **Push / Pull / Fetch.** `[ Push ]` pushes the branch — a branch's
+  first push sets the upstream automatically. A rejected push gets a
+  one-click fix offered ("origin has commits you don't — pull, then
+  push?") instead of a wall of stderr. `[ Pull ]` fast-forwards;
+  anything needing a real merge fails fast with a plain-language
+  explanation. Fetch lives under `[ ⋯ ]`.
+- **Branches.** Click the branch line (or `≡` → **Switch branch…**)
+  to pick any local or remote branch — picking `origin/x` creates the
+  local tracking branch the way you'd expect. **New branch…** is
+  under `[ ⋯ ]`, next to **Stash changes**, **Pop stash**, and
+  **Undo last commit** (a soft reset: the commit disappears, its
+  changes stay in your tree).
+- **Compare against any ref.** `[ ⋯ ]` → **Compare against…** points
+  the *whole editor* at another branch: tree tint, gutter bars, the
+  panel's list and every diff show what changed versus that ref —
+  "review this branch against main" as a mode. The status bar shows
+  `⇆ main` while it's on; pick **HEAD** to come back. Committing is
+  deliberately disabled in this mode (the index is always HEAD's).
+- **Walk a review with the arrows.** With a panel-opened diff up,
+  `↓`/`↑` jump straight to the next / previous changed file — read
+  the whole change-set end to end without touching the mouse. Every
+  git mutation runs on a background goroutine (never blocking typing),
+  one at a time, and refreshes the panel, tree tint, and gutter marks
+  when it lands.
+- **Commit history** (`≡` menu, or under the panel's `[ ⋯ ]` button)
+  lists recent commits — SHA, subject, relative age — and a
   click opens that commit's full diff, with per-file boundary rows
   for multi-file commits. **History of this file** does the same
   scoped to the active tab (with `--follow`, so renames don't
-  truncate the story). Both are read-only: no checkout, no rebase,
-  no cherry-pick — rewriting history stays in your shell.
+  truncate the story). Both are read-only — rewriting old history
+  stays in your shell.
 - An **untracked** file shows its whole content as an added diff. A
   **deleted** file shows what was removed, with no open button — there
   is nothing left to open. An untracked **directory** flips back to

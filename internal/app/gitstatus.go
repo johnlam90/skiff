@@ -57,13 +57,13 @@ func (e *gitStatusEvent) When() time.Time { return e.when }
 // whole-repo walk) plus one `git diff` of gutter lines per open tab.
 // It only shells out and builds data — no App state — so it is safe to
 // run off the main thread.
-func collectGitStatus(rootDir string, tabPaths []string, skipStatus bool) gitStatusResult {
+func collectGitStatus(rootDir, base string, tabPaths []string, skipStatus bool) gitStatusResult {
 	res := gitStatusResult{tabLines: map[string]map[int]editor.GitLineChange{}}
 	if !skipStatus {
-		res.st = loadGitStatus(rootDir)
+		res.st = loadGitStatus(rootDir, base)
 	}
 	for _, path := range tabPaths {
-		res.tabLines[path] = loadGitLineChanges(rootDir, path)
+		res.tabLines[path] = loadGitLineChanges(rootDir, base, path)
 	}
 	return res
 }
@@ -90,7 +90,7 @@ type gitStatus struct {
 // zero value (IsRepo=false, no dirty paths). Any failure of the underlying
 // commands degrades the same way — we'd rather lose the dirty highlight
 // than crash the editor over a transient git issue.
-func loadGitStatus(rootDir string) gitStatus {
+func loadGitStatus(rootDir, base string) gitStatus {
 	if rootDir == "" {
 		return gitStatus{}
 	}
@@ -118,7 +118,52 @@ func loadGitStatus(rootDir string) gitStatus {
 	}
 
 	dirty := parsePorcelain(out, toplevel)
+	if base != "" {
+		// Compare-against-ref mode (druk's diffBase): the change set is
+		// everything different from base, merged with the porcelain's
+		// untracked entries (a diff can't see files git doesn't track).
+		vsBase := loadGitDiffNameStatus(rootDir, base, toplevel)
+		for abs, kind := range dirty {
+			if kind == filetree.GitChangeAdded {
+				if _, exists := vsBase[abs]; !exists {
+					vsBase[abs] = kind
+				}
+			}
+		}
+		dirty = vsBase
+	}
 	return gitStatus{IsRepo: true, Root: toplevel, DirtyFiles: dirty, Branch: loadGitBranch(rootDir), Ahead: ahead, Behind: behind}
+}
+
+// loadGitDiffNameStatus builds the dirty map versus an arbitrary ref
+// via `git diff --name-status <ref>` — the loader behind the
+// compare-against mode. Best-effort like every loader here.
+func loadGitDiffNameStatus(rootDir, base, toplevel string) map[string]filetree.GitChangeKind {
+	dirty := map[string]filetree.GitChangeKind{}
+	out, err := exec.Command("git", "-C", rootDir, "diff", "--name-status", base).Output()
+	if err != nil {
+		return dirty
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		parts := strings.Split(line, "\t")
+		if len(parts) < 2 || parts[0] == "" {
+			continue
+		}
+		rel := parts[len(parts)-1] // renames list old	new; keep the new
+		var kind filetree.GitChangeKind
+		switch parts[0][0] {
+		case 'A':
+			kind = filetree.GitChangeAdded
+		case 'D':
+			kind = filetree.GitChangeDeleted
+		case 'R':
+			kind = filetree.GitChangeRenamed
+		default:
+			kind = filetree.GitChangeModified
+		}
+		dirty[filepath.Join(toplevel, rel)] = kind
+	}
+	return dirty
 }
 
 // loadGitAheadBehind counts commits versus the current branch's
@@ -310,12 +355,16 @@ func dirtyFolderSet(dirtyFiles map[string]filetree.GitChangeKind, root string) m
 	return folders
 }
 
-// loadGitLineChanges returns line-level worktree changes for path.
-func loadGitLineChanges(rootDir, path string) map[int]editor.GitLineChange {
+// loadGitLineChanges returns line-level changes for path versus base
+// ("" = HEAD, the everyday worktree gutter).
+func loadGitLineChanges(rootDir, base, path string) map[int]editor.GitLineChange {
 	if rootDir == "" || path == "" {
 		return nil
 	}
-	out, err := exec.Command("git", "-C", rootDir, "diff", "--unified=0", "HEAD", "--", path).Output()
+	if base == "" {
+		base = "HEAD"
+	}
+	out, err := exec.Command("git", "-C", rootDir, "diff", "--unified=0", base, "--", path).Output()
 	if err != nil || len(out) == 0 {
 		return nil
 	}
@@ -332,11 +381,14 @@ func loadGitLineChanges(rootDir, path string) map[int]editor.GitLineChange {
 // as brand new just because its HEAD diff is empty. Same best-effort
 // contract as every other loader here: nil on any failure and the
 // caller shows a friendly placeholder instead.
-func loadGitFileDiff(rootDir, path string, untracked bool) []string {
+func loadGitFileDiff(rootDir, base, path string, untracked bool) []string {
 	if rootDir == "" || path == "" {
 		return nil
 	}
-	out, err := exec.Command("git", "-C", rootDir, "diff", "HEAD", "--", path).Output()
+	if base == "" {
+		base = "HEAD"
+	}
+	out, err := exec.Command("git", "-C", rootDir, "diff", base, "--", path).Output()
 	if err != nil || len(out) == 0 {
 		if !untracked {
 			return nil

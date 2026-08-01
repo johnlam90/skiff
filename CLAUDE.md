@@ -39,16 +39,26 @@ features, make sure they're reachable from the main menu first.
 ## Architecture map
 
 ```
-main.go                       Entry — parses optional rootDir arg
+main.go                       Entry — parses optional rootDir / file[:line] arg
 internal/app/app.go           Event loop, layout, menu modal, splitter, all rendering
+internal/app/projfind.go      Project-wide content search panel (Esc-F)
+internal/app/preview.go       Shared file-open path + preview-tab rules
+internal/app/fileclip.go      File clipboard: cut/copy/paste/duplicate tree entries
+internal/app/session_restore.go App ↔ session store bridge (capture/restore)
+internal/app/gitops.go        Git write side: commit/push/pull/branch/stash runner
 internal/editor/buffer.go     Position + Buffer ([]string lines), edit primitives
 internal/editor/tab.go        Tab: path, buffer, cursor, anchor, scroll, dirty state
+internal/editor/lineops.go    Move / duplicate line-block gestures
+internal/editor/scrollbar.go  Right-edge scrollbar + git change map
 internal/editor/highlight.go  Chroma → []tcell.Style per line
 internal/filetree/filetree.go Lazy tree, identity-preserving refresh, hit-test, render
+internal/search/search.go     Literal smart-case project search engine
+internal/session/session.go   Per-project session store (~/.local/state/skiff)
 internal/clipboard/clipboard.go OSC 52 to /dev/tty with tmux passthrough wrap
-internal/spiceconfig/spiceconfig.go ~/.config/skiff/config.json loader (icons mode)
+internal/spiceconfig/spiceconfig.go ~/.config/skiff/config.json (icons, theme)
 internal/icons/icons.go       Nerd Font detection + per-file glyph mapping
-internal/theme/theme.go       Tokyo Night palette + syntax color mapping
+internal/theme/theme.go       Default Tokyo Night palette + contrast helpers
+internal/theme/palettes.go    Theme registry — 25 druk-ported palettes + ByID
 internal/version/version.go   const Version = "x.y.z" — single line, CI bumps it
 ```
 
@@ -139,8 +149,9 @@ tab's mtime: clean buffer + changed file → silent reload; dirty buffer
 ### Modal layout via `relY` and dynamic `labelFor`
 The action menu uses named struct literals with an optional `labelFor`
 hook so labels like "Show Sidebar" / "Hide Sidebar" toggle in place.
-Dividers are drawn at fixed `relY` offsets — when adding a menu item,
-update those offsets and `modalHeight`.
+`menuLayout` recomputes every `relY`, the divider rows, and the modal
+height on each call — adding a menu item is just adding the struct
+literal (plus updating the pinned numbers in `TestMenuLayout_*`).
 
 ### Sidebar splitter drag
 A drag is detected when a press lands at exactly `x == splitterX()`.
@@ -183,7 +194,9 @@ loops forever.
 
 - `Ctrl+` editor shortcuts (they fight tmux/terminals — that's the
   whole reason the action menu exists).
-- A config file / dotfile / plugin system. Skiff is opinionated.
+- A config *system*. Skiff is opinionated: `~/.config/skiff/config.json`
+  exists but stays a flat file of tiny keys (`icons`, `theme`) — no
+  plugin manifests, no per-key UI beyond a picker, no dotfile sprawl.
 - CGO dependencies. The whole point is one static binary.
 - Tree-sitter. We use Chroma intentionally — pure Go, no setup.
 - A separate `homebrew-tap` repo. The formula lives here under

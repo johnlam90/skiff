@@ -1254,3 +1254,58 @@ func TestReload_HidesTrashEntries(t *testing.T) {
 		t.Fatalf("expected only real.txt, got %v", tr.Root.Children)
 	}
 }
+
+// TestExpandedDirsRoundTrip pins the session-persistence pair: expand
+// some nested folders, capture ExpandedDirs, collapse everything, and
+// ExpandDirs must restore exactly the expanded set.
+func TestExpandedDirsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"a/b", "c"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	tr, err := New(dir)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	tr.ExpandDirs([]string{"a", filepath.Join("a", "b")})
+
+	got := tr.ExpandedDirs()
+	want := []string{"a", filepath.Join("a", "b")}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("ExpandedDirs: got %v, want %v", got, want)
+	}
+
+	// Fresh tree — restore from the captured list.
+	tr2, err := New(dir)
+	if err != nil {
+		t.Fatalf("new 2: %v", err)
+	}
+	tr2.ExpandDirs(got)
+	got2 := tr2.ExpandedDirs()
+	if len(got2) != 2 {
+		t.Fatalf("restore: got %v", got2)
+	}
+}
+
+// TestExpandDirsUnknownSkipped: stale session entries (deleted folders,
+// files where folders used to be) are skipped without side effects.
+func TestExpandDirsUnknownSkipped(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "real"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("x"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	tr, err := New(dir)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	tr.ExpandDirs([]string{"ghost", "file.txt", "real"})
+	got := tr.ExpandedDirs()
+	if len(got) != 1 || got[0] != "real" {
+		t.Fatalf("only 'real' should expand, got %v", got)
+	}
+}

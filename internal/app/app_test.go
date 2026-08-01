@@ -53,6 +53,7 @@ func newTestApp(t *testing.T, root string) *App {
 		rootDir:        tree.Root.Path,
 		tree:           tree,
 		hoveredMenuRow: -1,
+		diffPanelRow:   -1,
 		sidebarShown:   true,
 		sidebarWidth:   defaultSidebarWidth,
 	}
@@ -62,6 +63,20 @@ func newTestApp(t *testing.T, root string) *App {
 	// cached branch is what gates the Git panel, so tests need the same
 	// seeding to see the app the way a real session does.
 	a.refreshGitStatus()
+	// Drain any in-flight background git-status refresh before teardown:
+	// a `git status` goroutine still writing .git lock files while
+	// t.TempDir removes the repo is the classic "directory not empty"
+	// flake. Registered after the Fini cleanup so it runs first (LIFO).
+	t.Cleanup(func() {
+		deadline := time.Now().Add(3 * time.Second)
+		for a.gitRefreshInFlight && time.Now().Before(deadline) {
+			if scr.HasPendingEvent() {
+				a.handleEvent(scr.PollEvent())
+			} else {
+				time.Sleep(2 * time.Millisecond)
+			}
+		}
+	})
 	return a
 }
 
@@ -175,6 +190,10 @@ func TestMenuButtonRect(t *testing.T) {
 // to (0,0) when the window is too small to fit it.
 func TestMenuModalRect_Centered(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
+	// The full menu no longer fits a 40-row screen (it clamps + scrolls
+	// there); use a taller viewport so this test keeps pinning the
+	// *centering* rule rather than the clamp.
+	a.width, a.height = 120, 60
 	x, y, w, h := a.menuModalRect()
 	_, _, expectedH := a.menuLayout()
 	if w != modalWidth || h != expectedH {
@@ -1524,6 +1543,9 @@ func TestHandleMouse_SidebarSplitterDrag(t *testing.T) {
 // dismisses on outside click.
 func TestHandleMenuMouse_ClicksRowAndOutside(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
+	// Tall viewport: the toggle row sits near the menu's bottom, which
+	// on a 40-row screen falls into the scrolled-off region.
+	a.width, a.height = 120, 60
 	a.openMenu()
 	mx, my, _, _ := a.menuModalRect()
 	// Click on the sidebar toggle row — flips the sidebar.
@@ -1559,6 +1581,43 @@ func TestHandleMenuMouse_NoButtonIsNoop(t *testing.T) {
 	a.handleMenuMouse(0, 0, 0)
 	if !a.menuOpen {
 		t.Fatal("motion-only event should not close menu")
+	}
+}
+
+// TestScrollbarPressScrollsAndDrags pins the mouse path: pressing the
+// editor's rightmost column on a long file jumps the scroll and enters
+// the "scrollbar" drag mode; dragging keeps following the row; release
+// exits the mode.
+func TestScrollbarPressScrollsAndDrags(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "long.txt")
+	content := strings.Repeat("line\n", 300)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(path)
+
+	ex, ey, ew, eh := a.editorRect()
+	barX := ex + ew - 1
+	// Press near the bottom of the bar.
+	a.handleMouse(tcell.NewEventMouse(barX, ey+eh-1, tcell.Button1, 0))
+	if a.dragMode != "scrollbar" {
+		t.Fatalf("dragMode = %q, want scrollbar", a.dragMode)
+	}
+	tab := a.activeTabPtr()
+	if tab.ScrollY == 0 {
+		t.Fatal("bottom press should scroll the tab")
+	}
+	// Drag back to the top row.
+	a.handleMouse(tcell.NewEventMouse(barX, ey, tcell.Button1, 0))
+	if tab.ScrollY != 0 {
+		t.Fatalf("drag to top should return to 0, got %d", tab.ScrollY)
+	}
+	// Release exits the mode.
+	a.handleMouse(tcell.NewEventMouse(barX, ey, tcell.ButtonNone, 0))
+	if a.dragMode != "" {
+		t.Fatalf("release should clear dragMode, got %q", a.dragMode)
 	}
 }
 
@@ -1672,13 +1731,13 @@ func TestMenuLayout_NoCustomActions(t *testing.T) {
 	a.customActions = nil
 	items, dividers, h := a.menuLayout()
 
-	if h != 37 {
-		t.Errorf("modalHeight = %d, want 37", h)
+	if h != 53 {
+		t.Errorf("modalHeight = %d, want 53", h)
 	}
-	if got := len(items); got != 26 {
-		t.Errorf("item count = %d, want 26 built-ins", got)
+	if got := len(items); got != 41 {
+		t.Errorf("item count = %d, want 41 built-ins", got)
 	}
-	wantDiv := []int{2, 6, 10, 13, 18, 27, 32, 34}
+	wantDiv := []int{2, 7, 11, 16, 26, 38, 43, 47, 50}
 	if len(dividers) != len(wantDiv) {
 		t.Fatalf("dividers = %v, want %v", dividers, wantDiv)
 	}
@@ -1839,8 +1898,8 @@ func TestMenuLayout_WithCustomActions(t *testing.T) {
 	}
 	items, _, h := a.menuLayout()
 
-	if h != 40 { // 37 + 2 items + 1 divider
-		t.Errorf("modalHeight = %d, want 40", h)
+	if h != 56 { // 53 + 2 items + 1 divider
+		t.Errorf("modalHeight = %d, want 56", h)
 	}
 	// Custom actions should be the second-to-last and third-to-last
 	// rows, with Quit as the final row.

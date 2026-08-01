@@ -5,11 +5,11 @@
 // Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 // =============================================================================
 
-// Package theme defines the editor's curated color palette. The editor
-// intentionally ships one opinionated dark theme — there is no runtime
-// configuration, no theme file, no JSON. To restyle the editor, edit this
-// file and recompile. The palette is inspired by Tokyo Night and tuned so
-// the syntax colors stay legible against the chrome.
+// Package theme defines the editor's color palettes. The default is a
+// hand-tuned Tokyo Night (this file) with WCAG fences in theme_test.go;
+// palettes.go carries the registry of selectable themes ported from
+// druk. Themes are compiled in — there is no theme *file* format; the
+// only runtime knob is config.json's "theme" key naming a registry id.
 package theme
 
 import (
@@ -26,6 +26,7 @@ type Theme struct {
 	BG        tcell.Color // Editor background.
 	SidebarBG tcell.Color // File tree / inactive tab background, slightly darker than BG.
 	StatusBG  tcell.Color // Status bar background.
+	StatusFg  tcell.Color // Status bar text — paired with StatusBG per palette.
 	LineHL    tcell.Color // Active line highlight.
 
 	// --- Foregrounds & accents ---
@@ -108,15 +109,15 @@ func (t Theme) SelectionFg(fg tcell.Color) tcell.Color {
 	return t.Text
 }
 
-// Default returns the editor's curated dark theme. It is the only theme the
-// editor ships with — calling code can tweak fields on the returned value if
-// it really needs to, but there is no theme-loading machinery on purpose.
+// Default returns the editor's hand-tuned Tokyo Night theme — the
+// registry's first entry and the fallback for unknown ids.
 func Default() Theme {
 	return Theme{
 		// Surfaces.
 		BG:        tcell.NewRGBColor(0x1a, 0x1b, 0x26),
 		SidebarBG: tcell.NewRGBColor(0x16, 0x16, 0x1e),
 		StatusBG:  tcell.NewRGBColor(0x7a, 0xa2, 0xf7),
+		StatusFg:  tcell.NewRGBColor(0x1a, 0x1b, 0x26), // == BG: dark text on the accent bar
 		LineHL:    tcell.NewRGBColor(0x1f, 0x20, 0x2e),
 
 		// Foregrounds & accents. Muted and Subtle are brighter than

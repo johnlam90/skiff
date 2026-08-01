@@ -1051,11 +1051,11 @@ func TestTab_RenderSkipsHighlightWhenNotStale(t *testing.T) {
 	}
 }
 
-// TestTab_RenderRecomputesHighlightOnScroll confirms Render re-tokenises
-// when the viewport scrolls. The highlight grid is indexed by absolute line
-// number and only carries the visible rows, so a scroll change means
-// different rows must be filled even when the content is unchanged.
-func TestTab_RenderRecomputesHighlightOnScroll(t *testing.T) {
+// TestTab_RenderScrollKeepsRowsStyled confirms the windowed highlight
+// cache serves scrolled-to rows without a re-tokenise: the grid pointer
+// survives a small scroll (no recompute) and the newly visible rows are
+// already styled, because the window carries a lead beyond the viewport.
+func TestTab_RenderScrollKeepsRowsStyled(t *testing.T) {
 	scr := newSimScreen(t, 40, 10)
 	defer scr.Fini()
 
@@ -1070,13 +1070,16 @@ func TestTab_RenderRecomputesHighlightOnScroll(t *testing.T) {
 	firstPtr := reflect.ValueOf(tab.Styles).Pointer()
 
 	// Scroll without moving the cursor (cursorMoved=false so EnsureVisible
-	// doesn't snap ScrollY back). The visible rows changed, so Render must
-	// re-tokenise even though StyleStale is false.
+	// doesn't snap ScrollY back). The 51-line file fits one window, so the
+	// cache must be reused as-is — and row 20 must already carry styles.
 	tab.ScrollY = 20
 	tab.cursorMoved = false
 	tab.Render(scr, theme.Default(), 0, 0, 40, 10)
-	if reflect.ValueOf(tab.Styles).Pointer() == firstPtr {
-		t.Fatal("expected Render to re-highlight after scroll")
+	if reflect.ValueOf(tab.Styles).Pointer() != firstPtr {
+		t.Fatal("small scroll inside the window must not re-tokenise")
+	}
+	if tab.Styles[20] == nil {
+		t.Fatal("scrolled-to rows must already be styled by the window")
 	}
 }
 
@@ -1141,7 +1144,7 @@ func TestTab_Render_SelectedCommentReadable(t *testing.T) {
 	// Freeze the highlight cache so Render keeps the hand-set styles
 	// instead of re-tokenising the (extension-less) buffer.
 	tab.StyleStale = false
-	tab.lastHighlightScrollY = 0
+	tab.hlWinEnd = tab.Buffer.LineCount()
 	tab.lastHighlightHeight = 4
 	// Select the first three runes ("// ") and leave "hi" unselected.
 	tab.Anchor = Position{Line: 0, Col: 0}
@@ -1191,7 +1194,7 @@ func TestTab_Render_FindMatchForcesTextFg(t *testing.T) {
 	}
 	// Freeze the highlight cache so Render keeps the hand-set styles.
 	tab.StyleStale = false
-	tab.lastHighlightScrollY = 0
+	tab.hlWinEnd = tab.Buffer.LineCount()
 	tab.lastHighlightHeight = 4
 	tab.Cursor = Position{Line: 0, Col: 0}
 	tab.Anchor = tab.Cursor
@@ -1235,7 +1238,7 @@ func TestTab_Render_SelectedLowContrastSyntaxSwaps(t *testing.T) {
 		{kwStyle, kwStyle, kwStyle, strStyle, strStyle, strStyle},
 	}
 	tab.StyleStale = false
-	tab.lastHighlightScrollY = 0
+	tab.hlWinEnd = tab.Buffer.LineCount()
 	tab.lastHighlightHeight = 4
 	// Select the whole line.
 	tab.Anchor = Position{Line: 0, Col: 0}
@@ -1254,5 +1257,93 @@ func TestTab_Render_SelectedLowContrastSyntaxSwaps(t *testing.T) {
 	fg, _, _ = cells[0*w+contentX+3].Style.Decompose() // 's' of "str"
 	if fg != th.SynString {
 		t.Fatalf("selected string rune fg = %v, want SynString kept (it passes AA)", fg)
+	}
+}
+
+// TestJumpToLineClamps pins JumpToLine's contract: 1-based input, cursor
+// lands at column 0 of the requested line, the selection collapses, and
+// out-of-range lines clamp to the buffer instead of panicking.
+func TestJumpToLineClamps(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("a\nb\nc\nd\ne")}
+	tab.JumpToLine(3)
+	if tab.Cursor != (Position{Line: 2, Col: 0}) {
+		t.Fatalf("cursor: got %+v, want line 2 col 0", tab.Cursor)
+	}
+	if tab.Anchor != tab.Cursor {
+		t.Fatalf("anchor should collapse to cursor, got %+v", tab.Anchor)
+	}
+	tab.JumpToLine(999)
+	if tab.Cursor.Line != 4 {
+		t.Fatalf("overshoot should clamp to last line, got %d", tab.Cursor.Line)
+	}
+	tab.JumpToLine(-5)
+	if tab.Cursor.Line != 0 {
+		t.Fatalf("undershoot should clamp to first line, got %d", tab.Cursor.Line)
+	}
+}
+
+// TestCenterOnCursor verifies the goto-line scroll rule: the cursor's
+// line ends up mid-viewport rather than pinned to an edge, and a cursor
+// near the top never produces a negative scroll.
+func TestCenterOnCursor(t *testing.T) {
+	lines := make([]string, 100)
+	for i := range lines {
+		lines[i] = "x"
+	}
+	tab := &Tab{Buffer: &Buffer{Lines: lines}}
+	tab.Cursor = Position{Line: 50}
+	tab.CenterOnCursor(20)
+	if tab.ScrollY != 40 {
+		t.Fatalf("ScrollY: got %d, want 40 (50 - 20/2)", tab.ScrollY)
+	}
+	tab.Cursor = Position{Line: 2}
+	tab.CenterOnCursor(20)
+	if tab.ScrollY != 0 {
+		t.Fatalf("near-top center should clamp to 0, got %d", tab.ScrollY)
+	}
+}
+
+// TestRenderScrollReusesHighlightCache pins the remote-performance fix:
+// scrolling within the cached highlight window must NOT re-tokenise (a
+// poisoned cache row survives the redraw), while scrolling far outside
+// the window rebuilds it.
+func TestRenderScrollReusesHighlightCache(t *testing.T) {
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	defer scr.Fini()
+	scr.SetSize(40, 10)
+
+	lines := make([]string, 1000)
+	for i := range lines {
+		lines[i] = "x := 1"
+	}
+	tab := &Tab{Buffer: &Buffer{Lines: lines}, StyleStale: true}
+	tab.initUndo()
+	th := theme.Default()
+
+	tab.Render(scr, th, 0, 0, 40, 10)
+	if tab.hlWinEnd <= tab.hlWinStart {
+		t.Fatalf("first render should populate the window, got [%d,%d)", tab.hlWinStart, tab.hlWinEnd)
+	}
+	// Poison a cached row, scroll a little (still inside the window),
+	// and check the poison survives — proof no re-tokenise happened.
+	poison := []tcell.Style{tcell.StyleDefault.Foreground(tcell.ColorRed)}
+	tab.Styles[8] = poison
+	tab.ScrollY = 5
+	tab.Render(scr, th, 0, 0, 40, 10)
+	if len(tab.Styles[8]) != 1 {
+		t.Fatal("small scroll re-tokenised — the cache window was ignored")
+	}
+
+	// A jump far past the window must rebuild it.
+	tab.ScrollY = 600
+	tab.Render(scr, th, 0, 0, 40, 10)
+	if tab.Styles[600] == nil {
+		t.Fatal("jump outside the window should re-tokenise around the new viewport")
+	}
+	if len(tab.Styles[8]) == 1 && tab.hlWinStart <= 8 {
+		t.Fatal("window did not move with the viewport")
 	}
 }
