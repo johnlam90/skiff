@@ -39,12 +39,20 @@ features, make sure they're reachable from the main menu first.
 ## Architecture map
 
 ```
-main.go                       Entry — parses optional rootDir arg
+main.go                       Entry — parses optional rootDir / file[:line] arg
 internal/app/app.go           Event loop, layout, menu modal, splitter, all rendering
+internal/app/projfind.go      Project-wide content search panel (Esc-F)
+internal/app/preview.go       Shared file-open path + preview-tab rules
+internal/app/fileclip.go      File clipboard: cut/copy/paste/duplicate tree entries
+internal/app/session_restore.go App ↔ session store bridge (capture/restore)
 internal/editor/buffer.go     Position + Buffer ([]string lines), edit primitives
 internal/editor/tab.go        Tab: path, buffer, cursor, anchor, scroll, dirty state
+internal/editor/lineops.go    Move / duplicate line-block gestures
+internal/editor/scrollbar.go  Right-edge scrollbar + git change map
 internal/editor/highlight.go  Chroma → []tcell.Style per line
 internal/filetree/filetree.go Lazy tree, identity-preserving refresh, hit-test, render
+internal/search/search.go     Literal smart-case project search engine
+internal/session/session.go   Per-project session store (~/.local/state/skiff)
 internal/clipboard/clipboard.go OSC 52 to /dev/tty with tmux passthrough wrap
 internal/spiceconfig/spiceconfig.go ~/.config/skiff/config.json loader (icons mode)
 internal/icons/icons.go       Nerd Font detection + per-file glyph mapping

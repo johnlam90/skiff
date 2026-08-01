@@ -1,6 +1,6 @@
 # Druk Adaptations Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Port the druk features that fit skiff's philosophy: go-to-line (+ `file:42` CLI), move/duplicate line, reopen closed tab, leader cheat-strip, preview tabs, tree cut/copy/paste/duplicate, editor scrollbar with git change-map, project-wide content search, and per-project session restore.
 
@@ -201,4 +201,4 @@
 
 ### Task 10: Docs touch-up
 
-- [ ] Update README feature list + printHelp() in main.go (mentions `skiff file:line`). Update CLAUDE.md architecture map with the two new packages. `make test` green.
+- [x] Update README feature list + printHelp() in main.go (mentions `skiff file:line`). Update CLAUDE.md architecture map with the two new packages. `make test` green.

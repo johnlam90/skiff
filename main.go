@@ -134,6 +134,7 @@ Usage:
   skiff                     Open the current directory.
   skiff <directory>         Open a project directory.
   skiff <file>              Open a file (its parent becomes the project root).
+  skiff <file>:<line>       Open a file at a line, e.g. skiff main.go:42.
   skiff --version           Print the version and exit.
   skiff --help              Print this help and exit.
 

@@ -69,6 +69,22 @@ The goals, in order:
   bar shows the branch plus a change count, and the sidebar's
   [GIT tab](#git-changes) lists every uncommitted change with
   click-to-diff — VS Code's Source Control view, one click away.
+- **Project-wide search** — `Esc F` sweeps every file in the project
+  for your query, groups the hits by file (fold noisy files with `Tab`
+  or a click), and opens any hit at its line.
+- **Preview tabs** — a single tree click opens a file in one reusable
+  *italic* tab, so browsing ten files doesn't leave ten tabs behind.
+  Click the file again, or just start typing, to pin it.
+- **Scrollbar with a change map** — long files get a clickable,
+  draggable scrollbar on the editor's right edge with the file's git
+  changes marked along it, so "where did I change this file" is one
+  glance (and one click) away.
+- **File clipboard** — cut, copy, paste, and duplicate files or folders
+  from the tree's right-click menu or the main `≡` menu. Nothing is
+  ever overwritten: a taken name becomes `name copy.ext`.
+- **Session restore** — reopening a project brings back your open tabs
+  (cursor and scroll included), expanded folders, and sidebar exactly
+  as you left them.
 - **Toggleable, draggable sidebar** — show/hide the file tree from the
   menu, or drag the splitter to resize it.
 - **Clipboard over SSH** — OSC 52, including a `tmux` passthrough so
@@ -162,6 +178,7 @@ make install        # builds and installs to $GOPATH/bin
 skiff              # opens the current directory
 skiff ~/code/app   # opens a specific project root
 skiff main.go      # opens a file (project root = its parent dir)
+skiff main.go:42   # …opened at line 42
 skiff new-file.go  # creates the file on first save (vim-style)
 skiff --version    # print version and exit
 skiff --help       # print short usage
@@ -188,24 +205,32 @@ Skiff deliberately avoids `Ctrl+`-style shortcuts (they fight `tmux`,
 real terminal). Instead, **`Esc` is the leader key**: tap `Esc`, then
 within half a second tap one of the letters below.
 
-| Combo       | Action               |
-| ----------- | -------------------- |
-| `Esc Esc`   | Open ≡ menu          |
-| `Esc s`     | Save                 |
-| `Esc u`     | Undo                 |
-| `Esc r`     | Redo                 |
-| `Esc w`     | Close tab            |
-| `Esc q`     | Quit                 |
-| `Esc n`     | New file             |
-| `Esc t`     | Toggle sidebar       |
-| `Esc /`     | Toggle line comment  |
-| `Esc f`     | Find in file         |
-| `Esc p`     | Find file in project |
-| `Esc g`     | Git changes          |
+| Combo       | Action                 |
+| ----------- | ---------------------- |
+| `Esc Esc`   | Open ≡ menu            |
+| `Esc s`     | Save                   |
+| `Esc u`     | Undo                   |
+| `Esc r`     | Redo                   |
+| `Esc w`     | Close tab              |
+| `Esc o`     | Reopen closed tab      |
+| `Esc q`     | Quit                   |
+| `Esc n`     | New file               |
+| `Esc t`     | Toggle sidebar         |
+| `Esc /`     | Toggle line comment    |
+| `Esc k`     | Move line up           |
+| `Esc j`     | Move line down         |
+| `Esc d`     | Duplicate line         |
+| `Esc f`     | Find in file           |
+| `Esc F`     | Find in project        |
+| `Esc l`     | Go to line             |
+| `Esc p`     | Find file in project   |
+| `Esc g`     | Git changes            |
 
 A lone `Esc` is harmless — if you don't follow it with a bound key
 within the window, your next keystroke goes to the editor as normal,
-so accidental `Esc` taps never swallow a real character.
+so accidental `Esc` taps never swallow a real character. And while the
+window is armed, a one-row cheat-strip above the status bar lists every
+key that works right now — no memorizing required.
 
 Everything reachable by hotkey is also reachable from the `≡` menu —
 the hotkeys are just a faster path for the actions you reach for most.
