@@ -261,3 +261,47 @@ Priority order; check off as they land, one commit each.
 - [x] P9 Git polish: branch-list/upstream checks off the UI thread; isPushRejected only for non-fast-forward ("fetch first"/"non-fast-forward"), hook rejections get plain error; drop "Opened" flash on preview clicks.
 - [x] P10 diffBase DONE (Compare against… in ⋯ popup; loaders take base; commit gated while base active; ⇆ marker in status bar + panel): compare-against-ref mode — picker sets a.diffBase; gitstatus/diff/gutter/panel honour it; status bar shows "⎇ main ⇆ base"; Esc path back to HEAD.
 - [x] P11 Small (menu height left as-is: scrolls fine, extras popups keep it bounded): cheat-strip two-row wrap when clipped; CLAUDE.md stale relY paragraph; menu height note → move Line-ops group into ⋯-style "Edit extras" if still unwieldy.
+
+---
+
+## Tranche 4: project-wide replace (the deferred design pass)
+
+### Design decisions (locked)
+
+**UX.** The project-search panel (Esc-F) is the surface: `Tab` grows a
+replace field in its bar, exactly like the in-file find bar. With a
+replacement typed, the results overlay *is* the preview — every match
+row already shows the line; matches highlight what will be consumed.
+Enter on a single match row replaces just that one (and removes the
+row); a `[ Replace all N ]` affordance in the bar (click, or
+Shift+Enter from the replace field) applies everything, behind ONE
+confirm modal that states the blast radius: "Replace N matches in M
+files? Files change on disk — commit or stash first if unsure."
+
+**Safety model — the crux:**
+1. Never sed-the-disk blind. Every match re-verifies before applying:
+   the file's matched line must still equal the text the sweep
+   recorded. Mismatch → skip that match, count it, leave its row in
+   the panel. A stale index or a mid-flight edit can never corrupt.
+2. Open tabs route through their buffers, not the disk: apply via the
+   editor primitives (per-file undo stack gets ONE structural entry),
+   clean tabs save after, dirty tabs stay dirty with the replacement
+   applied — the user keeps their save decision.
+3. Closed files: read, verify, apply, atomic temp+rename write.
+4. Runs in the background (fileOp-style events, one at a time), report
+   flash: "Replaced N in M files (K skipped — changed since search)".
+5. Regex mode replaces with the literal replacement text v1 — no $1
+   groups yet; the confirm modal says so when regex is on.
+6. No cross-file undo v1. Open-tab replacements undo per file; closed-
+   file rewrites rely on git. The confirm text owns that honestly.
+
+### Tasks
+- [ ] R1 Engine: search.ReplacePlan (matches grouped per file) +
+      search.ApplyReplace(root, plan, replacement, verify) → report
+      {Replaced, Files, Skipped}; atomic writes; tests incl. stale-line
+      skip + multi-match-per-line ordering (apply right-to-left).
+- [ ] R2 Panel: replace field state (Tab toggles, mirrors find bar),
+      single-match Enter apply, [ Replace all N ] + confirm, open-tab
+      routing via editor buffers, background runner + report events;
+      tests for focus routing, verify-skip, dirty-tab preservation.
+- [ ] R3 Docs: README project-search section + this plan check-off.
