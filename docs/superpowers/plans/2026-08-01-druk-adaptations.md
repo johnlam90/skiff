@@ -135,9 +135,9 @@
 - Context menu: paste target = node itself when dir, else its parent. Main menu rows: "Cut file", "Copy file" (active tab), "Paste into folder" (activeFolder, labelled via relativeFolderLabel), "Duplicate file"; predicates `hasFileTab` / `hasFileClip`.
 
 **Steps:**
-- [ ] Tests: `TestUniqueDestPathSuffixes`, `TestPasteCopyKeepsClip`, `TestPasteCutMovesAndClearsClip`, `TestPasteDirIntoItselfRefused`, `TestPasteOntoFileLandsBeside`, `TestMoveUpdatesOpenTabs`, `TestDuplicateInPlace`. Run, fail.
-- [ ] Implement helpers + wiring (context + main menu).
-- [ ] `make test` green.
+- [x] Tests: `TestUniqueDestPathSuffixes`, `TestPasteCopyKeepsClip`, `TestPasteCutMovesAndClearsClip`, `TestPasteDirIntoItselfRefused`, `TestPasteOntoFileLandsBeside`, `TestMoveUpdatesOpenTabs`, `TestDuplicateInPlace`. Run, fail.
+- [x] Implement helpers + wiring (context + main menu).
+- [x] `make test` green.
 
 ### Task 7: Editor scrollbar with git change-map
 
@@ -153,9 +153,9 @@
 - App: press with `x == editorRight-1` and bar visible → set ScrollY via scrollTargetForThumb, dragMode "scrollbar"; drag continues; release ends. Editor text area narrows by one column when the bar shows (Render handles internally; editorPress position math must ignore presses on the bar column).
 
 **Steps:**
-- [ ] Tests: `TestScrollbarGeomProportions`, `TestScrollbarGeomHiddenWhenFits`, `TestScrollTargetClamps`, `TestRenderDrawsThumbAndMarks` (sim screen + GitLines fixture). Run, fail.
-- [ ] Implement scrollbar.go + Render integration + app mouse routing.
-- [ ] `make test` green.
+- [x] Tests: `TestScrollbarGeomProportions`, `TestScrollbarGeomHiddenWhenFits`, `TestScrollTargetClamps`, `TestRenderDrawsThumbAndMarks` (sim screen + GitLines fixture). Run, fail.
+- [x] Implement scrollbar.go + Render integration + app mouse routing.
+- [x] `make test` green.
 
 ### Task 8: Project-wide content search
 

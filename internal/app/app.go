@@ -1610,6 +1610,14 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		return
 	}
 
+	// Scrollbar thumb drag: the thumb stays glued to the mouse row even
+	// when the pointer wanders off the bar column.
+	if leftDown && a.dragMode == "scrollbar" {
+		_, ey, _, _ := a.editorRect()
+		a.scrollbarTo(y - ey)
+		return
+	}
+
 	// Initial press dispatch.
 	if leftDown && a.dragMode == "" {
 		sw := a.sidebarW()
@@ -1624,6 +1632,11 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		case y == a.height-1:
 			a.statusBarClick(x)
 		case y > 0 && y < a.height-1:
+			if localY, ok := a.scrollbarHit(x, y); ok {
+				a.scrollbarTo(localY)
+				a.dragMode = "scrollbar"
+				return
+			}
 			a.editorPress(x, y)
 			a.dragMode = "editor"
 		}
@@ -2015,6 +2028,37 @@ func (a *App) handleAutoScroll() {
 		return
 	}
 	tab.MoveCursorTo(pos, true)
+}
+
+// scrollbarHit reports whether (x, y) lands on the active tab's
+// scrollbar column, returning the bar-local row when it does. The
+// geometry must mirror Render's: rightmost editor column, only when the
+// file is taller than the viewport.
+func (a *App) scrollbarHit(x, y int) (int, bool) {
+	tab := a.activeTabPtr()
+	if tab == nil {
+		return 0, false
+	}
+	ex, ey, ew, eh := a.editorRect()
+	if ew <= 2 || !tab.ScrollbarVisible(eh) {
+		return 0, false
+	}
+	if x != ex+ew-1 || y < ey || y >= ey+eh {
+		return 0, false
+	}
+	return y - ey, true
+}
+
+// scrollbarTo scrolls the active tab so the thumb centers on the
+// bar-local row — shared by the initial press and the drag. Clamping
+// lives in the editor's ScrollTargetForClick.
+func (a *App) scrollbarTo(localY int) {
+	tab := a.activeTabPtr()
+	if tab == nil {
+		return
+	}
+	_, _, _, eh := a.editorRect()
+	tab.ScrollY = tab.ScrollTargetForClick(eh, localY)
 }
 
 // selectWordAt selects the word under the buffer position p (or does

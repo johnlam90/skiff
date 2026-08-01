@@ -1569,6 +1569,43 @@ func TestHandleMenuMouse_NoButtonIsNoop(t *testing.T) {
 	}
 }
 
+// TestScrollbarPressScrollsAndDrags pins the mouse path: pressing the
+// editor's rightmost column on a long file jumps the scroll and enters
+// the "scrollbar" drag mode; dragging keeps following the row; release
+// exits the mode.
+func TestScrollbarPressScrollsAndDrags(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "long.txt")
+	content := strings.Repeat("line\n", 300)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(path)
+
+	ex, ey, ew, eh := a.editorRect()
+	barX := ex + ew - 1
+	// Press near the bottom of the bar.
+	a.handleMouse(tcell.NewEventMouse(barX, ey+eh-1, tcell.Button1, 0))
+	if a.dragMode != "scrollbar" {
+		t.Fatalf("dragMode = %q, want scrollbar", a.dragMode)
+	}
+	tab := a.activeTabPtr()
+	if tab.ScrollY == 0 {
+		t.Fatal("bottom press should scroll the tab")
+	}
+	// Drag back to the top row.
+	a.handleMouse(tcell.NewEventMouse(barX, ey, tcell.Button1, 0))
+	if tab.ScrollY != 0 {
+		t.Fatalf("drag to top should return to 0, got %d", tab.ScrollY)
+	}
+	// Release exits the mode.
+	a.handleMouse(tcell.NewEventMouse(barX, ey, tcell.ButtonNone, 0))
+	if a.dragMode != "" {
+		t.Fatalf("release should clear dragMode, got %q", a.dragMode)
+	}
+}
+
 // TestDraw_AllPanels exercises the drawing path so the stdout/screen code
 // is covered. Result correctness is exercised manually; here we just make
 // sure no panics across several states.

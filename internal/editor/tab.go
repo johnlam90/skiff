@@ -596,6 +596,14 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		t.renderImage(scr, th, x, y, w, h)
 		return
 	}
+	// Long files reserve the rightmost column for the scrollbar before
+	// any width-dependent math runs, so EnsureVisible and the overflow
+	// chevrons agree with what's actually paintable.
+	barVisible := t.ScrollbarVisible(h) && w > 2
+	barX := x + w - 1
+	if barVisible {
+		w--
+	}
 	// Only re-center on the cursor if the cursor moved this tick. Doing it
 	// every render fights the user when they scroll with the wheel.
 	if t.cursorMoved {
@@ -758,6 +766,10 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		if visualCol-scrollVisual > contentW {
 			scr.SetContent(contentX+contentW-1, cy, '›', nil, overflowStyle)
 		}
+	}
+
+	if barVisible {
+		t.renderScrollbar(scr, th, barX, y, h)
 	}
 
 	// Position the hardware cursor at its visual column (so a cursor
