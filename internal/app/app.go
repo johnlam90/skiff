@@ -3190,7 +3190,9 @@ func (a *App) drawEmptyEditor() {
 func (a *App) drawStatusBar() {
 	sx, sy, sw, _ := a.statusRect()
 	bg := a.theme.StatusBG
-	fg := a.theme.BG
+	// StatusFg is paired with StatusBG per palette — hardcoding BG here
+	// broke ported themes whose status bar isn't an accent color.
+	fg := a.theme.StatusFg
 	style := tcell.StyleDefault.Background(bg).Foreground(fg).Bold(true)
 	for cx := sx; cx < sx+sw; cx++ {
 		a.screen.SetContent(cx, sy, ' ', nil, style)

@@ -26,6 +26,7 @@ type Theme struct {
 	BG        tcell.Color // Editor background.
 	SidebarBG tcell.Color // File tree / inactive tab background, slightly darker than BG.
 	StatusBG  tcell.Color // Status bar background.
+	StatusFg  tcell.Color // Status bar text — paired with StatusBG per palette.
 	LineHL    tcell.Color // Active line highlight.
 
 	// --- Foregrounds & accents ---
@@ -116,6 +117,7 @@ func Default() Theme {
 		BG:        tcell.NewRGBColor(0x1a, 0x1b, 0x26),
 		SidebarBG: tcell.NewRGBColor(0x16, 0x16, 0x1e),
 		StatusBG:  tcell.NewRGBColor(0x7a, 0xa2, 0xf7),
+		StatusFg:  tcell.NewRGBColor(0x1a, 0x1b, 0x26), // == BG: dark text on the accent bar
 		LineHL:    tcell.NewRGBColor(0x1f, 0x20, 0x2e),
 
 		// Foregrounds & accents. Muted and Subtle are brighter than

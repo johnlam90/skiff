@@ -68,5 +68,12 @@ func TestEveryThemeReadable(t *testing.T) {
 		if th.Text == th.BG || th.Text == th.Selection {
 			t.Errorf("%s: text would vanish on its surfaces", e.ID)
 		}
+		// Status bar: ≥ 1.8 only. Two upstream palettes (ayu-light,
+		// everforest-light) intentionally use white-on-color chips at
+		// ~1.9-2.2:1 — bold bar text, ayu's own UI does the same — so
+		// the fence just catches genuinely broken pairings.
+		if r := ContrastRatio(th.StatusFg, th.StatusBG); r < 1.8 {
+			t.Errorf("%s: status bar contrast %.2f < 1.8", e.ID, r)
+		}
 	}
 }
