@@ -22,6 +22,9 @@ package app
 type leaderBinding struct {
 	key    rune
 	action func(*App)
+	// desc is the two-or-three-word label the cheat-strip renders next
+	// to the key while the leader window is armed. See leaderstrip.go.
+	desc string
 }
 
 // leaderBindings is the editor's full Esc-leader table. The order is purely
@@ -37,22 +40,22 @@ type leaderBinding struct {
 //     menu's confirm dialog to gate the action as a deliberate gesture.
 func leaderBindings() []leaderBinding {
 	return []leaderBinding{
-		{'s', (*App).menuSave},
-		{'u', (*App).menuUndo},
-		{'r', (*App).menuRedo},
-		{'w', (*App).menuClose},
-		{'o', (*App).menuReopenTab},
-		{'q', (*App).menuQuit},
-		{'n', (*App).menuNewFile},
-		{'t', (*App).menuToggleSidebar},
-		{'/', (*App).menuToggleLineComment},
-		{'k', (*App).menuMoveLineUp},
-		{'j', (*App).menuMoveLineDown},
-		{'d', (*App).menuDuplicateLine},
-		{'f', (*App).openFind},
-		{'l', (*App).menuGoToLine},
-		{'p', (*App).openFinder},
-		{'g', (*App).toggleGitPanel},
+		{'s', (*App).menuSave, "save"},
+		{'u', (*App).menuUndo, "undo"},
+		{'r', (*App).menuRedo, "redo"},
+		{'w', (*App).menuClose, "close tab"},
+		{'o', (*App).menuReopenTab, "reopen tab"},
+		{'q', (*App).menuQuit, "quit"},
+		{'n', (*App).menuNewFile, "new file"},
+		{'t', (*App).menuToggleSidebar, "sidebar"},
+		{'/', (*App).menuToggleLineComment, "comment"},
+		{'k', (*App).menuMoveLineUp, "line up"},
+		{'j', (*App).menuMoveLineDown, "line down"},
+		{'d', (*App).menuDuplicateLine, "duplicate"},
+		{'f', (*App).openFind, "find"},
+		{'l', (*App).menuGoToLine, "goto line"},
+		{'p', (*App).openFinder, "open file"},
+		{'g', (*App).toggleGitPanel, "git panel"},
 	}
 }
 

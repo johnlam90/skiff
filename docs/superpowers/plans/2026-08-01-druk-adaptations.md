@@ -93,9 +93,9 @@
 - Produces: `(a *App) drawLeaderStrip()` — one row above status bar: ` Esc  s save · u undo · … ` built from leaderBindings() descs, clipped to width. The existing leaderExpiryEvent redraw clears it.
 
 **Steps:**
-- [ ] Tests: `TestLeaderStripListsEveryBinding` (render on sim screen, assert a couple of descs present), `TestLeaderStripHiddenWhenNotArmed`. Run, fail.
-- [ ] Implement desc field + strip drawing.
-- [ ] `make test` green.
+- [x] Tests: `TestLeaderStripListsEveryBinding` (render on sim screen, assert a couple of descs present), `TestLeaderStripHiddenWhenNotArmed`. Run, fail.
+- [x] Implement desc field + strip drawing.
+- [x] `make test` green.
 
 ### Task 5: Preview tabs (single-click preview, pin on edit/second click)
 

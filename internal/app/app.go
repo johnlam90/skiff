@@ -1346,6 +1346,12 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		time.AfterFunc(menuEscMs+50*time.Millisecond, func() {
 			_ = scr.PostEvent(&leaderExpiryEvent{when: time.Now()})
 		})
+		// A second, earlier wake-up right after the leader window shuts
+		// so the cheat-strip disappears on time instead of lingering
+		// until the menu-window expiry above.
+		time.AfterFunc(doubleEscMs+50*time.Millisecond, func() {
+			_ = scr.PostEvent(&leaderExpiryEvent{when: time.Now()})
+		})
 		return
 	}
 	// Esc-leader hotkey: if Esc was pressed within doubleEscMs and this
@@ -2746,6 +2752,7 @@ func (a *App) draw() {
 		a.drawFindBar()
 	}
 	a.drawStatusBar()
+	a.drawLeaderStrip()
 
 	// Modal layering, bottom-up. Only one of these is open at a time
 	// (closeAllModals enforces it), but the order still matters so a
