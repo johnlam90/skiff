@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 )
@@ -191,8 +192,14 @@ func TestGitPanelClick_BranchRowOpensPicker(t *testing.T) {
 	a.rebuildGitChangesRows()
 	gitRun(t, a.rootDir, "branch", "other")
 	a.gitPanelClick(5, 1)
-	if !a.listPickOpen {
-		t.Fatal("branch row click should open the switch-branch picker")
+	deadline := time.Now().Add(5 * time.Second)
+	for !a.listPickOpen {
+		if time.Now().After(deadline) {
+			t.Fatal("branch row click should open the switch-branch picker")
+		}
+		if ev := a.screen.PollEvent(); ev != nil {
+			a.handleEvent(ev)
+		}
 	}
 }
 

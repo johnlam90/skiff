@@ -258,6 +258,6 @@ Priority order; check off as they land, one commit each.
 - [ ] P6 Search hardening: 150ms debounce + cancellation check between files; case/word/regex toggles on the projfind bar (click chips + Esc-leader-free keys shown in bar); match-column jump (OpenFileAtLine gains col).
 - [ ] P7 Replace: in-file replace field (Tab from find bar; Enter replace-current, "all" button); project-wide replace deferred unless asked → note in README.
 - [ ] P8 Sessions: save on every tab open/close + 30s tick, atomic temp+rename write, flock to close the two-instance lost-update race; persist Preview flag.
-- [ ] P9 Git polish: branch-list/upstream checks off the UI thread; isPushRejected only for non-fast-forward ("fetch first"/"non-fast-forward"), hook rejections get plain error; drop "Opened" flash on preview clicks.
+- [x] P9 Git polish: branch-list/upstream checks off the UI thread; isPushRejected only for non-fast-forward ("fetch first"/"non-fast-forward"), hook rejections get plain error; drop "Opened" flash on preview clicks.
 - [ ] P10 diffBase: compare-against-ref mode — picker sets a.diffBase; gitstatus/diff/gutter/panel honour it; status bar shows "⎇ main ⇆ base"; Esc path back to HEAD.
-- [ ] P11 Small: cheat-strip two-row wrap when clipped; CLAUDE.md stale relY paragraph; menu height note → move Line-ops group into ⋯-style "Edit extras" if still unwieldy.
+- [x] P11 Small (menu height left as-is: scrolls fine, extras popups keep it bounded): cheat-strip two-row wrap when clipped; CLAUDE.md stale relY paragraph; menu height note → move Line-ops group into ⋯-style "Edit extras" if still unwieldy.

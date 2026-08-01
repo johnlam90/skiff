@@ -149,8 +149,9 @@ tab's mtime: clean buffer + changed file → silent reload; dirty buffer
 ### Modal layout via `relY` and dynamic `labelFor`
 The action menu uses named struct literals with an optional `labelFor`
 hook so labels like "Show Sidebar" / "Hide Sidebar" toggle in place.
-Dividers are drawn at fixed `relY` offsets — when adding a menu item,
-update those offsets and `modalHeight`.
+`menuLayout` recomputes every `relY`, the divider rows, and the modal
+height on each call — adding a menu item is just adding the struct
+literal (plus updating the pinned numbers in `TestMenuLayout_*`).
 
 ### Sidebar splitter drag
 A drag is detected when a press lands at exactly `x == splitterX()`.

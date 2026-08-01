@@ -34,16 +34,14 @@ func (a *App) leaderStripVisible() bool {
 	return true
 }
 
-// drawLeaderStrip paints the one-row key overview on the row above the
-// status bar, spanning the full window width. Entries render until the
-// row runs out — on a narrow terminal the tail is simply clipped, which
-// beats wrapping onto the editor.
+// drawLeaderStrip paints the key overview above the status bar. On a
+// wide terminal it is one row; when the full table doesn't fit, it
+// wraps onto a second row rather than silently dropping half the
+// bindings — the strip exists precisely for people who don't have the
+// table memorised. It overlays the editor for the ~half-second the
+// leader window is armed, which is a fair trade.
 func (a *App) drawLeaderStrip() {
 	if !a.leaderStripVisible() {
-		return
-	}
-	y := a.height - 2
-	if y < 0 {
 		return
 	}
 	bg := a.theme.LineHL
@@ -51,21 +49,45 @@ func (a *App) drawLeaderStrip() {
 	keyStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true)
 	mutedStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
 
-	for x := 0; x < a.width; x++ {
-		a.screen.SetContent(x, y, ' ', nil, baseStyle)
+	type segment struct {
+		text  string
+		style tcell.Style
+	}
+	segs := []segment{{" Esc ", keyStyle}}
+	total := runeLen(" Esc ")
+	for i, b := range leaderBindings() {
+		sep := " · "
+		if i == 0 {
+			sep = " "
+		}
+		segs = append(segs,
+			segment{sep, mutedStyle},
+			segment{string(b.key), keyStyle},
+			segment{" " + b.desc, baseStyle})
+		total += runeLen(sep) + 1 + 1 + runeLen(b.desc)
 	}
 
-	x := 0
-	x = drawStripSegment(a.screen, x, y, a.width, " Esc ", keyStyle)
-	for i, b := range leaderBindings() {
-		if i > 0 {
-			x = drawStripSegment(a.screen, x, y, a.width, " · ", mutedStyle)
-		} else {
-			x = drawStripSegment(a.screen, x, y, a.width, " ", mutedStyle)
+	rows := 1
+	if total > a.width {
+		rows = 2
+	}
+	topY := a.height - 1 - rows
+	if topY < 0 {
+		return
+	}
+	for r := 0; r < rows; r++ {
+		for x := 0; x < a.width; x++ {
+			a.screen.SetContent(x, topY+r, ' ', nil, baseStyle)
 		}
-		x = drawStripSegment(a.screen, x, y, a.width, string(b.key), keyStyle)
-		x = drawStripSegment(a.screen, x, y, a.width, " "+b.desc, baseStyle)
-		if x >= a.width {
+	}
+	x, y := 0, topY
+	for _, seg := range segs {
+		w := runeLen(seg.text)
+		if x+w > a.width && y < topY+rows-1 {
+			x, y = 2, y+1 // continuation indent under " Esc "
+		}
+		x = drawStripSegment(a.screen, x, y, a.width, seg.text, seg.style)
+		if x >= a.width && y == topY+rows-1 {
 			break
 		}
 	}

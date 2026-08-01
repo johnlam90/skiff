@@ -95,7 +95,11 @@ func (a *App) openFileMode(path string, preview bool) {
 func (a *App) finishOpen(t *editor.Tab, path string) {
 	a.ensureActiveTabVisible()
 	t.GitLines = loadGitLineChanges(a.rootDir, t.Path)
-	a.flash(fmt.Sprintf("Opened %s", filepath.Base(path)))
+	// Preview opens stay quiet — flashing "Opened X" on every tree
+	// click while browsing is noise; a pinned open is worth announcing.
+	if !t.IsPreview() {
+		a.flash(fmt.Sprintf("Opened %s", filepath.Base(path)))
+	}
 }
 
 // previewTabIndex returns the index of the current preview tab, or -1.

@@ -320,6 +320,21 @@ type fakeErr struct{}
 
 func (fakeErr) Error() string { return "exit status 1" }
 
+// waitListPick pumps events until the async branch-list collection
+// opens its picker.
+func waitListPick(t *testing.T, a *App) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !a.listPickOpen {
+		if time.Now().After(deadline) {
+			t.Fatal("picker never opened")
+		}
+		if ev := a.screen.PollEvent(); ev != nil {
+			a.handleEvent(ev)
+		}
+	}
+}
+
 // TestGitMergeBranchEndToEnd merges a side branch through the picker
 // flow and checks its file lands on the current branch.
 func TestGitMergeBranchEndToEnd(t *testing.T) {
@@ -334,10 +349,8 @@ func TestGitMergeBranchEndToEnd(t *testing.T) {
 
 	a := newTestApp(t, dir)
 	a.menuGitMergeBranch()
-	if !a.listPickOpen {
-		t.Fatal("merge should open the branch picker")
-	}
-	names := a.otherBranchNames(false)
+	waitListPick(t, a)
+	names := otherNames(gitBranchNames(dir, a.gitBranch), a.gitBranch, false)
 	idx := -1
 	for i, n := range names {
 		if n == "feature" {
@@ -370,10 +383,8 @@ func TestGitDeleteBranchForceOffer(t *testing.T) {
 
 	a := newTestApp(t, dir)
 	a.menuGitDeleteBranch()
-	if !a.listPickOpen {
-		t.Fatal("delete should open the branch picker")
-	}
-	names := a.otherBranchNames(true)
+	waitListPick(t, a)
+	names := otherNames(gitBranchNames(dir, a.gitBranch), a.gitBranch, true)
 	if len(names) != 1 || names[0] != "orphan" {
 		t.Fatalf("local candidates: %v", names)
 	}

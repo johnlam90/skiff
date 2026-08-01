@@ -1042,6 +1042,8 @@ func (a *App) handleEvent(ev tcell.Event) {
 		a.handleFileOpDone(e)
 	case *fileOpProgressEvent:
 		a.handleFileOpProgress(e)
+	case *branchListEvent:
+		a.handleBranchList(e)
 	}
 }
 

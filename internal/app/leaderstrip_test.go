@@ -57,8 +57,9 @@ func TestLeaderStripVisibility(t *testing.T) {
 	}
 }
 
-// TestLeaderStripRenders draws the strip and checks the row above the
-// status bar actually carries the first bindings' keys and descs.
+// TestLeaderStripRenders draws the strip and checks every binding is
+// visible — on a 120-col screen the full table needs two rows, and the
+// wrap must carry the tail instead of clipping it.
 func TestLeaderStripRenders(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.lastEscape = time.Now()
@@ -67,15 +68,17 @@ func TestLeaderStripRenders(t *testing.T) {
 	scr.Show() // SimulationScreen serves GetContents from the *front* buffer.
 
 	cells, w, h := scr.GetContents()
-	row := make([]rune, 0, w)
-	for x := 0; x < w; x++ {
-		row = append(row, cells[(h-2)*w+x].Runes[0])
+	readRow := func(y int) string {
+		row := make([]rune, 0, w)
+		for x := 0; x < w; x++ {
+			row = append(row, cells[y*w+x].Runes[0])
+		}
+		return string(row)
 	}
-	line := string(row)
-	if !strings.Contains(line, "s save") {
-		t.Fatalf("strip row missing 's save': %q", line)
-	}
-	if !strings.Contains(line, "u undo") {
-		t.Fatalf("strip row missing 'u undo': %q", line)
+	both := readRow(h-3) + "\n" + readRow(h-2)
+	for _, want := range []string{"s save", "u undo", "g git panel"} {
+		if !strings.Contains(both, want) {
+			t.Fatalf("strip missing %q:\n%s", want, both)
+		}
 	}
 }

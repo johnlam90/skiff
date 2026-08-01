@@ -86,7 +86,7 @@ func (a *App) handleGitOpDone(e *gitOpDoneEvent) {
 	switch {
 	case e.err == nil:
 		a.flash(e.okFlash)
-	case e.label == "Push" && isPushRejected(e.output):
+	case e.label == "Push" && isPushNonFastForward(e.output):
 		a.openConfirm("Push rejected",
 			"origin has commits you don't. Pull (merge), then push?",
 			func(app *App) { app.doGitPullAndPush() })
@@ -116,11 +116,22 @@ func (a *App) handleGitOpDone(e *gitOpDoneEvent) {
 	}
 }
 
-// isPushRejected recognises the non-fast-forward push failure that has
-// a known one-gesture fix.
+// isPushRejected recognises any push refusal (for the explainer);
+// isPushNonFastForward recognises the specific refusal whose fix is
+// "pull, then push". A hook / permission rejection must NOT get that
+// offer — pulling won't help, and the merge it creates just muddies
+// the water.
 func isPushRejected(output string) bool {
 	return strings.Contains(output, "[rejected]") ||
+		strings.Contains(output, "[remote rejected]") ||
 		strings.Contains(output, "failed to push some refs")
+}
+
+// isPushNonFastForward reports whether a rejected push failed because
+// origin has commits we don't — the one case pull-then-push repairs.
+func isPushNonFastForward(output string) bool {
+	return strings.Contains(output, "fetch first") ||
+		strings.Contains(output, "non-fast-forward")
 }
 
 // explainGit turns git's stderr into one plain-language headline. The
@@ -129,8 +140,13 @@ func isPushRejected(output string) bool {
 func explainGit(output string) string {
 	low := strings.ToLower(output)
 	switch {
-	case isPushRejected(output):
+	case isPushNonFastForward(output):
 		return "origin has commits you don't — pull first, then push"
+	case strings.Contains(output, "[remote rejected]") ||
+		strings.Contains(low, "hook declined"):
+		return "the server refused the push — a hook or permission said no"
+	case isPushRejected(output):
+		return "push rejected — see git's reason below"
 	case strings.Contains(low, "not possible to fast-forward") ||
 		strings.Contains(low, "divergent branches"):
 		return "local and origin have diverged — pull needs a merge"
@@ -288,6 +304,43 @@ func (a *App) menuGitFetch() {
 // Branches
 // -----------------------------------------------------------------------------
 
+// branchListEvent delivers an asynchronously-collected branch list to
+// the main loop, tagged with which picker asked for it.
+type branchListEvent struct {
+	when    time.Time
+	purpose string // "switch" | "merge" | "delete"
+	names   []string
+}
+
+// When implements tcell.Event.
+func (e *branchListEvent) When() time.Time { return e.when }
+
+// requestBranchList collects the branch list off the UI thread — on a
+// network-mounted repo `git branch --all` can stall, and a menu click
+// must never freeze the event loop — then reopens the flow via
+// handleBranchList.
+func (a *App) requestBranchList(purpose string) {
+	root, current := a.rootDir, a.gitBranch
+	scr := a.screen
+	go func() {
+		names := gitBranchNames(root, current)
+		_ = scr.PostEvent(&branchListEvent{when: time.Now(), purpose: purpose, names: names})
+	}()
+}
+
+// handleBranchList routes a collected branch list to the picker that
+// asked for it.
+func (a *App) handleBranchList(e *branchListEvent) {
+	switch e.purpose {
+	case "switch":
+		a.openSwitchBranchPick(e.names)
+	case "merge":
+		a.openMergeBranchPick(e.names)
+	case "delete":
+		a.openDeleteBranchPick(e.names)
+	}
+}
+
 // gitBranchNames lists local then remote branch names, current first,
 // origin/HEAD noise filtered, remote duplicates of locals dropped.
 func gitBranchNames(root, current string) (names []string) {
@@ -332,7 +385,11 @@ func (a *App) menuGitSwitchBranch() {
 	if !a.hasGitRepo() {
 		return
 	}
-	names := gitBranchNames(a.rootDir, a.gitBranch)
+	a.requestBranchList("switch")
+}
+
+// openSwitchBranchPick opens the switch picker for a collected list.
+func (a *App) openSwitchBranchPick(names []string) {
 	if len(names) < 2 {
 		a.flash("No other branches")
 		return
@@ -452,7 +509,12 @@ func (a *App) menuGitMergeBranch() {
 	if !a.hasGitRepo() {
 		return
 	}
-	names := a.otherBranchNames(false)
+	a.requestBranchList("merge")
+}
+
+// openMergeBranchPick opens the merge picker for a collected list.
+func (a *App) openMergeBranchPick(all []string) {
+	names := otherNames(all, a.gitBranch, false)
 	if len(names) == 0 {
 		a.flash("No other branches to merge")
 		return
@@ -487,7 +549,12 @@ func (a *App) menuGitDeleteBranch() {
 	if !a.hasGitRepo() {
 		return
 	}
-	names := a.otherBranchNames(true)
+	a.requestBranchList("delete")
+}
+
+// openDeleteBranchPick opens the delete picker for a collected list.
+func (a *App) openDeleteBranchPick(all []string) {
+	names := otherNames(all, a.gitBranch, true)
 	if len(names) == 0 {
 		a.flash("No other local branches")
 		return
@@ -504,13 +571,13 @@ func (a *App) menuGitDeleteBranch() {
 		}, nil, nil)
 }
 
-// otherBranchNames lists branches excluding the current one;
-// localOnly additionally drops remote-tracking spellings (you can't
+// otherNames filters a collected branch list: drop the current branch,
+// and with localOnly the remote-tracking spellings too (you can't
 // `branch -d` those).
-func (a *App) otherBranchNames(localOnly bool) []string {
+func otherNames(all []string, current string, localOnly bool) []string {
 	var out []string
-	for _, n := range gitBranchNames(a.rootDir, a.gitBranch) {
-		if n == a.gitBranch {
+	for _, n := range all {
+		if n == current {
 			continue
 		}
 		if localOnly && strings.ContainsRune(n, '/') {
