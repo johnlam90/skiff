@@ -53,6 +53,7 @@ func newTestApp(t *testing.T, root string) *App {
 		rootDir:        tree.Root.Path,
 		tree:           tree,
 		hoveredMenuRow: -1,
+		diffPanelRow:   -1,
 		sidebarShown:   true,
 		sidebarWidth:   defaultSidebarWidth,
 	}
@@ -1716,13 +1717,13 @@ func TestMenuLayout_NoCustomActions(t *testing.T) {
 	a.customActions = nil
 	items, dividers, h := a.menuLayout()
 
-	if h != 47 {
-		t.Errorf("modalHeight = %d, want 47", h)
+	if h != 52 {
+		t.Errorf("modalHeight = %d, want 52", h)
 	}
-	if got := len(items); got != 35 {
-		t.Errorf("item count = %d, want 35 built-ins", got)
+	if got := len(items); got != 40 {
+		t.Errorf("item count = %d, want 40 built-ins", got)
 	}
-	wantDiv := []int{2, 7, 11, 16, 21, 33, 38, 42, 44}
+	wantDiv := []int{2, 7, 11, 16, 26, 38, 43, 47, 49}
 	if len(dividers) != len(wantDiv) {
 		t.Fatalf("dividers = %v, want %v", dividers, wantDiv)
 	}
@@ -1883,8 +1884,8 @@ func TestMenuLayout_WithCustomActions(t *testing.T) {
 	}
 	items, _, h := a.menuLayout()
 
-	if h != 50 { // 47 + 2 items + 1 divider
-		t.Errorf("modalHeight = %d, want 50", h)
+	if h != 55 { // 52 + 2 items + 1 divider
+		t.Errorf("modalHeight = %d, want 55", h)
 	}
 	// Custom actions should be the second-to-last and third-to-last
 	// rows, with Quit as the final row.

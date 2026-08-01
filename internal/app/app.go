@@ -226,6 +226,11 @@ func builtinMenuGroups() [][]menuItemDef {
 			{label: "Diff this file", action: (*App).menuDiffFile, enabled: (*App).hasDiffableTab},
 			{label: "History of this file", action: (*App).menuFileHistory, enabled: (*App).hasFileHistoryTab},
 			{label: "Commit history", action: (*App).menuCommitHistory, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
+			{label: "Commit changes…", action: (*App).menuGitCommit, enabled: (*App).hasGitChanges, visible: (*App).hasTree},
+			{label: "Push", action: (*App).menuGitPush, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
+			{label: "Pull", action: (*App).menuGitPull, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
+			{label: "Switch branch…", action: (*App).menuGitSwitchBranch, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
+			{label: "More git actions…", action: (*App).menuGitExtras, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
 		},
 		// File actions
 		{
@@ -576,6 +581,15 @@ type App struct {
 	gitPanelRows   []gitChangeRow
 	gitPanelScroll int
 
+	// Write-side git state (see gitops.go / gitchanges.go): the
+	// one-at-a-time mutation gate, the commit checkbox set (absent =
+	// checked), the panel's keyboard/walk selection, and the panel row
+	// the open diff came from (-1 = diff not from the panel).
+	gitOpBusy        bool
+	gitCommitChecks  map[string]bool
+	gitPanelSelected int
+	diffPanelRow     int
+
 	// Diff view modal state — the side-by-side (or, when the terminal
 	// is narrow, unified) git diff opened from the Git panel and the
 	// editor's gutter markers. diffRaw keeps the verbatim `git diff`
@@ -658,6 +672,7 @@ func New(rootDir string) (*App, error) {
 		rootDir:        rootDir,
 		tree:           tree,
 		hoveredMenuRow: -1,
+		diffPanelRow:   -1,
 		sidebarShown:   true,
 		sidebarWidth:   defaultSidebarWidth,
 	}
@@ -727,6 +742,7 @@ func NewSingleFile(filePath string) (*App, error) {
 		rootDir:        rootDir,
 		tree:           nil,
 		hoveredMenuRow: -1,
+		diffPanelRow:   -1,
 		sidebarShown:   false,
 		sidebarWidth:   defaultSidebarWidth,
 	}
@@ -985,6 +1001,8 @@ func (a *App) handleEvent(ev tcell.Event) {
 		a.handleGitStatusEvent(e)
 	case *projFindDoneEvent:
 		a.handleProjFindDone(e)
+	case *gitOpDoneEvent:
+		a.handleGitOpDone(e)
 	}
 }
 
@@ -1808,7 +1826,7 @@ func (a *App) sidebarClick(x, y int) {
 		return
 	}
 	if a.gitPanelActive {
-		a.gitPanelClick(y - sy)
+		a.gitPanelClick(x-sx, y-sy)
 		return
 	}
 	n, ok := a.tree.HitTest(x-sx, y-sy)

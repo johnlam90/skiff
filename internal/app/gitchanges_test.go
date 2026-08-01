@@ -261,7 +261,7 @@ func TestSidebarHeaderHit_NoGitTabOutsideRepo(t *testing.T) {
 func TestGitPanelClick_ShowsDiffWithOpenButton(t *testing.T) {
 	a, modified, _ := dirtyRepoApp(t)
 	a.toggleGitPanel()
-	a.gitPanelClick(2) // first row: modified.txt
+	a.gitPanelClick(5, gitPanelListTop) // first row: modified.txt
 	if !a.diffOpen {
 		t.Fatal("row click should open the diff view")
 	}
@@ -297,7 +297,7 @@ func TestGitPanelClick_ShowsDiffWithOpenButton(t *testing.T) {
 func TestGitPanelClick_UntrackedShowsAllAddedDiff(t *testing.T) {
 	a, _, untracked := dirtyRepoApp(t)
 	a.toggleGitPanel()
-	a.gitPanelClick(3) // second row: untracked.txt
+	a.gitPanelClick(5, gitPanelListTop+1) // second row: untracked.txt
 	if !a.diffOpen {
 		t.Fatal("row click should open the diff view")
 	}
@@ -328,7 +328,7 @@ func TestGitPanelClick_DeletedHasNoOpenButton(t *testing.T) {
 	if len(a.gitPanelRows) != 1 || a.gitPanelRows[0].Kind != filetree.GitChangeDeleted {
 		t.Fatalf("expected one deleted row, got %+v", a.gitPanelRows)
 	}
-	a.gitPanelClick(2)
+	a.gitPanelClick(5, gitPanelListTop)
 	if !a.diffOpen {
 		t.Fatal("deleted row should open the diff view")
 	}
@@ -360,7 +360,7 @@ func TestGitPanelClick_UntrackedDirRevealsInExplorer(t *testing.T) {
 	if len(a.gitPanelRows) != 1 || !a.gitPanelRows[0].IsDir {
 		t.Fatalf("expected one dir row, got %+v", a.gitPanelRows)
 	}
-	a.gitPanelClick(2)
+	a.gitPanelClick(5, gitPanelListTop)
 	if a.gitPanelActive {
 		t.Fatal("dir activation should switch back to the explorer")
 	}
@@ -374,10 +374,9 @@ func TestGitPanelClick_UntrackedDirRevealsInExplorer(t *testing.T) {
 func TestGitPanelClick_IgnoresChrome(t *testing.T) {
 	a, _, _ := dirtyRepoApp(t)
 	a.toggleGitPanel()
-	a.gitPanelClick(1) // branch row
-	a.gitPanelClick(50)
+	a.gitPanelClick(5, 50)
 	if a.diffOpen || a.confirmOpen {
-		t.Fatal("chrome clicks should not open anything")
+		t.Fatal("clicks below the list should not open anything")
 	}
 }
 
@@ -389,7 +388,7 @@ func TestScrollGitPanel_Clamps(t *testing.T) {
 	a.gitPanelRows = make([]gitChangeRow, 100)
 	_, _, _, sh := a.sidebarRect()
 	a.scrollGitPanel(1000)
-	if want := 100 - (sh - 2); a.gitPanelScroll != want {
+	if want := 100 - (sh - gitPanelListTop); a.gitPanelScroll != want {
 		t.Fatalf("scroll past end: got %d, want %d", a.gitPanelScroll, want)
 	}
 	a.scrollGitPanel(-1000)
@@ -419,11 +418,17 @@ func TestDrawGitPanel_Smoke(t *testing.T) {
 	if branch := screenLine(scr, 1); !strings.Contains(branch, "main") {
 		t.Fatalf("branch row: %q", branch)
 	}
-	row0 := screenLine(scr, 2)
+	if buttons := screenLine(scr, 2); !strings.Contains(buttons, "Commit") || !strings.Contains(buttons, "Push") {
+		t.Fatalf("buttons row: %q", buttons)
+	}
+	row0 := screenLine(scr, gitPanelListTop)
 	if !strings.Contains(row0, "M") || !strings.Contains(row0, "modified.txt") {
 		t.Fatalf("row 0: %q", row0)
 	}
-	if got := []rune(row0)[1]; got != 'M' {
+	if got := []rune(row0)[1]; got != '●' {
+		t.Fatalf("checkbox cell: got %q, want ●", got)
+	}
+	if got := []rune(row0)[3]; got != 'M' {
 		t.Fatalf("letter cell: got %q", got)
 	}
 
@@ -431,7 +436,7 @@ func TestDrawGitPanel_Smoke(t *testing.T) {
 	a.gitPanelRows = nil
 	a.draw()
 	a.screen.Show()
-	if body := screenLine(scr, 2); !strings.Contains(body, "No uncommitted changes") {
+	if body := screenLine(scr, gitPanelListTop); !strings.Contains(body, "No uncommitted changes") {
 		t.Fatalf("empty state row: %q", body)
 	}
 }
@@ -559,5 +564,37 @@ func TestDrawSidebarHeader_LabelsReadable(t *testing.T) {
 	fg, _, _ = cells[0*w+gx].Style.Decompose()
 	if fg != a.theme.Text {
 		t.Fatalf("active header label fg = %v, want Text", fg)
+	}
+}
+
+// TestDiffWalk_ArrowsMoveBetweenFiles pins druk's walking gesture: with
+// a panel-opened diff up, ↓/↑ move to the next/previous changed file
+// (clamped at the ends), and closing the diff disarms the walk so a
+// menu-opened diff scrolls normally.
+func TestDiffWalk_ArrowsMoveBetweenFiles(t *testing.T) {
+	a, _, _ := dirtyRepoApp(t)
+	a.toggleGitPanel()
+	a.gitPanelClick(5, gitPanelListTop) // modified.txt
+	if a.diffPanelRow != 0 {
+		t.Fatalf("panel click should arm walking, got %d", a.diffPanelRow)
+	}
+	a.handleDiffKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	if a.diffPanelRow != 1 || !strings.Contains(a.diffTitle, "untracked.txt") {
+		t.Fatalf("down should walk to the next file, row %d title %q", a.diffPanelRow, a.diffTitle)
+	}
+	a.handleDiffKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	if a.diffPanelRow != 1 {
+		t.Fatalf("walk should clamp at the last file, got %d", a.diffPanelRow)
+	}
+	a.handleDiffKey(tcell.NewEventKey(tcell.KeyUp, 0, 0))
+	if !strings.Contains(a.diffTitle, "modified.txt") {
+		t.Fatalf("up should walk back, title %q", a.diffTitle)
+	}
+	if a.gitPanelSelected != 0 {
+		t.Fatalf("panel selection should track the walk, got %d", a.gitPanelSelected)
+	}
+	a.closeAllModals()
+	if a.diffPanelRow != -1 {
+		t.Fatalf("closing the diff must disarm walking, got %d", a.diffPanelRow)
 	}
 }

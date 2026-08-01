@@ -267,8 +267,14 @@ func (a *App) handleDiffKey(ev *tcell.EventKey) {
 	case tcell.KeyRight:
 		a.scrollDiffH(wheelCols)
 	case tcell.KeyUp:
+		if a.diffWalk(-1) {
+			return
+		}
 		a.scrollDiff(-1)
 	case tcell.KeyDown:
+		if a.diffWalk(1) {
+			return
+		}
 		a.scrollDiff(1)
 	case tcell.KeyPgUp:
 		a.scrollDiff(-a.diffVisibleRows())

@@ -178,16 +178,21 @@ func TestMenuCommitHistory_Predicates(t *testing.T) {
 	}
 }
 
-// TestGitPanelClick_BranchRowOpensHistory verifies the mouse-first
-// path: clicking the branch row in the Git panel opens the branch log.
-func TestGitPanelClick_BranchRowOpensHistory(t *testing.T) {
+// TestGitPanelClick_BranchRowOpensPicker verifies the mouse-first
+// path: clicking the branch row in the Git panel opens the
+// switch-branch form (history moved to the ⋯ popup and the ≡ menu).
+func TestGitPanelClick_BranchRowOpensPicker(t *testing.T) {
 	a, aFile, _ := historyRepoApp(t)
 	writeFileT(t, aFile, "dirty\n") // give the panel something to list
 	a.refreshGitStatus()
-	a.toggleGitPanel()
-	a.gitPanelClick(1)
-	if !a.gitLogOpen {
-		t.Fatal("branch row click should open the commit history")
+	// Activate the panel without toggleGitPanel's async status kick —
+	// a background `git status` racing t.TempDir cleanup flakes.
+	a.gitPanelActive = true
+	a.rebuildGitChangesRows()
+	gitRun(t, a.rootDir, "branch", "other")
+	a.gitPanelClick(5, 1)
+	if !a.formOpen {
+		t.Fatal("branch row click should open the switch-branch form")
 	}
 }
 

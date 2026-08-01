@@ -65,6 +65,7 @@ func (a *App) closeAllModals() {
 	a.findValue = nil
 	a.findCursor = 0
 	a.findScroll = 0
+	a.diffPanelRow = -1
 	a.projFindOpen = false
 	a.projFindValue = nil
 	a.projFindCursor = 0

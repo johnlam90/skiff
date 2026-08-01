@@ -296,10 +296,11 @@ Skiff panel:
 
 ```
  EXPLORER   GIT
- main
- M app.go  internal/app
- A gitchanges.go  internal/app
- D old.go  internal/app
+ ⎇ main ↑1
+ [ Commit ] [ Push ] [ Pull ] [ ⋯ ]
+ ● M app.go  internal/app
+ ● A gitchanges.go  internal/app
+ ○ D old.go  internal/app
 ```
 
 - Every changed path in the project, sorted, with a colored status
@@ -328,13 +329,36 @@ Skiff panel:
 - The status bar shows ` main ↑2 ↓1 · 4 ` when the branch has
   diverged from its upstream — the "you haven't pushed" nudge, before
   you quit the editor.
-- **Commit history** (`≡` menu, or click the branch row in the GIT
-  panel) lists recent commits — SHA, subject, relative age — and a
+- **Commit straight from the panel.** Every row carries a checkbox
+  (`●` in, `○` out — click to toggle; everything starts checked).
+  `[ Commit ]` asks for a message and commits exactly the checked
+  files; anything already staged in a shell stays out of it. The
+  same flow lives at `≡` → **Commit changes…**.
+- **Push / Pull / Fetch.** `[ Push ]` pushes the branch — a branch's
+  first push sets the upstream automatically. A rejected push gets a
+  one-click fix offered ("origin has commits you don't — pull, then
+  push?") instead of a wall of stderr. `[ Pull ]` fast-forwards;
+  anything needing a real merge fails fast with a plain-language
+  explanation. Fetch lives under `[ ⋯ ]`.
+- **Branches.** Click the branch line (or `≡` → **Switch branch…**)
+  to pick any local or remote branch — picking `origin/x` creates the
+  local tracking branch the way you'd expect. **New branch…** is
+  under `[ ⋯ ]`, next to **Stash changes**, **Pop stash**, and
+  **Undo last commit** (a soft reset: the commit disappears, its
+  changes stay in your tree).
+- **Walk a review with the arrows.** With a panel-opened diff up,
+  `↓`/`↑` jump straight to the next / previous changed file — read
+  the whole change-set end to end without touching the mouse. Every
+  git mutation runs on a background goroutine (never blocking typing),
+  one at a time, and refreshes the panel, tree tint, and gutter marks
+  when it lands.
+- **Commit history** (`≡` menu, or under the panel's `[ ⋯ ]` button)
+  lists recent commits — SHA, subject, relative age — and a
   click opens that commit's full diff, with per-file boundary rows
   for multi-file commits. **History of this file** does the same
   scoped to the active tab (with `--follow`, so renames don't
-  truncate the story). Both are read-only: no checkout, no rebase,
-  no cherry-pick — rewriting history stays in your shell.
+  truncate the story). Both are read-only — rewriting old history
+  stays in your shell.
 - An **untracked** file shows its whole content as an added diff. A
   **deleted** file shows what was removed, with no open button — there
   is nothing left to open. An untracked **directory** flips back to

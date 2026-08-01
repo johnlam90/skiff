@@ -45,6 +45,7 @@ internal/app/projfind.go      Project-wide content search panel (Esc-F)
 internal/app/preview.go       Shared file-open path + preview-tab rules
 internal/app/fileclip.go      File clipboard: cut/copy/paste/duplicate tree entries
 internal/app/session_restore.go App ↔ session store bridge (capture/restore)
+internal/app/gitops.go        Git write side: commit/push/pull/branch/stash runner
 internal/editor/buffer.go     Position + Buffer ([]string lines), edit primitives
 internal/editor/tab.go        Tab: path, buffer, cursor, anchor, scroll, dirty state
 internal/editor/lineops.go    Move / duplicate line-block gestures
