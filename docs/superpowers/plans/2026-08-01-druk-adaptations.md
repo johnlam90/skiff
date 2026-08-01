@@ -202,3 +202,44 @@
 ### Task 10: Docs touch-up
 
 - [x] Update README feature list + printHelp() in main.go (mentions `skiff file:line`). Update CLAUDE.md architecture map with the two new packages. `make test` green.
+
+---
+
+## Addendum: druk git workflow (second tranche)
+
+Skiff already has the read side (panel, adaptive side-by-side diff, log,
+ahead/behind). This tranche adds druk's write side and panel layout.
+
+### Task G1: git op plumbing — async runner, error explainer, push args
+
+**Files:** Create `internal/app/gitops.go` + `gitops_test.go`; modify `app.go` (event case, `gitBusy` field), `modals.go` (closeAllModals resets `diffPanelRow`).
+
+- `gitOpDoneEvent{when, label, okFlash, output string, err, touchesTree bool}` + `handleGitOpDone`: clear busy, error → `openInfo` with `explainGit` headline + raw output (push-rejected error instead offers a "Pull, then push" confirm that runs `pull --no-rebase --no-edit` + push), success → flash; always `refreshGitStatusAsync`, `touchesTree` → `refreshTreeNow`.
+- `runGitOp(label, okFlash string, touchesTree bool, cmds ...[]string) bool` — refuses while busy; goroutine runs `git -C root` sequence with `GIT_TERMINAL_PROMPT=0`, `GIT_EDITOR=true`, stops at first error, posts event. Pure helper `execGitSequence(root, cmds)` shared with tests.
+- `explainGit(output) string` mapping table (rejected push, non-ff pull, conflict, nothing to commit, no stash).
+- `gitPushCmds(root, branch) [][]string` — `push` or `push --set-upstream origin <branch>` when `@{upstream}` is absent; `gitCommitCmds(paths, msg)` — `add -A -- <paths>` + `commit -m <msg> -- <paths>` (druk semantics).
+- [x] Tests (real repos via `initRepo`, bare-dir origin): explain mappings, push cmds ± upstream, commit cmds, end-to-end commit/undo/stash via `execGitSequence`, handleGitOpDone busy/flash/error routing.
+
+### Task G2: menu actions — commit, push, pull, branch, extras
+
+**Files:** `gitops.go` (+tests); `app.go` menu rows.
+
+- Git menu group grows: "Commit changes…" (`hasGitChanges`), "Push", "Pull", "Switch branch…", "More git actions…" (context-popup with Fetch / New branch… / Stash changes / Pop stash / Undo last commit — reuses contextItems anchored via placeContext, node = tree root).
+- Commit: checked-set from G3 (default all) → `openPrompt("Commit message")` → `runGitOp`. Pull: `--ff-only`. Undo commit: `openConfirm` first, `reset --soft HEAD~1`. Stash: `stash push -u` / `stash pop`. New branch: prompt → `checkout -b`.
+- Switch branch: `openForm` select of `branch --all` names (current first, HEAD filtered); remote pick uses druk's tracking logic (`checkout -b x --track origin/x` unless local exists).
+- [x] Tests: branch list builder, tracking switch end-to-end, menu layout constants bump (+5 rows).
+
+### Task G3: panel redesign — branch row, buttons, commit checkboxes
+
+**Files:** `gitchanges.go` (+ test updates), `app.go` (fields `gitCommitChecks map[string]bool`, `gitPanelSelected`, `diffPanelRow`).
+
+- Layout: row 0 header tabs; row 1 `⎇ branch ↑n ↓n` (click → branch picker); row 2 buttons `[ Commit ] [ Push ] [ Pull ] [ ⋯ ]` (⋯ anchors the extras popup); rows 3+ changes with a leading `●`/`○` commit checkbox (click on the first two cells toggles; dirs included). Busy → muted "working…" after the buttons.
+- `gitCommitChecks` absent-means-checked, pruned in `rebuildGitChangesRows`; `checkedChangePaths()` feeds the commit.
+- History moves from the old row-1 click into the extras popup ("Commit history" stays in the main menu too).
+- [x] Tests: click mapping (branch/buttons/checkbox/row), checked-set pruning, draw assertions for the new rows.
+
+### Task G4: keyboard diff-walk + docs
+
+- `activateGitChangeRow` records `diffPanelRow`; while that diff is open, `↑`/`↓` in `handleDiffKey` walk to the prev/next file row (dirs skipped), reopening the diff and keeping the panel selection visible; wheel/PgUp/PgDn still scroll. `closeAllModals` resets the index. Menu "Diff this file" leaves it -1 (old scroll behavior).
+- README git section + hotkey note; CLAUDE.md map line for gitops.go.
+- [x] Tests: walk skips dirs and clamps; `make test` race-green.
