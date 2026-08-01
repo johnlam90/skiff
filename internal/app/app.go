@@ -515,13 +515,18 @@ type App struct {
 	findCursor int
 	findScroll int
 
-	// Live-preview theme picker (see themepick.go).
-	themePickOpen     bool
-	themePickQuery    []rune
-	themePickCursor   int
-	themePickSelected int
-	themePickScroll   int
-	themePickOriginal string // theme to restore on cancel
+	// Generic filter-list picker modal (see listpick.go) — themes,
+	// branches, any pick-one-of-N flow.
+	listPickOpen     bool
+	listPickTitle    string
+	listPickItems    []listPickItem
+	listPickQuery    []rune
+	listPickCursor   int
+	listPickSelected int
+	listPickScroll   int
+	listPickOnPick   func(*App, int)
+	listPickOnMove   func(*App, int)
+	listPickOnCancel func(*App)
 
 	// Project-wide content search (see projfind.go).
 	projFindOpen      bool
@@ -1360,8 +1365,8 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		a.handleProjFindKey(ev)
 		return
 	}
-	if a.themePickOpen {
-		a.handleThemePickKey(ev)
+	if a.listPickOpen {
+		a.handleListPickKey(ev)
 		return
 	}
 	if a.finderOpen {
@@ -1591,8 +1596,8 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		a.handleProjFindMouse(x, y, btn)
 		return
 	}
-	if a.themePickOpen {
-		a.handleThemePickMouse(x, y, btn)
+	if a.listPickOpen {
+		a.handleListPickMouse(x, y, btn)
 		return
 	}
 	if a.finderOpen {
@@ -2880,8 +2885,8 @@ func (a *App) draw() {
 	if a.finderOpen {
 		a.drawFinder()
 	}
-	if a.themePickOpen {
-		a.drawThemePick()
+	if a.listPickOpen {
+		a.drawListPick()
 	}
 	if a.diffOpen {
 		a.drawDiffView()

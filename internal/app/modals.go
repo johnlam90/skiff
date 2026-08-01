@@ -66,12 +66,12 @@ func (a *App) closeAllModals() {
 	a.findCursor = 0
 	a.findScroll = 0
 	a.diffPanelRow = -1
-	// A modal opening over the theme picker must not strand a
-	// half-chosen preview — put the original palette back first.
-	a.revertThemePreview()
-	a.themePickOpen = false
-	a.themePickQuery = nil
-	a.themePickCursor = 0
+	// A modal opening over a list picker cancels it properly so a
+	// preview hook (the theme picker's live preview) gets reverted
+	// rather than stranded.
+	if a.listPickOpen {
+		a.cancelListPick()
+	}
 	a.projFindOpen = false
 	a.projFindValue = nil
 	a.projFindCursor = 0

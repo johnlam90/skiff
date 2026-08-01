@@ -28,7 +28,7 @@ func (a *App) leaderStripVisible() bool {
 	}
 	if a.menuOpen || a.promptOpen || a.confirmOpen || a.dirtyOpen ||
 		a.formOpen || a.contextOpen || a.findOpen || a.finderOpen ||
-		a.projFindOpen || a.themePickOpen || a.diffOpen || a.gitLogOpen {
+		a.projFindOpen || a.listPickOpen || a.diffOpen || a.gitLogOpen {
 		return false
 	}
 	return true

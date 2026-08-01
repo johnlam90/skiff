@@ -21,7 +21,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johnlam90/skiff/internal/customactions"
 	"github.com/johnlam90/skiff/internal/filetree"
 )
 
@@ -326,13 +325,21 @@ func (a *App) menuGitSwitchBranch() {
 		a.flash("No other branches")
 		return
 	}
-	prompts := []customactions.Prompt{{
-		Key: "BRANCH", Label: "Branch", Type: customactions.PromptSelect,
-		Options: names, Default: a.gitBranch,
-	}}
-	a.openForm("Switch branch", prompts, func(app *App, values map[string]string) {
-		app.doGitSwitchBranch(values["BRANCH"])
-	})
+	a.openListPick("Switch branch", branchPickItems(names, a.gitBranch),
+		func(app *App, i int) { app.doGitSwitchBranch(names[i]) }, nil, nil)
+}
+
+// branchPickItems shapes branch names for the list picker: the current
+// branch wears the ● marker and remote-tracking spellings a dimmed tag.
+func branchPickItems(names []string, current string) []listPickItem {
+	items := make([]listPickItem, len(names))
+	for i, n := range names {
+		items[i] = listPickItem{Label: n, Current: n == current}
+		if strings.ContainsRune(n, '/') {
+			items[i].Tag = "remote"
+		}
+	}
+	return items
 }
 
 // doGitSwitchBranch checks out name with druk's tracking rule for

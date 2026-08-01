@@ -179,8 +179,8 @@ func TestMenuCommitHistory_Predicates(t *testing.T) {
 }
 
 // TestGitPanelClick_BranchRowOpensPicker verifies the mouse-first
-// path: clicking the branch row in the Git panel opens the
-// switch-branch form (history moved to the ⋯ popup and the ≡ menu).
+// path: clicking the branch row in the Git panel opens the filterable
+// switch-branch picker (history moved to the ⋯ popup and the ≡ menu).
 func TestGitPanelClick_BranchRowOpensPicker(t *testing.T) {
 	a, aFile, _ := historyRepoApp(t)
 	writeFileT(t, aFile, "dirty\n") // give the panel something to list
@@ -191,8 +191,8 @@ func TestGitPanelClick_BranchRowOpensPicker(t *testing.T) {
 	a.rebuildGitChangesRows()
 	gitRun(t, a.rootDir, "branch", "other")
 	a.gitPanelClick(5, 1)
-	if !a.formOpen {
-		t.Fatal("branch row click should open the switch-branch form")
+	if !a.listPickOpen {
+		t.Fatal("branch row click should open the switch-branch picker")
 	}
 }
 
