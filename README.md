@@ -88,7 +88,10 @@ The goals, in order:
 - **Session restore** — reopening a project brings back your open tabs
   (cursor and scroll included), expanded folders, and sidebar exactly
   as you left them.
-- **26 themes** — `≡` → **Theme…** applies instantly and persists to
+- **26 themes with live preview** — `≡` → **Theme…** opens a picker
+  that restyles the whole editor as you arrow (or hover) through the
+  list; type to filter ("cat" → the Catppuccins), `Enter` keeps,
+  `Esc` puts your old theme back. The choice persists to
   `~/.config/skiff/config.json` (`{"theme": "dracula"}`), the same
   tiny file the Nerd-Font icons preference lives in. Tokyo Night
   stays the default.

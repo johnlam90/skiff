@@ -5,8 +5,9 @@
 // Copyright: 2026 John Lam. All rights reserved.
 // =============================================================================
 
-// Tests for theme selection: applying a palette live, persisting it,
-// falling back on unknown ids, and the picker's form flow.
+// Tests for the live-preview theme picker: previews follow the
+// highlight, Enter persists, Esc reverts, the filter narrows and
+// previews, and mouse hover/click mirror the keyboard.
 
 package app
 
@@ -15,13 +16,15 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gdamore/tcell/v2"
+
 	"github.com/johnlam90/skiff/internal/spiceconfig"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
-// TestApplyTheme_SwapsPaletteAndStalesTabs pins the live-switch
-// contract: the struct swaps, open tabs re-tokenise, and the choice
-// lands in config.json when persist is set.
+// TestApplyTheme_SwapsPaletteAndStalesTabs pins the palette-swap
+// contract shared by preview and persist: the struct swaps, open tabs
+// re-tokenise, and persist=true lands in config.json.
 func TestApplyTheme_SwapsPaletteAndStalesTabs(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	dir := t.TempDir()
@@ -74,19 +77,130 @@ func TestLoadSpiceConfig_AppliesTheme(t *testing.T) {
 	}
 }
 
-// TestMenuTheme_PickerAppliesChoice walks the form flow: the picker
-// opens pre-selected on the current theme, and submitting a different
-// name applies that palette.
-func TestMenuTheme_PickerAppliesChoice(t *testing.T) {
+// TestThemePick_ArrowsPreviewLive is the picker's core promise:
+// moving the highlight restyles the editor immediately, before any
+// confirmation.
+func TestThemePick_ArrowsPreviewLive(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	a := newTestApp(t, t.TempDir())
-	a.menuTheme()
-	if !a.formOpen {
-		t.Fatal("picker form should open")
+	a.openThemePick()
+	if !a.themePickOpen {
+		t.Fatal("picker should open")
 	}
-	a.formValues["THEME"] = "Nord"
-	a.formCallback(a, a.formValues)
+	before := a.themeID
+	a.handleThemePickKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	if a.themeID == before {
+		t.Fatal("arrow move must preview the highlighted theme live")
+	}
+	entries := a.themePickEntries()
+	if a.themeID != entries[a.themePickSelected].ID {
+		t.Fatalf("preview out of sync: theme %q, highlight %q", a.themeID, entries[a.themePickSelected].ID)
+	}
+}
+
+// TestThemePick_EscReverts: cancelling puts the original palette back,
+// no matter how far the preview wandered.
+func TestThemePick_EscReverts(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	a := newTestApp(t, t.TempDir())
+	original := a.currentThemeID()
+	a.openThemePick()
+	a.handleThemePickKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	a.handleThemePickKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	a.handleThemePickKey(tcell.NewEventKey(tcell.KeyEsc, 0, 0))
+	if a.themePickOpen {
+		t.Fatal("esc should close the picker")
+	}
+	if a.themeID != original {
+		t.Fatalf("esc must revert: got %q, want %q", a.themeID, original)
+	}
+}
+
+// TestThemePick_EnterPersists: confirming keeps the previewed theme
+// and writes it to config.json.
+func TestThemePick_EnterPersists(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	a := newTestApp(t, t.TempDir())
+	a.openThemePick()
+	a.handleThemePickKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	picked := a.themeID
+	a.handleThemePickKey(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
+	if a.themePickOpen {
+		t.Fatal("enter should close the picker")
+	}
+	if a.themeID != picked {
+		t.Fatalf("enter must keep the preview: %q vs %q", a.themeID, picked)
+	}
+	cfg, err := spiceconfig.Load(spiceconfig.DefaultPath())
+	if err != nil || cfg.Theme != picked {
+		t.Fatalf("persist failed: %+v %v", cfg, err)
+	}
+}
+
+// TestThemePick_FilterNarrowsAndPreviews: typing narrows the list and
+// immediately previews the first hit — "nord" shows Nord.
+func TestThemePick_FilterNarrowsAndPreviews(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	a := newTestApp(t, t.TempDir())
+	a.openThemePick()
+	for _, r := range "nord" {
+		a.handleThemePickKey(tcell.NewEventKey(tcell.KeyRune, r, 0))
+	}
+	entries := a.themePickEntries()
+	if len(entries) != 1 || entries[0].ID != "nord" {
+		t.Fatalf("filter: got %+v", entries)
+	}
 	if a.themeID != "nord" {
-		t.Fatalf("picked theme not applied: %q", a.themeID)
+		t.Fatalf("filter should preview the hit, got %q", a.themeID)
+	}
+}
+
+// TestThemePick_MouseHoverPreviewsClickConfirms mirrors the keyboard
+// contract for the mouse: hover previews, click keeps, outside-click
+// cancels and reverts.
+func TestThemePick_MouseHoverPreviewsClickConfirms(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	a := newTestApp(t, t.TempDir())
+	a.openThemePick()
+	mx, my, _, _ := a.themePickRect()
+	rowY := my + 4 + 2 // third visible row
+
+	a.handleThemePickMouse(mx+5, rowY, 0) // hover
+	if a.themePickSelected != 2 || a.themeID != a.themePickEntries()[2].ID {
+		t.Fatalf("hover should preview row 2: sel %d theme %q", a.themePickSelected, a.themeID)
+	}
+	a.handleThemePickMouse(mx+5, rowY, tcell.Button1) // click keeps
+	if a.themePickOpen {
+		t.Fatal("click should confirm and close")
+	}
+
+	// Outside click cancels a fresh session: the wandering preview
+	// reverts to the theme confirmed above (the picker's new original).
+	confirmed := a.currentThemeID()
+	a.openThemePick()
+	a.handleThemePickKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	a.handleThemePickMouse(0, 0, tcell.Button1)
+	if a.themePickOpen {
+		t.Fatal("outside click should close")
+	}
+	if a.currentThemeID() != confirmed {
+		t.Fatalf("outside click must revert to %q, got %q", confirmed, a.currentThemeID())
+	}
+}
+
+// TestThemePick_ModalOverPickerReverts: another modal opening on top
+// (via closeAllModals) must not strand a preview.
+func TestThemePick_ModalOverPickerReverts(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	a := newTestApp(t, t.TempDir())
+	original := a.currentThemeID()
+	a.openThemePick()
+	a.handleThemePickKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	a.openMenu()
+	if a.themePickOpen {
+		t.Fatal("menu should close the picker")
+	}
+	if a.themeID != original {
+		t.Fatalf("stranded preview: %q, want %q", a.themeID, original)
 	}
 }

@@ -515,6 +515,14 @@ type App struct {
 	findCursor int
 	findScroll int
 
+	// Live-preview theme picker (see themepick.go).
+	themePickOpen     bool
+	themePickQuery    []rune
+	themePickCursor   int
+	themePickSelected int
+	themePickScroll   int
+	themePickOriginal string // theme to restore on cancel
+
 	// Project-wide content search (see projfind.go).
 	projFindOpen      bool
 	projFindValue     []rune
@@ -1339,6 +1347,10 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		a.handleProjFindKey(ev)
 		return
 	}
+	if a.themePickOpen {
+		a.handleThemePickKey(ev)
+		return
+	}
 	if a.finderOpen {
 		a.handleFinderKey(ev)
 		return
@@ -1564,6 +1576,10 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	}
 	if a.projFindOpen {
 		a.handleProjFindMouse(x, y, btn)
+		return
+	}
+	if a.themePickOpen {
+		a.handleThemePickMouse(x, y, btn)
 		return
 	}
 	if a.finderOpen {
@@ -2850,6 +2866,9 @@ func (a *App) draw() {
 	}
 	if a.finderOpen {
 		a.drawFinder()
+	}
+	if a.themePickOpen {
+		a.drawThemePick()
 	}
 	if a.diffOpen {
 		a.drawDiffView()
