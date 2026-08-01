@@ -117,7 +117,7 @@
 **Steps:**
 - [x] Tests: `TestPreviewReplacedByNextPreview`, `TestSecondClickPins`, `TestEditPinsPreview`, `TestOpenFilePinsExistingPreview`, `TestPreviewReplaceKeepsSlot`. Run, fail.
 - [x] Implement; italic style in drawTabBar via `style.Italic(true)` when `t.IsPreview()`.
-- [ ] `make test` green.
+- [x] `make test` green.
 
 ### Task 6: Tree cut / copy / paste / duplicate
 

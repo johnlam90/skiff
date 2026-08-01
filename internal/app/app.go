@@ -233,6 +233,10 @@ func builtinMenuGroups() [][]menuItemDef {
 			{action: (*App).menuRenameFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).renameFolderLabel},
 			{action: (*App).menuDeleteFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).deleteFolderLabel},
 			{action: (*App).menuUndoDelete, enabled: (*App).hasTrashedEntry, labelFor: (*App).undoDeleteLabel},
+			{label: "Cut file", action: (*App).menuCutFile, enabled: (*App).hasFileTab},
+			{label: "Copy file", action: (*App).menuCopyFile, enabled: (*App).hasFileTab},
+			{action: (*App).menuPasteEntry, enabled: (*App).hasFileClip, labelFor: (*App).pasteEntryLabel, visible: (*App).hasFileClip},
+			{label: "Duplicate file", action: (*App).menuDuplicateFile, enabled: (*App).hasFileTab},
 			{label: "Copy relative path", action: (*App).menuCopyRelativePath, enabled: (*App).hasFileTab},
 			{label: "Copy absolute path", action: (*App).menuCopyAbsolutePath, enabled: (*App).hasFileTab},
 		},
@@ -415,6 +419,10 @@ type App struct {
 
 	// closedTabs is the reopen stack — newest record last. See reopen.go.
 	closedTabs []closedTabRecord
+
+	// File clipboard (cut / copy / paste of tree entries) — see fileclip.go.
+	fileClipPath string // absolute path on the clipboard; "" = empty
+	fileClipCut  bool   // true = paste moves; false = paste copies
 
 	// tabScroll is how many cells the tab strip is scrolled left when
 	// the open tabs are wider than the bar (narrow tmux panes). It is

@@ -915,6 +915,12 @@ func (a *App) openTreeContext(n *filetree.Node, x, y int) {
 	if n != a.tree.Root {
 		items = append(items, contextItem{label: "Rename", action: ctxRename})
 		items = append(items, contextItem{label: "Delete", action: ctxDelete})
+		items = append(items, contextItem{label: "Cut", action: ctxCutNode})
+		items = append(items, contextItem{label: "Copy", action: ctxCopyNode})
+		items = append(items, contextItem{label: "Duplicate", action: ctxDuplicateNode})
+	}
+	if a.hasFileClip() {
+		items = append(items, contextItem{label: "Paste here", action: ctxPasteNode})
 	}
 	items = append(items, contextItem{label: "Copy rel path", action: ctxCopyRelativePath})
 	items = append(items, contextItem{label: "Copy abs path", action: ctxCopyAbsolutePath})
