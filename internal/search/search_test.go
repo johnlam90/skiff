@@ -130,3 +130,17 @@ func TestSearchEmptyQuery(t *testing.T) {
 		t.Fatalf("blank query must return nothing, got %d", len(got))
 	}
 }
+
+// TestSearchCancellation: a cancelled sweep abandons between files and
+// returns nothing — its results would be dropped anyway, so the walk
+// must not keep paying for disk reads.
+func TestSearchCancellation(t *testing.T) {
+	root := t.TempDir()
+	f1 := seed(t, root, "a.txt", "hit\n")
+	f2 := seed(t, root, "b.txt", "hit\n")
+	opts := DefaultOptions()
+	opts.Cancelled = func() bool { return true }
+	if got, _ := Search(root, []string{f1, f2}, "hit", opts); got != nil {
+		t.Fatalf("cancelled sweep should return nothing, got %v", got)
+	}
+}

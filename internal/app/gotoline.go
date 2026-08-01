@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/johnlam90/skiff/internal/editor"
 )
 
 // menuGoToLine opens the go-to-line prompt for the active tab. The hint
@@ -57,6 +59,13 @@ func (a *App) doGoToLine(value string) {
 // first draw the editor height is unknown and CenterOnCursor no-ops, in
 // which case the first Render's EnsureVisible still shows the line.
 func (a *App) OpenFileAtLine(path string, line int) {
+	a.OpenFileAtLineCol(path, line, 0)
+}
+
+// OpenFileAtLineCol additionally lands the cursor on a 0-based rune
+// column — project search uses it so Enter puts the caret on the match
+// itself, not at the start of its line.
+func (a *App) OpenFileAtLineCol(path string, line, col int) {
 	a.openFile(path)
 	if line <= 0 {
 		return
@@ -66,6 +75,10 @@ func (a *App) OpenFileAtLine(path string, line int) {
 		return
 	}
 	tab.JumpToLine(line)
+	if col > 0 {
+		tab.Cursor = tab.Buffer.Clamp(editor.Position{Line: tab.Cursor.Line, Col: col})
+		tab.Anchor = tab.Cursor
+	}
 	_, h := a.editorSize()
 	tab.CenterOnCursor(h)
 }

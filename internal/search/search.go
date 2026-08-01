@@ -37,6 +37,11 @@ type Options struct {
 	MaxTotal    int // stop after this many matches overall
 	MaxPerFile  int // stop after this many matches in one file
 	MaxFileSize int // skip files larger than this many bytes
+	// Cancelled, when set, is polled between files: a true return
+	// abandons the sweep immediately. The app wires it to "a newer
+	// query generation exists", so keystrokes stop paying for their
+	// predecessors' disk walks.
+	Cancelled func() bool
 }
 
 // DefaultOptions returns the caps the app uses: 500 total, 50 per file,
@@ -70,6 +75,9 @@ func Search(rootDir string, files []string, query string, opts Options) ([]Match
 	var out []Match
 	truncated := false
 	for _, rel := range files {
+		if opts.Cancelled != nil && opts.Cancelled() {
+			return nil, false
+		}
 		if opts.MaxTotal > 0 && len(out) >= opts.MaxTotal {
 			truncated = true
 			break

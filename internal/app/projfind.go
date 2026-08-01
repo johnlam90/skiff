@@ -25,6 +25,21 @@ import (
 	"github.com/johnlam90/skiff/internal/search"
 )
 
+// projFindKickEvent fires after the debounce interval: the sweep for
+// gen starts only if no newer keystroke has arrived meanwhile.
+type projFindKickEvent struct {
+	when time.Time
+	gen  int
+}
+
+// When implements tcell.Event.
+func (e *projFindKickEvent) When() time.Time { return e.when }
+
+// projFindDebounce is how long typing must pause before a sweep
+// starts. Long enough to coalesce a burst of keystrokes, short enough
+// to feel instant.
+const projFindDebounce = 120 * time.Millisecond
+
 // projFindDoneEvent carries a finished background sweep onto the main
 // event loop. gen pins it to the query generation that started it.
 type projFindDoneEvent struct {
@@ -103,11 +118,33 @@ func (a *App) projFindQueryChanged() {
 		return
 	}
 	a.projFindBusy = true
+	a.projFindLiveGen.Store(int64(gen))
+	// Debounce: the sweep starts only after the typing pauses — every
+	// keystroke on a big repo used to launch (and then discard) a full
+	// disk walk.
+	scr := a.screen
+	time.AfterFunc(projFindDebounce, func() {
+		_ = scr.PostEvent(&projFindKickEvent{when: time.Now(), gen: gen})
+	})
+}
+
+// handleProjFindKick starts the debounced sweep, unless a newer
+// keystroke superseded it. The sweep itself also polls the live
+// generation so an in-flight walk abandons as soon as it is stale.
+func (a *App) handleProjFindKick(e *projFindKickEvent) {
+	if !a.projFindOpen || e.gen != a.projFindGen {
+		return
+	}
+	gen := e.gen
+	query := string(a.projFindValue)
 	files := a.finder.Files()
 	root := a.rootDir
 	scr := a.screen
+	live := &a.projFindLiveGen
 	go func() {
-		matches, truncated := search.Search(root, files, query, search.DefaultOptions())
+		opts := search.DefaultOptions()
+		opts.Cancelled = func() bool { return live.Load() != int64(gen) }
+		matches, truncated := search.Search(root, files, query, opts)
 		_ = scr.PostEvent(&projFindDoneEvent{when: time.Now(), gen: gen, matches: matches, truncated: truncated})
 	}()
 }
@@ -179,7 +216,7 @@ func (a *App) projFindActivate() {
 	}
 	m := a.projFindMatches[row.MatchIdx]
 	a.closeProjFind()
-	a.OpenFileAtLine(filepath.Join(a.rootDir, m.Path), m.Line)
+	a.OpenFileAtLineCol(filepath.Join(a.rootDir, m.Path), m.Line, m.Col)
 }
 
 // projFindMove shifts the selection by delta rows, clamped, and keeps

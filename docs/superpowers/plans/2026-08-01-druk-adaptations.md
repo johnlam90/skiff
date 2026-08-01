@@ -255,7 +255,7 @@ Priority order; check off as they land, one commit each.
 - [x] P3 Themes: port druk's statusFg as Theme.StatusFg (generator mapping + regenerate palettes.go), audit drawStatusBar to use it; sanity-fence status bar contrast for all 26.
 - [x] P4 Background bulk file ops: paste/duplicate/delete of large trees run in a goroutine posting progress → done events (custom-event pattern); cross-device os.Rename fallback (copy+delete); status-bar progress count.
 - [x] P5 Branch verbs: Merge branch…, Rename branch…, Delete branch… in the ⋯ extras popup via the generic picker + confirm; gitops runners (merge --no-edit; branch -m; branch -d with -D confirm on failure).
-- [ ] P6 Search hardening: 150ms debounce + cancellation check between files; case/word/regex toggles on the projfind bar (click chips + Esc-leader-free keys shown in bar); match-column jump (OpenFileAtLine gains col).
+- [x] P6 Search hardening CORE done: 120ms debounce (projFindKickEvent), per-file cancellation (Options.Cancelled vs projFindLiveGen), match-column jump (OpenFileAtLineCol). REMAINING: case/word/regex toggle chips on the projfind bar.
 - [ ] P7 Replace: in-file replace field (Tab from find bar; Enter replace-current, "all" button); project-wide replace deferred unless asked → note in README.
 - [x] P8 Sessions (atomic rename write; flock skipped — Windows target — race narrowed via save-on-change): save on every tab open/close + 30s tick, atomic temp+rename write, flock to close the two-instance lost-update race; persist Preview flag.
 - [x] P9 Git polish: branch-list/upstream checks off the UI thread; isPushRejected only for non-fast-forward ("fetch first"/"non-fast-forward"), hook rejections get plain error; drop "Opened" flash on preview clicks.

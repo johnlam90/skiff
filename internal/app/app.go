@@ -20,6 +20,7 @@ package app
 import (
 	"fmt"
 	"os"
+	"sync/atomic"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -541,6 +542,7 @@ type App struct {
 	projFindSelected  int
 	projFindScrollY   int
 	projFindFolded    map[string]bool
+	projFindLiveGen   atomic.Int64 // latest gen, readable from sweep goroutines
 
 	// Auto-scroll while drag-selecting past the editor's top/bottom edge.
 	// lastDragX/Y is the most recent mouse position so the auto-scroll
@@ -1036,6 +1038,8 @@ func (a *App) handleEvent(ev tcell.Event) {
 		a.handleGitStatusEvent(e)
 	case *projFindDoneEvent:
 		a.handleProjFindDone(e)
+	case *projFindKickEvent:
+		a.handleProjFindKick(e)
 	case *gitOpDoneEvent:
 		a.handleGitOpDone(e)
 	case *fileOpDoneEvent:

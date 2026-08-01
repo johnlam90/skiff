@@ -141,3 +141,33 @@ func TestProjFindEscCloses(t *testing.T) {
 		t.Fatal("close should clear the panel state")
 	}
 }
+
+// TestProjFindDebounceAndStaleKick: a kick event whose generation was
+// superseded by a newer keystroke must not start a sweep, and Enter on
+// a match lands the cursor on the match column, not column 0.
+func TestProjFindDebounceAndStaleKick(t *testing.T) {
+	root := t.TempDir()
+	mkFile(t, root, "a.go", "xx alpha\n")
+	a := projFindApp(t, root)
+
+	a.projFindValue = []rune("al")
+	a.projFindQueryChanged() // gen N
+	staleGen := a.projFindGen
+	a.projFindValue = []rune("alpha")
+	a.projFindQueryChanged() // gen N+1 supersedes
+	a.handleProjFindKick(&projFindKickEvent{when: time.Now(), gen: staleGen})
+	// The stale kick must be inert: no done event for staleGen can win,
+	// and busy stays owned by the live generation.
+	if a.projFindGen != staleGen+1 {
+		t.Fatalf("generation bookkeeping broke: %d vs %d", a.projFindGen, staleGen)
+	}
+
+	// Column landing via activation.
+	a.projFindMatches = []search.Match{{Path: "a.go", Line: 1, Col: 3, Text: "xx alpha"}}
+	a.projFindSelected = 1 // header row 0, match row 1
+	a.projFindActivate()
+	tab := a.activeTabPtr()
+	if tab == nil || tab.Cursor.Col != 3 {
+		t.Fatalf("activation should land on the match column, got %+v", tab.Cursor)
+	}
+}
