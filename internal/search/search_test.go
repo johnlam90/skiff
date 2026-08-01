@@ -181,3 +181,62 @@ func TestSearchToggles(t *testing.T) {
 		t.Fatalf("broken regex should match nothing, got %+v", got)
 	}
 }
+
+// TestReplaceLine pins the rewrite rules: every qualifying occurrence
+// swaps, scanning never re-matches its own output, and the mode flags
+// (word, case, regex-with-literal-replacement) are honoured.
+func TestReplaceLine(t *testing.T) {
+	got, n := ReplaceLine("foo foo food", "foo", "foofoo", DefaultOptions())
+	if got != "foofoo foofoo foofood" || n != 3 {
+		t.Fatalf("basic: %q (%d)", got, n)
+	}
+	opts := DefaultOptions()
+	opts.WholeWord = true
+	got, n = ReplaceLine("foo food foo", "foo", "x", opts)
+	if got != "x food x" || n != 2 {
+		t.Fatalf("word: %q (%d)", got, n)
+	}
+	opts = DefaultOptions()
+	opts.Regex = true
+	got, n = ReplaceLine("a1 b22 c3", "[0-9]+", "#", opts)
+	if got != "a# b# c#" || n != 3 {
+		t.Fatalf("regex: %q (%d)", got, n)
+	}
+	if _, n = ReplaceLine("anything", "", "x", DefaultOptions()); n != 0 {
+		t.Fatalf("empty query must be a no-op, replaced %d", n)
+	}
+}
+
+// TestApplyReplaceVerifiesAndWrites drives the disk path: matched
+// lines rewrite atomically, drifted lines are skipped and counted, and
+// untouched files stay untouched.
+func TestApplyReplaceVerifiesAndWrites(t *testing.T) {
+	root := t.TempDir()
+	f1 := seed(t, root, "a.txt", "keep\nold value\nkeep\n")
+	f2 := seed(t, root, "b.txt", "old drifted\n")
+
+	matches, _ := Search(root, []string{f1, f2}, "old", DefaultOptions())
+	if len(matches) != 2 {
+		t.Fatalf("seed matches: %d", len(matches))
+	}
+	// Drift b.txt's line after the sweep — its match must be skipped.
+	seedOverwrite := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0644); err != nil {
+			t.Fatalf("rewrite: %v", err)
+		}
+	}
+	seedOverwrite("b.txt", "edited since\n")
+
+	rep := ApplyReplace(root, matches, "old", "new", DefaultOptions())
+	if rep.Replaced != 1 || rep.Files != 1 || rep.Skipped != 1 {
+		t.Fatalf("report: %+v", rep)
+	}
+	data, _ := os.ReadFile(filepath.Join(root, "a.txt"))
+	if string(data) != "keep\nnew value\nkeep\n" {
+		t.Fatalf("a.txt: %q", data)
+	}
+	data, _ = os.ReadFile(filepath.Join(root, "b.txt"))
+	if string(data) != "edited since\n" {
+		t.Fatalf("b.txt must be untouched: %q", data)
+	}
+}

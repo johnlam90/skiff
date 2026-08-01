@@ -266,3 +266,19 @@ func TestReplaceAllMatches(t *testing.T) {
 		t.Fatalf("one undo should restore all: %q", tab.Buffer.String())
 	}
 }
+
+// TestReplaceLines pins the open-buffer path of project replace: whole
+// lines swap in one undo step, out-of-range indexes are ignored, and
+// the tab reports dirty.
+func TestReplaceLines(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("one\ntwo\nthree")}
+	tab.initUndo()
+	n := tab.ReplaceLines(map[int]string{1: "TWO", 99: "ghost"})
+	if n != 1 || tab.Buffer.Lines[1] != "TWO" || !tab.Dirty {
+		t.Fatalf("swap: n=%d lines=%v dirty=%v", n, tab.Buffer.Lines, tab.Dirty)
+	}
+	tab.Undo()
+	if tab.Buffer.Lines[1] != "two" {
+		t.Fatalf("undo should restore: %v", tab.Buffer.Lines)
+	}
+}

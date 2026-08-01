@@ -552,6 +552,15 @@ type App struct {
 	projFindWholeWord bool
 	projFindRegex     bool
 
+	// Project-wide replace riding the panel (see projreplace.go). The
+	// X ranges are stamped by drawProjFindBar for the mouse handler.
+	projReplaceOpen                        bool
+	projReplaceValue                       []rune
+	projReplaceCursor                      int
+	projFocusReplace                       bool
+	projReplaceFieldX0, projReplaceFieldX1 int
+	projReplaceAllX0, projReplaceAllX1     int
+
 	// Auto-scroll while drag-selecting past the editor's top/bottom edge.
 	// lastDragX/Y is the most recent mouse position so the auto-scroll
 	// tick can extend the selection at the user's column even though the
@@ -1049,6 +1058,8 @@ func (a *App) handleEvent(ev tcell.Event) {
 		a.handleProjFindDone(e)
 	case *projFindKickEvent:
 		a.handleProjFindKick(e)
+	case *projReplaceDoneEvent:
+		a.handleProjReplaceDone(e)
 	case *gitOpDoneEvent:
 		a.handleGitOpDone(e)
 	case *fileOpDoneEvent:

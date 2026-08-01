@@ -72,9 +72,15 @@ The goals, in order:
   bar shows the branch plus a change count, and the sidebar's
   [GIT tab](#git-changes) lists every uncommitted change with
   click-to-diff — VS Code's Source Control view, one click away.
-- **Project-wide search** — `Esc F` sweeps every file in the project
-  for your query, groups the hits by file (fold noisy files with `Tab`
-  or a click), and opens any hit at its line.
+- **Project-wide search & replace** — `Esc F` sweeps every file in the
+  project (smart-case, with match-case / whole-word / regex chips),
+  groups the hits by file, and opens any hit at its line. `Tab` grows
+  a replace field: `Enter` rewrites the selected line, `[ All ]`
+  (or `Shift+Enter`) rewrites everything behind one confirm. Every
+  line re-verifies against what the search saw before it's touched —
+  files edited since are skipped and reported, never guessed at. Open
+  buffers apply through the editor (per-file undo, dirty tabs stay
+  dirty); closed files rewrite atomically on disk.
 - **Preview tabs** — a single tree click opens a file in one reusable
   *italic* tab, so browsing ten files doesn't leave ten tabs behind.
   Click the file again, or just start typing, to pin it.
@@ -261,8 +267,7 @@ above the status bar:
 - `Tab` grows the bar a **replace** field (`Find: foo ⇒ bar`): `Enter`
   replaces the current match and walks forward, `Shift+Enter` replaces
   every match in the file as one undo step, `Tab` hops back to the
-  query. Replace is per-file; project-wide replace is deliberately not
-  offered yet.
+  query.
 - `Esc` closes the bar and clears the highlights — each `Esc f` opens
   a fresh search.
 - The active match is painted a brighter color than the rest, so you

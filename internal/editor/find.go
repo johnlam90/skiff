@@ -240,3 +240,32 @@ func (t *Tab) ReplaceAllMatches(repl string) int {
 	t.SetFindQuery(t.FindQuery)
 	return n
 }
+
+// ReplaceLines swaps whole lines (0-based index → new content) as ONE
+// undo step — project-wide replace routes open buffers through here so
+// a tab keeps its history and its dirty-state semantics. Out-of-range
+// indexes are ignored (the caller verified against a live buffer, but
+// buffers move). Returns how many lines were actually swapped.
+func (t *Tab) ReplaceLines(newLines map[int]string) int {
+	if t.IsImage() || len(newLines) == 0 {
+		return 0
+	}
+	t.pushUndo(undoGroupStructural)
+	n := 0
+	for i, text := range newLines {
+		if i < 0 || i >= len(t.Buffer.Lines) {
+			continue
+		}
+		t.Buffer.Lines[i] = text
+		n++
+	}
+	if n == 0 {
+		return 0
+	}
+	t.Cursor = t.Buffer.Clamp(t.Cursor)
+	t.Anchor = t.Cursor
+	t.Dirty = true
+	t.StyleStale = true
+	t.cursorMoved = true
+	return n
+}

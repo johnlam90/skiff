@@ -296,12 +296,12 @@ files? Files change on disk — commit or stash first if unsure."
    file rewrites rely on git. The confirm text owns that honestly.
 
 ### Tasks
-- [ ] R1 Engine: search.ReplacePlan (matches grouped per file) +
+- [x] R1 Engine: search.ReplacePlan (matches grouped per file) +
       search.ApplyReplace(root, plan, replacement, verify) → report
       {Replaced, Files, Skipped}; atomic writes; tests incl. stale-line
       skip + multi-match-per-line ordering (apply right-to-left).
-- [ ] R2 Panel: replace field state (Tab toggles, mirrors find bar),
+- [x] R2 Panel: replace field state (Tab toggles, mirrors find bar),
       single-match Enter apply, [ Replace all N ] + confirm, open-tab
       routing via editor buffers, background runner + report events;
       tests for focus routing, verify-skip, dirty-tab preservation.
-- [ ] R3 Docs: README project-search section + this plan check-off.
+- [x] R3 Docs: README project-search section + this plan check-off.

@@ -85,6 +85,7 @@ func (a *App) openProjFind() {
 	a.projFindSelected = 0
 	a.projFindScrollY = 0
 	a.projFindFolded = map[string]bool{}
+	a.resetProjReplace()
 }
 
 // closeProjFind dismisses the panel and forgets the query — same
@@ -98,6 +99,7 @@ func (a *App) closeProjFind() {
 	a.projFindTruncated = false
 	a.projFindBusy = false
 	a.projFindFolded = nil
+	a.resetProjReplace()
 	// Invalidate any in-flight sweep.
 	a.projFindGen++
 }
@@ -271,12 +273,15 @@ func (a *App) handleProjFindKey(ev *tcell.EventKey) {
 	case tcell.KeyEsc:
 		a.closeProjFind()
 	case tcell.KeyEnter:
+		if a.projFocusReplace {
+			a.projReplaceEnter(ev.Modifiers()&tcell.ModShift != 0)
+			return
+		}
 		a.projFindActivate()
 	case tcell.KeyTab:
-		rows := a.projFindRows()
-		if a.projFindSelected >= 0 && a.projFindSelected < len(rows) {
-			a.projFindToggleFold(rows[a.projFindSelected].Path)
-		}
+		// Tab grows/hops the replace field (folding lives on Enter-on-
+		// header and header clicks).
+		a.projReplaceToggleFocus()
 	case tcell.KeyUp:
 		a.projFindMove(-1)
 	case tcell.KeyDown:
@@ -288,24 +293,57 @@ func (a *App) handleProjFindKey(ev *tcell.EventKey) {
 		_, _, _, eh := a.editorRect()
 		a.projFindMove(eh)
 	case tcell.KeyLeft:
+		if a.projFocusReplace {
+			if a.projReplaceCursor > 0 {
+				a.projReplaceCursor--
+			}
+			return
+		}
 		if a.projFindCursor > 0 {
 			a.projFindCursor--
 		}
 	case tcell.KeyRight:
+		if a.projFocusReplace {
+			if a.projReplaceCursor < len(a.projReplaceValue) {
+				a.projReplaceCursor++
+			}
+			return
+		}
 		if a.projFindCursor < len(a.projFindValue) {
 			a.projFindCursor++
 		}
 	case tcell.KeyHome:
+		if a.projFocusReplace {
+			a.projReplaceCursor = 0
+			return
+		}
 		a.projFindCursor = 0
 	case tcell.KeyEnd:
+		if a.projFocusReplace {
+			a.projReplaceCursor = len(a.projReplaceValue)
+			return
+		}
 		a.projFindCursor = len(a.projFindValue)
 	case tcell.KeyBackspace, tcell.KeyBackspace2:
+		if a.projFocusReplace {
+			if a.projReplaceCursor > 0 {
+				a.projReplaceValue = append(a.projReplaceValue[:a.projReplaceCursor-1], a.projReplaceValue[a.projReplaceCursor:]...)
+				a.projReplaceCursor--
+			}
+			return
+		}
 		if a.projFindCursor > 0 {
 			a.projFindValue = append(a.projFindValue[:a.projFindCursor-1], a.projFindValue[a.projFindCursor:]...)
 			a.projFindCursor--
 			a.projFindQueryChanged()
 		}
 	case tcell.KeyDelete:
+		if a.projFocusReplace {
+			if a.projReplaceCursor < len(a.projReplaceValue) {
+				a.projReplaceValue = append(a.projReplaceValue[:a.projReplaceCursor], a.projReplaceValue[a.projReplaceCursor+1:]...)
+			}
+			return
+		}
 		if a.projFindCursor < len(a.projFindValue) {
 			a.projFindValue = append(a.projFindValue[:a.projFindCursor], a.projFindValue[a.projFindCursor+1:]...)
 			a.projFindQueryChanged()
@@ -313,6 +351,15 @@ func (a *App) handleProjFindKey(ev *tcell.EventKey) {
 	case tcell.KeyRune:
 		r := ev.Rune()
 		if r < 0x20 {
+			return
+		}
+		if a.projFocusReplace {
+			next := make([]rune, 0, len(a.projReplaceValue)+1)
+			next = append(next, a.projReplaceValue[:a.projReplaceCursor]...)
+			next = append(next, r)
+			next = append(next, a.projReplaceValue[a.projReplaceCursor:]...)
+			a.projReplaceValue = next
+			a.projReplaceCursor++
 			return
 		}
 		next := make([]rune, 0, len(a.projFindValue)+1)
@@ -354,6 +401,17 @@ func (a *App) handleProjFindMouse(x, y int, btn tcell.ButtonMask) {
 				a.projFindQueryChanged()
 				return
 			}
+		}
+		if btn&tcell.Button1 != 0 && a.projReplaceOpen {
+			if x >= a.projReplaceAllX0 && x < a.projReplaceAllX1 && a.projReplaceAllX1 > 0 {
+				a.projReplaceConfirmAll()
+				return
+			}
+			if x >= a.projReplaceFieldX0 && x < a.projReplaceFieldX1 {
+				a.projFocusReplace = true
+				return
+			}
+			a.projFocusReplace = false
 		}
 		return
 	}
@@ -519,7 +577,12 @@ func (a *App) drawProjFindBar() {
 	}
 	inputStart := bx + chips[len(chips)-1].x1 + 1
 
-	hint := " Enter: open · Tab: fold · Esc: close "
+	hint := " Enter: open · Tab: replace · Esc: close "
+	if a.projReplaceOpen && a.projFocusReplace {
+		hint = " Enter: replace line · Shift+Enter: all · Tab: query · Esc: close "
+	} else if a.projReplaceOpen {
+		hint = " Enter: open · Tab: replace field · Esc: close "
+	}
 	counter := a.projFindCounterText()
 	rightTextStart := bx + bw
 	if bw > runeLen(label)+runeLen(hint)+10 {
@@ -539,6 +602,35 @@ func (a *App) drawProjFindBar() {
 	if inputEnd <= inputStart {
 		inputEnd = bx + bw - 1
 	}
+	// With the replace field open, the query keeps the left half; the
+	// right half carries " ⇒ <replacement> [ All ]". The x ranges are
+	// stamped for the mouse handler.
+	a.projReplaceFieldX0, a.projReplaceFieldX1 = 0, 0
+	a.projReplaceAllX0, a.projReplaceAllX1 = 0, 0
+	if a.projReplaceOpen {
+		half := inputStart + (inputEnd-inputStart)/2
+		rlabel := " ⇒ "
+		drawAt(a.screen, half, by, rlabel, labelStyle)
+		fieldX0 := half + runeLen(rlabel)
+		fieldX1 := inputEnd
+		if len(a.projReplaceValue) > 0 {
+			allBtn := "[ All ]"
+			bx0 := inputEnd - runeLen(allBtn)
+			if bx0 > fieldX0+2 {
+				drawAt(a.screen, bx0, by, allBtn, labelStyle)
+				a.projReplaceAllX0, a.projReplaceAllX1 = bx0, bx0+runeLen(allBtn)
+				fieldX1 = bx0 - 1
+			}
+		}
+		for i, r := range a.projReplaceValue {
+			if fieldX0+i >= fieldX1 {
+				break
+			}
+			a.screen.SetContent(fieldX0+i, by, r, nil, barStyle)
+		}
+		a.projReplaceFieldX0, a.projReplaceFieldX1 = fieldX0, fieldX1
+		inputEnd = half - 1
+	}
 	inputWidth := inputEnd - inputStart
 	if inputWidth < 1 {
 		inputWidth = 1
@@ -555,6 +647,13 @@ func (a *App) drawProjFindBar() {
 			break
 		}
 		a.screen.SetContent(inputStart+i, by, a.projFindValue[idx], nil, barStyle)
+	}
+	if a.projReplaceOpen && a.projFocusReplace {
+		caret := a.projReplaceFieldX0 + a.projReplaceCursor
+		if caret >= a.projReplaceFieldX0 && caret <= a.projReplaceFieldX1 {
+			a.screen.ShowCursor(caret, by)
+		}
+		return
 	}
 	caret := inputStart + (a.projFindCursor - a.projFindScroll)
 	if caret >= inputStart && caret <= inputEnd {
