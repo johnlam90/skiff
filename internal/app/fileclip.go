@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/johnlam90/skiff/internal/filetree"
@@ -82,23 +83,118 @@ func (a *App) pasteInto(dir string) {
 	}
 	dest := uniqueDestPath(dir, filepath.Base(src), info.IsDir())
 	if a.fileClipCut {
-		if err := os.Rename(src, dest); err != nil {
-			a.flash(fmt.Sprintf("Move failed: %v", err))
-			return
-		}
-		a.repointPaths(src, dest)
-		a.fileClipPath = ""
-		a.flash(fmt.Sprintf("Moved %s", filepath.Base(dest)))
+		a.startFileOp("Move", src, dest, true)
 	} else {
-		if err := copyTree(src, dest); err != nil {
-			a.flash(fmt.Sprintf("Copy failed: %v", err))
-			return
+		a.startFileOp("Paste", src, dest, false)
+	}
+}
+
+// fileOpDoneEvent reports a finished background file operation.
+type fileOpDoneEvent struct {
+	when  time.Time
+	label string
+	src   string
+	dest  string
+	moved bool
+	err   error
+}
+
+// When implements tcell.Event.
+func (e *fileOpDoneEvent) When() time.Time { return e.when }
+
+// fileOpProgressEvent ticks the status bar while a big copy runs.
+type fileOpProgressEvent struct {
+	when  time.Time
+	label string
+	count int64
+}
+
+// When implements tcell.Event.
+func (e *fileOpProgressEvent) When() time.Time { return e.when }
+
+// startFileOp runs a move or copy in the background so a
+// node_modules-sized tree never freezes the editor (druk's rule). One
+// at a time — racing two ops over the same paths helps nobody.
+func (a *App) startFileOp(label, src, dest string, move bool) {
+	if a.fileOpBusy {
+		a.flash("Another file operation is still running")
+		return
+	}
+	a.fileOpBusy = true
+	a.flash(gerundOf(label) + " " + filepath.Base(src) + "…")
+	scr := a.screen
+	go func() {
+		var count int64
+		lastTick := time.Now()
+		progress := func() {
+			n := atomic.AddInt64(&count, 1)
+			if time.Since(lastTick) > 150*time.Millisecond {
+				lastTick = time.Now()
+				_ = scr.PostEvent(&fileOpProgressEvent{when: time.Now(), label: label, count: n})
+			}
 		}
-		a.flash(fmt.Sprintf("Pasted %s", filepath.Base(dest)))
+		var err error
+		if move {
+			err = moveEntry(src, dest, progress)
+		} else {
+			err = copyTree(src, dest, progress)
+		}
+		_ = scr.PostEvent(&fileOpDoneEvent{when: time.Now(), label: label, src: src, dest: dest, moved: move, err: err})
+	}()
+}
+
+// handleFileOpProgress keeps the user informed mid-copy.
+func (a *App) handleFileOpProgress(e *fileOpProgressEvent) {
+	a.flash(fmt.Sprintf("%s… %d files", gerundOf(e.label), e.count))
+}
+
+// gerundOf maps an op verb to its progress form.
+func gerundOf(label string) string {
+	switch label {
+	case "Move":
+		return "Moving"
+	case "Paste":
+		return "Pasting"
+	case "Duplicate":
+		return "Duplicating"
+	default:
+		return label
+	}
+}
+
+// handleFileOpDone lands a finished op on the main loop: repoint tabs
+// after a move, clear the cut clipboard, refresh everything.
+func (a *App) handleFileOpDone(e *fileOpDoneEvent) {
+	a.fileOpBusy = false
+	if e.err != nil {
+		a.flash(fmt.Sprintf("%s failed: %v", e.label, e.err))
+		a.refreshTree()
+		return
+	}
+	if e.moved {
+		a.repointPaths(e.src, e.dest)
+		if a.fileClipCut && a.fileClipPath == e.src {
+			a.fileClipPath = ""
+		}
+		a.flash(fmt.Sprintf("Moved %s", filepath.Base(e.dest)))
+	} else {
+		a.flash(fmt.Sprintf("Pasted %s", filepath.Base(e.dest)))
 	}
 	a.refreshTree()
 	a.refreshGitStatusAsync()
 	a.invalidateFinder()
+}
+
+// moveEntry relocates src to dest: rename when the filesystem allows,
+// copy-then-delete across devices (the one case os.Rename can't do).
+func moveEntry(src, dest string, progress func()) error {
+	if err := os.Rename(src, dest); err == nil {
+		return nil
+	}
+	if err := copyTree(src, dest, progress); err != nil {
+		return err
+	}
+	return os.RemoveAll(src)
 }
 
 // duplicatePath copies path beside itself under the next free " copy"
@@ -110,14 +206,7 @@ func (a *App) duplicatePath(path string) {
 		return
 	}
 	dest := uniqueDestPath(filepath.Dir(path), filepath.Base(path), info.IsDir())
-	if err := copyTree(path, dest); err != nil {
-		a.flash(fmt.Sprintf("Duplicate failed: %v", err))
-		return
-	}
-	a.refreshTree()
-	a.refreshGitStatusAsync()
-	a.invalidateFinder()
-	a.flash(fmt.Sprintf("Duplicated to %s", filepath.Base(dest)))
+	a.startFileOp("Duplicate", path, dest, false)
 }
 
 // repointPaths rewrites every open tab (and the active folder) that
@@ -177,8 +266,13 @@ func uniqueDestPath(dir, base string, isDir bool) string {
 
 // copyTree copies src to dst recursively: directories re-create their
 // entries, symlinks re-link their targets, files copy bytes + mode.
-// dst must not exist yet (uniqueDestPath guarantees that).
-func copyTree(src, dst string) error {
+// dst must not exist yet (uniqueDestPath guarantees that). progress is
+// called once per copied entry so the background runner can narrate;
+// nil is allowed for callers that don't care.
+func copyTree(src, dst string, progress func()) error {
+	if progress != nil {
+		progress()
+	}
 	info, err := os.Lstat(src)
 	if err != nil {
 		return err
@@ -193,7 +287,7 @@ func copyTree(src, dst string) error {
 			return err
 		}
 		for _, e := range entries {
-			if err := copyTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+			if err := copyTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), progress); err != nil {
 				return err
 			}
 		}

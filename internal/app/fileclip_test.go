@@ -15,7 +15,27 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+// waitFileOpIdle pumps the simulation screen's queue until the pending
+// background file op posts its done event, then applies it — tests run
+// without the real event loop.
+func waitFileOpIdle(t *testing.T, a *App) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for a.fileOpBusy {
+		if time.Now().After(deadline) {
+			t.Fatal("file op never finished")
+		}
+		switch e := a.screen.PollEvent().(type) {
+		case *fileOpDoneEvent:
+			a.handleFileOpDone(e)
+		case *fileOpProgressEvent:
+			a.handleFileOpProgress(e)
+		}
+	}
+}
 
 // mkFile writes content to dir/name (creating parents) and returns the path.
 func mkFile(t *testing.T, dir, name, content string) string {
@@ -71,7 +91,9 @@ func TestPasteCopyKeepsClip(t *testing.T) {
 
 	a.clipCopyPath(src)
 	a.pasteInto(sub1)
+	waitFileOpIdle(t, a)
 	a.pasteInto(sub2)
+	waitFileOpIdle(t, a)
 	for _, want := range []string{filepath.Join(sub1, "a.txt"), filepath.Join(sub2, "a.txt")} {
 		if _, err := os.Stat(want); err != nil {
 			t.Fatalf("missing pasted copy %s: %v", want, err)
@@ -98,6 +120,7 @@ func TestPasteCutMovesAndClearsClip(t *testing.T) {
 
 	a.clipCutPath(src)
 	a.pasteInto(sub)
+	waitFileOpIdle(t, a)
 	if _, err := os.Stat(filepath.Join(sub, "a.txt")); err != nil {
 		t.Fatalf("moved file missing: %v", err)
 	}
@@ -141,6 +164,7 @@ func TestPasteOntoFileLandsBeside(t *testing.T) {
 
 	a.clipCopyPath(src)
 	a.pasteInto(pasteDirForPath(target, false))
+	waitFileOpIdle(t, a)
 	if _, err := os.Stat(filepath.Join(root, "sub", "a.txt")); err != nil {
 		t.Fatalf("paste-onto-file should land beside it: %v", err)
 	}
@@ -161,6 +185,7 @@ func TestMoveUpdatesOpenTabs(t *testing.T) {
 
 	a.clipCutPath(filepath.Join(root, "pkg"))
 	a.pasteInto(dest)
+	waitFileOpIdle(t, a)
 	want := filepath.Join(dest, "pkg", "file.go")
 	if got := a.activeTabPtr().Path; got != want {
 		t.Fatalf("tab path: got %q, want %q", got, want)
@@ -175,6 +200,7 @@ func TestDuplicateInPlace(t *testing.T) {
 	a := newTestApp(t, root)
 
 	a.duplicatePath(src)
+	waitFileOpIdle(t, a)
 	if _, err := os.Stat(filepath.Join(root, "a copy.txt")); err != nil {
 		t.Fatalf("duplicate missing: %v", err)
 	}

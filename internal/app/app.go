@@ -434,6 +434,7 @@ type App struct {
 	// File clipboard (cut / copy / paste of tree entries) — see fileclip.go.
 	fileClipPath string // absolute path on the clipboard; "" = empty
 	fileClipCut  bool   // true = paste moves; false = paste copies
+	fileOpBusy   bool   // a background move/copy is running
 
 	// tabScroll is how many cells the tab strip is scrolled left when
 	// the open tabs are wider than the bar (narrow tmux panes). It is
@@ -1036,6 +1037,10 @@ func (a *App) handleEvent(ev tcell.Event) {
 		a.handleProjFindDone(e)
 	case *gitOpDoneEvent:
 		a.handleGitOpDone(e)
+	case *fileOpDoneEvent:
+		a.handleFileOpDone(e)
+	case *fileOpProgressEvent:
+		a.handleFileOpProgress(e)
 	}
 }
 
