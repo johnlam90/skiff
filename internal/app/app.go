@@ -967,6 +967,19 @@ func (a *App) Run() error {
 			break
 		}
 		a.handleEvent(ev)
+		// Drain everything already queued before paying for a draw. A
+		// wheel flick or mouse sweep — especially over SSH, where events
+		// arrive in bursts — queues dozens of events; drawing once per
+		// burst instead of once per event is the difference between
+		// smooth scrolling and syrup on remote links.
+		for !a.quit && a.screen.HasPendingEvent() {
+			ev = a.screen.PollEvent()
+			if ev == nil {
+				a.quit = true
+				break
+			}
+			a.handleEvent(ev)
+		}
 		a.draw()
 		a.screen.Show()
 	}

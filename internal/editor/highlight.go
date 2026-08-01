@@ -85,6 +85,48 @@ func HighlightVisible(filename string, lines []string, startLine, height int, t 
 	return styles
 }
 
+// HighlightWindow tokenises a window around the viewport — the visible
+// rows plus the same lead HighlightVisible uses — but keeps every row
+// it computed, returning the styled grid plus the window's [start, end)
+// span. The caller caches the result and reuses it while the viewport
+// stays inside the window, so scrolling costs nothing until the view
+// nears an edge; re-lexing on every wheel tick is what made scrolling
+// crawl over remote links.
+func HighlightWindow(filename string, lines []string, startLine, height int, t theme.Theme) ([][]tcell.Style, int, int) {
+	styles := make([][]tcell.Style, len(lines))
+	if height <= 0 || len(lines) == 0 {
+		return styles, 0, 0
+	}
+	if startLine < 0 {
+		startLine = 0
+	}
+	if startLine >= len(lines) {
+		startLine = len(lines) - 1
+	}
+	endLine := startLine + height
+	if endLine > len(lines) {
+		endLine = len(lines)
+	}
+	winStart := startLine - highlightLeadLines
+	if winStart < 0 {
+		winStart = 0
+	}
+	winEnd := endLine + highlightLeadLines
+	if winEnd > len(lines) {
+		winEnd = len(lines)
+	}
+	src := strings.Join(lines[winStart:winEnd], "\n")
+	winStyles := highlightSource(filename, src, t)
+	for i := winStart; i < winEnd; i++ {
+		idx := i - winStart
+		if idx >= len(winStyles) {
+			break
+		}
+		styles[i] = winStyles[idx]
+	}
+	return styles, winStart, winEnd
+}
+
 // highlightSource tokenises src and returns one style row per source line.
 func highlightSource(filename, src string, t theme.Theme) [][]tcell.Style {
 	lexer := lexers.Match(filename)

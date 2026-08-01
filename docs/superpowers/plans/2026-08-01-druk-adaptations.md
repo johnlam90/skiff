@@ -250,7 +250,7 @@ ahead/behind). This tranche adds druk's write side and panel layout.
 
 Priority order; check off as they land, one commit each.
 
-- [ ] P1 Remote scroll performance: (a) coalesce pending tcell events into one draw (Run loop drains queue before drawing); (b) stop re-tokenizing on scroll — cache highlight styles per content-generation, not per viewport (read highlight.go first).
+- [x] P1 Remote scroll performance: (a) coalesce pending tcell events into one draw (Run loop drains queue before drawing); (b) stop re-tokenizing on scroll — cache highlight styles per content-generation, not per viewport (read highlight.go first).
 - [ ] P2 Generic filter-list picker modal (generalize themepick: title, entries, current, live-preview hook optional) → branch picker uses it (filter + hover + Enter, no blind ←→ select).
 - [ ] P3 Themes: port druk's statusFg as Theme.StatusFg (generator mapping + regenerate palettes.go), audit drawStatusBar to use it; sanity-fence status bar contrast for all 26.
 - [ ] P4 Background bulk file ops: paste/duplicate/delete of large trees run in a goroutine posting progress → done events (custom-event pattern); cross-device os.Rename fallback (copy+delete); status-bar progress count.

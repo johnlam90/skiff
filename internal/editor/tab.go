@@ -68,14 +68,15 @@ type Tab struct {
 	StyleStale bool
 	GitLines   map[int]GitLineChange
 
-	// lastHighlightScrollY / lastHighlightHeight record the viewport Render
-	// last tokenised for. Without them, every redraw (mouse moves included)
-	// would re-tokenise the visible rows even when nothing changed. Render
-	// recomputes only when the content changed (StyleStale) or the viewport
-	// shifted (scroll / height), since the grid is indexed by absolute line
-	// number and only carries the visible rows.
-	lastHighlightScrollY int
-	lastHighlightHeight  int
+	// hlWinStart / hlWinEnd bound the span of lines Styles currently
+	// carries (tokenised as one window, viewport + lead each side), and
+	// lastHighlightHeight records the view height it was computed for.
+	// Render re-tokenises only when the content changes (StyleStale),
+	// the height changes, or the viewport nears the window's edge — so
+	// scrolling inside the window is free. See styleWindowStale.
+	hlWinStart          int
+	hlWinEnd            int
+	lastHighlightHeight int
 
 	// Mtime is the file's modification time as of the last successful
 	// read or write. The app's periodic disk-reconcile loop compares it
@@ -560,6 +561,34 @@ func (t *Tab) SelectAll() {
 	t.breakUndoGroup()
 }
 
+// hlEdgeGuard is how close (in lines) the viewport may drift toward the
+// cached highlight window's edge before Render re-tokenises. The
+// cushion keeps multi-line constructs that straddle the edge colored
+// correctly and turns "re-lex per wheel tick" into "re-lex per ~190
+// scrolled lines".
+const hlEdgeGuard = 64
+
+// styleWindowStale reports whether the cached highlight window still
+// covers the viewport, with guard cushions at interior edges (the
+// file's own start and end need no cushion — there is nothing beyond
+// them to mis-color).
+func (t *Tab) styleWindowStale(viewH int) bool {
+	if t.StyleStale || viewH != t.lastHighlightHeight {
+		return true
+	}
+	if t.hlWinEnd > t.Buffer.LineCount() {
+		return true // buffer shrank under the cache — defensive
+	}
+	top, bottom := t.ScrollY, t.ScrollY+viewH
+	if t.hlWinStart > 0 && top < t.hlWinStart+hlEdgeGuard {
+		return true
+	}
+	if t.hlWinEnd < t.Buffer.LineCount() && bottom > t.hlWinEnd-hlEdgeGuard {
+		return true
+	}
+	return false
+}
+
 // EnsureVisible scrolls the viewport so the cursor is on screen. The
 // caller passes the editor area's width and height because the Tab itself
 // doesn't know its render rect.
@@ -611,15 +640,14 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		t.cursorMoved = false
 	}
 	t.clampScroll(h)
-	// Re-tokenise only when the content changed (StyleStale) or the viewport
-	// shifted (scroll / height). Otherwise every redraw, including mouse
-	// moves, would re-tokenise the visible rows for nothing. The grid is
-	// indexed by absolute line number and only carries the visible rows, so
-	// a scroll change means different rows must be filled.
-	if t.StyleStale || t.ScrollY != t.lastHighlightScrollY || h != t.lastHighlightHeight {
-		t.Styles = HighlightVisible(t.Path, t.Buffer.Lines, t.ScrollY, h, th)
+	// Re-tokenise only when the cached highlight window no longer
+	// covers the viewport (content edit, resize, or the view scrolled
+	// near the window's edge). Inside the window, scrolling reuses the
+	// cache — re-lexing ~500 lines per wheel tick is what made
+	// scrolling crawl on remote machines.
+	if t.styleWindowStale(h) {
+		t.Styles, t.hlWinStart, t.hlWinEnd = HighlightWindow(t.Path, t.Buffer.Lines, t.ScrollY, h, th)
 		t.StyleStale = false
-		t.lastHighlightScrollY = t.ScrollY
 		t.lastHighlightHeight = h
 	}
 
