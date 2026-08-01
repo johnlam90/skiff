@@ -55,9 +55,10 @@ internal/filetree/filetree.go Lazy tree, identity-preserving refresh, hit-test, 
 internal/search/search.go     Literal smart-case project search engine
 internal/session/session.go   Per-project session store (~/.local/state/skiff)
 internal/clipboard/clipboard.go OSC 52 to /dev/tty with tmux passthrough wrap
-internal/spiceconfig/spiceconfig.go ~/.config/skiff/config.json loader (icons mode)
+internal/spiceconfig/spiceconfig.go ~/.config/skiff/config.json (icons, theme)
 internal/icons/icons.go       Nerd Font detection + per-file glyph mapping
-internal/theme/theme.go       Tokyo Night palette + syntax color mapping
+internal/theme/theme.go       Default Tokyo Night palette + contrast helpers
+internal/theme/palettes.go    Theme registry — 25 druk-ported palettes + ByID
 internal/version/version.go   const Version = "x.y.z" — single line, CI bumps it
 ```
 
@@ -192,7 +193,9 @@ loops forever.
 
 - `Ctrl+` editor shortcuts (they fight tmux/terminals — that's the
   whole reason the action menu exists).
-- A config file / dotfile / plugin system. Skiff is opinionated.
+- A config *system*. Skiff is opinionated: `~/.config/skiff/config.json`
+  exists but stays a flat file of tiny keys (`icons`, `theme`) — no
+  plugin manifests, no per-key UI beyond a picker, no dotfile sprawl.
 - CGO dependencies. The whole point is one static binary.
 - Tree-sitter. We use Chroma intentionally — pure Go, no setup.
 - A separate `homebrew-tap` repo. The formula lives here under

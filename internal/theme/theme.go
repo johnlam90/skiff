@@ -5,11 +5,11 @@
 // Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 // =============================================================================
 
-// Package theme defines the editor's curated color palette. The editor
-// intentionally ships one opinionated dark theme — there is no runtime
-// configuration, no theme file, no JSON. To restyle the editor, edit this
-// file and recompile. The palette is inspired by Tokyo Night and tuned so
-// the syntax colors stay legible against the chrome.
+// Package theme defines the editor's color palettes. The default is a
+// hand-tuned Tokyo Night (this file) with WCAG fences in theme_test.go;
+// palettes.go carries the registry of selectable themes ported from
+// druk. Themes are compiled in — there is no theme *file* format; the
+// only runtime knob is config.json's "theme" key naming a registry id.
 package theme
 
 import (
@@ -108,9 +108,8 @@ func (t Theme) SelectionFg(fg tcell.Color) tcell.Color {
 	return t.Text
 }
 
-// Default returns the editor's curated dark theme. It is the only theme the
-// editor ships with — calling code can tweak fields on the returned value if
-// it really needs to, but there is no theme-loading machinery on purpose.
+// Default returns the editor's hand-tuned Tokyo Night theme — the
+// registry's first entry and the fallback for unknown ids.
 func Default() Theme {
 	return Theme{
 		// Surfaces.

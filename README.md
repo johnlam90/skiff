@@ -45,8 +45,11 @@ The goals, in order:
    ends up in your local Mac clipboard.
 4. **One static binary.** No runtime, no plugin manager, no config
    directory full of YAML. Drop it on a server and run it.
-5. **Looks reasonable.** Tokyo Night-inspired palette out of the box,
-   syntax highlighting via [chroma](https://github.com/alecthomas/chroma)
+5. **Looks reasonable.** A hand-tuned Tokyo Night palette out of the
+   box, 25 more themes one menu away (`≡` → **Theme…** — Catppuccin,
+   Dracula, Gruvbox, Nord, Rosé Pine, Solarized, and friends, ported
+   from [druk](https://github.com/letstri/druk)), and syntax
+   highlighting via [chroma](https://github.com/alecthomas/chroma)
    (no CGO, no tree-sitter setup).
 
 ## Features
@@ -85,6 +88,10 @@ The goals, in order:
 - **Session restore** — reopening a project brings back your open tabs
   (cursor and scroll included), expanded folders, and sidebar exactly
   as you left them.
+- **26 themes** — `≡` → **Theme…** applies instantly and persists to
+  `~/.config/skiff/config.json` (`{"theme": "dracula"}`), the same
+  tiny file the Nerd-Font icons preference lives in. Tokyo Night
+  stays the default.
 - **Toggleable, draggable sidebar** — show/hide the file tree from the
   menu, or drag the splitter to resize it.
 - **Clipboard over SSH** — OSC 52, including a `tmux` passthrough so

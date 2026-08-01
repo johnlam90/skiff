@@ -263,6 +263,7 @@ func builtinMenuGroups() [][]menuItemDef {
 		// View toggle
 		{
 			{shortcut: "Esc t", action: (*App).menuToggleSidebar, enabled: alwaysTrue, labelFor: (*App).sidebarToggleLabel, visible: (*App).hasTree},
+			{label: "Theme…", action: (*App).menuTheme, enabled: alwaysTrue},
 		},
 		// Quit
 		{
@@ -361,6 +362,9 @@ func (a *App) hasTree() bool {
 type App struct {
 	screen tcell.Screen
 	theme  theme.Theme
+	// themeID is the registry id of the active theme — what the picker
+	// pre-selects and what SetTheme persists. See themepick.go.
+	themeID string
 
 	rootDir   string
 	tree      *filetree.Tree
@@ -784,6 +788,9 @@ func (a *App) loadSpiceConfig() {
 	}
 	if a.tree != nil {
 		a.tree.IconsEnabled = icons.Resolve(cfg.Icons)
+	}
+	if cfg.Theme != "" {
+		a.applyTheme(cfg.Theme, false)
 	}
 }
 

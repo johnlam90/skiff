@@ -15,9 +15,10 @@
 // already wrapped in a struct so we can grow new top-level fields
 // without breaking older configs:
 //
-//	{"icons": "auto"}    // default; auto-detect Nerd Fonts on startup
-//	{"icons": "on"}      // force-on, even if detection would say no
-//	{"icons": "off"}     // force-off, even if a Nerd Font is installed
+//	{"icons": "auto"}          // default; auto-detect Nerd Fonts on startup
+//	{"icons": "on"}            // force-on, even if detection would say no
+//	{"icons": "off"}           // force-off, even if a Nerd Font is installed
+//	{"theme": "tokyo-night"}   // any id from internal/theme's registry
 //
 // The loader is best-effort the same way customactions is: missing
 // file → defaults, malformed file → error returned for the app to
@@ -49,6 +50,10 @@ const (
 // any field the file omitted, so consumers never need to nil-check.
 type Config struct {
 	Icons IconsMode
+	// Theme is the theme id to start with ("" = default). Validated by
+	// the app against the theme registry, not here — the config loader
+	// shouldn't need to import the palette table.
+	Theme string
 }
 
 // Defaults returns a Config populated with the values used when no
@@ -63,6 +68,7 @@ func Defaults() Config {
 // JSON tags or pointer fields just for "field was absent" detection.
 type fileFormat struct {
 	Icons string `json:"icons,omitempty"`
+	Theme string `json:"theme,omitempty"`
 }
 
 // DefaultPath returns the canonical config-file location:
@@ -129,5 +135,32 @@ func Load(path string) (Config, error) {
 			path, IconsAuto, IconsOn, IconsOff, ff.Icons,
 		)
 	}
+	cfg.Theme = strings.TrimSpace(ff.Theme)
 	return cfg, nil
+}
+
+// SetTheme persists the theme id into the config file at path,
+// creating it if needed and preserving every other key (including ones
+// this version of skiff doesn't know about — a newer config must
+// survive a round-trip through an older binary).
+func SetTheme(path, id string) error {
+	if path == "" {
+		return errors.New("no config path available")
+	}
+	raw := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+		// A malformed file is overwritten rather than failed on — the
+		// user just picked a theme; keeping it beats preserving JSON
+		// that was already broken.
+		_ = json.Unmarshal(data, &raw)
+	}
+	raw["theme"] = id
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
 }
