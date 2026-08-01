@@ -243,3 +243,21 @@ ahead/behind). This tranche adds druk's write side and panel layout.
 - `activateGitChangeRow` records `diffPanelRow`; while that diff is open, `↑`/`↓` in `handleDiffKey` walk to the prev/next file row (dirs skipped), reopening the diff and keeping the panel selection visible; wheel/PgUp/PgDn still scroll. `closeAllModals` resets the index. Menu "Diff this file" leaves it -1 (old scroll behavior).
 - README git section + hotkey note; CLAUDE.md map line for gitops.go.
 - [x] Tests: walk skips dirs and clamps; `make test` race-green.
+
+---
+
+## Tranche 3: corner-cut fixes + remote performance
+
+Priority order; check off as they land, one commit each.
+
+- [ ] P1 Remote scroll performance: (a) coalesce pending tcell events into one draw (Run loop drains queue before drawing); (b) stop re-tokenizing on scroll — cache highlight styles per content-generation, not per viewport (read highlight.go first).
+- [ ] P2 Generic filter-list picker modal (generalize themepick: title, entries, current, live-preview hook optional) → branch picker uses it (filter + hover + Enter, no blind ←→ select).
+- [ ] P3 Themes: port druk's statusFg as Theme.StatusFg (generator mapping + regenerate palettes.go), audit drawStatusBar to use it; sanity-fence status bar contrast for all 26.
+- [ ] P4 Background bulk file ops: paste/duplicate/delete of large trees run in a goroutine posting progress → done events (custom-event pattern); cross-device os.Rename fallback (copy+delete); status-bar progress count.
+- [ ] P5 Branch verbs: Merge branch…, Rename branch…, Delete branch… in the ⋯ extras popup via the generic picker + confirm; gitops runners (merge --no-edit; branch -m; branch -d with -D confirm on failure).
+- [ ] P6 Search hardening: 150ms debounce + cancellation check between files; case/word/regex toggles on the projfind bar (click chips + Esc-leader-free keys shown in bar); match-column jump (OpenFileAtLine gains col).
+- [ ] P7 Replace: in-file replace field (Tab from find bar; Enter replace-current, "all" button); project-wide replace deferred unless asked → note in README.
+- [ ] P8 Sessions: save on every tab open/close + 30s tick, atomic temp+rename write, flock to close the two-instance lost-update race; persist Preview flag.
+- [ ] P9 Git polish: branch-list/upstream checks off the UI thread; isPushRejected only for non-fast-forward ("fetch first"/"non-fast-forward"), hook rejections get plain error; drop "Opened" flash on preview clicks.
+- [ ] P10 diffBase: compare-against-ref mode — picker sets a.diffBase; gitstatus/diff/gutter/panel honour it; status bar shows "⎇ main ⇆ base"; Esc path back to HEAD.
+- [ ] P11 Small: cheat-strip two-row wrap when clipped; CLAUDE.md stale relY paragraph; menu height note → move Line-ops group into ⋯-style "Edit extras" if still unwieldy.
