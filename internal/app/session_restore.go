@@ -49,6 +49,7 @@ func (a *App) captureSession() session.Project {
 			Line:    t.Cursor.Line,
 			Col:     t.Cursor.Col,
 			ScrollY: t.ScrollY,
+			Preview: t.IsPreview(),
 		})
 	}
 	if a.tree != nil {
@@ -86,6 +87,7 @@ func (a *App) restoreSession() {
 		t.Cursor = t.Buffer.Clamp(editor.Position{Line: ts.Line, Col: ts.Col})
 		t.Anchor = t.Cursor
 		t.ScrollY = ts.ScrollY
+		t.Preview = ts.Preview
 		t.GitLines = loadGitLineChanges(a.rootDir, abs)
 		a.tabs = append(a.tabs, t)
 	}

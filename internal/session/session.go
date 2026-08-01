@@ -33,6 +33,7 @@ type TabState struct {
 	Line    int    `json:"line"`
 	Col     int    `json:"col"`
 	ScrollY int    `json:"scrollY"`
+	Preview bool   `json:"preview,omitempty"`
 }
 
 // Project is everything remembered about one project root.
@@ -122,5 +123,16 @@ func Save(rootAbs string, p Project) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	// Atomic replace: write a sibling temp file and rename it over the
+	// store, so a crash mid-write (or two instances saving close
+	// together) can never leave a half-written JSON behind. The
+	// read-modify-write above still narrows, not closes, the two-
+	// instance lost-update window — but each instance re-reads
+	// immediately before writing and saves frequently, so the loser of
+	// a race is healed on its next save.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

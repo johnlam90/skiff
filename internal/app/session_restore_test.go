@@ -128,3 +128,39 @@ func TestSaveSessionRoundTrip(t *testing.T) {
 		t.Fatalf("round trip failed: %d tabs", len(b.tabs))
 	}
 }
+
+// TestSessionPreservesPreviewFlag: a preview tab comes back as a
+// preview, not silently promoted to a real tab.
+func TestSessionPreservesPreviewFlag(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	p1 := mkFile(t, root, "a.go", "l1\n")
+	a := newTestApp(t, root)
+	a.openFilePreview(p1)
+	a.saveSession()
+
+	b := newTestApp(t, root)
+	b.restoreSession()
+	if len(b.tabs) != 1 || !b.tabs[0].IsPreview() {
+		t.Fatalf("preview flag lost: %d tabs", len(b.tabs))
+	}
+}
+
+// TestCloseTabSavesSession: closing a tab persists immediately, so a
+// killed terminal after a close still remembers the right set.
+func TestCloseTabSavesSession(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	p1 := mkFile(t, root, "a.go", "x\n")
+	p2 := mkFile(t, root, "b.go", "y\n")
+	a := newTestApp(t, root)
+	a.openFile(p1)
+	a.openFile(p2)
+	a.closeTab(1)
+
+	b := newTestApp(t, root)
+	b.restoreSession()
+	if len(b.tabs) != 1 || filepath.Base(b.tabs[0].Path) != "a.go" {
+		t.Fatalf("close should have persisted one tab, got %d", len(b.tabs))
+	}
+}

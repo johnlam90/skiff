@@ -1051,6 +1051,8 @@ func (a *App) handleEvent(ev tcell.Event) {
 // fires: rescan the file tree (preserving expansion state), reconcile
 // any open tabs with disk, refresh git status, and invalidate the
 // finder index so a freshly-pulled file shows up everywhere at once.
+// The session store piggybacks on the same tick, so a killed terminal
+// loses at most ten seconds of tab state instead of the whole session.
 // Called from the periodic event and from runCustomAction's success
 // path so a Copy-from-remote action's output is visible immediately
 // instead of after the next tick.
@@ -1059,6 +1061,7 @@ func (a *App) refreshTreeNow() {
 	a.reconcileOpenTabsWithDisk()
 	a.refreshGitStatusAsync()
 	a.invalidateFinder()
+	a.saveSession()
 }
 
 // handleCustomActionDone surfaces the result of an async custom-action
@@ -2331,6 +2334,7 @@ func (a *App) closeTab(idx int) {
 	}
 	a.recordClosedTab(a.tabs[idx])
 	a.tabs = append(a.tabs[:idx], a.tabs[idx+1:]...)
+	defer a.saveSession()
 	if a.activeTab >= len(a.tabs) {
 		a.activeTab = len(a.tabs) - 1
 	}
