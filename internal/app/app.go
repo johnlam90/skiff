@@ -548,6 +548,9 @@ type App struct {
 	projFindScrollY   int
 	projFindFolded    map[string]bool
 	projFindLiveGen   atomic.Int64 // latest gen, readable from sweep goroutines
+	projFindMatchCase bool
+	projFindWholeWord bool
+	projFindRegex     bool
 
 	// Auto-scroll while drag-selecting past the editor's top/bottom edge.
 	// lastDragX/Y is the most recent mouse position so the auto-scroll

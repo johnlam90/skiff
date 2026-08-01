@@ -144,3 +144,40 @@ func TestSearchCancellation(t *testing.T) {
 		t.Fatalf("cancelled sweep should return nothing, got %v", got)
 	}
 }
+
+// TestSearchToggles pins the three chips: MatchCase forces exactness
+// on a lowercase query, WholeWord drops substring hits, Regex matches
+// patterns (and a broken pattern matches nothing rather than erroring).
+func TestSearchToggles(t *testing.T) {
+	root := t.TempDir()
+	f := seed(t, root, "x.txt", "Foo food foo\nfootball\n")
+
+	opts := DefaultOptions()
+	opts.MatchCase = true
+	got, _ := Search(root, []string{f}, "foo", opts)
+	if len(got) != 2 {
+		t.Fatalf("MatchCase: got %d lines, want 2", len(got))
+	}
+
+	opts = DefaultOptions()
+	opts.WholeWord = true
+	got, _ = Search(root, []string{f}, "foo", opts)
+	if len(got) != 1 || got[0].Line != 1 {
+		t.Fatalf("WholeWord: got %+v", got)
+	}
+	if got[0].Col != 0 {
+		// "Foo" matches case-insensitively at col 0 and is word-bounded.
+		t.Fatalf("WholeWord col: got %d", got[0].Col)
+	}
+
+	opts = DefaultOptions()
+	opts.Regex = true
+	got, _ = Search(root, []string{f}, "fo+tball", opts)
+	if len(got) != 1 || got[0].Line != 2 {
+		t.Fatalf("Regex: got %+v", got)
+	}
+	got, _ = Search(root, []string{f}, "fo(", opts)
+	if len(got) != 0 {
+		t.Fatalf("broken regex should match nothing, got %+v", got)
+	}
+}

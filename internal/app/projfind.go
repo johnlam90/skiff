@@ -141,9 +141,11 @@ func (a *App) handleProjFindKick(e *projFindKickEvent) {
 	root := a.rootDir
 	scr := a.screen
 	live := &a.projFindLiveGen
+	matchCase, wholeWord, regex := a.projFindMatchCase, a.projFindWholeWord, a.projFindRegex
 	go func() {
 		opts := search.DefaultOptions()
 		opts.Cancelled = func() bool { return live.Load() != int64(gen) }
+		opts.MatchCase, opts.WholeWord, opts.Regex = matchCase, wholeWord, regex
 		matches, truncated := search.Search(root, files, query, opts)
 		_ = scr.PostEvent(&projFindDoneEvent{when: time.Now(), gen: gen, matches: matches, truncated: truncated})
 	}()
@@ -341,8 +343,18 @@ func (a *App) handleProjFindMouse(x, y int, btn tcell.ButtonMask) {
 	if btn&tcell.Button1 == 0 {
 		return
 	}
-	// The input row keeps focus; clicks there are a no-op.
+	// Bar row: chip clicks toggle a mode and re-run the query; other
+	// spots keep focus and do nothing.
 	if y == a.height-2 && x >= ex {
+		label := " Search project: "
+		for _, c := range a.projFindChips(runeLen(label)) {
+			sw := a.sidebarW()
+			if x >= sw+c.x0 && x < sw+c.x1 {
+				*c.on = !*c.on
+				a.projFindQueryChanged()
+				return
+			}
+		}
 		return
 	}
 	if x >= ex && x < ex+ew && y >= ey && y < ey+eh {
@@ -453,6 +465,35 @@ func (a *App) drawProjFindRow(x, y, w int, row projFindRow, selected bool, query
 	}
 }
 
+// projFindChip is one mode toggle on the search bar with its x-range
+// in bar-local cells.
+type projFindChip struct {
+	label  string
+	x0, x1 int
+	on     *bool
+}
+
+// projFindChips lays out the three mode chips right of the label —
+// computed on the fly so the renderer and the click handler agree.
+func (a *App) projFindChips(labelEnd int) []projFindChip {
+	defs := []struct {
+		label string
+		on    *bool
+	}{
+		{"Aa", &a.projFindMatchCase},
+		{"⌇w", &a.projFindWholeWord},
+		{".*", &a.projFindRegex},
+	}
+	out := make([]projFindChip, 0, 3)
+	x := labelEnd
+	for _, d := range defs {
+		w := runeLen(d.label) + 2
+		out = append(out, projFindChip{label: d.label, x0: x, x1: x + w, on: d.on})
+		x += w
+	}
+	return out
+}
+
 // drawProjFindBar paints the query input row above the status bar.
 func (a *App) drawProjFindBar() {
 	sw := a.sidebarW()
@@ -467,7 +508,16 @@ func (a *App) drawProjFindBar() {
 	}
 	label := " Search project: "
 	drawAt(a.screen, bx, by, label, labelStyle)
-	inputStart := bx + runeLen(label)
+	// Mode chips: clickable [Aa] [⌇w] [.*] toggles, lit when active.
+	chips := a.projFindChips(runeLen(label))
+	for _, c := range chips {
+		st := mutedStyle
+		if *c.on {
+			st = labelStyle
+		}
+		drawAt(a.screen, bx+c.x0, by, " "+c.label+" ", st)
+	}
+	inputStart := bx + chips[len(chips)-1].x1 + 1
 
 	hint := " Enter: open · Tab: fold · Esc: close "
 	counter := a.projFindCounterText()
