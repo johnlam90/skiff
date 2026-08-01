@@ -607,6 +607,7 @@ type App struct {
 	gitCommitChecks  map[string]bool
 	gitPanelSelected int
 	diffPanelRow     int
+	gitDeleteTarget  string // branch mid-delete, for the force-delete offer
 
 	// Diff view modal state — the side-by-side (or, when the terminal
 	// is narrow, unified) git diff opened from the Git panel and the

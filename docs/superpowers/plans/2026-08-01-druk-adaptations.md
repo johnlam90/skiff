@@ -254,7 +254,7 @@ Priority order; check off as they land, one commit each.
 - [x] P2 Generic filter-list picker modal (generalize themepick: title, entries, current, live-preview hook optional) → branch picker uses it (filter + hover + Enter, no blind ←→ select).
 - [x] P3 Themes: port druk's statusFg as Theme.StatusFg (generator mapping + regenerate palettes.go), audit drawStatusBar to use it; sanity-fence status bar contrast for all 26.
 - [x] P4 Background bulk file ops: paste/duplicate/delete of large trees run in a goroutine posting progress → done events (custom-event pattern); cross-device os.Rename fallback (copy+delete); status-bar progress count.
-- [ ] P5 Branch verbs: Merge branch…, Rename branch…, Delete branch… in the ⋯ extras popup via the generic picker + confirm; gitops runners (merge --no-edit; branch -m; branch -d with -D confirm on failure).
+- [x] P5 Branch verbs: Merge branch…, Rename branch…, Delete branch… in the ⋯ extras popup via the generic picker + confirm; gitops runners (merge --no-edit; branch -m; branch -d with -D confirm on failure).
 - [ ] P6 Search hardening: 150ms debounce + cancellation check between files; case/word/regex toggles on the projfind bar (click chips + Esc-leader-free keys shown in bar); match-column jump (OpenFileAtLine gains col).
 - [ ] P7 Replace: in-file replace field (Tab from find bar; Enter replace-current, "all" button); project-wide replace deferred unless asked → note in README.
 - [ ] P8 Sessions: save on every tab open/close + 30s tick, atomic temp+rename write, flock to close the two-instance lost-update race; persist Preview flag.

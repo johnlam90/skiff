@@ -90,6 +90,18 @@ func (a *App) handleGitOpDone(e *gitOpDoneEvent) {
 		a.openConfirm("Push rejected",
 			"origin has commits you don't. Pull (merge), then push?",
 			func(app *App) { app.doGitPullAndPush() })
+	case e.label == "Delete branch" && a.gitDeleteTarget != "" &&
+		strings.Contains(e.output, "not fully merged"):
+		// `-d` refused an unmerged branch — losing work needs its own
+		// explicit yes, so the force delete is a second confirm, never
+		// the default.
+		name := a.gitDeleteTarget
+		a.gitDeleteTarget = ""
+		a.openConfirm("Branch not merged",
+			name+" has commits that aren't merged anywhere. Force delete?",
+			func(app *App) {
+				app.runGitOp("Force delete", "Deleted "+name, false, []string{"branch", "-D", name})
+			})
 	default:
 		lines := []string{explainGit(e.output), ""}
 		lines = append(lines, splitNonEmptyLines(e.output)...)
@@ -431,6 +443,84 @@ func (a *App) menuGitUndoCommit() {
 		})
 }
 
+// menuGitMergeBranch picks any other branch and merges it into the
+// current one. --no-edit lives in the runner's environment contract; a
+// conflicted merge stops with git's own reason and the tree left
+// mid-merge, same as druk.
+func (a *App) menuGitMergeBranch() {
+	a.closeMenu()
+	if !a.hasGitRepo() {
+		return
+	}
+	names := a.otherBranchNames(false)
+	if len(names) == 0 {
+		a.flash("No other branches to merge")
+		return
+	}
+	a.openListPick("Merge into "+a.gitBranch, branchPickItems(names, ""),
+		func(app *App, i int) {
+			app.runGitOp("Merge", "Merged "+names[i], true, []string{"merge", "--no-edit", names[i]})
+		}, nil, nil)
+}
+
+// menuGitRenameBranch renames the current branch in place.
+func (a *App) menuGitRenameBranch() {
+	a.closeMenu()
+	if !a.hasGitRepo() {
+		return
+	}
+	old := a.gitBranch
+	a.openPrompt("Rename branch", "renames "+old, old, func(app *App, name string) {
+		name = strings.TrimSpace(name)
+		if name == "" || name == old {
+			return
+		}
+		app.runGitOp("Rename branch", "Renamed to "+name, false, []string{"branch", "-m", old, name})
+	})
+}
+
+// menuGitDeleteBranch picks a local branch (never the current one) and
+// deletes it behind a confirm. An unmerged branch fails `-d`; the done
+// handler then offers the force delete explicitly — see handleGitOpDone.
+func (a *App) menuGitDeleteBranch() {
+	a.closeMenu()
+	if !a.hasGitRepo() {
+		return
+	}
+	names := a.otherBranchNames(true)
+	if len(names) == 0 {
+		a.flash("No other local branches")
+		return
+	}
+	a.openListPick("Delete branch", branchPickItems(names, ""),
+		func(app *App, i int) {
+			name := names[i]
+			app.openConfirm("Delete branch",
+				"Delete "+name+"? Unmerged work on it would be lost.",
+				func(app2 *App) {
+					app2.gitDeleteTarget = name
+					app2.runGitOp("Delete branch", "Deleted "+name, false, []string{"branch", "-d", name})
+				})
+		}, nil, nil)
+}
+
+// otherBranchNames lists branches excluding the current one;
+// localOnly additionally drops remote-tracking spellings (you can't
+// `branch -d` those).
+func (a *App) otherBranchNames(localOnly bool) []string {
+	var out []string
+	for _, n := range gitBranchNames(a.rootDir, a.gitBranch) {
+		if n == a.gitBranch {
+			continue
+		}
+		if localOnly && strings.ContainsRune(n, '/') {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
 // menuGitExtras opens the less-used git verbs as a small popup so the
 // main menu doesn't grow five more rows. Reuses the context-menu modal
 // with the tree root as a harmless anchor node.
@@ -449,6 +539,9 @@ func (a *App) openGitExtras(x, y int) {
 	items := []contextItem{
 		{label: "Fetch", action: func(app *App, _ *filetree.Node) { app.menuGitFetch() }},
 		{label: "New branch…", action: func(app *App, _ *filetree.Node) { app.menuGitNewBranch() }},
+		{label: "Merge branch…", action: func(app *App, _ *filetree.Node) { app.menuGitMergeBranch() }},
+		{label: "Rename branch…", action: func(app *App, _ *filetree.Node) { app.menuGitRenameBranch() }},
+		{label: "Delete branch…", action: func(app *App, _ *filetree.Node) { app.menuGitDeleteBranch() }},
 		{label: "Stash changes", action: func(app *App, _ *filetree.Node) { app.menuGitStash() }},
 		{label: "Pop stash", action: func(app *App, _ *filetree.Node) { app.menuGitStashPop() }},
 		{label: "Undo last commit", action: func(app *App, _ *filetree.Node) { app.menuGitUndoCommit() }},

@@ -13,6 +13,7 @@
 package app
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -318,3 +319,102 @@ var errFake = fakeErr{}
 type fakeErr struct{}
 
 func (fakeErr) Error() string { return "exit status 1" }
+
+// TestGitMergeBranchEndToEnd merges a side branch through the picker
+// flow and checks its file lands on the current branch.
+func TestGitMergeBranchEndToEnd(t *testing.T) {
+	requireGit(t)
+	dir := initRepo(t)
+	writeFileT(t, filepath.Join(dir, "base.txt"), "b\n")
+	commitAll(t, dir, "seed")
+	gitRun(t, dir, "checkout", "-q", "-b", "feature")
+	writeFileT(t, filepath.Join(dir, "feat.txt"), "f\n")
+	commitAll(t, dir, "feature work")
+	gitRun(t, dir, "checkout", "-q", "main")
+
+	a := newTestApp(t, dir)
+	a.menuGitMergeBranch()
+	if !a.listPickOpen {
+		t.Fatal("merge should open the branch picker")
+	}
+	names := a.otherBranchNames(false)
+	idx := -1
+	for i, n := range names {
+		if n == "feature" {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		t.Fatalf("feature branch missing from %v", names)
+	}
+	a.listPickSelected = idx
+	a.confirmListPick()
+	waitGitIdle(t, a)
+	if _, err := os.Stat(filepath.Join(dir, "feat.txt")); err != nil {
+		t.Fatalf("merge should bring feat.txt onto main: %v", err)
+	}
+}
+
+// TestGitDeleteBranchForceOffer pins the two-confirm ladder: -d on an
+// unmerged branch fails, the handler offers force delete, accepting it
+// runs -D and the branch is gone.
+func TestGitDeleteBranchForceOffer(t *testing.T) {
+	requireGit(t)
+	dir := initRepo(t)
+	writeFileT(t, filepath.Join(dir, "base.txt"), "b\n")
+	commitAll(t, dir, "seed")
+	gitRun(t, dir, "checkout", "-q", "-b", "orphan")
+	writeFileT(t, filepath.Join(dir, "o.txt"), "o\n")
+	commitAll(t, dir, "unmerged work")
+	gitRun(t, dir, "checkout", "-q", "main")
+
+	a := newTestApp(t, dir)
+	a.menuGitDeleteBranch()
+	if !a.listPickOpen {
+		t.Fatal("delete should open the branch picker")
+	}
+	names := a.otherBranchNames(true)
+	if len(names) != 1 || names[0] != "orphan" {
+		t.Fatalf("local candidates: %v", names)
+	}
+	a.listPickSelected = 0
+	a.confirmListPick()
+	if !a.confirmOpen {
+		t.Fatal("delete needs a confirm first")
+	}
+	a.confirmCallback(a) // yes, delete
+	waitGitIdle(t, a)
+	if !a.confirmOpen || !strings.Contains(a.confirmMessage, "Force delete") {
+		t.Fatalf("unmerged delete should offer force, got %v %q", a.confirmOpen, a.confirmMessage)
+	}
+	cb := a.confirmCallback
+	a.closeAllModals()
+	cb(a) // yes, force
+	waitGitIdle(t, a)
+	out, _ := exec.Command("git", "-C", dir, "branch", "--list", "orphan").Output()
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("orphan should be gone, got %q", out)
+	}
+}
+
+// TestGitRenameBranchEndToEnd renames the current branch via the
+// prompt flow.
+func TestGitRenameBranchEndToEnd(t *testing.T) {
+	requireGit(t)
+	dir := initRepo(t)
+	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
+	commitAll(t, dir, "seed")
+
+	a := newTestApp(t, dir)
+	a.menuGitRenameBranch()
+	if !a.promptOpen {
+		t.Fatal("rename should prompt for the new name")
+	}
+	a.promptValue = []rune("mainline")
+	a.promptSubmit()
+	waitGitIdle(t, a)
+	out, err := exec.Command("git", "-C", dir, "symbolic-ref", "--short", "HEAD").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "mainline" {
+		t.Fatalf("rename failed: %q %v", out, err)
+	}
+}

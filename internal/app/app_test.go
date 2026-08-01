@@ -63,6 +63,20 @@ func newTestApp(t *testing.T, root string) *App {
 	// cached branch is what gates the Git panel, so tests need the same
 	// seeding to see the app the way a real session does.
 	a.refreshGitStatus()
+	// Drain any in-flight background git-status refresh before teardown:
+	// a `git status` goroutine still writing .git lock files while
+	// t.TempDir removes the repo is the classic "directory not empty"
+	// flake. Registered after the Fini cleanup so it runs first (LIFO).
+	t.Cleanup(func() {
+		deadline := time.Now().Add(3 * time.Second)
+		for a.gitRefreshInFlight && time.Now().Before(deadline) {
+			if scr.HasPendingEvent() {
+				a.handleEvent(scr.PollEvent())
+			} else {
+				time.Sleep(2 * time.Millisecond)
+			}
+		}
+	})
 	return a
 }
 
