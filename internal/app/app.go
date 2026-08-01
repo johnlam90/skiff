@@ -214,6 +214,7 @@ func builtinMenuGroups() [][]menuItemDef {
 		// Search
 		{
 			{label: "Find in file", shortcut: "Esc f", action: (*App).menuFind, enabled: (*App).hasFindable},
+			{label: "Go to line", shortcut: "Esc l", action: (*App).menuGoToLine, enabled: (*App).hasFindable},
 			{label: "Find file in project", shortcut: "Esc p", action: (*App).menuFindFile, enabled: (*App).hasFinder},
 		},
 		// Git

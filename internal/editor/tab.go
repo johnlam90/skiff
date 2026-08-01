@@ -501,6 +501,36 @@ func (t *Tab) MoveLineEnd(extend bool) {
 	t.breakUndoGroup()
 }
 
+// JumpToLine moves the cursor to column 0 of the 1-based line n,
+// clamping to the buffer. The selection collapses — a goto is
+// navigation, not extension — and cursorMoved is set so the next
+// Render scrolls the target into view even if the caller never
+// centers the viewport.
+func (t *Tab) JumpToLine(n int) {
+	if t.IsImage() {
+		return
+	}
+	p := t.Buffer.Clamp(Position{Line: n - 1, Col: 0})
+	p.Col = 0
+	t.Cursor = p
+	t.Anchor = p
+	t.cursorMoved = true
+	t.breakUndoGroup()
+}
+
+// CenterOnCursor scrolls so the cursor's line sits mid-viewport. Used
+// by goto-line so the target lands with context above and below it
+// instead of hugging the edge the way plain EnsureVisible leaves it.
+// viewH <= 0 (headless callers, pre-first-draw) is a no-op — the next
+// Render's EnsureVisible still guarantees visibility.
+func (t *Tab) CenterOnCursor(viewH int) {
+	if viewH <= 0 {
+		return
+	}
+	t.ScrollY = t.Cursor.Line - viewH/2
+	t.clampScroll(viewH)
+}
+
 // SelectAll selects the entire buffer (anchor at start, cursor at end).
 func (t *Tab) SelectAll() {
 	t.Anchor = Position{Line: 0, Col: 0}

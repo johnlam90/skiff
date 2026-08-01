@@ -1256,3 +1256,46 @@ func TestTab_Render_SelectedLowContrastSyntaxSwaps(t *testing.T) {
 		t.Fatalf("selected string rune fg = %v, want SynString kept (it passes AA)", fg)
 	}
 }
+
+// TestJumpToLineClamps pins JumpToLine's contract: 1-based input, cursor
+// lands at column 0 of the requested line, the selection collapses, and
+// out-of-range lines clamp to the buffer instead of panicking.
+func TestJumpToLineClamps(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("a\nb\nc\nd\ne")}
+	tab.JumpToLine(3)
+	if tab.Cursor != (Position{Line: 2, Col: 0}) {
+		t.Fatalf("cursor: got %+v, want line 2 col 0", tab.Cursor)
+	}
+	if tab.Anchor != tab.Cursor {
+		t.Fatalf("anchor should collapse to cursor, got %+v", tab.Anchor)
+	}
+	tab.JumpToLine(999)
+	if tab.Cursor.Line != 4 {
+		t.Fatalf("overshoot should clamp to last line, got %d", tab.Cursor.Line)
+	}
+	tab.JumpToLine(-5)
+	if tab.Cursor.Line != 0 {
+		t.Fatalf("undershoot should clamp to first line, got %d", tab.Cursor.Line)
+	}
+}
+
+// TestCenterOnCursor verifies the goto-line scroll rule: the cursor's
+// line ends up mid-viewport rather than pinned to an edge, and a cursor
+// near the top never produces a negative scroll.
+func TestCenterOnCursor(t *testing.T) {
+	lines := make([]string, 100)
+	for i := range lines {
+		lines[i] = "x"
+	}
+	tab := &Tab{Buffer: &Buffer{Lines: lines}}
+	tab.Cursor = Position{Line: 50}
+	tab.CenterOnCursor(20)
+	if tab.ScrollY != 40 {
+		t.Fatalf("ScrollY: got %d, want 40 (50 - 20/2)", tab.ScrollY)
+	}
+	tab.Cursor = Position{Line: 2}
+	tab.CenterOnCursor(20)
+	if tab.ScrollY != 0 {
+		t.Fatalf("near-top center should clamp to 0, got %d", tab.ScrollY)
+	}
+}

@@ -111,6 +111,44 @@ func TestResolveArgs_MissingFileTreatsAsNew(t *testing.T) {
 	}
 }
 
+// TestResolveArgs_FileLineSuffix covers `skiff main.go:42`: when the
+// literal path doesn't exist but the prefix before ":42" does, the
+// suffix is a line request, not part of the file name.
+func TestResolveArgs_FileLineSuffix(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(target, []byte("package main"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	got := resolveArgs([]string{target + ":42"})
+	if got.OpenFile != target {
+		t.Fatalf("OpenFile: got %q, want %q", got.OpenFile, target)
+	}
+	if got.OpenLine != 42 {
+		t.Fatalf("OpenLine: got %d, want 42", got.OpenLine)
+	}
+	if got.RootDir != dir {
+		t.Fatalf("rootDir: got %q, want %q", got.RootDir, dir)
+	}
+}
+
+// TestResolveArgs_FileLineMissingPrefix pins the fallback: when neither
+// "foo:9" nor "foo" exists on disk, the argument is a new-file name
+// taken literally (colon and all) — same as vim's treatment.
+func TestResolveArgs_FileLineMissingPrefix(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "foo:9")
+
+	got := resolveArgs([]string{target})
+	if got.OpenFile != target {
+		t.Fatalf("OpenFile: got %q, want the literal %q", got.OpenFile, target)
+	}
+	if got.OpenLine != 0 {
+		t.Fatalf("OpenLine: got %d, want 0", got.OpenLine)
+	}
+}
+
 // TestResolveArgs_VersionFlag covers every flavour of --version we
 // accept. Failing here would mean a user typing `--version` lands in
 // the editor instead of seeing a printed version.
