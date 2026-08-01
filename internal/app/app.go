@@ -618,6 +618,7 @@ type App struct {
 	gitPanelSelected int
 	diffPanelRow     int
 	gitDeleteTarget  string // branch mid-delete, for the force-delete offer
+	diffBase         string // compare-against ref; "" = HEAD (the default)
 
 	// Diff view modal state — the side-by-side (or, when the terminal
 	// is narrow, unified) git diff opened from the Git panel and the
@@ -839,7 +840,7 @@ func (a *App) refreshTree() {
 // paths use refreshGitStatusAsync so a slow `git status` on a huge or
 // network-mounted repo can never stall typing.
 func (a *App) refreshGitStatus() {
-	a.applyGitStatus(collectGitStatus(a.rootDir, a.openTabPaths(), a.tree == nil))
+	a.applyGitStatus(collectGitStatus(a.rootDir, a.diffBase, a.openTabPaths(), a.tree == nil))
 }
 
 // refreshGitStatusAsync collects git status on a background goroutine
@@ -855,10 +856,10 @@ func (a *App) refreshGitStatusAsync() {
 		return
 	}
 	a.gitRefreshInFlight = true
-	rootDir, paths, skipStatus := a.rootDir, a.openTabPaths(), a.tree == nil
+	rootDir, base, paths, skipStatus := a.rootDir, a.diffBase, a.openTabPaths(), a.tree == nil
 	scr := a.screen
 	go func() {
-		res := collectGitStatus(rootDir, paths, skipStatus)
+		res := collectGitStatus(rootDir, base, paths, skipStatus)
 		_ = scr.PostEvent(&gitStatusEvent{when: time.Now(), res: res})
 	}()
 }

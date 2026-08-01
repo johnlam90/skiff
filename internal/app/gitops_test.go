@@ -429,3 +429,71 @@ func TestGitRenameBranchEndToEnd(t *testing.T) {
 		t.Fatalf("rename failed: %q %v", out, err)
 	}
 }
+
+// TestDiffBaseStatusAndGuard: with a compare base set, the dirty map
+// follows the base (a committed-but-different file shows up), the
+// gutter diffs against the base, and committing is gated off.
+func TestDiffBaseStatusAndGuard(t *testing.T) {
+	requireGit(t)
+	dir := initRepo(t)
+	f := filepath.Join(dir, "a.txt")
+	writeFileT(t, f, "one\n")
+	commitAll(t, dir, "first")
+	writeFileT(t, f, "two\n")
+	commitAll(t, dir, "second") // worktree clean vs HEAD, dirty vs HEAD~1
+
+	st := loadGitStatus(dir, "HEAD~1")
+	if len(st.DirtyFiles) != 1 {
+		t.Fatalf("vs HEAD~1 should show 1 change, got %+v", st.DirtyFiles)
+	}
+	if st2 := loadGitStatus(dir, ""); len(st2.DirtyFiles) != 0 {
+		t.Fatalf("vs HEAD should be clean, got %+v", st2.DirtyFiles)
+	}
+	if lines := loadGitLineChanges(dir, "HEAD~1", f); len(lines) == 0 {
+		t.Fatal("gutter vs base should mark the changed line")
+	}
+
+	a := newTestApp(t, dir)
+	a.diffBase = "HEAD~1"
+	a.menuGitCommit()
+	if a.promptOpen {
+		t.Fatal("commit must be gated off while comparing against a base")
+	}
+	if a.statusMsg == "" {
+		t.Fatal("the gate should explain itself")
+	}
+}
+
+// TestComparePickSetsAndClearsBase drives the picker: picking a branch
+// sets the base, picking HEAD (row 0) clears it, and picking the
+// current branch degrades to HEAD.
+func TestComparePickSetsAndClearsBase(t *testing.T) {
+	requireGit(t)
+	dir := initRepo(t)
+	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
+	commitAll(t, dir, "seed")
+	gitRun(t, dir, "branch", "other")
+	a := newTestApp(t, dir)
+
+	a.openComparePick([]string{"other", "main"})
+	if !a.listPickOpen {
+		t.Fatal("picker should open")
+	}
+	a.listPickSelected = 1 // "other"
+	a.confirmListPick()
+	if a.diffBase != "other" {
+		t.Fatalf("base: got %q, want other", a.diffBase)
+	}
+
+	a.openComparePick([]string{"other", "main"})
+	a.listPickSelected = 0 // HEAD row
+	a.confirmListPick()
+	if a.diffBase != "" {
+		t.Fatalf("HEAD row should clear the base, got %q", a.diffBase)
+	}
+
+	a.setDiffBase("main") // current branch → degrades to HEAD
+	if a.diffBase != "" {
+		t.Fatalf("current-branch base should degrade to HEAD, got %q", a.diffBase)
+	}
+}

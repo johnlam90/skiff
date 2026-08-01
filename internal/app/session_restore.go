@@ -88,7 +88,7 @@ func (a *App) restoreSession() {
 		t.Anchor = t.Cursor
 		t.ScrollY = ts.ScrollY
 		t.Preview = ts.Preview
-		t.GitLines = loadGitLineChanges(a.rootDir, abs)
+		t.GitLines = loadGitLineChanges(a.rootDir, a.diffBase, abs)
 		a.tabs = append(a.tabs, t)
 	}
 	if len(a.tabs) > 0 {

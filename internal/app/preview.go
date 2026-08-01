@@ -66,7 +66,7 @@ func (a *App) openFileMode(path string, preview bool) {
 		}
 		a.activeTab = i
 		a.ensureActiveTabVisible()
-		t.GitLines = loadGitLineChanges(a.rootDir, t.Path)
+		t.GitLines = loadGitLineChanges(a.rootDir, a.diffBase, t.Path)
 		return
 	}
 	t, err := editor.NewTab(path)
@@ -94,7 +94,7 @@ func (a *App) openFileMode(path string, preview bool) {
 // scroll the strip, seed git line marks, and announce the open.
 func (a *App) finishOpen(t *editor.Tab, path string) {
 	a.ensureActiveTabVisible()
-	t.GitLines = loadGitLineChanges(a.rootDir, t.Path)
+	t.GitLines = loadGitLineChanges(a.rootDir, a.diffBase, t.Path)
 	// Preview opens stay quiet — flashing "Opened X" on every tree
 	// click while browsing is noise; a pinned open is worth announcing.
 	if !t.IsPreview() {

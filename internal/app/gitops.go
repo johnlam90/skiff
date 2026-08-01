@@ -239,6 +239,13 @@ func (a *App) menuGitCommit() {
 	if !a.hasGitRepo() {
 		return
 	}
+	if a.diffBase != "" {
+		// The change list is vs the compare base right now; the index is
+		// always built against HEAD (druk's rule). Committing a base-
+		// relative file list would surprise — make the mode explicit.
+		a.flash("Comparing against " + a.diffBase + " — switch back to HEAD to commit")
+		return
+	}
 	a.rebuildGitChangesRows()
 	paths := a.checkedChangePaths()
 	if len(paths) == 0 {
@@ -338,7 +345,56 @@ func (a *App) handleBranchList(e *branchListEvent) {
 		a.openMergeBranchPick(e.names)
 	case "delete":
 		a.openDeleteBranchPick(e.names)
+	case "base":
+		a.openComparePick(e.names)
 	}
+}
+
+// openComparePick sets the editor-wide compare base (druk's diffBase):
+// every mark — tree tint, gutter, panel list, diffs — follows the
+// picked ref until HEAD is picked again. Committing stays HEAD-scoped,
+// so it is gated off while a base is active (see menuGitCommit).
+func (a *App) openComparePick(names []string) {
+	items := make([]listPickItem, 0, len(names)+1)
+	items = append(items, listPickItem{Label: "HEAD (working default)", Current: a.diffBase == ""})
+	for _, n := range names {
+		it := listPickItem{Label: n, Current: n == a.diffBase}
+		if strings.ContainsRune(n, '/') {
+			it.Tag = "remote"
+		}
+		items = append(items, it)
+	}
+	a.openListPick("Compare against", items,
+		func(app *App, i int) {
+			if i == 0 {
+				app.setDiffBase("")
+				return
+			}
+			app.setDiffBase(names[i-1])
+		}, nil, nil)
+}
+
+// setDiffBase applies a new compare base and re-points every mark.
+func (a *App) setDiffBase(base string) {
+	if base == a.gitBranch {
+		base = "" // comparing a branch against itself is just HEAD
+	}
+	a.diffBase = base
+	if base == "" {
+		a.flash("Comparing against HEAD")
+	} else {
+		a.flash("Comparing against " + base)
+	}
+	a.refreshGitStatusAsync()
+}
+
+// menuGitCompareAgainst is the extras-popup entry point.
+func (a *App) menuGitCompareAgainst() {
+	a.closeMenu()
+	if !a.hasGitRepo() {
+		return
+	}
+	a.requestBranchList("base")
 }
 
 // gitBranchNames lists local then remote branch names, current first,
@@ -605,6 +661,7 @@ func (a *App) openGitExtras(x, y int) {
 	a.closeAllModals()
 	items := []contextItem{
 		{label: "Fetch", action: func(app *App, _ *filetree.Node) { app.menuGitFetch() }},
+		{label: "Compare against…", action: func(app *App, _ *filetree.Node) { app.menuGitCompareAgainst() }},
 		{label: "New branch…", action: func(app *App, _ *filetree.Node) { app.menuGitNewBranch() }},
 		{label: "Merge branch…", action: func(app *App, _ *filetree.Node) { app.menuGitMergeBranch() }},
 		{label: "Rename branch…", action: func(app *App, _ *filetree.Node) { app.menuGitRenameBranch() }},

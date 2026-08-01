@@ -125,7 +125,7 @@ func (a *App) menuDiffFile() {
 	if a.tree != nil {
 		kind = a.tree.DirtyFiles[tab.Path]
 	}
-	lines := loadGitFileDiff(a.rootDir, tab.Path, kind == filetree.GitChangeAdded)
+	lines := loadGitFileDiff(a.rootDir, a.diffBase, tab.Path, kind == filetree.GitChangeAdded)
 	if len(lines) == 0 {
 		a.flash("No uncommitted changes in this file")
 		return

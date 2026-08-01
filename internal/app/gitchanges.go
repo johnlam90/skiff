@@ -329,7 +329,7 @@ func (a *App) activateGitChangeRow(row gitChangeRow) {
 		return
 	}
 
-	lines := loadGitFileDiff(a.rootDir, row.Abs, row.Kind == filetree.GitChangeAdded)
+	lines := loadGitFileDiff(a.rootDir, a.diffBase, row.Abs, row.Kind == filetree.GitChangeAdded)
 	if len(lines) == 0 {
 		lines = []string{"No git diff available for this file."}
 	}
@@ -464,6 +464,9 @@ func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 	// source-control work happens. Clicking it opens the branch picker.
 	branchStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text).Bold(true)
 	branchLine := "⎇ " + a.gitBranch
+	if a.diffBase != "" {
+		branchLine += " ⇆ " + a.diffBase
+	}
 	if a.gitAhead > 0 {
 		branchLine += fmt.Sprintf(" ↑%d", a.gitAhead)
 	}
@@ -616,6 +619,9 @@ func (a *App) statusGitSegment() string {
 		return ""
 	}
 	seg := " " + a.gitBranch
+	if a.diffBase != "" {
+		seg += " ⇆ " + a.diffBase
+	}
 	if a.gitAhead > 0 {
 		seg += " ↑" + itoa(a.gitAhead)
 	}

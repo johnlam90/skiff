@@ -361,6 +361,12 @@ Skiff panel:
   under `[ ⋯ ]`, next to **Stash changes**, **Pop stash**, and
   **Undo last commit** (a soft reset: the commit disappears, its
   changes stay in your tree).
+- **Compare against any ref.** `[ ⋯ ]` → **Compare against…** points
+  the *whole editor* at another branch: tree tint, gutter bars, the
+  panel's list and every diff show what changed versus that ref —
+  "review this branch against main" as a mode. The status bar shows
+  `⇆ main` while it's on; pick **HEAD** to come back. Committing is
+  deliberately disabled in this mode (the index is always HEAD's).
 - **Walk a review with the arrows.** With a panel-opened diff up,
   `↓`/`↑` jump straight to the next / previous changed file — read
   the whole change-set end to end without touching the mouse. Every
