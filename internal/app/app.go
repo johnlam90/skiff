@@ -1775,7 +1775,7 @@ func (a *App) sidebarClick(x, y int) {
 		return
 	}
 	a.setActiveFolder(filepath.Dir(n.Path))
-	a.openFile(n.Path)
+	a.openFilePreview(n.Path)
 }
 
 // setActiveFolder records path as the editor's current working folder and
@@ -2070,49 +2070,13 @@ func (a *App) flash(msg string) {
 // name and the public surface stays small.
 func (a *App) OpenFile(path string) { a.openFile(path) }
 
-// openFile opens the file at path in a new tab — or switches to it if it is
-// already open in another tab. Errors are surfaced as a flash message.
-// Whatever the path resolves to, its parent becomes the active folder so
-// the next New File from the main menu lands next to it.
+// openFile opens the file at path in a new permanent tab — or switches
+// to it if it is already open (pinning a preview it lands on). Errors
+// surface as a flash message. Whatever the path resolves to, its parent
+// becomes the active folder so the next New File from the main menu
+// lands next to it. The shared implementation lives in preview.go.
 func (a *App) openFile(path string) {
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
-	}
-	a.setActiveFolder(filepath.Dir(path))
-	if a.tree != nil {
-		a.tree.ActiveFile = path
-		// Reveal the file's location in the sidebar: expand every ancestor
-		// directory and scroll the row into view. Without this, opening a
-		// file via the finder (Esc-p) or the command line leaves the tree
-		// collapsed at the top, so the active-file highlight is set on a
-		// row nobody can see. listH mirrors Render's own list-area height
-		// (sidebarH - 2) so the "already visible" guard inside Reveal uses
-		// the same viewport the next paint will.
-		_, _, _, sh := a.sidebarRect()
-		listH := sh - 2
-		if listH < 0 {
-			listH = 0
-		}
-		a.tree.Reveal(path, listH)
-	}
-	for i, t := range a.tabs {
-		if t.Path == path {
-			a.activeTab = i
-			a.ensureActiveTabVisible()
-			t.GitLines = loadGitLineChanges(a.rootDir, t.Path)
-			return
-		}
-	}
-	t, err := editor.NewTab(path)
-	if err != nil {
-		a.flash(fmt.Sprintf("Error: %v", err))
-		return
-	}
-	a.tabs = append(a.tabs, t)
-	a.activeTab = len(a.tabs) - 1
-	a.ensureActiveTabVisible()
-	t.GitLines = loadGitLineChanges(a.rootDir, t.Path)
-	a.flash(fmt.Sprintf("Opened %s", filepath.Base(path)))
+	a.openFileMode(path, false)
 }
 
 // saveActiveTab writes the active tab's buffer to disk.
@@ -2937,6 +2901,11 @@ func (a *App) drawTabBar() {
 		st := tcell.StyleDefault.Background(bg).Foreground(fg)
 		if active {
 			st = st.Bold(true)
+		}
+		// Preview tabs render in italics — the visual promise that the
+		// next tree click will replace this tab rather than add one.
+		if a.tabs[r.Index].IsPreview() {
+			st = st.Italic(true)
 		}
 		// Background. Cells scrolled off either edge of the strip are
 		// skipped; the chevrons painted below mark what's hidden.

@@ -115,8 +115,8 @@
 - Dirty edit auto-pins via IsPreview definition; `Pin()` clears the flag so italics drop.
 
 **Steps:**
-- [ ] Tests: `TestPreviewReplacedByNextPreview`, `TestSecondClickPins`, `TestEditPinsPreview`, `TestOpenFilePinsExistingPreview`, `TestPreviewReplaceKeepsSlot`. Run, fail.
-- [ ] Implement; italic style in drawTabBar via `style.Italic(true)` when `t.IsPreview()`.
+- [x] Tests: `TestPreviewReplacedByNextPreview`, `TestSecondClickPins`, `TestEditPinsPreview`, `TestOpenFilePinsExistingPreview`, `TestPreviewReplaceKeepsSlot`. Run, fail.
+- [x] Implement; italic style in drawTabBar via `style.Italic(true)` when `t.IsPreview()`.
 - [ ] `make test` green.
 
 ### Task 6: Tree cut / copy / paste / duplicate

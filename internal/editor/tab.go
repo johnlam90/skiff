@@ -120,6 +120,13 @@ type Tab struct {
 	FindMatches []Match
 	FindIndex   int // -1 = no current match; otherwise an index into FindMatches.
 
+	// Preview marks a tab opened by single-clicking the file tree: the
+	// next single-click preview replaces it in place instead of piling
+	// up tabs (VS Code / druk behavior). Editing or an explicit open
+	// "pins" the tab. Always read through IsPreview(), which treats a
+	// dirty buffer as pinned regardless of this flag.
+	Preview bool
+
 	// IndentUnit is the string the editor inserts when the user presses
 	// Tab. Detected on file open (DetectIndent) so the editor matches
 	// whatever the file already does — a tab-indented Go file gets a
@@ -197,6 +204,20 @@ func newImageTab(path string) (*Tab, error) {
 // dispatch, save, etc.) without having to know about Mode strings.
 func (t *Tab) IsImage() bool {
 	return t.Mode == imageMode
+}
+
+// IsPreview reports whether the tab is still replaceable by the next
+// tree-click preview. A dirty buffer is never a preview — the user's
+// edits pin it implicitly, so a half-typed change can't be silently
+// swapped out from under them.
+func (t *Tab) IsPreview() bool {
+	return t.Preview && !t.Dirty
+}
+
+// Pin makes a preview tab permanent (drops the italic, stops the
+// replace-in-place behavior). Safe to call on any tab.
+func (t *Tab) Pin() {
+	t.Preview = false
 }
 
 // DisplayName returns the basename of Path, or "untitled" for unsaved tabs.
