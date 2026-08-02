@@ -9,7 +9,7 @@ CI owns the release: any push to `main` triggers `.github/workflows/release.yml`
 
 1. **Preflight.** `git status --porcelain` empty; `git fetch origin && git status -sb` shows main not behind (`git pull --ff-only` if it is); `make test` green. Don't push red.
 2. **Version.**
-   - No argument → CI auto-bumps the patch. Just make sure the outgoing tip commit's message does not contain `[skip ci]` / `[ci skip]`, or the workflow never fires.
+   - No argument → CI auto-bumps the patch. Just make sure the outgoing tip commit's message does not contain `[skip ci]` / `[ci skip]` — **anywhere, subject or body, even quoted descriptively** (a commit whose body merely *mentioned* the marker has silently skipped a release before), or the workflow never fires.
    - `minor` / `major` / explicit → edit `const Version` in `internal/version/version.go` and commit it as `Release v<x.y.z>`. This edit **must be the tip commit of the push**: the workflow only inspects `HEAD~1..HEAD`, so a buried version edit gets a patch bump stacked on top (an intended 0.2.0 silently ships as 0.2.1). Also confirm the target tag is free: `git ls-remote --tags origin 'v<x.y.z>'` → empty.
 3. **Push `main`.** That is the trigger — no tag, no other command.
 4. **Watch.** `gh run list --workflow=release.yml --limit 1` for the run id, then `gh run watch <id> --exit-status`. For a manual bump, check the "Determine version" step's log says `manually edited … using as-is` — if it says `Auto-bumping`, stop and investigate before anything else.
