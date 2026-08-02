@@ -5,21 +5,21 @@
 class Skiff < Formula
   desc "Skiff — opinionated mouse-first terminal code editor."
   homepage "https://github.com/johnlam90/skiff"
-  version "0.1.4"
+  version "0.1.5"
   license "MIT"
 
   on_macos do
     if Hardware::CPU.intel?
-      url "https://github.com/johnlam90/skiff/releases/download/v0.1.4/skiff_0.1.4_darwin_amd64.tar.gz"
-      sha256 "bfb3e38842631f8b5a05efa0aad269d0823adbb8a0ce000dd3383146a66fdc5b"
+      url "https://github.com/johnlam90/skiff/releases/download/v0.1.5/skiff_0.1.5_darwin_amd64.tar.gz"
+      sha256 "777e80472168a726bd7be3f3f48b9ac3a982a4ac2f37167da24def2b00534a7f"
 
       define_method(:install) do
         bin.install "skiff"
       end
     end
     if Hardware::CPU.arm?
-      url "https://github.com/johnlam90/skiff/releases/download/v0.1.4/skiff_0.1.4_darwin_arm64.tar.gz"
-      sha256 "4e52b6d7f559f9f0d6de95ca8bdbd0c2ec40bbefcef40c64d2b06e18dd724ee4"
+      url "https://github.com/johnlam90/skiff/releases/download/v0.1.5/skiff_0.1.5_darwin_arm64.tar.gz"
+      sha256 "a8e343fe0ff361cc03e01011d06d2ce021e872cfc3d92144a6ae183e09d738dc"
 
       define_method(:install) do
         bin.install "skiff"
@@ -29,15 +29,15 @@ class Skiff < Formula
 
   on_linux do
     if Hardware::CPU.intel? && Hardware::CPU.is_64_bit?
-      url "https://github.com/johnlam90/skiff/releases/download/v0.1.4/skiff_0.1.4_linux_amd64.tar.gz"
-      sha256 "7cc370f4f7b35414c3dfbb142c3f15a690c20626800e450905fcfe47f996511f"
+      url "https://github.com/johnlam90/skiff/releases/download/v0.1.5/skiff_0.1.5_linux_amd64.tar.gz"
+      sha256 "20141fd80d807c83c109a2a3f8e31f2ba0c863fc78b2e86f187f420982b05e84"
       define_method(:install) do
         bin.install "skiff"
       end
     end
     if Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
-      url "https://github.com/johnlam90/skiff/releases/download/v0.1.4/skiff_0.1.4_linux_arm64.tar.gz"
-      sha256 "ab638805d932e3694a550c71dc8c0cd7b4613a3c70b26d2cd10420710acb0aab"
+      url "https://github.com/johnlam90/skiff/releases/download/v0.1.5/skiff_0.1.5_linux_arm64.tar.gz"
+      sha256 "22730a5254ef4d4a8bfb70a630b15be3ff5274fbe5fd4a4ae565a2cf70d8d8ce"
       define_method(:install) do
         bin.install "skiff"
       end
