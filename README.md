@@ -88,6 +88,13 @@ The goals, in order:
   files edited since are skipped and reported, never guessed at. Open
   buffers apply through the editor (per-file undo, dirty tabs stay
   dirty); closed files rewrite atomically on disk.
+- **Soft wrap, on by default** — long lines flow onto continuation
+  rows (breaking at word boundaries, like VS Code) instead of running
+  off the right edge, so code and prose read without sideways
+  scrolling. Prefer panning? `≡` → **Unwrap long lines** (or `Esc z`)
+  flips every open tab and persists (`{"wrap": "off"}` in the same
+  config file the theme lives in); with wrap off, Shift+wheel scrolls
+  sideways and `‹`/`›` chevrons mark clipped lines.
 - **Preview tabs** — a single tree click opens a file in one reusable
   *italic* tab, so browsing ten files doesn't leave ten tabs behind.
   Click the file again, or just start typing, to pin it.
@@ -239,6 +246,7 @@ within half a second tap one of the letters below.
 | `Esc q`     | Quit                   |
 | `Esc n`     | New file               |
 | `Esc t`     | Toggle sidebar         |
+| `Esc z`     | Toggle line wrap       |
 | `Esc /`     | Toggle line comment    |
 | `Esc k`     | Move line up           |
 | `Esc j`     | Move line down         |

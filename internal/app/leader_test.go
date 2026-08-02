@@ -32,8 +32,8 @@ func TestLeaderActionFor_AllBindingsResolve(t *testing.T) {
 // leaderActionFor reports a miss with nil so handleKey can distinguish
 // "leader fired" from "key was unbound — fall through".
 func TestLeaderActionFor_UnboundReturnsNil(t *testing.T) {
-	if leaderActionFor('z') != nil {
-		t.Fatal("'z' should not be a leader binding (no editor action mapped)")
+	if leaderActionFor('y') != nil {
+		t.Fatal("'y' should not be a leader binding (no editor action mapped)")
 	}
 }
 
@@ -165,9 +165,9 @@ func TestHandleKey_LeaderUnboundFallsThrough(t *testing.T) {
 	a.openFile(target)
 
 	a.handleKey(keyEv(tcell.KeyEsc, 0))
-	a.handleKey(keyEv(tcell.KeyRune, 'z'))
+	a.handleKey(keyEv(tcell.KeyRune, 'y'))
 
-	if got := a.activeTabPtr().Buffer.Lines[0]; got != "z" {
+	if got := a.activeTabPtr().Buffer.Lines[0]; got != "y" {
 		t.Fatalf("unbound key after Esc should reach the editor, got %q", got)
 	}
 }
@@ -225,8 +225,8 @@ func TestHandleKey_ExpiredLeaderRuneHints(t *testing.T) {
 	// window: a stray Esc must not eat ordinary typing.
 	a.handleKey(keyEv(tcell.KeyEsc, 0))
 	a.lastEscape = time.Now().Add(-800 * time.Millisecond)
-	a.handleKey(keyEv(tcell.KeyRune, 'z'))
-	if got := a.activeTabPtr().Buffer.Lines[0]; got != "z" {
+	a.handleKey(keyEv(tcell.KeyRune, 'y'))
+	if got := a.activeTabPtr().Buffer.Lines[0]; got != "y" {
 		t.Fatalf("unbound rune in the grace window should insert, got %q", got)
 	}
 }
@@ -330,7 +330,7 @@ func TestHandleKey_AltRuneUnboundSwallowed(t *testing.T) {
 	a := newTestApp(t, dir)
 	a.openFile(target)
 
-	a.handleKey(tcell.NewEventKey(tcell.KeyRune, 'z', tcell.ModAlt))
+	a.handleKey(tcell.NewEventKey(tcell.KeyRune, 'y', tcell.ModAlt))
 
 	if got := a.activeTabPtr().Buffer.Lines[0]; got != "" {
 		t.Fatalf("unbound Alt rune must be swallowed, buffer = %q", got)
@@ -350,5 +350,34 @@ func TestHandleKey_AltEscTogglesMenu(t *testing.T) {
 	a.handleKey(tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModAlt))
 	if a.menuOpen {
 		t.Fatal("Alt+Esc with the menu open should close it")
+	}
+}
+
+// TestHandleKey_LeaderWrapToggle drives the Esc, z gesture end to end:
+// it must flip soft wrap off for the open tab (and back on again),
+// matching the ≡ menu row it shadows.
+func TestHandleKey_LeaderWrapToggle(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // the toggle persists config
+	dir := t.TempDir()
+	target := filepath.Join(dir, "t.txt")
+	if err := os.WriteFile(target, []byte("hello"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	if !a.activeTabPtr().Wrap {
+		t.Fatal("wrap should start on by default")
+	}
+
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	a.handleKey(keyEv(tcell.KeyRune, 'z'))
+	if a.wrapOn || a.activeTabPtr().Wrap {
+		t.Fatal("Esc z should turn wrap off")
+	}
+
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	a.handleKey(keyEv(tcell.KeyRune, 'z'))
+	if !a.wrapOn || !a.activeTabPtr().Wrap {
+		t.Fatal("second Esc z should turn wrap back on")
 	}
 }

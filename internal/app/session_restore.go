@@ -87,6 +87,7 @@ func (a *App) restoreSession() {
 		t.Cursor = t.Buffer.Clamp(editor.Position{Line: ts.Line, Col: ts.Col})
 		t.Anchor = t.Cursor
 		t.ScrollY = ts.ScrollY
+		t.Wrap = a.wrapOn
 		t.Preview = ts.Preview
 		t.GitLines = loadGitLineChanges(a.rootDir, a.diffBase, abs)
 		a.tabs = append(a.tabs, t)

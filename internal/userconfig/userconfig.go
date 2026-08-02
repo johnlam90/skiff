@@ -19,6 +19,7 @@
 //	{"icons": "on"}            // force-on, even if detection would say no
 //	{"icons": "off"}           // force-off, even if a Nerd Font is installed
 //	{"theme": "tokyo-night"}   // any id from internal/theme's registry
+//	{"wrap": "off"}            // long lines pan sideways; "on" (default) wraps
 //
 // The loader is best-effort the same way customactions is: missing
 // file → defaults, malformed file → error returned for the app to
@@ -54,13 +55,17 @@ type Config struct {
 	// the app against the theme registry, not here — the config loader
 	// shouldn't need to import the palette table.
 	Theme string
+	// Wrap is whether the editor soft-wraps long lines. Defaults to on —
+	// the editor's audience reads code over SSH, where sideways panning
+	// hurts the most; the menu toggle persists an "off" here.
+	Wrap bool
 }
 
 // Defaults returns a Config populated with the values used when no
 // config file is present (or every field in it is blank). Centralised
 // so tests and the loader can't drift from each other.
 func Defaults() Config {
-	return Config{Icons: IconsAuto}
+	return Config{Icons: IconsAuto, Wrap: true}
 }
 
 // fileFormat mirrors the on-disk JSON shape. We decode into this and
@@ -69,6 +74,7 @@ func Defaults() Config {
 type fileFormat struct {
 	Icons string `json:"icons,omitempty"`
 	Theme string `json:"theme,omitempty"`
+	Wrap  string `json:"wrap,omitempty"`
 }
 
 // DefaultPath returns the canonical config-file location:
@@ -136,6 +142,19 @@ func Load(path string) (Config, error) {
 		)
 	}
 	cfg.Theme = strings.TrimSpace(ff.Theme)
+
+	switch strings.ToLower(strings.TrimSpace(ff.Wrap)) {
+	case "":
+		// field omitted — keep default (on)
+	case "on":
+		cfg.Wrap = true
+	case "off":
+		cfg.Wrap = false
+	default:
+		return Defaults(), fmt.Errorf(
+			"%s: wrap must be \"on\" or \"off\" (got %q)", path, ff.Wrap,
+		)
+	}
 	return cfg, nil
 }
 
@@ -155,6 +174,33 @@ func SetTheme(path, id string) error {
 		_ = json.Unmarshal(data, &raw)
 	}
 	raw["theme"] = id
+	return writeRaw(path, raw)
+}
+
+// SetWrap persists the soft-wrap preference into the config file at
+// path, with the same create-if-needed / preserve-unknown-keys contract
+// as SetTheme.
+func SetWrap(path string, on bool) error {
+	if path == "" {
+		return errors.New("no config path available")
+	}
+	raw := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+		// Same tradeoff as SetTheme: a malformed file is overwritten —
+		// keeping the user's fresh choice beats preserving broken JSON.
+		_ = json.Unmarshal(data, &raw)
+	}
+	if on {
+		raw["wrap"] = "on"
+	} else {
+		raw["wrap"] = "off"
+	}
+	return writeRaw(path, raw)
+}
+
+// writeRaw marshals the merged key map back to disk, creating the
+// config directory on first write. Shared tail of the Set* helpers.
+func writeRaw(path string, raw map[string]any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}

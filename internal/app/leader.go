@@ -48,6 +48,7 @@ func leaderBindings() []leaderBinding {
 		{'q', (*App).menuQuit, "quit"},
 		{'n', (*App).menuNewFile, "new file"},
 		{'t', (*App).menuToggleSidebar, "sidebar"},
+		{'z', (*App).menuToggleWrap, "wrap"},
 		{'/', (*App).menuToggleLineComment, "comment"},
 		{'k', (*App).menuMoveLineUp, "line up"},
 		{'j', (*App).menuMoveLineDown, "line down"},

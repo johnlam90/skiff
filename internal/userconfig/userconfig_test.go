@@ -218,3 +218,70 @@ func TestSetThemePreservesOtherKeys(t *testing.T) {
 		t.Fatalf("fresh load: %+v %v", cfg, err)
 	}
 }
+
+// TestLoadWrap covers the wrap key's whole contract: absent defaults to
+// on, "on"/"off" parse (case-insensitively), and a typo surfaces as an
+// error with defaults — same tell-the-user rule as a bad icons value.
+func TestLoadWrap(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name    string
+		json    string
+		want    bool
+		wantErr bool
+	}{
+		{"absent defaults on", `{"icons": "on"}`, true, false},
+		{"explicit on", `{"wrap": "on"}`, true, false},
+		{"explicit off", `{"wrap": "off"}`, false, false},
+		{"case insensitive", `{"wrap": "OFF"}`, false, false},
+		{"typo errors", `{"wrap": "nope"}`, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "-")+".json")
+			if err := os.WriteFile(path, []byte(tc.json), 0644); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			cfg, err := Load(path)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if cfg.Wrap != tc.want {
+				t.Fatalf("Wrap = %v, want %v", cfg.Wrap, tc.want)
+			}
+		})
+	}
+}
+
+// TestSetWrapPreservesOtherKeys pins SetWrap's round-trip rule (keep
+// unknown keys, create the file when missing) and that the value it
+// writes reads back through Load.
+func TestSetWrapPreservesOtherKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"theme": "nord", "future-key": 7}`), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := SetWrap(path, false); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	for _, want := range []string{`"wrap": "off"`, `"theme": "nord"`, `"future-key": 7`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("missing %s in:\n%s", want, data)
+		}
+	}
+	cfg, err := Load(path)
+	if err != nil || cfg.Wrap {
+		t.Fatalf("load after set: %+v %v", cfg, err)
+	}
+	// Fresh-file creation, and flipping back to on round-trips too.
+	fresh := filepath.Join(dir, "sub", "config.json")
+	if err := SetWrap(fresh, true); err != nil {
+		t.Fatalf("fresh set: %v", err)
+	}
+	cfg, err = Load(fresh)
+	if err != nil || !cfg.Wrap {
+		t.Fatalf("fresh load: %+v %v", cfg, err)
+	}
+}

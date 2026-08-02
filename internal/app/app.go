@@ -264,6 +264,7 @@ func builtinMenuGroups() [][]menuItemDef {
 		// View toggle
 		{
 			{shortcut: "Esc t", action: (*App).menuToggleSidebar, enabled: alwaysTrue, labelFor: (*App).sidebarToggleLabel, visible: (*App).hasTree},
+			{shortcut: "Esc z", action: (*App).menuToggleWrap, enabled: alwaysTrue, labelFor: (*App).wrapToggleLabel},
 			{label: "Theme…", action: (*App).menuTheme, enabled: alwaysTrue},
 		},
 		// Quit
@@ -385,6 +386,11 @@ type App struct {
 	// sidebarShown controls whether the file explorer panel is visible.
 	// When false the editor and tab bar fill the whole window.
 	sidebarShown bool
+
+	// wrapOn is the soft-wrap preference stamped onto every tab at
+	// creation and flipped (for all open tabs at once) by the menu
+	// toggle. Loaded from config.json; defaults to on.
+	wrapOn bool
 
 	// sidebarWidth is the live width of the file-explorer block (file tree
 	// + 1-cell splitter on its right edge), in screen cells. The user can
@@ -714,6 +720,7 @@ func New(rootDir string) (*App, error) {
 		diffPanelRow:   -1,
 		sidebarShown:   true,
 		sidebarWidth:   defaultSidebarWidth,
+		wrapOn:         true,
 	}
 	a.setActiveFolder(tree.Root.Path)
 	a.loadUserConfig()
@@ -784,6 +791,7 @@ func NewSingleFile(filePath string) (*App, error) {
 		diffPanelRow:   -1,
 		sidebarShown:   false,
 		sidebarWidth:   defaultSidebarWidth,
+		wrapOn:         true,
 	}
 	a.setActiveFolder(rootDir)
 	a.loadUserConfig()
@@ -827,6 +835,9 @@ func (a *App) loadUserConfig() {
 	if cfg.Theme != "" {
 		a.applyTheme(cfg.Theme, false)
 	}
+	// Both constructors call this before any tab exists, so stamping
+	// the preference on the App is enough — tab-open paths copy it.
+	a.wrapOn = cfg.Wrap
 }
 
 // refreshTree calls tree.Refresh when the file tree exists, and is a
@@ -2182,6 +2193,9 @@ func (a *App) scrollbarTo(localY int) {
 	}
 	_, _, _, eh := a.editorRect()
 	tab.ScrollY = tab.ScrollTargetForClick(eh, localY)
+	// The thumb maps to a buffer line; land at its first visual row so a
+	// stale wrap segment from the previous anchor can't offset the jump.
+	tab.ScrollSeg = 0
 }
 
 // selectWordAt selects the word under the buffer position p (or does
@@ -2808,6 +2822,36 @@ func (a *App) sidebarToggleLabel() string {
 		return "Hide file explorer"
 	}
 	return "Show file explorer"
+}
+
+// menuToggleWrap flips soft wrap for every open tab and persists the
+// preference, so it holds for future tabs and future sessions alike.
+// A persistence failure still applies the toggle in-memory — the user
+// asked for a view change first, a config write second.
+func (a *App) menuToggleWrap() {
+	a.closeMenu()
+	a.wrapOn = !a.wrapOn
+	for _, t := range a.tabs {
+		t.SetWrap(a.wrapOn)
+	}
+	if err := userconfig.SetWrap(userconfig.DefaultPath(), a.wrapOn); err != nil {
+		a.flash("config: " + err.Error())
+		return
+	}
+	if a.wrapOn {
+		a.flash("Long lines now wrap")
+	} else {
+		a.flash("Long lines now scroll sideways")
+	}
+}
+
+// wrapToggleLabel returns the wrap row's label for the current state.
+// Drawn dynamically by drawMenu, same pattern as the sidebar toggle.
+func (a *App) wrapToggleLabel() string {
+	if a.wrapOn {
+		return "Unwrap long lines"
+	}
+	return "Wrap long lines"
 }
 
 // menuQuit exits the editor. When any tab has unsaved changes, opens the

@@ -74,6 +74,7 @@ func (a *App) openFileMode(path string, preview bool) {
 		a.flash(fmt.Sprintf("Error: %v", err))
 		return
 	}
+	t.Wrap = a.wrapOn
 	t.Preview = preview
 	if preview {
 		if idx := a.previewTabIndex(); idx >= 0 {

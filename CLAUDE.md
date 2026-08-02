@@ -53,6 +53,7 @@ internal/app/gitops.go        Git write side: commit/push/pull/branch/stash runn
 internal/editor/buffer.go     Position + Buffer ([]string lines), edit primitives
 internal/editor/tab.go        Tab: path, buffer, cursor, anchor, scroll, dirty state
 internal/editor/lineops.go    Move / duplicate line-block gestures
+internal/editor/wrap.go       Soft wrap: segment math + wrap-mode render/scroll/hit-test
 internal/editor/scrollbar.go  Right-edge scrollbar + git change map
 internal/editor/highlight.go  Chroma → []tcell.Style per line
 internal/filetree/filetree.go Lazy tree, identity-preserving refresh, hit-test, render
@@ -132,6 +133,16 @@ on every tick" bug.
 `tab.clampScroll(viewH)` allows the last line to scroll roughly to the
 middle (`overscroll = max(viewH/2, 3)`). This is intentional — without
 it, you can't comfortably read the bottom of a file.
+
+### Soft wrap is anchor-based — no whole-file layout (wrap.go)
+In wrap mode the scroll position is `(ScrollY, ScrollSeg)` and every
+computation (render, EnsureVisible, clamp, hit-test) walks at most a
+viewport's worth of lines from that anchor. Don't "optimize" this into
+a cached file-wide visual-row map — the O(viewport) walks are the
+design, and they keep huge files snappy with zero invalidation logic.
+Tab stops reset at each segment, so a segment's rune subslice behaves
+exactly like an independent line under the existing visual-column
+helpers. The scrollbar stays buffer-line proportional on purpose.
 
 ### Custom tcell events for goroutine → main-loop messaging
 Background work (auto-scroll during drag, 10s tree refresh) posts custom

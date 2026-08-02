@@ -57,13 +57,26 @@ const (
 // the per-tab view state (scroll position, cursor, selection anchor), the
 // cached syntax-highlight styles, and a dirty flag.
 type Tab struct {
-	Path       string // Empty for an unsaved/scratch tab.
-	Buffer     *Buffer
-	Cursor     Position // Where new typed text appears.
-	Anchor     Position // Selection anchor; equals Cursor when nothing is selected.
-	ScrollY    int      // Index of the first visible line.
-	ScrollX    int      // Index of the first visible column (rune-indexed).
-	Dirty      bool
+	Path    string // Empty for an unsaved/scratch tab.
+	Buffer  *Buffer
+	Cursor  Position // Where new typed text appears.
+	Anchor  Position // Selection anchor; equals Cursor when nothing is selected.
+	ScrollY int      // Index of the first visible line.
+	ScrollX int      // Index of the first visible column (rune-indexed). Always 0 with Wrap on.
+	Dirty   bool
+
+	// Wrap turns on soft wrap: long lines flow onto continuation rows
+	// instead of panning horizontally. Stamped by the app from the user
+	// config on tab creation and flipped via SetWrap. ScrollSeg is the
+	// wrap-mode half of the scroll anchor — the segment index within
+	// ScrollY's line of the first visible row (always 0 with Wrap off).
+	// lastWrapW caches the content width of the last wrap-mode render so
+	// wheel scrolling between frames can do visual-row math; 0 means
+	// "never rendered", which falls back to line scrolling. See wrap.go.
+	Wrap      bool
+	ScrollSeg int
+	lastWrapW int
+
 	Styles     [][]tcell.Style
 	StyleStale bool
 	GitLines   map[int]GitLineChange
@@ -550,6 +563,10 @@ func (t *Tab) CenterOnCursor(viewH int) {
 		return
 	}
 	t.ScrollY = t.Cursor.Line - viewH/2
+	// Wrap mode: centering by buffer line is an approximation (segments
+	// above may push the target lower), but cursorMoved's EnsureVisible
+	// still guarantees the cursor lands on screen next render.
+	t.ScrollSeg = 0
 	t.clampScroll(viewH)
 }
 
@@ -593,6 +610,12 @@ func (t *Tab) styleWindowStale(viewH int) bool {
 // caller passes the editor area's width and height because the Tab itself
 // doesn't know its render rect.
 func (t *Tab) EnsureVisible(viewW, viewH int) {
+	if t.Wrap {
+		wrapW := viewW - gutterWidthFor(t.Buffer.LineCount()) - 1
+		t.ensureVisibleWrapped(wrapW, viewH)
+		t.ScrollX = 0
+		return
+	}
 	contentW := viewW - gutterWidthFor(t.Buffer.LineCount()) - 1
 	if contentW < 1 {
 		contentW = 1
@@ -635,11 +658,26 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 	}
 	// Only re-center on the cursor if the cursor moved this tick. Doing it
 	// every render fights the user when they scroll with the wheel.
-	if t.cursorMoved {
-		t.EnsureVisible(w, h)
-		t.cursorMoved = false
+	if t.Wrap {
+		wrapW := w - gutterWidthFor(t.Buffer.LineCount()) - 1
+		if wrapW < 1 {
+			wrapW = 1
+		}
+		t.lastWrapW = wrapW
+		t.ScrollX = 0
+		if t.cursorMoved {
+			t.ensureVisibleWrapped(wrapW, h)
+			t.cursorMoved = false
+		}
+		t.clampScrollWrapped(wrapW, h)
+	} else {
+		t.ScrollSeg = 0
+		if t.cursorMoved {
+			t.EnsureVisible(w, h)
+			t.cursorMoved = false
+		}
+		t.clampScroll(h)
 	}
-	t.clampScroll(h)
 	// Re-tokenise only when the cached highlight window no longer
 	// covers the viewport (content edit, resize, or the view scrolled
 	// near the window's edge). Inside the window, scrolling reuses the
@@ -660,6 +698,17 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		for cx := x; cx < x+w; cx++ {
 			scr.SetContent(cx, cy, ' ', nil, bgStyle)
 		}
+	}
+
+	// Wrap mode draws its own body (wrapped rows, gutter, cursor) and
+	// shares everything above (scroll upkeep, highlight window, base
+	// paint) plus the scrollbar below with the line path.
+	if t.Wrap {
+		t.renderWrappedBody(scr, th, x, y, w, h)
+		if barVisible {
+			t.renderScrollbar(scr, th, barX, y, h)
+		}
+		return
 	}
 
 	selStart, selEnd := PosOrdered(t.Anchor, t.Cursor)
@@ -728,36 +777,7 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 				// The rune's first cell shows the actual glyph (or ' '
 				// for tabs); padding cells for a multi-cell tab show a
 				// space so the trailing tab area still gets the right bg.
-				st := bgStyle
-				if runeIdx < len(styles) {
-					st = styles[runeIdx]
-				}
-				st = st.Background(lineBg)
-				if hasSel {
-					p := Position{Line: lineIdx, Col: runeIdx}
-					if !PosLess(p, selStart) && PosLess(p, selEnd) {
-						st = st.Background(th.Selection)
-						// Several syntax colors fall below WCAG AA on
-						// the selection blue (comments worst at ~1.5:1,
-						// keywords/functions/builtins ~3.4-4.5:1) —
-						// SelectionFg trades exactly those for Text and
-						// keeps the ones that stay readable.
-						fg, _, _ := st.Decompose()
-						st = st.Foreground(th.SelectionFg(fg))
-					}
-				}
-				if mIdx := t.matchAtRune(lineIdx, runeIdx); mIdx >= 0 {
-					if mIdx == t.FindIndex {
-						st = st.Background(th.FindCurrent).Foreground(th.BG)
-					} else {
-						// The match tint drops syntax coloring entirely:
-						// several syntax colors (comments worst, ~1.2:1)
-						// are illegible on the amber, and a find sweep
-						// should read as "here are your hits", not as
-						// code that happens to be tinted.
-						st = st.Background(th.FindMatch).Foreground(th.Text)
-					}
-				}
+				st := t.cellStyle(th, styles, lineIdx, runeIdx, lineBg, hasSel, selStart, selEnd)
 				glyph := r
 				if r == '\t' {
 					glyph = ' '
@@ -815,6 +835,42 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 	}
 }
 
+// cellStyle resolves the final style for the rune at (lineIdx, runeIdx):
+// the cached syntax style re-based onto the row background, then the
+// selection tint, then the find-match tint on top. Shared by the line
+// and wrap render paths so the two can't drift on styling rules.
+func (t *Tab) cellStyle(th theme.Theme, styles []tcell.Style, lineIdx, runeIdx int, lineBg tcell.Color, hasSel bool, selStart, selEnd Position) tcell.Style {
+	st := tcell.StyleDefault.Background(th.BG).Foreground(th.Text)
+	if runeIdx < len(styles) {
+		st = styles[runeIdx]
+	}
+	st = st.Background(lineBg)
+	if hasSel {
+		p := Position{Line: lineIdx, Col: runeIdx}
+		if !PosLess(p, selStart) && PosLess(p, selEnd) {
+			st = st.Background(th.Selection)
+			// Several syntax colors fall below WCAG AA on the selection
+			// blue (comments worst at ~1.5:1, keywords/functions/builtins
+			// ~3.4-4.5:1) — SelectionFg trades exactly those for Text and
+			// keeps the ones that stay readable.
+			fg, _, _ := st.Decompose()
+			st = st.Foreground(th.SelectionFg(fg))
+		}
+	}
+	if mIdx := t.matchAtRune(lineIdx, runeIdx); mIdx >= 0 {
+		if mIdx == t.FindIndex {
+			st = st.Background(th.FindCurrent).Foreground(th.BG)
+		} else {
+			// The match tint drops syntax coloring entirely: several
+			// syntax colors (comments worst, ~1.2:1) are illegible on the
+			// amber, and a find sweep should read as "here are your
+			// hits", not as code that happens to be tinted.
+			st = st.Background(th.FindMatch).Foreground(th.Text)
+		}
+	}
+	return st
+}
+
 // gitLineMarkerRune returns the gutter glyph for a git line change.
 func gitLineMarkerRune(change GitLineChange) rune {
 	if change == GitLineDeleted {
@@ -837,6 +893,9 @@ func gitLineMarkerColor(th theme.Theme, change GitLineChange) tcell.Color {
 // HitTest converts screen coordinates within this tab's render area to a
 // buffer position. ok=false means the click was outside any line.
 func (t *Tab) HitTest(localX, localY, w, h int) (Position, bool) {
+	if t.Wrap {
+		return t.hitTestWrapped(localX, localY, w, h)
+	}
 	if localY < 0 || localY >= h {
 		return Position{}, false
 	}
@@ -867,8 +926,15 @@ func (t *Tab) HitTest(localX, localY, w, h int) (Position, bool) {
 
 // Scroll moves the viewport by delta lines (negative = up). Render runs
 // clampScroll afterwards so the user never scrolls into pure void; here we
-// just adjust the raw value.
+// just adjust the raw value. In wrap mode a "line" of scrolling is a
+// visual row, so a wheel tick over a long wrapped line moves one row,
+// not one whole paragraph; before the first render (no cached width
+// yet) we fall back to buffer-line motion.
 func (t *Tab) Scroll(deltaLines int) {
+	if t.Wrap && t.lastWrapW > 0 {
+		t.scrollWrapped(deltaLines, t.lastWrapW)
+		return
+	}
 	t.ScrollY += deltaLines
 	if t.ScrollY < 0 {
 		t.ScrollY = 0
@@ -880,8 +946,12 @@ func (t *Tab) Scroll(deltaLines int) {
 // Render's contentW window — scrolling past the longest visible line just
 // shows blank space, which is fine. Lives next to Scroll so the app's
 // mouse-wheel dispatcher can treat horizontal and vertical wheels
-// symmetrically.
+// symmetrically. A no-op in wrap mode — nothing extends past the right
+// edge, so a horizontal wheel has nothing to reveal.
 func (t *Tab) ScrollH(deltaCols int) {
+	if t.Wrap {
+		return
+	}
 	t.ScrollX += deltaCols
 	if t.ScrollX < 0 {
 		t.ScrollX = 0

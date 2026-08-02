@@ -56,6 +56,7 @@ func newTestApp(t *testing.T, root string) *App {
 		diffPanelRow:   -1,
 		sidebarShown:   true,
 		sidebarWidth:   defaultSidebarWidth,
+		wrapOn:         true,
 	}
 	a.setActiveFolder(tree.Root.Path)
 	a.width, a.height = scr.Size()
@@ -1391,6 +1392,9 @@ func TestHandleMouse_WheelHorizontal(t *testing.T) {
 	if tab == nil {
 		t.Fatal("no active tab after openFile")
 	}
+	// Horizontal scrolling only exists with wrap off; this test is about
+	// the wheel routing, so run in the mode where it has an effect.
+	tab.SetWrap(false)
 	// Aim well inside the editor pane (past the sidebar, below the tab bar).
 	editorX := a.sidebarW() + 10
 	ev := tcell.NewEventMouse(editorX, 5, tcell.WheelRight, tcell.ModNone)
@@ -1424,6 +1428,9 @@ func TestHandleMouse_ShiftWheelScrollsHorizontally(t *testing.T) {
 	if tab == nil {
 		t.Fatal("no active tab after openFile")
 	}
+	// Same rationale as TestHandleMouse_WheelHorizontal: the horizontal
+	// route is only observable with wrap off.
+	tab.SetWrap(false)
 	editorX := a.sidebarW() + 10
 
 	// Shift+WheelDown → horizontal scroll right.
@@ -1473,6 +1480,10 @@ func TestHandleMouse_ShiftStickyForWheel(t *testing.T) {
 	a := newTestApp(t, dir)
 	a.openFile(target)
 	tab := a.activeTabPtr()
+	// Horizontal scrolling only exists with wrap off — this test is about
+	// the sticky-shift routing, so run it in the mode where the route has
+	// a visible effect.
+	tab.SetWrap(false)
 	editorX := a.sidebarW() + 10
 
 	// First event: ButtonNone with Shift modifier — what Zellij emits
@@ -1731,13 +1742,13 @@ func TestMenuLayout_NoCustomActions(t *testing.T) {
 	a.customActions = nil
 	items, dividers, h := a.menuLayout()
 
-	if h != 53 {
-		t.Errorf("modalHeight = %d, want 53", h)
+	if h != 54 {
+		t.Errorf("modalHeight = %d, want 54", h)
 	}
-	if got := len(items); got != 41 {
-		t.Errorf("item count = %d, want 41 built-ins", got)
+	if got := len(items); got != 42 {
+		t.Errorf("item count = %d, want 42 built-ins", got)
 	}
-	wantDiv := []int{2, 7, 11, 16, 26, 38, 43, 47, 50}
+	wantDiv := []int{2, 7, 11, 16, 26, 38, 43, 47, 51}
 	if len(dividers) != len(wantDiv) {
 		t.Fatalf("dividers = %v, want %v", dividers, wantDiv)
 	}
@@ -1793,6 +1804,7 @@ func TestMenuLayout_Shortcuts(t *testing.T) {
 		"Paste":                "",
 		"Toggle line comment":  "Esc /",
 		"Hide file explorer":   "Esc t",
+		"Unwrap long lines":    "Esc z",
 		"Quit editor":          "Esc q",
 	}
 
@@ -1898,8 +1910,8 @@ func TestMenuLayout_WithCustomActions(t *testing.T) {
 	}
 	items, _, h := a.menuLayout()
 
-	if h != 56 { // 53 + 2 items + 1 divider
-		t.Errorf("modalHeight = %d, want 56", h)
+	if h != 57 { // 54 + 2 items + 1 divider
+		t.Errorf("modalHeight = %d, want 57", h)
 	}
 	// Custom actions should be the second-to-last and third-to-last
 	// rows, with Quit as the final row.
@@ -2802,5 +2814,63 @@ func TestHandleKey_PasteTabInsertsLiteralTab(t *testing.T) {
 
 	if got := a.activeTabPtr().Buffer.Lines[0]; got != "\t" {
 		t.Fatalf("Tab during a paste should insert \\t, buffer = %q", got)
+	}
+}
+
+// TestMenuToggleWrap pins the toggle's full contract: it flips the app
+// preference and every open tab together, swaps the dynamic menu label,
+// and persists the choice to the user config file.
+func TestMenuToggleWrap(t *testing.T) {
+	cfgHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "t.txt")
+	if err := os.WriteFile(target, []byte("hello"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	if !a.activeTabPtr().Wrap {
+		t.Fatal("tabs should open with wrap on by default")
+	}
+	if got := a.wrapToggleLabel(); got != "Unwrap long lines" {
+		t.Fatalf("label = %q, want Unwrap long lines", got)
+	}
+
+	a.menuToggleWrap()
+	if a.wrapOn || a.activeTabPtr().Wrap {
+		t.Fatal("toggle should turn wrap off for the app and all open tabs")
+	}
+	if got := a.wrapToggleLabel(); got != "Wrap long lines" {
+		t.Fatalf("label after toggle = %q, want Wrap long lines", got)
+	}
+	data, err := os.ReadFile(filepath.Join(cfgHome, "skiff", "config.json"))
+	if err != nil {
+		t.Fatalf("config not written: %v", err)
+	}
+	if !strings.Contains(string(data), `"wrap": "off"`) {
+		t.Fatalf("config missing wrap off:\n%s", data)
+	}
+
+	a.menuToggleWrap()
+	if !a.wrapOn || !a.activeTabPtr().Wrap {
+		t.Fatal("second toggle should turn wrap back on")
+	}
+}
+
+// TestOpenFile_StampsWrapPreference verifies a freshly opened tab copies
+// the app-level wrap preference — the path future tabs take after the
+// user has toggled wrap off.
+func TestOpenFile_StampsWrapPreference(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "t.txt")
+	if err := os.WriteFile(target, []byte("hello"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.wrapOn = false
+	a.openFile(target)
+	if a.activeTabPtr().Wrap {
+		t.Fatal("tab should inherit wrap-off from the app preference")
 	}
 }
