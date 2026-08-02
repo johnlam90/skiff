@@ -250,9 +250,9 @@ func builtinMenuGroups() [][]menuItemDef {
 		},
 		// Clipboard
 		{
-			{label: "Copy selection", action: (*App).menuCopy, enabled: (*App).hasSelection},
-			{label: "Cut selection", action: (*App).menuCut, enabled: (*App).hasSelection},
-			{label: "Paste", action: (*App).menuPaste, enabled: (*App).hasClipboard},
+			{label: "Copy selection", shortcut: "Esc c", action: (*App).menuCopy, enabled: (*App).hasSelection},
+			{label: "Cut selection", shortcut: "Esc x", action: (*App).menuCut, enabled: (*App).hasSelection},
+			{label: "Paste", shortcut: "Esc v", action: (*App).menuPaste, enabled: (*App).hasClipboard},
 			{label: "Toggle line comment", shortcut: "Esc /", action: (*App).menuToggleLineComment, enabled: (*App).hasCommentableTab},
 		},
 		// Line ops
@@ -1788,7 +1788,17 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		return
 	}
 
-	// Button released — exit any drag mode we were in.
+	// Button released — exit any drag mode we were in. Releasing an
+	// editor drag that built a selection copies it (select-to-copy, the
+	// tmux/herdr convention): with mouse reporting on, the terminal and
+	// any multiplexer never see a selection of their own, so Cmd+C at
+	// the terminal level has nothing to grab. A plain click collapses
+	// the selection before release, so caret placement never copies.
+	if a.dragMode == "editor" {
+		if t := a.activeTabPtr(); t != nil && t.HasSelection() {
+			a.copySelection()
+		}
+	}
 	a.dragMode = ""
 	a.stopAutoScroll()
 }

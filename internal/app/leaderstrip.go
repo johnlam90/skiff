@@ -36,10 +36,11 @@ func (a *App) leaderStripVisible() bool {
 
 // drawLeaderStrip paints the key overview above the status bar. On a
 // wide terminal it is one row; when the full table doesn't fit, it
-// wraps onto a second row rather than silently dropping half the
-// bindings — the strip exists precisely for people who don't have the
-// table memorised. It overlays the editor for the ~half-second the
-// leader window is armed, which is a fair trade.
+// wraps onto as many rows as the table needs rather than silently
+// dropping bindings — the strip exists precisely for people who don't
+// have the table memorised, so a fixed row cap that clips the tail
+// defeats it. It overlays the editor for the ~half-second the leader
+// window is armed, which is a fair trade.
 func (a *App) drawLeaderStrip() {
 	if !a.leaderStripVisible() {
 		return
@@ -54,7 +55,6 @@ func (a *App) drawLeaderStrip() {
 		style tcell.Style
 	}
 	segs := []segment{{" Esc ", keyStyle}}
-	total := runeLen(" Esc ")
 	for i, b := range leaderBindings() {
 		sep := " · "
 		if i == 0 {
@@ -64,12 +64,20 @@ func (a *App) drawLeaderStrip() {
 			segment{sep, mutedStyle},
 			segment{string(b.key), keyStyle},
 			segment{" " + b.desc, baseStyle})
-		total += runeLen(sep) + 1 + 1 + runeLen(b.desc)
 	}
 
+	// Two passes over the same wrap rule: first count the rows the whole
+	// table needs, then paint. Keeping the passes rule-identical is what
+	// guarantees the paint loop never runs out of rows mid-table.
 	rows := 1
-	if total > a.width {
-		rows = 2
+	simX := 0
+	for _, seg := range segs {
+		w := runeLen(seg.text)
+		if simX+w > a.width {
+			rows++
+			simX = 2 // continuation indent under " Esc "
+		}
+		simX += w
 	}
 	topY := a.height - 1 - rows
 	if topY < 0 {

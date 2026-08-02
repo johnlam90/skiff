@@ -1799,9 +1799,9 @@ func TestMenuLayout_Shortcuts(t *testing.T) {
 		"Delete file":          "",
 		"Copy relative path":   "",
 		"Copy absolute path":   "",
-		"Copy selection":       "",
-		"Cut selection":        "",
-		"Paste":                "",
+		"Copy selection":       "Esc c",
+		"Cut selection":        "Esc x",
+		"Paste":                "Esc v",
 		"Toggle line comment":  "Esc /",
 		"Hide file explorer":   "Esc t",
 		"Unwrap long lines":    "Esc z",
@@ -2971,5 +2971,79 @@ func TestDrawTabBar_CloseButtonEmphasis(t *testing.T) {
 		} else if fg != a.theme.Subtle {
 			t.Fatalf("inactive tab × fg = %v, want Subtle (recedes)", fg)
 		}
+	}
+}
+
+// TestDragRelease_CopiesSelection pins select-to-copy, the tmux/herdr
+// convention: releasing a mouse drag that produced a selection puts it
+// on the clipboard. With mouse reporting on, the terminal/multiplexer
+// never has a selection of its own, so Cmd+C at the terminal level has
+// nothing to grab — release-to-copy is the mouse-first replacement.
+func TestDragRelease_CopiesSelection(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "t.txt")
+	if err := os.WriteFile(target, []byte("hello world\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	tab.MoveCursorTo(editor.Position{Line: 0, Col: 0}, false)
+	tab.MoveCursorTo(editor.Position{Line: 0, Col: 5}, true) // drag built "hello"
+	a.dragMode = "editor"
+
+	a.handleMouse(tcell.NewEventMouse(40, 5, tcell.ButtonNone, 0)) // release
+
+	if a.clipBuf != "hello" {
+		t.Fatalf("release should copy the selection, clipBuf = %q", a.clipBuf)
+	}
+	if a.dragMode != "" {
+		t.Fatalf("release should end the drag, dragMode = %q", a.dragMode)
+	}
+}
+
+// TestDragRelease_NoCopyWithoutSelection proves a plain click (press
+// then release with a collapsed selection) leaves the clipboard alone —
+// select-to-copy must not clobber it on every caret placement.
+func TestDragRelease_NoCopyWithoutSelection(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "t.txt")
+	if err := os.WriteFile(target, []byte("hello world\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	a.clipBuf = "keep me"
+	a.activeTabPtr().MoveCursorTo(editor.Position{Line: 0, Col: 3}, false)
+	a.dragMode = "editor"
+
+	a.handleMouse(tcell.NewEventMouse(40, 5, tcell.ButtonNone, 0))
+
+	if a.clipBuf != "keep me" {
+		t.Fatalf("collapsed-selection release must not copy, clipBuf = %q", a.clipBuf)
+	}
+}
+
+// TestDragRelease_NonEditorDragDoesNotCopy proves finishing a sidebar or
+// scrollbar drag never touches the clipboard, even while a text
+// selection happens to exist in the active tab.
+func TestDragRelease_NonEditorDragDoesNotCopy(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "t.txt")
+	if err := os.WriteFile(target, []byte("hello world\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	tab.MoveCursorTo(editor.Position{Line: 0, Col: 0}, false)
+	tab.MoveCursorTo(editor.Position{Line: 0, Col: 5}, true)
+	a.clipBuf = "keep me"
+	a.dragMode = "sidebar"
+
+	a.handleMouse(tcell.NewEventMouse(20, 5, tcell.ButtonNone, 0))
+
+	if a.clipBuf != "keep me" {
+		t.Fatalf("sidebar-drag release must not copy, clipBuf = %q", a.clipBuf)
 	}
 }

@@ -33,9 +33,13 @@ type leaderBinding struct {
 // chosen to be mnemonic and avoid collisions; punctuation bindings mirror
 // familiar editor gestures where they make sense.
 //
+// c / x / v are bound even though the host terminal has its own
+// Cmd+C/V: with mouse reporting on (always, in skiff) the terminal and
+// any multiplexer never build a selection of their own, so Cmd+C has
+// nothing to grab — the editor's clipboard keys are the only keyboard
+// path. Mouse users get select-to-copy on drag release (handleMouse).
+//
 // Intentionally not bound:
-//   - c / x / v (clipboard) — the host terminal's Cmd+C/V already covers
-//     that path; adding a third channel just adds confusion.
 //   - rename / delete / revert — destructive enough that we want the
 //     menu's confirm dialog to gate the action as a deliberate gesture.
 func leaderBindings() []leaderBinding {
@@ -53,6 +57,9 @@ func leaderBindings() []leaderBinding {
 		{'k', (*App).menuMoveLineUp, "line up"},
 		{'j', (*App).menuMoveLineDown, "line down"},
 		{'d', (*App).menuDuplicateLine, "duplicate"},
+		{'c', (*App).menuCopy, "copy"},
+		{'x', (*App).menuCut, "cut"},
+		{'v', (*App).menuPaste, "paste"},
 		{'f', (*App).openFind, "find"},
 		{'F', (*App).menuFindInProject, "find in project"},
 		{'l', (*App).menuGoToLine, "goto line"},

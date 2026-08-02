@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+
+	"github.com/johnlam90/skiff/internal/editor"
 )
 
 // TestLeaderActionFor_AllBindingsResolve walks the binding table and
@@ -379,5 +381,47 @@ func TestHandleKey_LeaderWrapToggle(t *testing.T) {
 	a.handleKey(keyEv(tcell.KeyRune, 'z'))
 	if !a.wrapOn || !a.activeTabPtr().Wrap {
 		t.Fatal("second Esc z should turn wrap back on")
+	}
+}
+
+// TestHandleKey_LeaderCopyCutPaste round-trips the clipboard bindings:
+// Esc-c copies the selection, Esc-x cuts it, Esc-v pastes it back.
+// These were deliberately unbound while "the terminal's Cmd+C already
+// covers copy" — but with mouse reporting on, the terminal never sees
+// a selection, so the editor needs its own keys (see leader.go).
+func TestHandleKey_LeaderCopyCutPaste(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "t.txt")
+	if err := os.WriteFile(target, []byte("hello world\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+
+	tab.MoveCursorTo(editor.Position{Line: 0, Col: 0}, false)
+	tab.MoveCursorTo(editor.Position{Line: 0, Col: 5}, true) // "hello"
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	a.handleKey(keyEv(tcell.KeyRune, 'c'))
+	if a.clipBuf != "hello" {
+		t.Fatalf("Esc-c: clipBuf = %q, want %q", a.clipBuf, "hello")
+	}
+
+	tab.MoveCursorTo(editor.Position{Line: 0, Col: 0}, false)
+	tab.MoveCursorTo(editor.Position{Line: 0, Col: 6}, true) // "hello "
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	a.handleKey(keyEv(tcell.KeyRune, 'x'))
+	if a.clipBuf != "hello " {
+		t.Fatalf("Esc-x: clipBuf = %q, want %q", a.clipBuf, "hello ")
+	}
+	if got := tab.Buffer.Lines[0]; got != "world" {
+		t.Fatalf("Esc-x should remove the selection from the buffer, line = %q", got)
+	}
+
+	tab.MoveCursorTo(editor.Position{Line: 0, Col: 5}, false)
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	a.handleKey(keyEv(tcell.KeyRune, 'v'))
+	if got := tab.Buffer.Lines[0]; got != "worldhello " {
+		t.Fatalf("Esc-v: line = %q, want %q", got, "worldhello ")
 	}
 }

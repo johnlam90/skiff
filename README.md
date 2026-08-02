@@ -229,7 +229,10 @@ Then:
   main `≡` menu.
 - Drag the splitter between the sidebar and editor to resize.
 - Click and drag in the editor to select; drag past the top or bottom
-  edge to auto-scroll the selection.
+  edge to auto-scroll the selection. Releasing the drag copies the
+  selection (the tmux convention) — with mouse reporting on, your
+  terminal never has a selection of its own, so `Cmd+C` at the
+  terminal level would grab nothing. `Esc c` copies too.
 
 ### Hotkeys
 
@@ -254,6 +257,9 @@ within half a second tap one of the letters below.
 | `Esc k`     | Move line up           |
 | `Esc j`     | Move line down         |
 | `Esc d`     | Duplicate line         |
+| `Esc c`     | Copy selection         |
+| `Esc x`     | Cut selection          |
+| `Esc v`     | Paste                  |
 | `Esc f`     | Find in file           |
 | `Esc F`     | Find in project        |
 | `Esc l`     | Go to line             |

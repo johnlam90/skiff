@@ -57,9 +57,10 @@ func TestLeaderStripVisibility(t *testing.T) {
 	}
 }
 
-// TestLeaderStripRenders draws the strip and checks every binding is
-// visible — on a 120-col screen the full table needs two rows, and the
-// wrap must carry the tail instead of clipping it.
+// TestLeaderStripRenders draws the strip and checks EVERY binding is
+// visible — the strip must grow rows with the table instead of clipping
+// the tail at a fixed cap (which is exactly what happened when the
+// clipboard bindings pushed the table past two 120-col rows).
 func TestLeaderStripRenders(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.lastEscape = time.Now()
@@ -75,10 +76,21 @@ func TestLeaderStripRenders(t *testing.T) {
 		}
 		return string(row)
 	}
-	both := readRow(h-3) + "\n" + readRow(h-2)
-	for _, want := range []string{"s save", "u undo", "g git panel"} {
-		if !strings.Contains(both, want) {
-			t.Fatalf("strip missing %q:\n%s", want, both)
+	// Read a generous window above the status bar — the strip sizes
+	// itself to the table, so the test shouldn't assume a row count.
+	var strip strings.Builder
+	for y := h - 9; y < h-1; y++ {
+		strip.WriteString(readRow(y))
+		strip.WriteString("\n")
+	}
+	// Collapse whitespace before matching: the wrap breaks between
+	// segments, so a key and its description may land on different rows
+	// with the continuation indent between them.
+	flat := strings.Join(strings.Fields(strip.String()), " ")
+	for _, b := range leaderBindings() {
+		want := string(b.key) + " " + b.desc
+		if !strings.Contains(flat, want) {
+			t.Fatalf("strip missing %q:\n%s", want, strip.String())
 		}
 	}
 }
