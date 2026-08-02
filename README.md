@@ -124,18 +124,18 @@ The goals, in order:
 
 ### macOS / Linux (Homebrew)
 
-The Homebrew formula is published into this repo's `Formula/` directory.
-Tap it by URL (no `homebrew-*` repo naming convention required), then
-install:
-
 ```sh
-brew tap johnlam90/skiff https://github.com/johnlam90/skiff
 brew install johnlam90/skiff/skiff
 ```
 
+That's it — brew resolves the
+[johnlam90/homebrew-skiff](https://github.com/johnlam90/homebrew-skiff)
+tap automatically. (If you tried an older install command and it left a
+broken tap behind, `brew untap johnlam90/skiff` first.)
+
 ### Updating
 
-When a new release ships, refresh the tap and upgrade:
+When a new release ships:
 
 ```sh
 brew update

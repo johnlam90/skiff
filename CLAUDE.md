@@ -34,7 +34,11 @@ features, make sure they're reachable from the main menu first.
 - Module: `github.com/johnlam90/skiff`
 - Binary name: `skiff` (one word, lowercase — Makefile, goreleaser,
   brew formula all assume this)
-- Brew tap: this same repo, `Formula/` directory (no separate tap repo)
+- Brew: `johnlam90/homebrew-skiff` is the tap users install from
+  (`brew install johnlam90/skiff/skiff`). The formula's source of truth
+  is still `Formula/skiff.rb` in THIS repo (GoReleaser writes it each
+  release with the default token); the tap repo pull-syncs it on a
+  15-minute cron — no cross-repo secret exists or is needed.
 
 ## Architecture map
 
@@ -199,5 +203,6 @@ loops forever.
   plugin manifests, no per-key UI beyond a picker, no dotfile sprawl.
 - CGO dependencies. The whole point is one static binary.
 - Tree-sitter. We use Chroma intentionally — pure Go, no setup.
-- A separate `homebrew-tap` repo. The formula lives here under
-  `Formula/` and that's deliberate.
+- Cross-repo release tokens. The `homebrew-skiff` tap repo mirrors
+  `Formula/skiff.rb` from here via its own pull-sync cron — don't
+  "simplify" that into a PAT-based push from this repo's CI.
