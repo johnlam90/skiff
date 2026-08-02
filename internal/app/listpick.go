@@ -43,6 +43,7 @@ func (a *App) openListPick(title string, items []listPickItem, onPick, onMove fu
 	a.listPickQuery = nil
 	a.listPickCursor = 0
 	a.listPickScroll = 0
+	a.listPickInputScroll = 0
 	a.listPickOnPick = onPick
 	a.listPickOnMove = onMove
 	a.listPickOnCancel = onCancel
@@ -74,9 +75,28 @@ func (a *App) closeListPick() {
 	a.listPickOpen = false
 	a.listPickItems = nil
 	a.listPickQuery = nil
+	a.listPickInputScroll = 0
 	a.listPickOnPick = nil
 	a.listPickOnMove = nil
 	a.listPickOnCancel = nil
+}
+
+// adjustListPickInputScroll keeps the filter caret inside the field's
+// visible window — same caret-tracking contract as adjustPromptScroll.
+func (a *App) adjustListPickInputScroll(width int) {
+	if width <= 0 {
+		a.listPickInputScroll = 0
+		return
+	}
+	if a.listPickCursor < a.listPickInputScroll {
+		a.listPickInputScroll = a.listPickCursor
+	}
+	if a.listPickCursor >= a.listPickInputScroll+width {
+		a.listPickInputScroll = a.listPickCursor - width + 1
+	}
+	if a.listPickInputScroll < 0 {
+		a.listPickInputScroll = 0
+	}
 }
 
 // confirmListPick fires OnPick for the highlighted row and closes.
@@ -335,13 +355,18 @@ func (a *App) drawListPick() {
 	if len(a.listPickQuery) == 0 {
 		drawAt(a.screen, fieldStart, my+3, "type to filter…", tcell.StyleDefault.Background(inputBg).Foreground(a.theme.Subtle))
 	}
-	for i, r := range a.listPickQuery {
-		if fieldStart+i > fieldEnd {
+	// Caret-tracking scroll window, so a query longer than the field
+	// keeps the caret (and fresh keystrokes) visible.
+	fieldW := fieldEnd - fieldStart + 1
+	a.adjustListPickInputScroll(fieldW)
+	for i := 0; i < fieldW; i++ {
+		idx := a.listPickInputScroll + i
+		if idx >= len(a.listPickQuery) {
 			break
 		}
-		a.screen.SetContent(fieldStart+i, my+3, r, nil, inputStyle)
+		a.screen.SetContent(fieldStart+i, my+3, a.listPickQuery[idx], nil, inputStyle)
 	}
-	caret := fieldStart + a.listPickCursor
+	caret := fieldStart + (a.listPickCursor - a.listPickInputScroll)
 	if caret >= fieldStart && caret <= fieldEnd {
 		a.screen.ShowCursor(caret, my+3)
 	}

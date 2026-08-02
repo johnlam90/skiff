@@ -2874,3 +2874,102 @@ func TestOpenFile_StampsWrapPreference(t *testing.T) {
 		t.Fatal("tab should inherit wrap-off from the app preference")
 	}
 }
+
+// TestDrawEmptyEditor_ClipsToEditorRect pins the empty-state hint inside
+// the editor pane: on a narrow pane the 45-rune hint used to start left
+// of the editor rect and overwrite file-tree rows and the splitter.
+func TestDrawEmptyEditor_ClipsToEditorRect(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.SetSize(60, 24)
+	a.width, a.height = scr.Size()
+	a.draw()
+	a.screen.Show()
+
+	cells, w, _ := scr.GetContents()
+	_, ey, _, eh := a.editorRect()
+	hintRow := ey + eh/2 + 1 // one below the vertical midpoint
+	sx := a.splitterX()
+	if r := cells[hintRow*w+sx].Runes[0]; r != '│' {
+		t.Fatalf("splitter cell on the hint row = %q — hint bled into the sidebar", r)
+	}
+	ex, _, _, _ := a.editorRect()
+	if r := cells[hintRow*w+ex].Runes[0]; r != 'C' {
+		t.Fatalf("hint should start at the editor's left edge, got %q", r)
+	}
+}
+
+// TestMenuWheel_RecomputesHoverAfterScroll pins the hover highlight to
+// the row actually under the pointer: a wheel tick used to scroll the
+// menu after hover was computed, leaving the highlight one row stale
+// until the next mouse motion.
+func TestMenuWheel_RecomputesHoverAfterScroll(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(path, []byte("package a\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.SetSize(120, 24) // short terminal so the menu overflows and scrolls
+	a.width, a.height = scr.Size()
+	a.openFile(path)
+	a.openMenu()
+	if a.menuMaxScroll() <= 0 {
+		t.Fatal("test setup needs an overflowing menu")
+	}
+
+	// Park the pointer on an enabled row ("Find in file"), then wheel.
+	items, _, _ := a.menuLayout()
+	relY := -1
+	for _, it := range items {
+		if it.label == "Find in file" {
+			relY = it.relY
+			break
+		}
+	}
+	if relY < 0 {
+		t.Fatal("Find in file row not found")
+	}
+	mx, my, _, _ := a.menuModalRect()
+	x, y := mx+6, my+relY
+	a.handleMouse(tcell.NewEventMouse(x, y, tcell.WheelDown, 0))
+	if a.menuScroll == 0 {
+		t.Fatal("wheel should have scrolled the menu")
+	}
+	got := a.hoveredMenuRow
+	a.updateMenuHover(x, y)
+	if got != a.hoveredMenuRow {
+		t.Fatalf("hover after wheel = %d, recomputed for the same pointer = %d — stale hover", got, a.hoveredMenuRow)
+	}
+}
+
+// TestDrawTabBar_CloseButtonEmphasis pins the close-× hierarchy: the
+// active tab (the likeliest close target) gets the brighter Muted ×,
+// and inactive tabs recede to Subtle — not the other way around.
+func TestDrawTabBar_CloseButtonEmphasis(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x\n"), 0o644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	a := newTestApp(t, dir)
+	a.openFile(filepath.Join(dir, "a.txt"))
+	a.openFile(filepath.Join(dir, "b.txt")) // b active, a inactive
+	a.drawTabBar()
+	a.screen.Show()
+
+	scr := a.screen.(tcell.SimulationScreen)
+	cells, w, _ := scr.GetContents()
+	for _, r := range a.lastTabRects {
+		fg, _, _ := cells[0*w+r.CloseX].Style.Decompose()
+		if r.Index == a.activeTab {
+			if fg != a.theme.Muted {
+				t.Fatalf("active tab × fg = %v, want Muted (brighter)", fg)
+			}
+		} else if fg != a.theme.Subtle {
+			t.Fatalf("inactive tab × fg = %v, want Subtle (recedes)", fg)
+		}
+	}
+}

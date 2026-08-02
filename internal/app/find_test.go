@@ -10,6 +10,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
@@ -249,5 +250,30 @@ func TestFindBarReplaceFlow(t *testing.T) {
 	a.handleFindKey(tcell.NewEventKey(tcell.KeyEsc, 0, 0))
 	if a.findOpen || a.replaceOpen || a.findFocusReplace {
 		t.Fatal("Esc should tear down the whole bar")
+	}
+}
+
+// TestDrawFindBar_ScrollsReplaceFieldToCaret pins the replace field's
+// horizontal scroll window: a replacement longer than the field used to
+// draw from index 0 forever, so the caret (and every new keystroke)
+// landed past the field edge — invisible. The window must slide right
+// with the caret and back left when the caret returns home.
+func TestDrawFindBar_ScrollsReplaceFieldToCaret(t *testing.T) {
+	a := seedFindApp(t, "hello world\n")
+	a.findOpen = true
+	a.replaceOpen = true
+	a.findFocusReplace = true
+	a.replaceValue = []rune(strings.Repeat("r", 80))
+	a.replaceCursor = len(a.replaceValue)
+
+	a.drawFindBar()
+	if a.replaceScroll == 0 {
+		t.Fatal("replace field did not scroll; caret sits off-field")
+	}
+
+	a.replaceCursor = 0
+	a.drawFindBar()
+	if a.replaceScroll != 0 {
+		t.Fatalf("scroll should follow the caret home, got %d", a.replaceScroll)
 	}
 }

@@ -459,6 +459,11 @@ type App struct {
 	promptCursor   int
 	promptScroll   int
 	promptCallback func(*App, string)
+	// promptHover mirrors confirmHover for the prompt's button row:
+	// 0 = Cancel, 1 = OK (the default — Enter submits). Mouse motion
+	// over a button moves it so the highlight matches what a click
+	// would do, same feedback contract as the confirm/dirty modals.
+	promptHover int
 
 	// Confirm modal — Yes / No, used by Delete. confirmHover is 0 for No
 	// (the safe default) or 1 for Yes.
@@ -523,9 +528,12 @@ type App struct {
 	findCursor int
 	findScroll int
 	// Replace field riding the find bar (Tab opens it) — see find.go.
+	// replaceScroll is the field's horizontal scroll window, kept
+	// caret-tracking by drawFindBar the same way findScroll is.
 	replaceOpen      bool
 	replaceValue     []rune
 	replaceCursor    int
+	replaceScroll    int
 	findFocusReplace bool
 
 	// Generic filter-list picker modal (see listpick.go) — themes,
@@ -537,9 +545,12 @@ type App struct {
 	listPickCursor   int
 	listPickSelected int
 	listPickScroll   int
-	listPickOnPick   func(*App, int)
-	listPickOnMove   func(*App, int)
-	listPickOnCancel func(*App)
+	// listPickInputScroll is the filter field's horizontal scroll
+	// window — caret-tracking, like promptScroll for the prompt modal.
+	listPickInputScroll int
+	listPickOnPick      func(*App, int)
+	listPickOnMove      func(*App, int)
+	listPickOnCancel    func(*App)
 
 	// Project-wide content search (see projfind.go).
 	projFindOpen      bool
@@ -1790,11 +1801,16 @@ func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
 	if btn&tcell.WheelUp != 0 {
 		a.menuScroll--
 		a.clampMenuScroll()
+		// The rows just moved under the stationary pointer — recompute
+		// the hover so the highlight tracks what a click would now hit
+		// instead of going one row stale until the next mouse motion.
+		a.updateMenuHover(x, y)
 		return
 	}
 	if btn&tcell.WheelDown != 0 {
 		a.menuScroll++
 		a.clampMenuScroll()
+		a.updateMenuHover(x, y)
 		return
 	}
 	if btn&tcell.Button1 == 0 {
@@ -3184,9 +3200,13 @@ func (a *App) drawTabBar() {
 		}
 		col++ // separator space before ×
 		if col >= stripX && col < tx+tw {
-			closeStyle := st.Foreground(a.theme.Muted)
+			// Emphasis tracks likelihood of use: the active tab's × is
+			// the likeliest close target, so it gets the brighter Muted;
+			// inactive tabs recede to Subtle so their × can't outshine
+			// the active tab's controls.
+			closeStyle := st.Foreground(a.theme.Subtle)
 			if active {
-				closeStyle = st.Foreground(a.theme.Subtle)
+				closeStyle = st.Foreground(a.theme.Muted)
 			}
 			a.screen.SetContent(col, ty, '×', nil, closeStyle)
 		}
@@ -3242,6 +3262,9 @@ func (a *App) drawMenuButton() {
 }
 
 // drawEmptyEditor paints the placeholder shown when no tabs are open.
+// Both hint lines are trimmed to the editor's width before centering —
+// on a narrow pane the untrimmed 45-rune hint used to start left of the
+// editor rect and overwrite file-tree rows and the splitter.
 func (a *App) drawEmptyEditor() {
 	ex, ey, ew, eh := a.editorRect()
 	bg := a.theme.BG
@@ -3253,13 +3276,13 @@ func (a *App) drawEmptyEditor() {
 		}
 	}
 	cy := ey + eh/2
-	msg1 := "No file open"
-	msg2 := "Click a file in the tree, or  ≡  for the menu"
-	cx1 := ex + (ew-len([]rune(msg1)))/2
+	msg1 := trimRunes("No file open", ew)
+	msg2 := trimRunes("Click a file in the tree, or  ≡  for the menu", ew)
+	cx1 := ex + (ew-runeLen(msg1))/2
 	for i, r := range msg1 {
 		a.screen.SetContent(cx1+i, cy-1, r, nil, bold)
 	}
-	cx2 := ex + (ew-len([]rune(msg2)))/2
+	cx2 := ex + (ew-runeLen(msg2))/2
 	for i, r := range msg2 {
 		a.screen.SetContent(cx2+i, cy+1, r, nil, muted)
 	}

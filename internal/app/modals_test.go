@@ -16,6 +16,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
@@ -1149,6 +1150,130 @@ func TestDirtyTabCount(t *testing.T) {
 	a.tabs[0].Dirty = true
 	if got := a.dirtyTabCount(); got != 1 {
 		t.Fatalf("expected 1 dirty, got %d", got)
+	}
+}
+
+// TestDrawConfirm_TruncatesOverflowMessageByRunes pins the truncation to
+// rune boundaries: the old byte slice could cut a multibyte filename
+// mid-sequence and paint UTF-8 replacement garbage into the modal body.
+func TestDrawConfirm_TruncatesOverflowMessageByRunes(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	// 60 runes (> the 50-cell budget) with a multibyte rune straddling
+	// byte 50, exactly where the old msg[:mw-4] slice cut.
+	msg := strings.Repeat("x", 49) + "é" + strings.Repeat("y", 10)
+	a.openConfirm("Delete file", msg, nil)
+	a.drawConfirm()
+	a.screen.Show()
+
+	scr := a.screen.(tcell.SimulationScreen)
+	cells, _, _ := scr.GetContents()
+	sawEllipsis := false
+	for _, c := range cells {
+		for _, r := range c.Runes {
+			if r == '�' {
+				t.Fatal("confirm modal painted a UTF-8 replacement rune — message was byte-sliced")
+			}
+			if r == '…' {
+				sawEllipsis = true
+			}
+		}
+	}
+	if !sawEllipsis {
+		t.Fatal("expected the truncated message to end in an ellipsis")
+	}
+}
+
+// TestDrawDirtyClose_TruncatesOverflowMessageByRunes is the dirty-close
+// twin of the confirm test above — same byte-slice bug, same fix.
+func TestDrawDirtyClose_TruncatesOverflowMessageByRunes(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	msg := strings.Repeat("x", 55) + "é" + strings.Repeat("y", 10)
+	a.openDirtyClose("Unsaved changes", msg, nil, nil)
+	a.drawDirtyClose()
+	a.screen.Show()
+
+	scr := a.screen.(tcell.SimulationScreen)
+	cells, _, _ := scr.GetContents()
+	sawEllipsis := false
+	for _, c := range cells {
+		for _, r := range c.Runes {
+			if r == '�' {
+				t.Fatal("dirty modal painted a UTF-8 replacement rune — message was byte-sliced")
+			}
+			if r == '…' {
+				sawEllipsis = true
+			}
+		}
+	}
+	if !sawEllipsis {
+		t.Fatal("expected the truncated message to end in an ellipsis")
+	}
+}
+
+// TestConfirmMouse_YesZoneMatchesDrawnButton pins the destructive Yes
+// button's click zone to its drawn cells. The old zone ran 3 cells past
+// the label, so a click on blank modal background fired the callback.
+func TestConfirmMouse_YesZoneMatchesDrawnButton(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	fired := false
+	a.openConfirm("Delete file", "sure?", func(*App) { fired = true })
+	mx, my, _, _ := a.confirmModalRect()
+
+	// One cell right of the drawn "[ Yes ]" (7 cells starting at relX 28).
+	a.handleConfirmMouse(mx+28+7, my+5, tcell.Button1)
+	if fired {
+		t.Fatal("click past the drawn Yes button fired the destructive callback")
+	}
+	if !a.confirmOpen {
+		t.Fatal("dead-zone click inside the modal should not dismiss it")
+	}
+
+	a.handleConfirmMouse(mx+28+3, my+5, tcell.Button1)
+	if !fired {
+		t.Fatal("click on the drawn Yes button should fire the callback")
+	}
+}
+
+// TestPromptMouse_HoverTracksButtons proves the prompt modal gives the
+// same hover feedback as its confirm/dirty siblings: OK is the default,
+// and mouse motion over either button moves the highlight.
+func TestPromptMouse_HoverTracksButtons(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.openPrompt("New File", "", "", nil)
+	if a.promptHover != 1 {
+		t.Fatalf("promptHover after open = %d, want 1 (OK)", a.promptHover)
+	}
+	mx, my, _, _ := a.promptModalRect()
+	a.handlePromptMouse(mx+15, my+6, 0) // motion over [ Cancel ]
+	if a.promptHover != 0 {
+		t.Fatalf("hover over Cancel: promptHover = %d, want 0", a.promptHover)
+	}
+	a.handlePromptMouse(mx+31, my+6, 0) // motion over [  OK  ]
+	if a.promptHover != 1 {
+		t.Fatalf("hover over OK: promptHover = %d, want 1", a.promptHover)
+	}
+}
+
+// TestDrawPrompt_HoverInvertsFocusedButton verifies the hover state
+// actually renders: the hovered button paints inverted (label color as
+// background) and the other button drops back to the modal background.
+func TestDrawPrompt_HoverInvertsFocusedButton(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.openPrompt("New File", "", "", nil)
+	mx, my, _, _ := a.promptModalRect()
+	a.handlePromptMouse(mx+15, my+6, 0) // hover Cancel
+	a.drawPrompt()
+	a.screen.Show()
+
+	scr := a.screen.(tcell.SimulationScreen)
+	cells, w, _ := scr.GetContents()
+	_, cancelBg, _ := cells[(my+6)*w+mx+15].Style.Decompose()
+	if cancelBg != a.theme.Text {
+		t.Fatalf("hovered Cancel bg = %v, want inverted (theme.Text)", cancelBg)
+	}
+	_, okBg, _ := cells[(my+6)*w+mx+31].Style.Decompose()
+	if okBg != a.theme.LineHL {
+		t.Fatalf("unhovered OK bg = %v, want modal bg (theme.LineHL)", okBg)
 	}
 }
 

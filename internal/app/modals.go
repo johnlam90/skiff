@@ -38,6 +38,22 @@ const (
 	contextMenuWidth = 19
 )
 
+// Button geometry for the prompt and confirm modals, shared by the draw
+// and mouse paths so the highlight and the click zone can't disagree —
+// the same rule the dirty modal's dirtyBtn* constants and the diff
+// view's btnRect enforce. The widths are the literal label widths.
+const (
+	promptBtnCancelX = 14
+	promptBtnCancelW = 10 // "[ Cancel ]"
+	promptBtnOKX     = 30
+	promptBtnOKW     = 8 // "[  OK  ]"
+
+	confirmBtnNoX  = 14
+	confirmBtnNoW  = 8 // "[  No  ]"
+	confirmBtnYesX = 28
+	confirmBtnYesW = 7 // "[ Yes ]"
+)
+
 // contextItem is one row in the tree's right-click context menu. action runs
 // against the node the menu was opened for; enabled gates whether the row is
 // clickable.
@@ -147,6 +163,7 @@ func (a *App) openPrompt(title, hint, initial string, callback func(*App, string
 	a.promptValue = []rune(initial)
 	a.promptCursor = len(a.promptValue)
 	a.promptScroll = 0
+	a.promptHover = 1 // OK — matches what Enter does.
 	a.promptCallback = callback
 }
 
@@ -218,26 +235,37 @@ func (a *App) handlePromptKey(ev *tcell.EventKey) {
 }
 
 // handlePromptMouse processes mouse input while the prompt modal is open.
-// Clicks on OK / Cancel run the corresponding action; clicks outside the
-// modal cancel; clicks on the input field reposition the cursor.
+// Hovering a button highlights it (same feedback as the confirm/dirty
+// modals); clicks on OK / Cancel run the corresponding action; clicks
+// outside the modal cancel; clicks on the input field reposition the
+// cursor. Button geometry comes from the promptBtn* constants shared
+// with drawPrompt.
 func (a *App) handlePromptMouse(x, y int, btn tcell.ButtonMask) {
+	mx, my, mw, mh := a.promptModalRect()
+	// Hover tracking — runs on every event, button held or not.
+	if x >= mx && x < mx+mw && y == my+6 {
+		relX := x - mx
+		switch {
+		case relX >= promptBtnCancelX && relX < promptBtnCancelX+promptBtnCancelW:
+			a.promptHover = 0
+		case relX >= promptBtnOKX && relX < promptBtnOKX+promptBtnOKW:
+			a.promptHover = 1
+		}
+	}
 	if btn&tcell.Button1 == 0 {
 		return
 	}
-	mx, my, mw, mh := a.promptModalRect()
 	if x < mx || x >= mx+mw || y < my || y >= my+mh {
 		a.promptCancel()
 		return
 	}
-	// Buttons sit on row 6 (relY). [ Cancel ] occupies cells 14..23,
-	// [  OK  ] occupies 30..37 — see drawPrompt for the matching layout.
 	if y == my+6 {
 		relX := x - mx
 		switch {
-		case relX >= 14 && relX < 24:
+		case relX >= promptBtnCancelX && relX < promptBtnCancelX+promptBtnCancelW:
 			a.promptCancel()
 			return
-		case relX >= 30 && relX < 38:
+		case relX >= promptBtnOKX && relX < promptBtnOKX+promptBtnOKW:
 			a.promptSubmit()
 			return
 		}
@@ -340,10 +368,11 @@ func (a *App) drawPrompt() {
 		a.screen.ShowCursor(caret, my+4)
 	}
 
-	// Buttons — drawn at fixed columns matching the click rects in
-	// handlePromptMouse.
-	drawButton(a.screen, mx+14, my+6, "[ Cancel ]", bg, a.theme.Text, false)
-	drawButton(a.screen, mx+30, my+6, "[  OK  ]", bg, a.theme.Accent, true)
+	// Buttons — the promptBtn* constants keep these columns in lockstep
+	// with the hover/click zones in handlePromptMouse. The hovered button
+	// renders focused; OK is the default (it's what Enter does).
+	drawButton(a.screen, mx+promptBtnCancelX, my+6, "[ Cancel ]", bg, a.theme.Text, a.promptHover == 0)
+	drawButton(a.screen, mx+promptBtnOKX, my+6, "[  OK  ]", bg, a.theme.Accent, a.promptHover == 1)
 }
 
 // adjustPromptScroll keeps the cursor within the visible window of the input
@@ -509,9 +538,9 @@ func (a *App) handleConfirmMouse(x, y int, btn tcell.ButtonMask) {
 	if x >= mx && x < mx+mw && y == my+5 {
 		relX := x - mx
 		switch {
-		case relX >= 14 && relX < 22:
+		case relX >= confirmBtnNoX && relX < confirmBtnNoX+confirmBtnNoW:
 			a.confirmHover = 0
-		case relX >= 28 && relX < 38:
+		case relX >= confirmBtnYesX && relX < confirmBtnYesX+confirmBtnYesW:
 			a.confirmHover = 1
 		}
 	}
@@ -525,10 +554,10 @@ func (a *App) handleConfirmMouse(x, y int, btn tcell.ButtonMask) {
 	if y == my+5 {
 		relX := x - mx
 		switch {
-		case relX >= 14 && relX < 22:
+		case relX >= confirmBtnNoX && relX < confirmBtnNoX+confirmBtnNoW:
 			a.confirmCancel()
 			return
-		case relX >= 28 && relX < 38:
+		case relX >= confirmBtnYesX && relX < confirmBtnYesX+confirmBtnYesW:
 			a.confirmYes()
 			return
 		}
@@ -614,7 +643,7 @@ func (a *App) scrollConfirmInfo(delta int) {
 //	2   divider
 //	3   blank
 //	4   message (centered)
-//	5   buttons          [  No  ]    [  Yes  ]
+//	5   buttons          [  No  ]      [ Yes ]
 //	6   blank
 //	7   blank
 //	8   bottom border
@@ -660,17 +689,16 @@ func (a *App) drawConfirm() {
 		return
 	}
 
-	// Message — centered, truncated if too long.
-	msg := a.confirmMessage
-	if runeLen(msg) > mw-4 {
-		msg = msg[:mw-4]
-	}
+	// Message — centered, rune-safe truncation (a byte slice here once
+	// split multibyte filenames into replacement garbage).
+	msg := trimRunes(a.confirmMessage, mw-4)
 	mxText := mx + (mw-runeLen(msg))/2
 	drawAt(a.screen, mxText, my+4, msg, bodyStyle)
 
 	// Buttons. Default focus is No so an accidental Enter is non-destructive.
-	drawButton(a.screen, mx+14, my+5, "[  No  ]", bg, a.theme.Text, a.confirmHover == 0)
-	drawButton(a.screen, mx+28, my+5, "[ Yes ]", bg, a.theme.Error, a.confirmHover == 1)
+	// Columns come from the confirmBtn* constants shared with the mouse zones.
+	drawButton(a.screen, mx+confirmBtnNoX, my+5, "[  No  ]", bg, a.theme.Text, a.confirmHover == 0)
+	drawButton(a.screen, mx+confirmBtnYesX, my+5, "[ Yes ]", bg, a.theme.Error, a.confirmHover == 1)
 
 	a.screen.HideCursor()
 }
@@ -895,11 +923,9 @@ func (a *App) drawDirtyClose() {
 	hint := "esc "
 	drawAt(a.screen, mx+mw-1-runeLen(hint), my+1, hint, mutedStyle)
 
-	// Message — centered, truncated if too long.
-	msg := a.dirtyMessage
-	if runeLen(msg) > mw-4 {
-		msg = msg[:mw-4]
-	}
+	// Message — centered, rune-safe truncation (same byte-slice bug the
+	// confirm modal had: multibyte filenames split into garbage).
+	msg := trimRunes(a.dirtyMessage, mw-4)
 	mxText := mx + (mw-runeLen(msg))/2
 	drawAt(a.screen, mxText, my+4, msg, bodyStyle)
 

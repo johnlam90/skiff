@@ -223,7 +223,10 @@ Then:
 - If your terminal forwards Button3, right-click on a file or folder
   in the tree opens a per-item context menu (New File on folders,
   Rename, Delete). macOS Terminal + tmux often swallows right-click,
-  so all of those actions also live in the main `≡` menu.
+  and [herdr](https://herdr.dev) reserves plain right-click for its own
+  pane menu (its `right_click_passthrough_modifier` setting can forward
+  modified right-clicks) — so all of those actions also live in the
+  main `≡` menu.
 - Drag the splitter between the sidebar and editor to resize.
 - Click and drag in the editor to select; drag past the top or bottom
   edge to auto-scroll the selection.

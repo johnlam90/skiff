@@ -31,6 +31,11 @@ import (
 // race tcell's screen rendering. When TMUX is set we wrap the OSC 52
 // sequence in tmux's escape passthrough so it reaches the outer terminal
 // even if tmux is configured with set-clipboard off.
+//
+// tmux is deliberately the ONLY multiplexer that gets a wrapper. herdr
+// (HERDR_ENV=1) intercepts the pane's plain OSC 52 and bridges it to
+// the host clipboard itself — wrapping there would break copy, so don't
+// add a HERDR_ENV branch. See docs/research/2026-08-02-herdr-compatibility.md.
 func CopyToSystem(text string) error {
 	f, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
 	if err != nil {

@@ -56,6 +56,7 @@ func (a *App) closeFind() {
 	a.replaceOpen = false
 	a.replaceValue = nil
 	a.replaceCursor = 0
+	a.replaceScroll = 0
 	a.findFocusReplace = false
 	if tab := a.activeTabPtr(); tab != nil {
 		tab.ClearFind()
@@ -328,18 +329,27 @@ func (a *App) drawFindBar() {
 		a.screen.SetContent(inputStart+i, by, a.findValue[idx], nil, barStyle)
 	}
 	if a.replaceOpen {
-		for i, r := range a.replaceValue {
-			if replaceStart+i >= rightTextStart-1 {
+		// The replacement gets the same caret-tracking scroll window as
+		// the query field — a long value used to draw from index 0 and
+		// push the caret (and fresh keystrokes) past the field edge.
+		rw := (rightTextStart - 1) - replaceStart
+		if rw < 1 {
+			rw = 1
+		}
+		a.adjustReplaceScroll(rw)
+		for i := 0; i < rw; i++ {
+			idx := a.replaceScroll + i
+			if idx >= len(a.replaceValue) {
 				break
 			}
-			a.screen.SetContent(replaceStart+i, by, r, nil, barStyle)
+			a.screen.SetContent(replaceStart+i, by, a.replaceValue[idx], nil, barStyle)
 		}
 	}
 
 	// Place the screen cursor in the focused field so the user sees a
 	// blinking caret where their typing will land.
 	if a.replaceOpen && a.findFocusReplace {
-		caret := replaceStart + a.replaceCursor
+		caret := replaceStart + (a.replaceCursor - a.replaceScroll)
 		if caret >= replaceStart && caret < rightTextStart {
 			a.screen.ShowCursor(caret, by)
 		}
@@ -375,6 +385,24 @@ func (a *App) findHasNoMatches() bool {
 	}
 	tab := a.activeTabPtr()
 	return tab != nil && len(tab.FindMatches) == 0
+}
+
+// adjustReplaceScroll keeps the replace caret inside the field's visible
+// window — the replace-field twin of adjustFindScroll below.
+func (a *App) adjustReplaceScroll(width int) {
+	if width <= 0 {
+		a.replaceScroll = 0
+		return
+	}
+	if a.replaceCursor < a.replaceScroll {
+		a.replaceScroll = a.replaceCursor
+	}
+	if a.replaceCursor >= a.replaceScroll+width {
+		a.replaceScroll = a.replaceCursor - width + 1
+	}
+	if a.replaceScroll < 0 {
+		a.replaceScroll = 0
+	}
 }
 
 // adjustFindScroll keeps the input cursor inside the visible window of
