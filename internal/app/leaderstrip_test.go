@@ -41,12 +41,15 @@ func TestLeaderStripVisibility(t *testing.T) {
 	if !a.leaderStripVisible() {
 		t.Fatal("strip should show while the leader window is armed")
 	}
-	a.menuOpen = true
+	// Overlay presence comes from the stack, so the menu must be opened
+	// for real — a hand-flipped flag no longer counts.
+	a.openMenu()
+	a.lastEscape = time.Now() // re-arm; openMenu's closeAllModals path is irrelevant to the window
 	if a.leaderStripVisible() {
 		t.Fatal("strip must hide under the menu")
 	}
-	a.menuOpen = false
-	a.findOpen = true
+	a.closeMenu()
+	a.findOpen = true // strips are still flag-tracked (not on the stack)
 	if a.leaderStripVisible() {
 		t.Fatal("strip must hide under the find bar")
 	}

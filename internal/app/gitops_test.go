@@ -283,11 +283,11 @@ func TestToggleCommitCheck_AndCheckedPaths(t *testing.T) {
 func TestMenuGitCommit_OpensPromptAndCommits(t *testing.T) {
 	a, _, _ := dirtyRepoApp(t)
 	a.menuGitCommit()
-	if !a.promptOpen || a.promptTitle != "Commit message" {
-		t.Fatalf("commit prompt should open, got %v %q", a.promptOpen, a.promptTitle)
+	if p := promptPrefab(t, a); p.Title != "Commit message" {
+		t.Fatalf("commit prompt should open, got title %q", p.Title)
 	}
-	a.promptValue = []rune("from the panel")
-	a.promptSubmit()
+	promptPrefab(t, a).Field.SetText("from the panel")
+	submitPrompt(a)
 	waitGitIdle(t, a)
 	if out, err := exec.Command("git", "-C", a.rootDir, "log", "-1", "--format=%s").Output(); err != nil ||
 		!strings.Contains(string(out), "from the panel") {
@@ -418,11 +418,11 @@ func TestGitRenameBranchEndToEnd(t *testing.T) {
 
 	a := newTestApp(t, dir)
 	a.menuGitRenameBranch()
-	if !a.promptOpen {
+	if !promptIsOpen(a) {
 		t.Fatal("rename should prompt for the new name")
 	}
-	a.promptValue = []rune("mainline")
-	a.promptSubmit()
+	promptPrefab(t, a).Field.SetText("mainline")
+	submitPrompt(a)
 	waitGitIdle(t, a)
 	out, err := exec.Command("git", "-C", dir, "symbolic-ref", "--short", "HEAD").Output()
 	if err != nil || strings.TrimSpace(string(out)) != "mainline" {
@@ -456,7 +456,7 @@ func TestDiffBaseStatusAndGuard(t *testing.T) {
 	a := newTestApp(t, dir)
 	a.diffBase = "HEAD~1"
 	a.menuGitCommit()
-	if a.promptOpen {
+	if promptIsOpen(a) {
 		t.Fatal("commit must be gated off while comparing against a base")
 	}
 	if a.statusMsg == "" {

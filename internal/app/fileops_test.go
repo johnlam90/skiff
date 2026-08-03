@@ -307,10 +307,10 @@ func TestMenuRenameFolder_OpensPrompt(t *testing.T) {
 	a.setActiveFolder(sub)
 
 	a.menuRenameFolder()
-	if !a.promptOpen {
+	if !promptIsOpen(a) {
 		t.Fatal("expected prompt to open")
 	}
-	if got := string(a.promptValue); got != "victim" {
+	if got := promptPrefab(t, a).Field.Text(); got != "victim" {
 		t.Fatalf("prompt value: got %q, want %q", got, "victim")
 	}
 }
@@ -325,7 +325,7 @@ func TestMenuRenameFolder_RefusesRoot(t *testing.T) {
 	a.setActiveFolder(root)
 
 	a.menuRenameFolder()
-	if a.promptOpen {
+	if promptIsOpen(a) {
 		t.Fatal("root should not open the rename prompt")
 	}
 }

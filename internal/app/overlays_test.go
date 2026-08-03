@@ -15,6 +15,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/customactions"
+	"github.com/johnlam90/skiff/internal/overlay"
 )
 
 // initRepoWithCommit builds on initRepo with one committed file, since
@@ -132,8 +133,8 @@ func TestDropOverlay_OnlyPopsOwnShim(t *testing.T) {
 	if !a.overlays.IsOpen() {
 		t.Fatal("closeMenu popped a prompt it does not own")
 	}
-	if _, ok := a.overlays.Top().(promptOverlay); !ok {
-		t.Fatalf("expected the prompt shim on top, got %T", a.overlays.Top())
+	if _, ok := a.overlays.Top().(*overlay.Prompt); !ok {
+		t.Fatalf("expected the prompt overlay on top, got %T", a.overlays.Top())
 	}
 }
 
@@ -144,7 +145,7 @@ func TestStackRouting_KeyReachesPrompt(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.openPrompt("T", "", "", nil)
 	a.handleKey(tcell.NewEventKey(tcell.KeyRune, 'x', tcell.ModNone))
-	if got := string(a.promptValue); got != "x" {
+	if got := promptPrefab(t, a).Field.Text(); got != "x" {
 		t.Fatalf("typed rune did not reach the prompt input: %q", got)
 	}
 }

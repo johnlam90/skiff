@@ -21,6 +21,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/overlay"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -28,8 +29,6 @@ import (
 // reasonably long filename or sentence; heights are fixed by the row layout
 // in the draw functions below.
 const (
-	promptModalWidth   = 54
-	promptModalHeight  = 9
 	confirmModalWidth  = 54
 	confirmModalHeight = 9
 
@@ -38,16 +37,11 @@ const (
 	contextMenuWidth = 19
 )
 
-// Button geometry for the prompt and confirm modals, shared by the draw
-// and mouse paths so the highlight and the click zone can't disagree —
-// the same rule the dirty modal's dirtyBtn* constants and the diff
-// view's btnRect enforce. The widths are the literal label widths.
+// Button geometry for the confirm modal, shared by the draw and mouse
+// paths so the highlight and the click zone can't disagree — the same
+// rule the dirty modal's dirtyBtn* constants and the diff view's
+// btnRect enforce. The widths are the literal label widths.
 const (
-	promptBtnCancelX = 14
-	promptBtnCancelW = 10 // "[ Cancel ]"
-	promptBtnOKX     = 30
-	promptBtnOKW     = 8 // "[  OK  ]"
-
 	confirmBtnNoX  = 14
 	confirmBtnNoW  = 8 // "[  No  ]"
 	confirmBtnYesX = 28
@@ -73,7 +67,6 @@ type contextItem struct {
 func (a *App) closeAllModals() {
 	a.overlays.Close()
 	a.menuOpen = false
-	a.promptOpen = false
 	a.confirmOpen = false
 	a.contextOpen = false
 	a.dirtyOpen = false
@@ -97,7 +90,6 @@ func (a *App) closeAllModals() {
 	a.hoveredMenuRow = -1
 	a.contextNode = nil
 	a.contextItems = nil
-	a.promptCallback = nil
 	a.confirmCallback = nil
 	a.dirtySaveCallback = nil
 	a.dirtyDiscardCallback = nil
@@ -150,247 +142,21 @@ func (a *App) anyModalOpen() bool {
 // Prompt modal (text input + OK / Cancel)
 // -----------------------------------------------------------------------------
 
-// openPrompt shows a single-line text input modal. title is the heading,
-// hint is a small subtitle (e.g. "in /path/to/folder"), initial pre-fills
-// the input field, and callback runs with the trimmed value when the user
-// confirms with Enter or clicks OK. An empty submit is ignored.
+// openPrompt shows a single-line text input overlay — an
+// overlay.Prompt prefab. title is the heading, hint is a small subtitle
+// (e.g. "in /path/to/folder"), initial pre-fills the input field, and
+// callback runs with the trimmed value when the user confirms with
+// Enter or clicks OK. An empty submit is ignored.
 func (a *App) openPrompt(title, hint, initial string, callback func(*App, string)) {
 	a.closeAllModals()
-	a.promptOpen = true
-	a.overlays.Open(promptOverlay{a})
-	a.promptTitle = title
-	a.promptHint = hint
-	a.promptValue = []rune(initial)
-	a.promptCursor = len(a.promptValue)
-	a.promptScroll = 0
-	a.promptHover = 1 // OK — matches what Enter does.
-	a.promptCallback = callback
-}
-
-// promptSubmit runs the prompt's callback with the current value (trimmed of
-// surrounding whitespace) and closes the modal. An empty value is rejected
-// silently — the user can still cancel with Esc.
-func (a *App) promptSubmit() {
-	if !a.promptOpen {
-		return
+	p := &overlay.Prompt{Title: title, Hint: hint, Hover: 1, Theme: a.theme}
+	p.Field.SetText(initial)
+	p.Size = func() (int, int) { return a.width, a.height }
+	p.Close = func() { a.closeAllModals() }
+	if callback != nil {
+		p.OnSubmit = func(v string) { callback(a, v) }
 	}
-	value := trimSpace(string(a.promptValue))
-	if value == "" {
-		return
-	}
-	cb := a.promptCallback
-	a.closeAllModals()
-	if cb != nil {
-		cb(a, value)
-	}
-}
-
-// promptCancel dismisses the prompt without calling the callback.
-func (a *App) promptCancel() {
-	a.closeAllModals()
-}
-
-// handlePromptKey processes keyboard input while the prompt modal is open:
-// printable runes are inserted at the cursor; arrow keys move the cursor;
-// Backspace / Delete edit; Enter submits; Esc cancels.
-func (a *App) handlePromptKey(ev *tcell.EventKey) {
-	switch ev.Key() {
-	case tcell.KeyEsc:
-		a.promptCancel()
-	case tcell.KeyEnter:
-		a.promptSubmit()
-	case tcell.KeyLeft:
-		if a.promptCursor > 0 {
-			a.promptCursor--
-		}
-	case tcell.KeyRight:
-		if a.promptCursor < len(a.promptValue) {
-			a.promptCursor++
-		}
-	case tcell.KeyHome:
-		a.promptCursor = 0
-	case tcell.KeyEnd:
-		a.promptCursor = len(a.promptValue)
-	case tcell.KeyBackspace, tcell.KeyBackspace2:
-		if a.promptCursor > 0 {
-			a.promptValue = append(a.promptValue[:a.promptCursor-1], a.promptValue[a.promptCursor:]...)
-			a.promptCursor--
-		}
-	case tcell.KeyDelete:
-		if a.promptCursor < len(a.promptValue) {
-			a.promptValue = append(a.promptValue[:a.promptCursor], a.promptValue[a.promptCursor+1:]...)
-		}
-	case tcell.KeyRune:
-		r := ev.Rune()
-		if r < 0x20 {
-			return
-		}
-		next := make([]rune, 0, len(a.promptValue)+1)
-		next = append(next, a.promptValue[:a.promptCursor]...)
-		next = append(next, r)
-		next = append(next, a.promptValue[a.promptCursor:]...)
-		a.promptValue = next
-		a.promptCursor++
-	}
-}
-
-// handlePromptMouse processes mouse input while the prompt modal is open.
-// Hovering a button highlights it (same feedback as the confirm/dirty
-// modals); clicks on OK / Cancel run the corresponding action; clicks
-// outside the modal cancel; clicks on the input field reposition the
-// cursor. Button geometry comes from the promptBtn* constants shared
-// with drawPrompt.
-func (a *App) handlePromptMouse(x, y int, btn tcell.ButtonMask) {
-	mx, my, mw, mh := a.promptModalRect()
-	// Hover tracking — runs on every event, button held or not.
-	if x >= mx && x < mx+mw && y == my+6 {
-		relX := x - mx
-		switch {
-		case relX >= promptBtnCancelX && relX < promptBtnCancelX+promptBtnCancelW:
-			a.promptHover = 0
-		case relX >= promptBtnOKX && relX < promptBtnOKX+promptBtnOKW:
-			a.promptHover = 1
-		}
-	}
-	if btn&tcell.Button1 == 0 {
-		return
-	}
-	if x < mx || x >= mx+mw || y < my || y >= my+mh {
-		a.promptCancel()
-		return
-	}
-	if y == my+6 {
-		relX := x - mx
-		switch {
-		case relX >= promptBtnCancelX && relX < promptBtnCancelX+promptBtnCancelW:
-			a.promptCancel()
-			return
-		case relX >= promptBtnOKX && relX < promptBtnOKX+promptBtnOKW:
-			a.promptSubmit()
-			return
-		}
-	}
-	// Click in the input field — move the cursor to the clicked rune.
-	if y == my+4 {
-		fieldStart := mx + 3
-		fieldEnd := mx + mw - 3
-		if x >= fieldStart && x < fieldEnd {
-			localCol := x - fieldStart
-			target := a.promptScroll + localCol
-			if target < 0 {
-				target = 0
-			}
-			if target > len(a.promptValue) {
-				target = len(a.promptValue)
-			}
-			a.promptCursor = target
-		}
-	}
-}
-
-// promptModalRect returns the on-screen rectangle of the prompt modal,
-// centered in the window.
-func (a *App) promptModalRect() (x, y, w, h int) {
-	w = promptModalWidth
-	h = promptModalHeight
-	x = (a.width - w) / 2
-	y = (a.height - h) / 2
-	if x < 0 {
-		x = 0
-	}
-	if y < 0 {
-		y = 0
-	}
-	return
-}
-
-// drawPrompt renders the prompt modal: a centered box with a title row, a
-// single-line text input, and a Cancel / OK button row.
-//
-// Rows (relY):
-//
-//	0   top border
-//	1   title — "<title>   esc"
-//	2   divider
-//	3   hint (greyed)
-//	4   input field    [ value ]
-//	5   blank
-//	6   buttons        [ Cancel ]   [  OK  ]
-//	7   blank
-//	8   bottom border
-func (a *App) drawPrompt() {
-	mx, my, mw, mh := a.promptModalRect()
-
-	bg := a.theme.LineHL
-	bgStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
-	borderStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Subtle)
-	titleStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true)
-	mutedStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
-
-	fillRect(a.screen, mx, my, mw, mh, bgStyle)
-	drawBorder(a.screen, mx, my, mw, mh, borderStyle)
-
-	// Title divider.
-	drawHDivider(a.screen, mx, my+2, mw, borderStyle)
-
-	drawAt(a.screen, mx+1, my+1, " "+a.promptTitle, titleStyle)
-	hint := "esc "
-	drawAt(a.screen, mx+mw-1-runeLen(hint), my+1, hint, mutedStyle)
-
-	if a.promptHint != "" {
-		drawAt(a.screen, mx+2, my+3, a.promptHint, mutedStyle)
-	}
-
-	// Input field — a faint inset at row 4. We render the value with a
-	// horizontal scroll window so a long path still keeps the cursor in
-	// view.
-	fieldStart := mx + 3
-	fieldEnd := mx + mw - 3
-	fieldWidth := fieldEnd - fieldStart
-	a.adjustPromptScroll(fieldWidth)
-
-	inputBg := a.theme.BG
-	inputStyle := tcell.StyleDefault.Background(inputBg).Foreground(a.theme.Text)
-	for cx := fieldStart - 1; cx <= fieldEnd; cx++ {
-		a.screen.SetContent(cx, my+4, ' ', nil, inputStyle)
-	}
-	for i := 0; i < fieldWidth; i++ {
-		idx := a.promptScroll + i
-		if idx >= len(a.promptValue) {
-			break
-		}
-		a.screen.SetContent(fieldStart+i, my+4, a.promptValue[idx], nil, inputStyle)
-	}
-	// Place the screen cursor at the input position so the user sees a
-	// blinking caret like any other text field.
-	caret := fieldStart + (a.promptCursor - a.promptScroll)
-	if caret >= fieldStart && caret <= fieldEnd {
-		a.screen.ShowCursor(caret, my+4)
-	}
-
-	// Buttons — the promptBtn* constants keep these columns in lockstep
-	// with the hover/click zones in handlePromptMouse. The hovered button
-	// renders focused; OK is the default (it's what Enter does).
-	drawButton(a.screen, mx+promptBtnCancelX, my+6, "[ Cancel ]", bg, a.theme.Text, a.promptHover == 0)
-	drawButton(a.screen, mx+promptBtnOKX, my+6, "[  OK  ]", bg, a.theme.Accent, a.promptHover == 1)
-}
-
-// adjustPromptScroll keeps the cursor within the visible window of the input
-// field by sliding promptScroll left or right as needed.
-func (a *App) adjustPromptScroll(width int) {
-	if width <= 0 {
-		a.promptScroll = 0
-		return
-	}
-	if a.promptCursor < a.promptScroll {
-		a.promptScroll = a.promptCursor
-	}
-	if a.promptCursor >= a.promptScroll+width {
-		a.promptScroll = a.promptCursor - width + 1
-	}
-	if a.promptScroll < 0 {
-		a.promptScroll = 0
-	}
+	a.overlays.Open(p)
 }
 
 // -----------------------------------------------------------------------------

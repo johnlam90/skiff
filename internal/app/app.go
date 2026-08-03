@@ -459,20 +459,9 @@ type App struct {
 	// the same reason tab.go's cursorMoved flag exists.
 	tabScroll int
 
-	// Prompt modal — single-line text input with OK / Cancel. Used by
-	// Rename and New File. See modals.go for render + event handling.
-	promptOpen     bool
-	promptTitle    string
-	promptHint     string
-	promptValue    []rune
-	promptCursor   int
-	promptScroll   int
-	promptCallback func(*App, string)
-	// promptHover mirrors confirmHover for the prompt's button row:
-	// 0 = Cancel, 1 = OK (the default — Enter submits). Mouse motion
-	// over a button moves it so the highlight matches what a click
-	// would do, same feedback contract as the confirm/dirty modals.
-	promptHover int
+	// The prompt modal (single-line text input with OK / Cancel, used by
+	// Rename and New File) is an overlay.Prompt prefab — openPrompt in
+	// modals.go constructs it; it carries all its own state.
 
 	// Confirm modal — Yes / No, used by Delete. confirmHover is 0 for No
 	// (the safe default) or 1 for Yes.

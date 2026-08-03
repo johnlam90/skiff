@@ -39,17 +39,17 @@ func TestMenuGoToLineJumps(t *testing.T) {
 	a.openFile(path)
 
 	a.menuGoToLine()
-	if !a.promptOpen {
-		t.Fatal("menuGoToLine should open the prompt modal")
+	if !promptIsOpen(a) {
+		t.Fatal("menuGoToLine should open the prompt overlay")
 	}
-	a.promptValue = []rune("42")
-	a.promptSubmit()
+	promptPrefab(t, a).Field.SetText("42")
+	submitPrompt(a)
 
 	tab := a.activeTabPtr()
 	if tab.Cursor.Line != 41 {
 		t.Fatalf("cursor line: got %d, want 41", tab.Cursor.Line)
 	}
-	if a.promptOpen {
+	if promptIsOpen(a) {
 		t.Fatal("prompt should close after submit")
 	}
 }
@@ -63,8 +63,8 @@ func TestGoToLineRejectsGarbage(t *testing.T) {
 	a.openFile(path)
 
 	a.menuGoToLine()
-	a.promptValue = []rune("abc")
-	a.promptSubmit()
+	promptPrefab(t, a).Field.SetText("abc")
+	submitPrompt(a)
 
 	tab := a.activeTabPtr()
 	if tab.Cursor.Line != 0 {

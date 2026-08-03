@@ -1652,7 +1652,7 @@ func TestDraw_AllPanels(t *testing.T) {
 	a.closeMenu()
 	a.openPrompt("T", "H", "x", nil)
 	a.draw()
-	a.promptCancel()
+	a.closeAllModals()
 	a.openConfirm("T", "M", nil)
 	a.draw()
 	a.confirmCancel()

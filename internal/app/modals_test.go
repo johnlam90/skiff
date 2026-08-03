@@ -22,6 +22,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/overlay"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -30,20 +31,18 @@ import (
 func TestCloseAllModals_ClearsEverything(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.menuOpen = true
-	a.promptOpen = true
 	a.confirmOpen = true
 	a.contextOpen = true
 	a.hoveredMenuRow = 3
 	a.contextNode = a.tree.Root
 	a.contextItems = []contextItem{{label: "x"}}
-	a.promptCallback = func(*App, string) {}
 	a.confirmCallback = func(*App) {}
 	a.dragMode = "editor"
 	a.autoScrollDir = 1
 
 	a.closeAllModals()
 
-	if a.menuOpen || a.promptOpen || a.confirmOpen || a.contextOpen {
+	if a.menuOpen || a.confirmOpen || a.contextOpen {
 		t.Fatal("expected all modal flags off")
 	}
 	if a.hoveredMenuRow != -1 {
@@ -52,7 +51,7 @@ func TestCloseAllModals_ClearsEverything(t *testing.T) {
 	if a.contextNode != nil || a.contextItems != nil {
 		t.Fatal("context state not cleared")
 	}
-	if a.promptCallback != nil || a.confirmCallback != nil {
+	if a.confirmCallback != nil {
 		t.Fatal("callbacks not cleared")
 	}
 	if a.dragMode != "" {
@@ -159,190 +158,80 @@ func TestAnyModalOpen(t *testing.T) {
 	}
 }
 
-// TestOpenPrompt_Submit runs the callback with a trimmed value and closes
-// the modal.
-func TestOpenPrompt_Submit(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	got := ""
-	a.openPrompt("Title", "Hint", "  hello  ", func(_ *App, v string) { got = v })
-	if !a.promptOpen {
-		t.Fatal("openPrompt should set promptOpen")
-	}
-	if a.promptCursor != len([]rune("  hello  ")) {
-		t.Fatalf("cursor at end of initial: got %d", a.promptCursor)
-	}
-	a.promptSubmit()
-	if got != "hello" {
-		t.Fatalf("callback got %q, want trimmed 'hello'", got)
-	}
-	if a.promptOpen {
-		t.Fatal("promptSubmit should close the modal")
-	}
-}
-
-// TestPromptSubmit_EmptyIsNoop keeps the modal open and skips the callback.
-func TestPromptSubmit_EmptyIsNoop(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	called := false
-	a.openPrompt("T", "H", "   ", func(*App, string) { called = true })
-	a.promptSubmit()
-	if called {
-		t.Fatal("empty submit should not run callback")
-	}
-	if !a.promptOpen {
-		t.Fatal("empty submit should keep modal open")
-	}
-}
-
-// TestPromptCancel skips the callback.
-func TestPromptCancel(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	called := false
-	a.openPrompt("T", "H", "x", func(*App, string) { called = true })
-	a.promptCancel()
-	if called {
-		t.Fatal("cancel should not run callback")
-	}
-	if a.promptOpen {
-		t.Fatal("cancel should close")
-	}
-}
-
-// TestPromptSubmit_NoopWhenClosed guards against double-submits triggered
-// by stale events.
-func TestPromptSubmit_NoopWhenClosed(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	a.promptSubmit() // does nothing
-}
-
 // keyEv builds a synthetic tcell key event for tests.
 func keyEv(k tcell.Key, r rune) *tcell.EventKey {
 	return tcell.NewEventKey(k, r, tcell.ModNone)
 }
 
-// TestHandlePromptKey_Editing exercises every editing branch of the prompt
-// keyboard handler.
-func TestHandlePromptKey_Editing(t *testing.T) {
+// promptPrefab returns the open prompt overlay, failing the test when
+// none is up — the prompt's state lives on the prefab now, not on App.
+func promptPrefab(t *testing.T, a *App) *overlay.Prompt {
+	t.Helper()
+	p, ok := a.overlays.Top().(*overlay.Prompt)
+	if !ok {
+		t.Fatalf("no prompt overlay open; top = %T", a.overlays.Top())
+	}
+	return p
+}
+
+// promptIsOpen reports whether a prompt overlay is up.
+func promptIsOpen(a *App) bool {
+	_, ok := a.overlays.Top().(*overlay.Prompt)
+	return ok
+}
+
+// submitPrompt presses Enter through the real routing path so tests
+// exercise the same stack traversal the user does.
+func submitPrompt(a *App) {
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+}
+
+// TestOpenPrompt_Submit runs the callback with a trimmed value and closes
+// the overlay. The editing/mouse/draw behavior itself is pinned in
+// internal/overlay's prompt tests — this pins the App wiring.
+func TestOpenPrompt_Submit(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	a.openPrompt("T", "H", "", nil)
-
-	// Insert "abc".
-	for _, r := range "abc" {
-		a.handlePromptKey(keyEv(tcell.KeyRune, r))
+	got := ""
+	a.openPrompt("Title", "Hint", "  hello  ", func(_ *App, v string) { got = v })
+	p := promptPrefab(t, a)
+	if p.Field.Cursor != len([]rune("  hello  ")) {
+		t.Fatalf("cursor at end of initial: got %d", p.Field.Cursor)
 	}
-	if string(a.promptValue) != "abc" || a.promptCursor != 3 {
-		t.Fatalf("after insert: %q cur=%d", string(a.promptValue), a.promptCursor)
+	submitPrompt(a)
+	if got != "hello" {
+		t.Fatalf("callback got %q, want trimmed 'hello'", got)
 	}
-
-	// Control-rune is ignored.
-	a.handlePromptKey(keyEv(tcell.KeyRune, 0x01))
-	if string(a.promptValue) != "abc" {
-		t.Fatalf("control rune should be ignored: %q", string(a.promptValue))
-	}
-
-	// Home / End.
-	a.handlePromptKey(keyEv(tcell.KeyHome, 0))
-	if a.promptCursor != 0 {
-		t.Fatalf("Home: got %d", a.promptCursor)
-	}
-	a.handlePromptKey(keyEv(tcell.KeyEnd, 0))
-	if a.promptCursor != 3 {
-		t.Fatalf("End: got %d", a.promptCursor)
-	}
-
-	// Left / Right.
-	a.handlePromptKey(keyEv(tcell.KeyLeft, 0))
-	if a.promptCursor != 2 {
-		t.Fatalf("Left: got %d", a.promptCursor)
-	}
-	a.handlePromptKey(keyEv(tcell.KeyRight, 0))
-	if a.promptCursor != 3 {
-		t.Fatalf("Right: got %d", a.promptCursor)
-	}
-	// Right past end is clamped.
-	a.handlePromptKey(keyEv(tcell.KeyRight, 0))
-	if a.promptCursor != 3 {
-		t.Fatalf("Right past end: got %d", a.promptCursor)
-	}
-	// Left past start is clamped.
-	a.promptCursor = 0
-	a.handlePromptKey(keyEv(tcell.KeyLeft, 0))
-	if a.promptCursor != 0 {
-		t.Fatalf("Left past start: got %d", a.promptCursor)
-	}
-
-	// Backspace: cursor between 'a' and 'b' → removes 'a'.
-	a.promptCursor = 1
-	a.handlePromptKey(keyEv(tcell.KeyBackspace, 0))
-	if string(a.promptValue) != "bc" || a.promptCursor != 0 {
-		t.Fatalf("Backspace: %q cur=%d", string(a.promptValue), a.promptCursor)
-	}
-	// Backspace at column 0 is a no-op.
-	a.handlePromptKey(keyEv(tcell.KeyBackspace2, 0))
-	if string(a.promptValue) != "bc" {
-		t.Fatalf("Backspace at 0 should be no-op: %q", string(a.promptValue))
-	}
-
-	// Delete forward: removes 'b' at cursor=0.
-	a.handlePromptKey(keyEv(tcell.KeyDelete, 0))
-	if string(a.promptValue) != "c" {
-		t.Fatalf("Delete: %q", string(a.promptValue))
-	}
-	// Delete at end is no-op.
-	a.promptCursor = 1
-	a.handlePromptKey(keyEv(tcell.KeyDelete, 0))
-	if string(a.promptValue) != "c" {
-		t.Fatalf("Delete at end should be no-op: %q", string(a.promptValue))
+	if promptIsOpen(a) {
+		t.Fatal("submit should close the prompt overlay")
 	}
 }
 
-// TestHandlePromptKey_Esc cancels the modal.
-func TestHandlePromptKey_Esc(t *testing.T) {
+// TestPromptSubmit_EmptyIsNoop keeps the overlay open and skips the
+// callback.
+func TestPromptSubmit_EmptyIsNoop(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	called := false
+	a.openPrompt("T", "H", "   ", func(*App, string) { called = true })
+	submitPrompt(a)
+	if called {
+		t.Fatal("empty submit should not run callback")
+	}
+	if !promptIsOpen(a) {
+		t.Fatal("empty submit should keep the prompt open")
+	}
+}
+
+// TestPromptCancel skips the callback: Esc through real routing.
+func TestPromptCancel(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	called := false
 	a.openPrompt("T", "H", "x", func(*App, string) { called = true })
-	a.handlePromptKey(keyEv(tcell.KeyEsc, 0))
-	if a.promptOpen {
-		t.Fatal("Esc should close")
-	}
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
 	if called {
-		t.Fatal("Esc should not run callback")
+		t.Fatal("cancel should not run callback")
 	}
-}
-
-// TestHandlePromptKey_Enter submits.
-func TestHandlePromptKey_Enter(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	got := ""
-	a.openPrompt("T", "H", "ok", func(_ *App, v string) { got = v })
-	a.handlePromptKey(keyEv(tcell.KeyEnter, 0))
-	if got != "ok" {
-		t.Fatalf("Enter callback: got %q", got)
-	}
-}
-
-// TestAdjustPromptScroll keeps the cursor inside the visible window.
-func TestAdjustPromptScroll(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	a.promptValue = []rune("abcdefghijklmnop")
-	a.promptCursor = len(a.promptValue) // 16
-	a.promptScroll = 0
-	a.adjustPromptScroll(5)
-	if a.promptScroll != a.promptCursor-5+1 {
-		t.Fatalf("scroll-to-end: got %d, want %d", a.promptScroll, a.promptCursor-5+1)
-	}
-
-	a.promptCursor = 0
-	a.adjustPromptScroll(5)
-	if a.promptScroll != 0 {
-		t.Fatalf("scroll-to-start: got %d", a.promptScroll)
-	}
-
-	// Zero-width clamps to 0.
-	a.promptScroll = 7
-	a.adjustPromptScroll(0)
-	if a.promptScroll != 0 {
-		t.Fatalf("zero-width: got %d", a.promptScroll)
+	if promptIsOpen(a) {
+		t.Fatal("cancel should close")
 	}
 }
 
@@ -627,23 +516,6 @@ func TestTrimSpace(t *testing.T) {
 	}
 }
 
-// TestPromptModalRect centers the prompt and clamps a tiny window.
-func TestPromptModalRect(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	x, y, w, h := a.promptModalRect()
-	if w != promptModalWidth || h != promptModalHeight {
-		t.Fatalf("size: (%d,%d)", w, h)
-	}
-	if x != (a.width-w)/2 || y != (a.height-h)/2 {
-		t.Fatalf("origin: (%d,%d)", x, y)
-	}
-	a.width, a.height = 4, 4
-	x, y, _, _ = a.promptModalRect()
-	if x != 0 || y != 0 {
-		t.Fatalf("clamp: (%d,%d)", x, y)
-	}
-}
-
 // TestConfirmModalRect centers the confirm modal and clamps a tiny window.
 func TestConfirmModalRect(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
@@ -668,64 +540,6 @@ func TestContextRect(t *testing.T) {
 	x, y, w, h := a.contextRect()
 	if x != 10 || y != 5 || w != contextMenuWidth || h != 4 {
 		t.Fatalf("contextRect: (%d,%d,%d,%d)", x, y, w, h)
-	}
-}
-
-// TestHandlePromptMouse_OutsideCancels closes the prompt when clicked
-// outside its rect.
-func TestHandlePromptMouse_OutsideCancels(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	a.openPrompt("T", "H", "x", nil)
-	a.handlePromptMouse(0, 0, tcell.Button1)
-	if a.promptOpen {
-		t.Fatal("outside click should cancel")
-	}
-}
-
-// TestHandlePromptMouse_OK clicks the OK button area and submits.
-func TestHandlePromptMouse_OK(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	got := ""
-	a.openPrompt("T", "H", "ok", func(_ *App, v string) { got = v })
-	mx, my, _, _ := a.promptModalRect()
-	a.handlePromptMouse(mx+32, my+6, tcell.Button1)
-	if got != "ok" {
-		t.Fatalf("OK button: callback got %q", got)
-	}
-}
-
-// TestHandlePromptMouse_Cancel clicks the Cancel button area.
-func TestHandlePromptMouse_Cancel(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	called := false
-	a.openPrompt("T", "H", "ok", func(*App, string) { called = true })
-	mx, my, _, _ := a.promptModalRect()
-	a.handlePromptMouse(mx+18, my+6, tcell.Button1)
-	if called {
-		t.Fatal("cancel button should skip callback")
-	}
-}
-
-// TestHandlePromptMouse_FieldClickMovesCursor places the cursor at the
-// clicked rune.
-func TestHandlePromptMouse_FieldClickMovesCursor(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	a.openPrompt("T", "H", "abcdef", nil)
-	mx, my, _, _ := a.promptModalRect()
-	// Click 2 cells into the field.
-	a.handlePromptMouse(mx+3+2, my+4, tcell.Button1)
-	if a.promptCursor != 2 {
-		t.Fatalf("field click: got %d, want 2", a.promptCursor)
-	}
-}
-
-// TestHandlePromptMouse_NoButton is a no-op for motion events.
-func TestHandlePromptMouse_NoButton(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	a.openPrompt("T", "H", "x", nil)
-	a.handlePromptMouse(0, 0, 0)
-	if !a.promptOpen {
-		t.Fatal("motion event should not close prompt")
 	}
 }
 
@@ -1235,49 +1049,6 @@ func TestConfirmMouse_YesZoneMatchesDrawnButton(t *testing.T) {
 	a.handleConfirmMouse(mx+28+3, my+5, tcell.Button1)
 	if !fired {
 		t.Fatal("click on the drawn Yes button should fire the callback")
-	}
-}
-
-// TestPromptMouse_HoverTracksButtons proves the prompt modal gives the
-// same hover feedback as its confirm/dirty siblings: OK is the default,
-// and mouse motion over either button moves the highlight.
-func TestPromptMouse_HoverTracksButtons(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	a.openPrompt("New File", "", "", nil)
-	if a.promptHover != 1 {
-		t.Fatalf("promptHover after open = %d, want 1 (OK)", a.promptHover)
-	}
-	mx, my, _, _ := a.promptModalRect()
-	a.handlePromptMouse(mx+15, my+6, 0) // motion over [ Cancel ]
-	if a.promptHover != 0 {
-		t.Fatalf("hover over Cancel: promptHover = %d, want 0", a.promptHover)
-	}
-	a.handlePromptMouse(mx+31, my+6, 0) // motion over [  OK  ]
-	if a.promptHover != 1 {
-		t.Fatalf("hover over OK: promptHover = %d, want 1", a.promptHover)
-	}
-}
-
-// TestDrawPrompt_HoverInvertsFocusedButton verifies the hover state
-// actually renders: the hovered button paints inverted (label color as
-// background) and the other button drops back to the modal background.
-func TestDrawPrompt_HoverInvertsFocusedButton(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	a.openPrompt("New File", "", "", nil)
-	mx, my, _, _ := a.promptModalRect()
-	a.handlePromptMouse(mx+15, my+6, 0) // hover Cancel
-	a.drawPrompt()
-	a.screen.Show()
-
-	scr := a.screen.(tcell.SimulationScreen)
-	cells, w, _ := scr.GetContents()
-	_, cancelBg, _ := cells[(my+6)*w+mx+15].Style.Decompose()
-	if cancelBg != a.theme.Text {
-		t.Fatalf("hovered Cancel bg = %v, want inverted (theme.Text)", cancelBg)
-	}
-	_, okBg, _ := cells[(my+6)*w+mx+31].Style.Decompose()
-	if okBg != a.theme.LineHL {
-		t.Fatalf("unhovered OK bg = %v, want modal bg (theme.LineHL)", okBg)
 	}
 }
 

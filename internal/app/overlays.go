@@ -42,12 +42,8 @@ func (o menuOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
 }
 func (o menuOverlay) Draw(tcell.Screen) { o.a.drawMenu() }
 
-// promptOverlay routes the single-line text prompt.
-type promptOverlay struct{ a *App }
-
-func (o promptOverlay) HandleKey(ev *tcell.EventKey)               { o.a.handlePromptKey(ev) }
-func (o promptOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) { o.a.handlePromptMouse(x, y, btn) }
-func (o promptOverlay) Draw(tcell.Screen)                          { o.a.drawPrompt() }
+// The prompt is a real overlay now — overlay.Prompt — so it has no shim;
+// openPrompt constructs the prefab directly.
 
 // confirmOverlay routes the Yes/No confirm and its single-button info
 // flavour — both share the confirm state and handlers.
