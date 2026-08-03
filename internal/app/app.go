@@ -589,21 +589,10 @@ type App struct {
 	gitDeleteTarget  string // branch mid-delete, for the force-delete offer
 	diffBase         string // compare-against ref; "" = HEAD (the default)
 
-	// Diff view modal state — the side-by-side (or, when the terminal
-	// is narrow, unified) git diff opened from the Git panel and the
-	// editor's gutter markers. diffRaw keeps the verbatim `git diff`
-	// lines for the unified layout; diffRows is the same diff parsed
-	// into aligned two-column rows. diffOpenPath, when non-empty, arms
-	// the [ Open file ] button; diffHover tracks which button Enter
-	// activates (1 = Open file, 0 = Close).
-	diffOpen     bool
-	diffTitle    string
-	diffRaw      []string
-	diffRows     []diffRow
-	diffOpenPath string
-	diffScroll   int
-	diffScrollX  int
-	diffHover    int
+	// The diff viewer is a bespoke overlay (diffview.go's diffOverlay)
+	// that owns its transient state. diffBase and diffPanelRow stay here:
+	// the compare base outlives any one diff, and the panel row marker
+	// belongs to the Git panel.
 	// diffRowStyles carries per-rune Chroma styles for context rows
 	// (nil for changed/hunk rows, which keep the git colors); diffMaxLen
 	// is the longest line in the diff, bounding horizontal scroll.

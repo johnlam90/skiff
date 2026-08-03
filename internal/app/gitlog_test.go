@@ -146,14 +146,14 @@ func TestActivateGitLogRow_OpensCommitDiff(t *testing.T) {
 	if gitLogIsOpen(a) {
 		t.Fatal("activation should close the history modal")
 	}
-	if !a.diffOpen {
+	if !diffIsOpen(a) {
 		t.Fatal("activation should open the diff view")
 	}
-	if !strings.Contains(a.diffTitle, "Commit ") {
-		t.Fatalf("diff title should name the commit, got %q", a.diffTitle)
+	if !strings.Contains(diffOv(t, a).title, "Commit ") {
+		t.Fatalf("diff title should name the commit, got %q", diffOv(t, a).title)
 	}
 	files := 0
-	for _, r := range a.diffRows {
+	for _, r := range diffOv(t, a).rows {
 		if r.Kind == diffRowFile {
 			files++
 		}
@@ -179,8 +179,8 @@ func TestMenuFileHistory_ScopesToActiveTab(t *testing.T) {
 		t.Fatalf("want open with 1 entry, top=%T", a.overlays.Top())
 	}
 	a.handleKey(keyEv(tcell.KeyEnter, 0))
-	if !a.diffOpen || !strings.Contains(a.diffTitle, "b.txt") {
-		t.Fatalf("diff should open scoped to b.txt, title %q", a.diffTitle)
+	if !diffIsOpen(a) || !strings.Contains(diffOv(t, a).title, "b.txt") {
+		t.Fatalf("diff should open scoped to b.txt, title %q", diffOv(t, a).title)
 	}
 }
 
@@ -234,7 +234,7 @@ func TestHandleGitLogMouse_HoverClickAndDismiss(t *testing.T) {
 		t.Fatalf("hover should select row 1, got %d", g.selected)
 	}
 	g.HandleMouse(mx+4, my+4, tcell.Button1)
-	if gitLogIsOpen(a) || !a.diffOpen {
+	if gitLogIsOpen(a) || !diffIsOpen(a) {
 		t.Fatal("click should activate the row")
 	}
 

@@ -22,6 +22,23 @@ import (
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
+// diffOv returns the open diff overlay, failing the test when none is
+// up.
+func diffOv(t *testing.T, a *App) *diffOverlay {
+	t.Helper()
+	d, ok := a.overlays.Top().(*diffOverlay)
+	if !ok {
+		t.Fatalf("no diff overlay open; top = %T", a.overlays.Top())
+	}
+	return d
+}
+
+// diffIsOpen reports whether the diff overlay is up.
+func diffIsOpen(a *App) bool {
+	_, ok := a.overlays.Top().(*diffOverlay)
+	return ok
+}
+
 // sampleDiff is a small captured `git diff` with one modification
 // flanked by context — the standard hunk shape the parser must align.
 func sampleDiff() []string {
@@ -239,11 +256,11 @@ func TestAnnotateDiffSpans_OnlyPairedRows(t *testing.T) {
 func TestDrawDiffView_WordLevelHighlight(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.openDiffView("Diff · f.txt", sampleDiff(), "", "f.txt")
-	a.drawDiffView()
+	diffOv(t, a).Draw(a.screen)
 	a.screen.Show()
 	scr := a.screen.(tcell.SimulationScreen)
 	cells, w, _ := scr.GetContents()
-	mx, my, mw, _ := a.diffModalRect()
+	mx, my, mw, _ := diffOv(t, a).modalRect()
 	rowY := my + 5 // hunk, ctx, then the change row
 	leftTextX := mx + 2 + diffNoGutter
 
@@ -266,20 +283,20 @@ func TestScrollDiffH_ClampsAndSlides(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.openDiffView("Diff · f.txt", sampleDiff(), "", "f.txt")
 
-	a.scrollDiffH(-5)
-	if a.diffScrollX != 0 {
-		t.Fatalf("left of origin should clamp to 0, got %d", a.diffScrollX)
+	diffOv(t, a).scrollByH(-5)
+	if diffOv(t, a).scrollX != 0 {
+		t.Fatalf("left of origin should clamp to 0, got %d", diffOv(t, a).scrollX)
 	}
-	a.scrollDiffH(1000)
-	if want := a.diffMaxLen - 10; a.diffScrollX != want {
-		t.Fatalf("overscroll should clamp to %d, got %d", want, a.diffScrollX)
+	diffOv(t, a).scrollByH(1000)
+	if want := diffOv(t, a).maxLen - 10; diffOv(t, a).scrollX != want {
+		t.Fatalf("overscroll should clamp to %d, got %d", want, diffOv(t, a).scrollX)
 	}
 
-	a.diffScrollX = 4 // "old line" → " line" visible
-	a.drawDiffView()
+	diffOv(t, a).scrollX = 4 // "old line" → " line" visible
+	diffOv(t, a).Draw(a.screen)
 	a.screen.Show()
 	scr := a.screen.(tcell.SimulationScreen)
-	_, my, _, _ := a.diffModalRect()
+	_, my, _, _ := diffOv(t, a).modalRect()
 	change := screenLine(scr, my+5)
 	if strings.Contains(change, "old line") || !strings.Contains(change, "line") {
 		t.Fatalf("scrolled row should start mid-line, got %q", change)
@@ -294,13 +311,13 @@ func TestScrollDiffH_ClampsAndSlides(t *testing.T) {
 func TestHandleDiffKey_ArrowsScrollHorizontally(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.openDiffView("Diff · f.txt", sampleDiff(), "", "f.txt")
-	a.handleDiffKey(keyEv(tcell.KeyRight, 0))
-	if a.diffScrollX != wheelCols {
-		t.Fatalf("Right should scroll by wheelCols, got %d", a.diffScrollX)
+	a.handleKey(keyEv(tcell.KeyRight, 0))
+	if diffOv(t, a).scrollX != wheelCols {
+		t.Fatalf("Right should scroll by wheelCols, got %d", diffOv(t, a).scrollX)
 	}
-	a.handleDiffKey(keyEv(tcell.KeyLeft, 0))
-	if a.diffScrollX != 0 {
-		t.Fatalf("Left should scroll back, got %d", a.diffScrollX)
+	a.handleKey(keyEv(tcell.KeyLeft, 0))
+	if diffOv(t, a).scrollX != 0 {
+		t.Fatalf("Left should scroll back, got %d", diffOv(t, a).scrollX)
 	}
 }
 
@@ -318,13 +335,13 @@ func TestHandleDiffMouse_ShiftWheelScrollsHorizontally(t *testing.T) {
 	a.openDiffView("Diff · f.txt", long, "", "f.txt")
 
 	a.lastShiftAt = time.Now()
-	a.handleDiffMouse(50, 10, tcell.WheelDown)
-	if a.diffScrollX != wheelCols || a.diffScroll != 0 {
-		t.Fatalf("shift+wheel should scroll sideways only, x=%d y=%d", a.diffScrollX, a.diffScroll)
+	diffOv(t, a).HandleMouse(50, 10, tcell.WheelDown)
+	if diffOv(t, a).scrollX != wheelCols || diffOv(t, a).scroll != 0 {
+		t.Fatalf("shift+wheel should scroll sideways only, x=%d y=%d", diffOv(t, a).scrollX, diffOv(t, a).scroll)
 	}
 	a.lastShiftAt = time.Time{}
-	a.handleDiffMouse(50, 10, tcell.WheelDown)
-	if a.diffScroll == 0 {
+	diffOv(t, a).HandleMouse(50, 10, tcell.WheelDown)
+	if diffOv(t, a).scroll == 0 {
 		t.Fatal("plain wheel should scroll vertically again")
 	}
 }
@@ -398,13 +415,13 @@ func TestMenuDiffFile_OpensActiveTabDiff(t *testing.T) {
 	}
 
 	a.menuDiffFile()
-	if !a.diffOpen {
+	if !diffIsOpen(a) {
 		t.Fatal("menu action should open the diff view")
 	}
-	if a.diffOpenPath != "" {
+	if diffOv(t, a).openPath != "" {
 		t.Fatal("already-open file should have no Open button")
 	}
-	if body := strings.Join(a.diffRaw, "\n"); !strings.Contains(body, "+TWO") {
+	if body := strings.Join(diffOv(t, a).raw, "\n"); !strings.Contains(body, "+TWO") {
 		t.Fatalf("diff body should show the change, got:\n%s", body)
 	}
 }
@@ -423,7 +440,7 @@ func TestMenuDiffFile_CleanFileFlashes(t *testing.T) {
 	a.openFile(target)
 
 	a.menuDiffFile()
-	if a.diffOpen {
+	if diffIsOpen(a) {
 		t.Fatal("clean file should not open a diff")
 	}
 	if !strings.Contains(a.statusMsg, "No uncommitted changes") {
@@ -437,14 +454,14 @@ func TestMenuDiffFile_CleanFileFlashes(t *testing.T) {
 func TestOpenDiffView_FocusFollowsOpenPath(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.openDiffView("Diff · f.txt", sampleDiff(), "/tmp/f.txt", "f.txt")
-	if !a.diffOpen || a.diffHover != 1 {
-		t.Fatalf("open with path: open=%v hover=%d, want open+hover 1", a.diffOpen, a.diffHover)
+	if !diffIsOpen(a) || diffOv(t, a).hover != 1 {
+		t.Fatalf("open with path: open=%v hover=%d, want open+hover 1", diffIsOpen(a), diffOv(t, a).hover)
 	}
 	a.openDiffView("Diff · gone.txt", sampleDiff(), "", "gone.txt")
-	if a.diffHover != 0 {
-		t.Fatalf("open without path: hover=%d, want 0", a.diffHover)
+	if diffOv(t, a).hover != 0 {
+		t.Fatalf("open without path: hover=%d, want 0", diffOv(t, a).hover)
 	}
-	openRect, _ := a.diffButtonRects()
+	openRect, _ := diffOv(t, a).buttonRects()
 	if openRect.w != 0 {
 		t.Fatal("no open path → no Open file button zone")
 	}
@@ -461,8 +478,8 @@ func TestHandleDiffKey_EnterOpensFocusedFile(t *testing.T) {
 	}
 	a := newTestApp(t, dir)
 	a.openDiffView("Diff · f.txt", sampleDiff(), target, target)
-	a.handleDiffKey(keyEv(tcell.KeyEnter, 0))
-	if a.diffOpen {
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+	if diffIsOpen(a) {
 		t.Fatal("Enter should close the diff view")
 	}
 	if tab := a.activeTabPtr(); tab == nil || tab.Path != target {
@@ -476,19 +493,19 @@ func TestHandleDiffKey_EnterOpensFocusedFile(t *testing.T) {
 func TestHandleDiffKey_TabDeclinesAction(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.openDiffView("Diff · f.txt", sampleDiff(), "/tmp/f.txt", "f.txt")
-	a.handleDiffKey(keyEv(tcell.KeyTab, 0))
-	if a.diffHover != 0 {
-		t.Fatalf("Tab should focus Close, hover=%d", a.diffHover)
+	a.handleKey(keyEv(tcell.KeyTab, 0))
+	if diffOv(t, a).hover != 0 {
+		t.Fatalf("Tab should focus Close, hover=%d", diffOv(t, a).hover)
 	}
 	tabsBefore := len(a.tabs)
-	a.handleDiffKey(keyEv(tcell.KeyEnter, 0))
-	if a.diffOpen || len(a.tabs) != tabsBefore {
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+	if diffIsOpen(a) || len(a.tabs) != tabsBefore {
 		t.Fatal("Enter on Close should dismiss without opening a tab")
 	}
 
 	a.openDiffView("Diff · f.txt", sampleDiff(), "/tmp/f.txt", "f.txt")
-	a.handleDiffKey(keyEv(tcell.KeyEsc, 0))
-	if a.diffOpen {
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	if diffIsOpen(a) {
 		t.Fatal("Esc should dismiss the diff view")
 	}
 }
@@ -509,18 +526,18 @@ func TestHandleDiffMouse_WheelAndButtons(t *testing.T) {
 	}
 	a.openDiffView("Diff · f.txt", long, target, target)
 
-	a.handleDiffMouse(50, 10, tcell.WheelDown)
-	if a.diffScroll != 3 || !a.diffOpen {
-		t.Fatalf("WheelDown should scroll and keep the modal, scroll=%d", a.diffScroll)
+	diffOv(t, a).HandleMouse(50, 10, tcell.WheelDown)
+	if diffOv(t, a).scroll != 3 || !diffIsOpen(a) {
+		t.Fatalf("WheelDown should scroll and keep the modal, scroll=%d", diffOv(t, a).scroll)
 	}
-	a.handleDiffMouse(50, 10, tcell.WheelUp)
-	if a.diffScroll != 0 {
-		t.Fatalf("WheelUp should scroll back, scroll=%d", a.diffScroll)
+	diffOv(t, a).HandleMouse(50, 10, tcell.WheelUp)
+	if diffOv(t, a).scroll != 0 {
+		t.Fatalf("WheelUp should scroll back, scroll=%d", diffOv(t, a).scroll)
 	}
 
-	openRect, _ := a.diffButtonRects()
-	a.handleDiffMouse(openRect.x+1, openRect.y, tcell.Button1)
-	if a.diffOpen {
+	openRect, _ := diffOv(t, a).buttonRects()
+	diffOv(t, a).HandleMouse(openRect.x+1, openRect.y, tcell.Button1)
+	if diffIsOpen(a) {
 		t.Fatal("clicking Open file should close the modal")
 	}
 	if tab := a.activeTabPtr(); tab == nil || tab.Path != target {
@@ -528,8 +545,8 @@ func TestHandleDiffMouse_WheelAndButtons(t *testing.T) {
 	}
 
 	a.openDiffView("Diff · f.txt", long, target, target)
-	a.handleDiffMouse(0, 0, tcell.Button1)
-	if a.diffOpen {
+	diffOv(t, a).HandleMouse(0, 0, tcell.Button1)
+	if diffIsOpen(a) {
 		t.Fatal("outside click should dismiss")
 	}
 }
@@ -541,20 +558,20 @@ func TestDiffSideBySide_AdaptsToWidth(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.openDiffView("Diff · f.txt", sampleDiff(), "", "f.txt")
 	a.width = 120
-	if !a.diffSideBySide() {
+	if !diffOv(t, a).sideBySide() {
 		t.Fatal("120 columns should render side-by-side")
 	}
 	a.width = 70
-	if a.diffSideBySide() {
+	if diffOv(t, a).sideBySide() {
 		t.Fatal("70 columns should fall back to unified")
 	}
 	// Unified counts raw lines (9) vs side-by-side rows (4): the clamp
 	// must use the active layout so scrolling can reach the raw tail.
-	if got := a.diffBodyCount(); got != len(sampleDiff()) {
+	if got := diffOv(t, a).bodyCount(); got != len(sampleDiff()) {
 		t.Fatalf("unified body count = %d, want %d", got, len(sampleDiff()))
 	}
 	a.width = 120
-	if got := a.diffBodyCount(); got != 4 {
+	if got := diffOv(t, a).bodyCount(); got != 4 {
 		t.Fatalf("side-by-side body count = %d, want 4", got)
 	}
 }
@@ -565,10 +582,10 @@ func TestDiffSideBySide_AdaptsToWidth(t *testing.T) {
 func TestDrawDiffView_SideBySideSmoke(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.openDiffView("Diff · f.txt", sampleDiff(), "", "f.txt")
-	a.drawDiffView()
+	diffOv(t, a).Draw(a.screen)
 	a.screen.Show()
 	scr := a.screen.(tcell.SimulationScreen)
-	_, my, _, _ := a.diffModalRect()
+	_, my, _, _ := diffOv(t, a).modalRect()
 	if title := screenLine(scr, my+1); !strings.Contains(title, "Diff · f.txt") {
 		t.Fatalf("title row: %q", title)
 	}
@@ -593,10 +610,10 @@ func TestDrawDiffView_NarrowFallsBackToUnified(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.width = 70
 	a.openDiffView("Diff · f.txt", sampleDiff(), "", "f.txt")
-	a.drawDiffView()
+	diffOv(t, a).Draw(a.screen)
 	a.screen.Show()
 	scr := a.screen.(tcell.SimulationScreen)
-	_, my, _, _ := a.diffModalRect()
+	_, my, _, _ := diffOv(t, a).modalRect()
 	body := ""
 	for i := 0; i < len(sampleDiff()); i++ {
 		body += screenLine(scr, my+3+i) + "\n"

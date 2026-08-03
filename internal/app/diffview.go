@@ -82,6 +82,24 @@ type diffRow struct {
 	RightEmph       span
 }
 
+// diffOverlay is the diff viewer's overlay: the raw and aligned diff,
+// precomputed context styles, scroll state, and the button focus. It is
+// bespoke — it needs the App for the git-panel diff walk, file opening,
+// and theme — and its state dies with it.
+type diffOverlay struct {
+	app       *App
+	title     string
+	raw       []string
+	rows      []diffRow
+	rowStyles [][]tcell.Style
+	openPath  string
+	maxLen    int
+	scroll    int
+	scrollX   int
+	// hover is the focused button: 0 = Close, 1 = Open file.
+	hover int
+}
+
 // diffSpan locates the changed portion of a modified line pair: the
 // longest common prefix and suffix are unchanged, and whatever sits
 // between differs. Returns the differing rune spans of old and new.
@@ -170,21 +188,15 @@ const diffHighlightCap = 4000
 // files); only its extension matters.
 func (a *App) openDiffView(title string, raw []string, openPath, langPath string) {
 	a.closeAllModals()
-	a.diffOpen = true
-	a.overlays.Open(diffOverlay{a})
-	a.diffTitle = title
-	a.diffRaw = raw
-	a.diffRows = parseSideBySideDiff(raw)
-	annotateDiffSpans(a.diffRows)
-	a.diffRowStyles = diffContextStyles(a.diffRows, langPath, a.theme)
-	a.diffMaxLen = diffLongestLine(a.diffRaw, a.diffRows)
-	a.diffOpenPath = openPath
-	a.diffScroll = 0
-	a.diffScrollX = 0
-	a.diffHover = 0
+	d := &diffOverlay{app: a, title: title, raw: raw, openPath: openPath}
+	d.rows = parseSideBySideDiff(raw)
+	annotateDiffSpans(d.rows)
+	d.rowStyles = diffContextStyles(d.rows, langPath, a.theme)
+	d.maxLen = diffLongestLine(d.raw, d.rows)
 	if openPath != "" {
-		a.diffHover = 1 // focus Open file so Enter is the fast path
+		d.hover = 1 // focus Open file so Enter is the fast path
 	}
+	a.overlays.Open(d)
 }
 
 // diffContextStyles precomputes Chroma syntax styles for the diff's
@@ -248,40 +260,41 @@ func diffLongestLine(raw []string, rows []diffRow) int {
 // handleDiffKey routes keyboard input while the diff view is open:
 // Esc dismisses, Enter activates the focused button, Tab/←/→ move
 // between buttons, and the usual scroll keys move the body.
-func (a *App) handleDiffKey(ev *tcell.EventKey) {
+func (d *diffOverlay) HandleKey(ev *tcell.EventKey) {
+	a := d.app
 	switch ev.Key() {
 	case tcell.KeyEsc:
 		a.closeAllModals()
 	case tcell.KeyEnter:
-		if a.diffHover == 1 && a.diffOpenPath != "" {
-			a.runDiffOpenFile()
+		if d.hover == 1 && d.openPath != "" {
+			d.openFileButton()
 		} else {
 			a.closeAllModals()
 		}
 	case tcell.KeyTab:
-		if a.diffOpenPath != "" {
-			a.diffHover = 1 - a.diffHover
+		if d.openPath != "" {
+			d.hover = 1 - d.hover
 		} else {
 			a.closeAllModals()
 		}
 	case tcell.KeyLeft:
-		a.scrollDiffH(-wheelCols)
+		d.scrollByH(-wheelCols)
 	case tcell.KeyRight:
-		a.scrollDiffH(wheelCols)
+		d.scrollByH(wheelCols)
 	case tcell.KeyUp:
 		if a.diffWalk(-1) {
 			return
 		}
-		a.scrollDiff(-1)
+		d.scrollBy(-1)
 	case tcell.KeyDown:
 		if a.diffWalk(1) {
 			return
 		}
-		a.scrollDiff(1)
+		d.scrollBy(1)
 	case tcell.KeyPgUp:
-		a.scrollDiff(-a.diffVisibleRows())
+		d.scrollBy(-d.visibleRows())
 	case tcell.KeyPgDn:
-		a.scrollDiff(a.diffVisibleRows())
+		d.scrollBy(d.visibleRows())
 	}
 }
 
@@ -292,38 +305,39 @@ func (a *App) handleDiffKey(ev *tcell.EventKey) {
 // comes from lastShiftAt — handleMouse stamps it before dispatching
 // here, and the sticky window bridges terminals that split the
 // modifier into its own event.
-func (a *App) handleDiffMouse(x, y int, btn tcell.ButtonMask) {
+func (d *diffOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
+	a := d.app
 	shift := !a.lastShiftAt.IsZero() && time.Since(a.lastShiftAt) < modifierStickyWindow
 	if btn&tcell.WheelUp != 0 {
 		if shift {
-			a.scrollDiffH(-wheelCols)
+			d.scrollByH(-wheelCols)
 		} else {
-			a.scrollDiff(-3)
+			d.scrollBy(-3)
 		}
 		return
 	}
 	if btn&tcell.WheelDown != 0 {
 		if shift {
-			a.scrollDiffH(wheelCols)
+			d.scrollByH(wheelCols)
 		} else {
-			a.scrollDiff(3)
+			d.scrollBy(3)
 		}
 		return
 	}
 	if btn&tcell.WheelLeft != 0 {
-		a.scrollDiffH(-wheelCols)
+		d.scrollByH(-wheelCols)
 		return
 	}
 	if btn&tcell.WheelRight != 0 {
-		a.scrollDiffH(wheelCols)
+		d.scrollByH(wheelCols)
 		return
 	}
-	mx, my, mw, mh := a.diffModalRect()
-	openRect, closeRect := a.diffButtonRects()
+	mx, my, mw, mh := d.modalRect()
+	openRect, closeRect := d.buttonRects()
 	if openRect.contains(x, y) {
-		a.diffHover = 1
+		d.hover = 1
 	} else if closeRect.contains(x, y) {
-		a.diffHover = 0
+		d.hover = 0
 	}
 	if btn&tcell.Button1 == 0 {
 		return
@@ -333,7 +347,7 @@ func (a *App) handleDiffMouse(x, y int, btn tcell.ButtonMask) {
 		return
 	}
 	if openRect.contains(x, y) {
-		a.runDiffOpenFile()
+		d.openFileButton()
 		return
 	}
 	if closeRect.contains(x, y) {
@@ -344,8 +358,9 @@ func (a *App) handleDiffMouse(x, y int, btn tcell.ButtonMask) {
 // runDiffOpenFile fires the Open file button: close the modal first
 // (capture-then-close, same as confirmYes) and jump to the first
 // changed line of the file the diff was showing.
-func (a *App) runDiffOpenFile() {
-	path := a.diffOpenPath
+func (d *diffOverlay) openFileButton() {
+	a := d.app
+	path := d.openPath
 	a.closeAllModals()
 	if path != "" {
 		a.openFileAtFirstChange(path)
@@ -356,17 +371,17 @@ func (a *App) runDiffOpenFile() {
 // active layout's row count. Delta 0 is a pure re-clamp — the draw
 // path calls it so a resize that flips the layout can't leave the
 // scroll pointing past the end.
-func (a *App) scrollDiff(delta int) {
-	max := a.diffBodyCount() - a.diffVisibleRows()
+func (d *diffOverlay) scrollBy(delta int) {
+	max := d.bodyCount() - d.visibleRows()
 	if max < 0 {
 		max = 0
 	}
-	a.diffScroll += delta
-	if a.diffScroll > max {
-		a.diffScroll = max
+	d.scroll += delta
+	if d.scroll > max {
+		d.scroll = max
 	}
-	if a.diffScroll < 0 {
-		a.diffScroll = 0
+	if d.scroll < 0 {
+		d.scroll = 0
 	}
 }
 
@@ -374,47 +389,48 @@ func (a *App) scrollDiff(delta int) {
 // aren't dead-ends. Clamped so the longest line can't scroll more than
 // a comfortable margin past the left edge — over-scrolling to a fully
 // blank body is disorienting.
-func (a *App) scrollDiffH(delta int) {
-	max := a.diffMaxLen - 10
+func (d *diffOverlay) scrollByH(delta int) {
+	max := d.maxLen - 10
 	if max < 0 {
 		max = 0
 	}
-	a.diffScrollX += delta
-	if a.diffScrollX > max {
-		a.diffScrollX = max
+	d.scrollX += delta
+	if d.scrollX > max {
+		d.scrollX = max
 	}
-	if a.diffScrollX < 0 {
-		a.diffScrollX = 0
+	if d.scrollX < 0 {
+		d.scrollX = 0
 	}
 }
 
 // diffSideBySide reports whether the current terminal is wide enough
 // for the two-column layout. Checked at draw and scroll time rather
 // than stored, so resizing the window adapts the view live.
-func (a *App) diffSideBySide() bool {
-	_, _, mw, _ := a.diffModalRect()
-	return mw-4 >= diffSideBySideMinBody && len(a.diffRows) > 0
+func (d *diffOverlay) sideBySide() bool {
+	_, _, mw, _ := d.modalRect()
+	return mw-4 >= diffSideBySideMinBody && len(d.rows) > 0
 }
 
 // diffBodyCount returns how many body rows the active layout has:
 // aligned rows side-by-side, raw diff lines unified.
-func (a *App) diffBodyCount() int {
-	if a.diffSideBySide() {
-		return len(a.diffRows)
+func (d *diffOverlay) bodyCount() int {
+	if d.sideBySide() {
+		return len(d.rows)
 	}
-	return len(a.diffRaw)
+	return len(d.raw)
 }
 
 // diffVisibleRows returns how many body rows fit in the modal.
-func (a *App) diffVisibleRows() int {
-	_, _, _, mh := a.diffModalRect()
+func (d *diffOverlay) visibleRows() int {
+	_, _, _, mh := d.modalRect()
 	return mh - 7
 }
 
 // diffModalRect returns the modal's on-screen rectangle. Diffs are the
 // content, not a notification, so the modal takes most of the screen —
 // which is also what makes room for two columns.
-func (a *App) diffModalRect() (x, y, w, h int) {
+func (d *diffOverlay) modalRect() (x, y, w, h int) {
+	a := d.app
 	w = a.width - 6
 	if w > diffModalMaxWidth {
 		w = diffModalMaxWidth
@@ -429,9 +445,9 @@ func (a *App) diffModalRect() (x, y, w, h int) {
 	if maxBody < 3 {
 		maxBody = 3
 	}
-	body := len(a.diffRows)
-	if len(a.diffRaw) > body {
-		body = len(a.diffRaw)
+	body := len(d.rows)
+	if len(d.raw) > body {
+		body = len(d.raw)
 	}
 	if body > maxBody {
 		body = maxBody
@@ -454,11 +470,11 @@ func (a *App) diffModalRect() (x, y, w, h int) {
 // diffButtonRects returns the button hit zones: Open file (when armed)
 // and Close, centered on the button row. Shared by draw and mouse so
 // the highlight and the click can't disagree.
-func (a *App) diffButtonRects() (open, closeBtn btnRect) {
-	mx, my, mw, mh := a.diffModalRect()
+func (d *diffOverlay) buttonRects() (open, closeBtn btnRect) {
+	mx, my, mw, mh := d.modalRect()
 	btnY := my + mh - 3
 	cw := runeLen("[ Close ]")
-	if a.diffOpenPath == "" {
+	if d.openPath == "" {
 		return btnRect{}, btnRect{x: mx + (mw-cw)/2, y: btnY, w: cw}
 	}
 	ow := runeLen("[ Open file ]")
@@ -478,56 +494,57 @@ func (a *App) diffButtonRects() (open, closeBtn btnRect) {
 //	N+1   blank
 //	N+2   buttons — [ Open file ]    [ Close ]
 //	N+3   bottom border
-func (a *App) drawDiffView() {
-	mx, my, mw, mh := a.diffModalRect()
+func (d *diffOverlay) Draw(scr tcell.Screen) {
+	a := d.app
+	mx, my, mw, mh := d.modalRect()
 	bg := a.theme.LineHL
 	bgStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
 	borderStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Subtle)
 	titleStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true)
 	mutedStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
 
-	fillRect(a.screen, mx, my, mw, mh, bgStyle)
-	drawBorder(a.screen, mx, my, mw, mh, borderStyle)
-	drawHDivider(a.screen, mx, my+2, mw, borderStyle)
+	fillRect(scr, mx, my, mw, mh, bgStyle)
+	drawBorder(scr, mx, my, mw, mh, borderStyle)
+	drawHDivider(scr, mx, my+2, mw, borderStyle)
 
-	drawAt(a.screen, mx+1, my+1, " "+a.diffTitle, titleStyle)
+	drawAt(scr, mx+1, my+1, " "+d.title, titleStyle)
 	hint := "esc "
-	drawAt(a.screen, mx+mw-1-runeLen(hint), my+1, hint, mutedStyle)
+	drawAt(scr, mx+mw-1-runeLen(hint), my+1, hint, mutedStyle)
 
-	a.scrollDiff(0)
+	d.scrollBy(0)
 	bodyX, bodyW := mx+2, mw-4
-	visible := a.diffVisibleRows()
-	if a.diffSideBySide() {
+	visible := d.visibleRows()
+	if d.sideBySide() {
 		for i := 0; i < visible; i++ {
-			idx := a.diffScroll + i
-			if idx >= len(a.diffRows) {
+			idx := d.scroll + i
+			if idx >= len(d.rows) {
 				break
 			}
-			a.drawDiffRowSideBySide(bodyX, my+3+i, bodyW, idx)
+			d.drawRowSideBySide(scr, bodyX, my+3+i, bodyW, idx)
 		}
 	} else {
 		for i := 0; i < visible; i++ {
-			idx := a.diffScroll + i
-			if idx >= len(a.diffRaw) {
+			idx := d.scroll + i
+			if idx >= len(d.raw) {
 				break
 			}
 			// Style from the full line (the +/-/@ prefix), display from
 			// the scrolled slice — so sideways scrolling never changes
 			// a line's color.
-			line := a.diffRaw[idx]
+			line := d.raw[idx]
 			st := overlay.DiffLineStyle(a.theme, bg, line)
-			drawAt(a.screen, bodyX, my+3+i, sliceRunes(line, a.diffScrollX, bodyW), st)
+			drawAt(scr, bodyX, my+3+i, sliceRunes(line, d.scrollX, bodyW), st)
 		}
 	}
 
-	openRect, closeRect := a.diffButtonRects()
-	if a.diffOpenPath != "" {
-		drawButton(a.screen, openRect.x, openRect.y, "[ Open file ]", bg, a.theme.Accent, a.diffHover == 1)
-		drawButton(a.screen, closeRect.x, closeRect.y, "[ Close ]", bg, a.theme.Text, a.diffHover == 0)
+	openRect, closeRect := d.buttonRects()
+	if d.openPath != "" {
+		drawButton(scr, openRect.x, openRect.y, "[ Open file ]", bg, a.theme.Accent, d.hover == 1)
+		drawButton(scr, closeRect.x, closeRect.y, "[ Close ]", bg, a.theme.Text, d.hover == 0)
 	} else {
-		drawButton(a.screen, closeRect.x, closeRect.y, "[ Close ]", bg, a.theme.Accent, true)
+		drawButton(scr, closeRect.x, closeRect.y, "[ Close ]", bg, a.theme.Accent, true)
 	}
-	a.screen.HideCursor()
+	scr.HideCursor()
 }
 
 // drawDiffRowSideBySide paints one aligned row: two line-number
@@ -535,17 +552,18 @@ func (a *App) drawDiffView() {
 // changed side takes the Git add/delete color; blank sides stay empty
 // so pure insertions and deletions read as gaps, the way VS Code
 // renders them. idx indexes diffRows/diffRowStyles.
-func (a *App) drawDiffRowSideBySide(x, y, w, idx int) {
-	row := a.diffRows[idx]
+func (d *diffOverlay) drawRowSideBySide(scr tcell.Screen, x, y, w, idx int) {
+	a := d.app
+	row := d.rows[idx]
 	bg := a.theme.LineHL
 	if row.Kind == diffRowFile {
 		fileStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true)
-		drawAt(a.screen, x, y, sliceRunes("▸ "+row.Left, 0, w), fileStyle)
+		drawAt(scr, x, y, sliceRunes("▸ "+row.Left, 0, w), fileStyle)
 		return
 	}
 	if row.Kind == diffRowHunk {
 		hunkStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.AccentSoft).Bold(true)
-		drawAt(a.screen, x, y, sliceRunes(row.Left, 0, w), hunkStyle)
+		drawAt(scr, x, y, sliceRunes(row.Left, 0, w), hunkStyle)
 		return
 	}
 
@@ -553,15 +571,15 @@ func (a *App) drawDiffRowSideBySide(x, y, w, idx int) {
 	rightW := w - 3 - leftW
 	rightX := x + leftW + 3
 	sepStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Subtle)
-	a.screen.SetContent(x+leftW+1, y, '│', nil, sepStyle)
+	scr.SetContent(x+leftW+1, y, '│', nil, sepStyle)
 
 	var ctx []tcell.Style
-	if idx < len(a.diffRowStyles) {
-		ctx = a.diffRowStyles[idx]
+	if idx < len(d.rowStyles) {
+		ctx = d.rowStyles[idx]
 	}
 	changed := row.Kind == diffRowChange
-	a.drawDiffSide(x, y, leftW, row.LeftNo, row.Left, changed, a.theme.GitDeleted, row.LeftEmph, ctx)
-	a.drawDiffSide(rightX, y, rightW, row.RightNo, row.Right, changed, a.theme.GitAdded, row.RightEmph, ctx)
+	d.drawSide(scr, x, y, leftW, row.LeftNo, row.Left, changed, a.theme.GitDeleted, row.LeftEmph, ctx)
+	d.drawSide(scr, rightX, y, rightW, row.RightNo, row.Right, changed, a.theme.GitAdded, row.RightEmph, ctx)
 }
 
 // drawDiffSide paints one half of a side-by-side row: a muted line
@@ -570,7 +588,8 @@ func (a *App) drawDiffRowSideBySide(x, y, w, idx int) {
 // ones, and reverse video over the intra-line span that actually
 // differs on paired modifications. The horizontal scroll offset slides
 // the text only; gutters stay put.
-func (a *App) drawDiffSide(x, y, w, lineNo int, text string, changed bool, changeColor tcell.Color, emph span, ctx []tcell.Style) {
+func (d *diffOverlay) drawSide(scr tcell.Screen, x, y, w, lineNo int, text string, changed bool, changeColor tcell.Color, emph span, ctx []tcell.Style) {
+	a := d.app
 	if lineNo == 0 {
 		return // blank side of a pure addition or deletion
 	}
@@ -581,14 +600,14 @@ func (a *App) drawDiffSide(x, y, w, lineNo int, text string, changed bool, chang
 		base = tcell.StyleDefault.Background(bg).Foreground(changeColor)
 	}
 	no := itoa(lineNo)
-	drawAt(a.screen, x+diffNoGutter-1-runeLen(no)-1, y, no+" ", noStyle)
+	drawAt(scr, x+diffNoGutter-1-runeLen(no)-1, y, no+" ", noStyle)
 	tw := w - diffNoGutter
 	if tw <= 0 {
 		return
 	}
 	runes := []rune(text)
 	for col := 0; col < tw; col++ {
-		i := a.diffScrollX + col
+		i := d.scrollX + col
 		if i >= len(runes) {
 			break
 		}
@@ -599,7 +618,7 @@ func (a *App) drawDiffSide(x, y, w, lineNo int, text string, changed bool, chang
 		if changed && emph.End > emph.Start && i >= emph.Start && i < emph.End {
 			st = st.Reverse(true)
 		}
-		a.screen.SetContent(x+diffNoGutter+col, y, runes[i], nil, st)
+		scr.SetContent(x+diffNoGutter+col, y, runes[i], nil, st)
 	}
 }
 

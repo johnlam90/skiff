@@ -262,23 +262,23 @@ func TestGitPanelClick_ShowsDiffWithOpenButton(t *testing.T) {
 	a, modified, _ := dirtyRepoApp(t)
 	a.toggleGitPanel()
 	a.gitPanelClick(5, gitPanelListTop) // first row: modified.txt
-	if !a.diffOpen {
+	if !diffIsOpen(a) {
 		t.Fatal("row click should open the diff view")
 	}
-	if !strings.Contains(a.diffTitle, "modified.txt") {
-		t.Fatalf("diff title should carry the file name, got %q", a.diffTitle)
+	if !strings.Contains(diffOv(t, a).title, "modified.txt") {
+		t.Fatalf("diff title should carry the file name, got %q", diffOv(t, a).title)
 	}
-	body := strings.Join(a.diffRaw, "\n")
+	body := strings.Join(diffOv(t, a).raw, "\n")
 	if !strings.Contains(body, "-two") || !strings.Contains(body, "+TWO") {
 		t.Fatalf("diff body should show the change, got:\n%s", body)
 	}
-	if a.diffOpenPath != modified || a.diffHover != 1 {
+	if diffOv(t, a).openPath != modified || diffOv(t, a).hover != 1 {
 		t.Fatalf("Open file should be armed and focused, path=%q hover=%d",
-			a.diffOpenPath, a.diffHover)
+			diffOv(t, a).openPath, diffOv(t, a).hover)
 	}
 
-	a.handleDiffKey(keyEv(tcell.KeyEnter, 0))
-	if a.diffOpen {
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+	if diffIsOpen(a) {
 		t.Fatal("Enter should close the diff view")
 	}
 	tab := a.activeTabPtr()
@@ -298,14 +298,14 @@ func TestGitPanelClick_UntrackedShowsAllAddedDiff(t *testing.T) {
 	a, _, untracked := dirtyRepoApp(t)
 	a.toggleGitPanel()
 	a.gitPanelClick(5, gitPanelListTop+1) // second row: untracked.txt
-	if !a.diffOpen {
+	if !diffIsOpen(a) {
 		t.Fatal("row click should open the diff view")
 	}
-	body := strings.Join(a.diffRaw, "\n")
+	body := strings.Join(diffOv(t, a).raw, "\n")
 	if !strings.Contains(body, "+new") {
 		t.Fatalf("untracked diff should show the file as added, got:\n%s", body)
 	}
-	if a.diffOpenPath != untracked {
+	if diffOv(t, a).openPath != untracked {
 		t.Fatal("untracked files exist on disk — Open file should be armed")
 	}
 }
@@ -329,13 +329,13 @@ func TestGitPanelClick_DeletedHasNoOpenButton(t *testing.T) {
 		t.Fatalf("expected one deleted row, got %+v", a.gitPanelRows)
 	}
 	a.gitPanelClick(5, gitPanelListTop)
-	if !a.diffOpen {
+	if !diffIsOpen(a) {
 		t.Fatal("deleted row should open the diff view")
 	}
-	if a.diffOpenPath != "" {
+	if diffOv(t, a).openPath != "" {
 		t.Fatal("deleted files must not arm Open file")
 	}
-	body := strings.Join(a.diffRaw, "\n")
+	body := strings.Join(diffOv(t, a).raw, "\n")
 	if !strings.Contains(body, "-so long") {
 		t.Fatalf("diff body should show the removed line, got %q", body)
 	}
@@ -375,7 +375,7 @@ func TestGitPanelClick_IgnoresChrome(t *testing.T) {
 	a, _, _ := dirtyRepoApp(t)
 	a.toggleGitPanel()
 	a.gitPanelClick(5, 50)
-	if a.diffOpen || confirmIsOpen(a) {
+	if diffIsOpen(a) || confirmIsOpen(a) {
 		t.Fatal("clicks below the list should not open anything")
 	}
 }
@@ -578,17 +578,17 @@ func TestDiffWalk_ArrowsMoveBetweenFiles(t *testing.T) {
 	if a.diffPanelRow != 0 {
 		t.Fatalf("panel click should arm walking, got %d", a.diffPanelRow)
 	}
-	a.handleDiffKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
-	if a.diffPanelRow != 1 || !strings.Contains(a.diffTitle, "untracked.txt") {
-		t.Fatalf("down should walk to the next file, row %d title %q", a.diffPanelRow, a.diffTitle)
+	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	if a.diffPanelRow != 1 || !strings.Contains(diffOv(t, a).title, "untracked.txt") {
+		t.Fatalf("down should walk to the next file, row %d title %q", a.diffPanelRow, diffOv(t, a).title)
 	}
-	a.handleDiffKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
 	if a.diffPanelRow != 1 {
 		t.Fatalf("walk should clamp at the last file, got %d", a.diffPanelRow)
 	}
-	a.handleDiffKey(tcell.NewEventKey(tcell.KeyUp, 0, 0))
-	if !strings.Contains(a.diffTitle, "modified.txt") {
-		t.Fatalf("up should walk back, title %q", a.diffTitle)
+	a.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, 0))
+	if !strings.Contains(diffOv(t, a).title, "modified.txt") {
+		t.Fatalf("up should walk back, title %q", diffOv(t, a).title)
 	}
 	if a.gitPanelSelected != 0 {
 		t.Fatalf("panel selection should track the walk, got %d", a.gitPanelSelected)

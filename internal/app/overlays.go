@@ -56,12 +56,8 @@ func (o menuOverlay) Draw(tcell.Screen) { o.a.drawMenu() }
 // The finder is a bespoke overlay implementing the contract directly —
 // see finder.go's finderOverlay.
 
-// diffOverlay routes the side-by-side diff viewer.
-type diffOverlay struct{ a *App }
-
-func (o diffOverlay) HandleKey(ev *tcell.EventKey)               { o.a.handleDiffKey(ev) }
-func (o diffOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) { o.a.handleDiffMouse(x, y, btn) }
-func (o diffOverlay) Draw(tcell.Screen)                          { o.a.drawDiffView() }
+// The diff viewer is a bespoke overlay implementing the contract
+// directly — see diffview.go's diffOverlay.
 
 // The git log is a bespoke overlay implementing the contract directly —
 // see gitlog.go's gitLogOverlay.

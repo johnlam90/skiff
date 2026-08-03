@@ -57,16 +57,6 @@ func (a *App) closeAllModals() {
 	a.projFindFolded = nil
 	a.projFindBusy = false
 	a.hoveredMenuRow = -1
-	a.diffOpen = false
-	a.diffTitle = ""
-	a.diffRaw = nil
-	a.diffRows = nil
-	a.diffOpenPath = ""
-	a.diffScroll = 0
-	a.diffScrollX = 0
-	a.diffHover = 0
-	a.diffRowStyles = nil
-	a.diffMaxLen = 0
 	a.dragMode = ""
 	a.stopAutoScroll()
 }
