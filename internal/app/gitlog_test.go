@@ -20,6 +20,23 @@ import (
 	"github.com/gdamore/tcell/v2"
 )
 
+// gitLogOv returns the open commit-history overlay, failing the test
+// when none is up.
+func gitLogOv(t *testing.T, a *App) *gitLogOverlay {
+	t.Helper()
+	g, ok := a.overlays.Top().(*gitLogOverlay)
+	if !ok {
+		t.Fatalf("no git log overlay open; top = %T", a.overlays.Top())
+	}
+	return g
+}
+
+// gitLogIsOpen reports whether the commit-history overlay is up.
+func gitLogIsOpen(a *App) bool {
+	_, ok := a.overlays.Top().(*gitLogOverlay)
+	return ok
+}
+
 // historyRepoApp builds a test App over a repo with two commits: c1
 // creates both a.txt and b.txt, c2 modifies only a.txt. That shape
 // distinguishes branch history (2 commits) from b.txt's file history
@@ -103,14 +120,14 @@ func TestLoadGitCommitDiff_WholeAndScoped(t *testing.T) {
 func TestOpenGitLog_ListsCommitsAndEmptyFlashes(t *testing.T) {
 	a, _, _ := historyRepoApp(t)
 	a.openGitLog("History · main", "")
-	if !a.gitLogOpen || len(a.gitLogEntries) != 2 {
-		t.Fatalf("open=%v entries=%d, want open with 2", a.gitLogOpen, len(a.gitLogEntries))
+	if !gitLogIsOpen(a) || len(gitLogOv(t, a).entries) != 2 {
+		t.Fatalf("want open with 2 entries, top=%T", a.overlays.Top())
 	}
-	a.closeGitLog()
+	pressEsc(a)
 
 	empty := newTestApp(t, t.TempDir())
 	empty.openGitLog("History", "")
-	if empty.gitLogOpen {
+	if gitLogIsOpen(empty) {
 		t.Fatal("no history should not open the modal")
 	}
 	if !strings.Contains(empty.statusMsg, "No commit history") {
@@ -124,9 +141,9 @@ func TestOpenGitLog_ListsCommitsAndEmptyFlashes(t *testing.T) {
 func TestActivateGitLogRow_OpensCommitDiff(t *testing.T) {
 	a, _, _ := historyRepoApp(t)
 	a.openGitLog("History · main", "")
-	a.gitLogSelected = 1 // c1 — the two-file commit
-	a.handleGitLogKey(keyEv(tcell.KeyEnter, 0))
-	if a.gitLogOpen {
+	gitLogOv(t, a).selected = 1 // c1 — the two-file commit
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+	if gitLogIsOpen(a) {
 		t.Fatal("activation should close the history modal")
 	}
 	if !a.diffOpen {
@@ -158,10 +175,10 @@ func TestMenuFileHistory_ScopesToActiveTab(t *testing.T) {
 		t.Fatal("row should be enabled for a file tab in a repo")
 	}
 	a.menuFileHistory()
-	if !a.gitLogOpen || len(a.gitLogEntries) != 1 {
-		t.Fatalf("open=%v entries=%d, want open with 1", a.gitLogOpen, len(a.gitLogEntries))
+	if !gitLogIsOpen(a) || len(gitLogOv(t, a).entries) != 1 {
+		t.Fatalf("want open with 1 entry, top=%T", a.overlays.Top())
 	}
-	a.handleGitLogKey(keyEv(tcell.KeyEnter, 0))
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
 	if !a.diffOpen || !strings.Contains(a.diffTitle, "b.txt") {
 		t.Fatalf("diff should open scoped to b.txt, title %q", a.diffTitle)
 	}
@@ -208,21 +225,23 @@ func TestGitPanelClick_BranchRowOpensPicker(t *testing.T) {
 func TestHandleGitLogMouse_HoverClickAndDismiss(t *testing.T) {
 	a, _, _ := historyRepoApp(t)
 	a.openGitLog("History · main", "")
-	mx, my, _, _ := a.gitLogModalRect()
+	g := gitLogOv(t, a)
+	gr := g.rect()
+	mx, my := gr.X, gr.Y
 
-	a.handleGitLogMouse(mx+4, my+4, 0) // hover row 1
-	if a.gitLogSelected != 1 {
-		t.Fatalf("hover should select row 1, got %d", a.gitLogSelected)
+	g.HandleMouse(mx+4, my+4, 0) // hover row 1
+	if g.selected != 1 {
+		t.Fatalf("hover should select row 1, got %d", g.selected)
 	}
-	a.handleGitLogMouse(mx+4, my+4, tcell.Button1)
-	if a.gitLogOpen || !a.diffOpen {
+	g.HandleMouse(mx+4, my+4, tcell.Button1)
+	if gitLogIsOpen(a) || !a.diffOpen {
 		t.Fatal("click should activate the row")
 	}
 
 	a.closeAllModals()
 	a.openGitLog("History · main", "")
-	a.handleGitLogMouse(mx-2, my-2, tcell.Button1)
-	if a.gitLogOpen {
+	gitLogOv(t, a).HandleMouse(mx-2, my-2, tcell.Button1)
+	if gitLogIsOpen(a) {
 		t.Fatal("outside click should dismiss")
 	}
 }
@@ -230,14 +249,14 @@ func TestHandleGitLogMouse_HoverClickAndDismiss(t *testing.T) {
 // TestScrollGitLog_Clamps pins the wheel bounds on a long history.
 func TestScrollGitLog_Clamps(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	a.gitLogEntries = make([]gitLogEntry, 40)
-	a.scrollGitLog(1000)
-	if want := 40 - gitLogVisible; a.gitLogScroll != want {
-		t.Fatalf("scroll past end: got %d, want %d", a.gitLogScroll, want)
+	g := &gitLogOverlay{app: a, entries: make([]gitLogEntry, 40)}
+	g.scrollBy(1000)
+	if want := 40 - gitLogVisible; g.scroll != want {
+		t.Fatalf("scroll past end: got %d, want %d", g.scroll, want)
 	}
-	a.scrollGitLog(-1000)
-	if a.gitLogScroll != 0 {
-		t.Fatalf("scroll past top: got %d, want 0", a.gitLogScroll)
+	g.scrollBy(-1000)
+	if g.scroll != 0 {
+		t.Fatalf("scroll past top: got %d, want 0", g.scroll)
 	}
 }
 
@@ -246,15 +265,15 @@ func TestScrollGitLog_Clamps(t *testing.T) {
 func TestDrawGitLog_Smoke(t *testing.T) {
 	a, _, _ := historyRepoApp(t)
 	a.openGitLog("History · main", "")
-	a.drawGitLog()
+	gitLogOv(t, a).Draw(a.screen)
 	a.screen.Show()
 	scr := a.screen.(tcell.SimulationScreen)
-	_, my, _, _ := a.gitLogModalRect()
+	my := gitLogOv(t, a).rect().Y
 	if title := screenLine(scr, my+1); !strings.Contains(title, "History · main") {
 		t.Fatalf("title row: %q", title)
 	}
 	row0 := screenLine(scr, my+3)
-	if !strings.Contains(row0, a.gitLogEntries[0].SHA) || !strings.Contains(row0, "c2") {
+	if !strings.Contains(row0, gitLogOv(t, a).entries[0].SHA) || !strings.Contains(row0, "c2") {
 		t.Fatalf("row 0 should show SHA and subject: %q", row0)
 	}
 	if !strings.Contains(row0, "ago") {

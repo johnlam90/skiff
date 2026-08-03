@@ -63,9 +63,5 @@ func (o diffOverlay) HandleKey(ev *tcell.EventKey)               { o.a.handleDif
 func (o diffOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) { o.a.handleDiffMouse(x, y, btn) }
 func (o diffOverlay) Draw(tcell.Screen)                          { o.a.drawDiffView() }
 
-// gitLogOverlay routes the commit-history list.
-type gitLogOverlay struct{ a *App }
-
-func (o gitLogOverlay) HandleKey(ev *tcell.EventKey)               { o.a.handleGitLogKey(ev) }
-func (o gitLogOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) { o.a.handleGitLogMouse(x, y, btn) }
-func (o gitLogOverlay) Draw(tcell.Screen)                          { o.a.drawGitLog() }
+// The git log is a bespoke overlay implementing the contract directly —
+// see gitlog.go's gitLogOverlay.

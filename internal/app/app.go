@@ -610,15 +610,8 @@ type App struct {
 	diffRowStyles [][]tcell.Style
 	diffMaxLen    int
 
-	// Commit history modal state — the branch log or a single file's
-	// log (gitLogPath non-empty), opened from the ≡ menu or the Git
-	// panel's branch row. Enter/click opens the commit's diff.
-	gitLogOpen     bool
-	gitLogTitle    string
-	gitLogPath     string
-	gitLogEntries  []gitLogEntry
-	gitLogSelected int
-	gitLogScroll   int
+	// The commit-history list is a bespoke overlay (gitlog.go's
+	// gitLogOverlay) that owns its transient state.
 
 	quit bool
 }

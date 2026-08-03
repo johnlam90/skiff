@@ -67,12 +67,6 @@ func (a *App) closeAllModals() {
 	a.diffHover = 0
 	a.diffRowStyles = nil
 	a.diffMaxLen = 0
-	a.gitLogOpen = false
-	a.gitLogEntries = nil
-	a.gitLogTitle = ""
-	a.gitLogPath = ""
-	a.gitLogSelected = 0
-	a.gitLogScroll = 0
 	a.dragMode = ""
 	a.stopAutoScroll()
 }

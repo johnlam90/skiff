@@ -117,9 +117,9 @@ func TestCloseGitLog_PopsOverlay(t *testing.T) {
 	if !a.overlays.IsOpen() {
 		t.Fatal("openGitLog should have pushed onto the stack")
 	}
-	a.closeGitLog()
+	pressEsc(a)
 	if a.overlays.IsOpen() {
-		t.Fatal("closeGitLog must pop the git log overlay")
+		t.Fatal("Esc must pop the git log overlay")
 	}
 }
 
