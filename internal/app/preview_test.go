@@ -13,6 +13,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -127,5 +128,26 @@ func TestOpenFilePinsExistingPreview(t *testing.T) {
 	a.openFile(p1)
 	if a.tabs.At(0).IsPreview() {
 		t.Fatal("permanent open should pin the existing preview")
+	}
+}
+
+// TestOpenFile_BinaryFlashesInsteadOfFreezing pins the app-level
+// behavior for the freeze report: clicking a zip in the tree must not
+// open a tab at all — the user gets a flash naming the problem, and
+// the editor keeps breathing.
+func TestOpenFile_BinaryFlashesInsteadOfFreezing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bundle.zip")
+	data := append([]byte("PK\x03\x04"), make([]byte, 4096)...)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(path)
+	if a.tabs.Len() != 0 {
+		t.Fatalf("binary file must not open a tab, got %d tabs", a.tabs.Len())
+	}
+	if !strings.Contains(a.statusMsg, "binary") {
+		t.Fatalf("flash should name the problem, got %q", a.statusMsg)
 	}
 }

@@ -8,6 +8,8 @@
 package editor
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	"os"
@@ -154,6 +156,23 @@ type Tab struct {
 // matching what most editors do when you "open" a brand-new file path.
 // When path looks like an image we recognise (PNG / JPEG / GIF), the tab
 // is opened in read-only image-preview mode instead of as text.
+// ErrBinaryFile marks a refusal to open non-text content into a text
+// buffer. Callers surface it as a flash; image formats never hit it —
+// they take the image-tab path first.
+var ErrBinaryFile = errors.New("looks like a binary file")
+
+// looksBinary applies git's own heuristic: a NUL byte in the first 8KB
+// means binary. UTF-8 text of any language never contains NUL, so
+// multibyte files sail through; UTF-16 is refused, exactly as git
+// refuses to diff it.
+func looksBinary(data []byte) bool {
+	probe := data
+	if len(probe) > 8192 {
+		probe = probe[:8192]
+	}
+	return bytes.IndexByte(probe, 0) >= 0
+}
+
 func NewTab(path string) (*Tab, error) {
 	if path != "" && isImageExt(path) {
 		return newImageTab(path)
@@ -164,6 +183,14 @@ func NewTab(path string) (*Tab, error) {
 		b, err := os.ReadFile(path)
 		if err != nil && !os.IsNotExist(err) {
 			return nil, err
+		}
+		if looksBinary(b) {
+			// A text buffer must never load binary content: every
+			// downstream stage — Chroma lexing, per-rune style grids,
+			// soft-wrap math — scales with line length, and binary data
+			// has pathological "lines". Opening a large zip used to
+			// freeze the editor outright.
+			return nil, fmt.Errorf("%s: %w", filepath.Base(path), ErrBinaryFile)
 		}
 		data = b
 		// Record the on-disk mtime so the app can detect external edits

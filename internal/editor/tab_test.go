@@ -14,6 +14,7 @@
 package editor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1345,5 +1346,43 @@ func TestRenderScrollReusesHighlightCache(t *testing.T) {
 	}
 	if len(tab.Styles[8]) == 1 && tab.hlWinStart <= 8 {
 		t.Fatal("window did not move with the viewport")
+	}
+}
+
+// TestNewTab_RefusesBinaryFiles pins the open gate: a binary file (a
+// zip, a misnamed executable) must not load into a text buffer — every
+// downstream stage (Chroma lexing, per-rune style grids, wrap math)
+// scales with line length, and binary content has pathological lines.
+// On a real machine this manifested as a full editor freeze: multi-
+// second highlights snowballing behind tcell's mouse-motion events
+// until even Esc-q could not get through.
+func TestNewTab_RefusesBinaryFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.zip")
+	// PK\x03\x04 header followed by NUL-laden compressed bytes.
+	data := append([]byte("PK\x03\x04"), make([]byte, 4096)...)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := NewTab(path); !errors.Is(err, ErrBinaryFile) {
+		t.Fatalf("want ErrBinaryFile, got %v", err)
+	}
+}
+
+// TestNewTab_KeepsMultibyteTextOpenable guards the heuristic's other
+// side: UTF-8 text (no NUL bytes, whatever the language) must still
+// open normally.
+func TestNewTab_KeepsMultibyteTextOpenable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "höhe.txt")
+	if err := os.WriteFile(path, []byte("höhe — 高さ\nplain line\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("multibyte text must open, got %v", err)
+	}
+	if len(tab.Buffer.Lines) < 2 {
+		t.Fatalf("buffer looks wrong: %d lines", len(tab.Buffer.Lines))
 	}
 }
