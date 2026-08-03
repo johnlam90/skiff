@@ -67,8 +67,9 @@ type contextItem struct {
 // drag / auto-scroll state. Every "open this modal" helper calls it first
 // so the modals stay mutually exclusive and a stale drag from before the
 // modal opened can't keep extending a selection underneath it. The find
-// bar is closed too — opening a modal should never leave it taking
-// keystrokes underneath the modal.
+// bar is torn down through closeFind — one teardown path — so the
+// replace row and the tab's match highlights go with it rather than
+// staying armed under the modal.
 func (a *App) closeAllModals() {
 	a.menuOpen = false
 	a.promptOpen = false
@@ -76,11 +77,8 @@ func (a *App) closeAllModals() {
 	a.contextOpen = false
 	a.dirtyOpen = false
 	a.formOpen = false
-	a.findOpen = false
 	a.finderOpen = false
-	a.findValue = nil
-	a.findCursor = 0
-	a.findScroll = 0
+	a.closeFind()
 	a.diffPanelRow = -1
 	// A modal opening over a list picker cancels it properly so a
 	// preview hook (the theme picker's live preview) gets reverted
@@ -137,14 +135,14 @@ func (a *App) closeAllModals() {
 	a.stopAutoScroll()
 }
 
-// anyModalOpen reports whether any modal is on screen. Used by the main
-// event router to short-circuit normal editor input. The find bar is
-// included so click-through behaviour matches the modals — a click into
-// the editor body while the bar is up still routes to the editor (which
-// is what the user wants), but a key/mouse handler can use this to know
-// "is the user mid-task in some overlay surface".
+// anyModalOpen reports whether an overlay — a floating surface that
+// captures all input — is on screen. Strips (the find bar, the
+// project-find bar) are deliberately absent: they pass mouse through so
+// the editor stays interactive underneath them, and counting them here
+// would suppress editor behaviours (drag auto-scroll) that must keep
+// working while a strip is up. See docs/adr/0001-strips-are-not-overlays.md.
 func (a *App) anyModalOpen() bool {
-	return a.menuOpen || a.promptOpen || a.confirmOpen || a.contextOpen || a.dirtyOpen || a.formOpen || a.findOpen || a.finderOpen || a.diffOpen || a.gitLogOpen
+	return a.menuOpen || a.promptOpen || a.confirmOpen || a.contextOpen || a.dirtyOpen || a.formOpen || a.finderOpen || a.listPickOpen || a.diffOpen || a.gitLogOpen
 }
 
 // -----------------------------------------------------------------------------

@@ -1296,3 +1296,62 @@ func TestDirtyButtonAtRelX_HitsAndMisses(t *testing.T) {
 		}
 	}
 }
+
+// TestCloseAllModals_ClearsReplaceState pins the full find/replace
+// teardown. Opening a modal over a find-with-replace used to reset only
+// the find fields, leaving the replace row armed (replaceOpen,
+// findFocusReplace, stale text) for the next Esc-g and the tab's match
+// highlights painted under the modal. closeAllModals must tear down the
+// whole family, exactly like closeFind.
+func TestCloseAllModals_ClearsReplaceState(t *testing.T) {
+	a := seedFindApp(t, "foo bar foo\n")
+	a.openFind()
+	a.findValue = []rune("foo")
+	a.findApplyQuery()
+	a.replaceOpen = true
+	a.findFocusReplace = true
+	a.replaceValue = []rune("qux")
+	a.replaceCursor = 3
+	a.replaceScroll = 1
+
+	a.closeAllModals()
+
+	if a.replaceOpen || a.findFocusReplace {
+		t.Fatal("replace row must not stay armed after closeAllModals")
+	}
+	if a.replaceValue != nil || a.replaceCursor != 0 || a.replaceScroll != 0 {
+		t.Fatalf("replace field state leaked: value=%q cursor=%d scroll=%d",
+			string(a.replaceValue), a.replaceCursor, a.replaceScroll)
+	}
+	if tab := a.activeTabPtr(); tab != nil && tab.FindQuery != "" {
+		t.Fatalf("tab find highlights leaked: %q", tab.FindQuery)
+	}
+}
+
+// TestAnyModalOpen_ListPickIsOverlay pins the list picker's membership:
+// it floats over the editor and captures all input, so the auto-scroll
+// guard (and any future caller) must see it. Its omission left the
+// guard able to keep scrolling under the picker.
+func TestAnyModalOpen_ListPickIsOverlay(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.openListPick("Pick", []listPickItem{{Label: "one"}}, func(*App, int) {}, nil, nil)
+	if !a.anyModalOpen() {
+		t.Fatal("list picker is an overlay; anyModalOpen must report it")
+	}
+}
+
+// TestAnyModalOpen_FindStripIsNotOverlay pins the strip/overlay split
+// (ADR-0001): the find bar deliberately passes mouse through so the
+// user can keep drag-selecting in the editor while it's open. Counting
+// it as a modal silently disabled auto-scroll during exactly those
+// drags.
+func TestAnyModalOpen_FindStripIsNotOverlay(t *testing.T) {
+	a := seedFindApp(t, "hello\n")
+	a.openFind()
+	if !a.findOpen {
+		t.Fatal("precondition: find bar should be open")
+	}
+	if a.anyModalOpen() {
+		t.Fatal("the find bar is a strip, not an overlay; it must not suppress editor input")
+	}
+}
