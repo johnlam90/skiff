@@ -204,10 +204,14 @@ func (a *App) openTreeContext(n *filetree.Node, x, y int) {
 // openPopup places and opens an anchored action popup — the shared tail
 // of the tree context menu and the git extras menu.
 func (a *App) openPopup(items []overlay.PopupItem, x, y int) {
+	w := overlay.PopupWidth(items, contextMenuWidth)
+	if w > a.width-2 {
+		w = a.width - 2
+	}
 	pop := &overlay.Popup{
 		Items: items,
 		Theme: a.theme,
-		At:    overlay.PlacePopup(a.width, a.height, x, y, contextMenuWidth, len(items)),
+		At:    overlay.PlacePopup(a.width, a.height, x, y, w, len(items)),
 	}
 	pop.Close = func() { a.closeAllModals() }
 	a.overlays.Open(pop)

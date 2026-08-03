@@ -39,6 +39,21 @@ type Popup struct {
 	Close func()
 }
 
+// PopupWidth returns the width a popup needs to show every label in
+// full — the chevron indent on the left, a padding cell and the border
+// on the right — never narrower than min. Sizing to content is what
+// keeps a long label ("Compare against…") from painting past the
+// border into whatever sits behind the popup.
+func PopupWidth(items []PopupItem, min int) int {
+	w := min
+	for _, it := range items {
+		if n := 4 + runeLen(it.Label) + 2; n > w {
+			w = n
+		}
+	}
+	return w
+}
+
 // PlacePopup anchors a w-wide, count-row popup at click point (x, y) on
 // a scrW×scrH screen. It flips left or up when the popup would fall off
 // the right or bottom edge, and clamps to the origin.
@@ -137,15 +152,18 @@ func (p *Popup) Draw(scr tcell.Screen) {
 			drawHDivider(scr, r.X, cy, r.W, borderStyle)
 			continue
 		}
+		// Labels clip at the border: a clamped-width popup on a tiny
+		// screen must never leak text over what sits behind it.
+		labelW := r.W - 4 - 1
 		if i == p.Hover {
 			for cx := r.X + 1; cx < r.X+r.W-1; cx++ {
 				scr.SetContent(cx, cy, ' ', nil, hoverStyle)
 			}
 			drawText(scr, r.X+2, cy, "▸", hoverChevStyle)
-			drawText(scr, r.X+4, cy, item.Label, hoverStyle)
+			drawClippedText(scr, r.X+4, cy, labelW, item.Label, hoverStyle)
 		} else {
 			drawText(scr, r.X+2, cy, "▸", chevStyle)
-			drawText(scr, r.X+4, cy, item.Label, bgStyle)
+			drawClippedText(scr, r.X+4, cy, labelW, item.Label, bgStyle)
 		}
 	}
 	scr.HideCursor()

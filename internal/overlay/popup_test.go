@@ -167,3 +167,43 @@ func TestPopup_DividersAreInert(t *testing.T) {
 		t.Fatalf("divider row should draw a rule, got %q", got)
 	}
 }
+
+// TestPopupWidth_FitsLongestLabel pins the auto-width contract: the
+// popup is sized to its content (chevron indent + label + padding),
+// never narrower than min — a fixed width chose for short labels let
+// long ones paint past the border into the editor.
+func TestPopupWidth_FitsLongestLabel(t *testing.T) {
+	items := []PopupItem{
+		{Label: "Fetch"},
+		{Divider: true},
+		{Label: "Compare against…"},
+	}
+	got := PopupWidth(items, 19)
+	if want := 4 + 16 + 2; got != want {
+		t.Fatalf("width = %d, want %d", got, want)
+	}
+	if got := PopupWidth([]PopupItem{{Label: "x"}}, 19); got != 19 {
+		t.Fatalf("short labels keep the minimum, got %d", got)
+	}
+}
+
+// TestPopup_DrawClipsLabelsToBorder pins the belt: even when a label is
+// wider than the popup (a clamped width on a tiny screen), it clips at
+// the border instead of leaking over whatever sits behind.
+func TestPopup_DrawClipsLabelsToBorder(t *testing.T) {
+	scr := simScreen(t)
+	p := &Popup{
+		Theme: theme.Default(),
+		At:    Rect{X: 5, Y: 3, W: 12, H: 3},
+		Items: []PopupItem{{Label: "much-too-long-label"}},
+	}
+	p.Close = func() {}
+	p.Draw(scr)
+	scr.Show()
+	if got := cellAt(scr, 5+12-1, 4); got != '│' {
+		t.Fatalf("right border must survive a long label, got %q", got)
+	}
+	if got := cellAt(scr, 5+12, 4); got == 'l' || got == 'a' || got == 'b' {
+		t.Fatalf("label leaked past the border: %q", got)
+	}
+}
