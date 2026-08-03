@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/overlay"
 )
 
 // gitOpDoneEvent carries a finished git mutation back onto the main
@@ -659,22 +659,16 @@ func (a *App) menuGitExtras() {
 // the ≡ menu row (centered) and the Git panel's ⋯ button (anchored).
 func (a *App) openGitExtras(x, y int) {
 	a.closeAllModals()
-	items := []contextItem{
-		{label: "Fetch", action: func(app *App, _ *filetree.Node) { app.menuGitFetch() }},
-		{label: "Compare against…", action: func(app *App, _ *filetree.Node) { app.menuGitCompareAgainst() }},
-		{label: "New branch…", action: func(app *App, _ *filetree.Node) { app.menuGitNewBranch() }},
-		{label: "Merge branch…", action: func(app *App, _ *filetree.Node) { app.menuGitMergeBranch() }},
-		{label: "Rename branch…", action: func(app *App, _ *filetree.Node) { app.menuGitRenameBranch() }},
-		{label: "Delete branch…", action: func(app *App, _ *filetree.Node) { app.menuGitDeleteBranch() }},
-		{label: "Stash changes", action: func(app *App, _ *filetree.Node) { app.menuGitStash() }},
-		{label: "Pop stash", action: func(app *App, _ *filetree.Node) { app.menuGitStashPop() }},
-		{label: "Undo last commit", action: func(app *App, _ *filetree.Node) { app.menuGitUndoCommit() }},
-		{label: "Commit history", action: func(app *App, _ *filetree.Node) { app.menuCommitHistory() }},
-	}
-	a.contextNode = a.tree.Root
-	a.contextItems = items
-	a.contextHover = 0
-	a.contextX, a.contextY = a.placeContext(x, y, len(items))
-	a.contextOpen = true
-	a.overlays.Open(contextOverlay{a})
+	a.openPopup([]overlay.PopupItem{
+		{Label: "Fetch", OnPick: func() { a.menuGitFetch() }},
+		{Label: "Compare against…", OnPick: func() { a.menuGitCompareAgainst() }},
+		{Label: "New branch…", OnPick: func() { a.menuGitNewBranch() }},
+		{Label: "Merge branch…", OnPick: func() { a.menuGitMergeBranch() }},
+		{Label: "Rename branch…", OnPick: func() { a.menuGitRenameBranch() }},
+		{Label: "Delete branch…", OnPick: func() { a.menuGitDeleteBranch() }},
+		{Label: "Stash changes", OnPick: func() { a.menuGitStash() }},
+		{Label: "Pop stash", OnPick: func() { a.menuGitStashPop() }},
+		{Label: "Undo last commit", OnPick: func() { a.menuGitUndoCommit() }},
+		{Label: "Commit history", OnPick: func() { a.menuCommitHistory() }},
+	}, x, y)
 }

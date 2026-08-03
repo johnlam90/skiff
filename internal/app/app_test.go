@@ -2086,7 +2086,7 @@ func TestRunCustomAction_PromptedSkipsNoFileGuard(t *testing.T) {
 	}}
 	a.runCustomAction(0)
 
-	if !a.formOpen {
+	if !formIsOpen(a) {
 		t.Fatal("prompted action with no file open should still show the form modal")
 	}
 	if strings.Contains(a.statusMsg, "no file open") {
@@ -2115,18 +2115,18 @@ func TestRunCustomAction_PromptedExportsValuesAndExpands(t *testing.T) {
 	}}
 
 	a.runCustomAction(0)
-	if !a.formOpen {
+	if !formIsOpen(a) {
 		t.Fatal("form did not open")
 	}
 
 	// Fill in REMOTE_SRC by typing into the focused field after Tab'ing
-	// past the HOST select.
-	a.handleFormKey(tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone))
+	// past the HOST select — all through real routing.
+	a.handleKey(tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone))
 	for _, r := range "/etc/hosts" {
-		a.handleFormKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+		a.handleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
 	}
-	a.handleFormKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
-	if a.formOpen {
+	a.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if formIsOpen(a) {
 		t.Fatal("Enter on last field should submit")
 	}
 

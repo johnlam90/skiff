@@ -29,23 +29,17 @@ import (
 func TestCloseAllModals_ClearsEverything(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.menuOpen = true
-	a.contextOpen = true
 	a.hoveredMenuRow = 3
-	a.contextNode = a.tree.Root
-	a.contextItems = []contextItem{{label: "x"}}
 	a.dragMode = "editor"
 	a.autoScrollDir = 1
 
 	a.closeAllModals()
 
-	if a.menuOpen || a.contextOpen {
-		t.Fatal("expected all modal flags off")
+	if a.menuOpen {
+		t.Fatal("expected the menu flag off")
 	}
 	if a.hoveredMenuRow != -1 {
 		t.Fatalf("hoveredMenuRow not cleared: %d", a.hoveredMenuRow)
-	}
-	if a.contextNode != nil || a.contextItems != nil {
-		t.Fatal("context state not cleared")
 	}
 	if a.dragMode != "" {
 		t.Fatalf("dragMode not cleared: %q", a.dragMode)
@@ -254,6 +248,43 @@ func TestConfirmCancel(t *testing.T) {
 	}
 }
 
+// popupPrefab returns the open popup overlay, failing the test when
+// none is up.
+func popupPrefab(t *testing.T, a *App) *overlay.Popup {
+	t.Helper()
+	pop, ok := a.overlays.Top().(*overlay.Popup)
+	if !ok {
+		t.Fatalf("no popup overlay open; top = %T", a.overlays.Top())
+	}
+	return pop
+}
+
+// popupLabels flattens the open popup's row labels for comparison.
+func popupLabels(t *testing.T, a *App) []string {
+	t.Helper()
+	pop := popupPrefab(t, a)
+	out := make([]string, len(pop.Items))
+	for i, it := range pop.Items {
+		out[i] = it.Label
+	}
+	return out
+}
+
+// wantLabels fails unless the open popup shows exactly these rows in
+// this order.
+func wantPopupLabels(t *testing.T, a *App, want []string) {
+	t.Helper()
+	got := popupLabels(t, a)
+	if len(got) != len(want) {
+		t.Fatalf("popup should have %d items, got %d: %v", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("item %d label: got %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 // TestOpenTreeContext_Folder offers New File + Rename + Delete plus the
 // two clipboard rows.
 func TestOpenTreeContext_Folder(t *testing.T) {
@@ -275,18 +306,7 @@ func TestOpenTreeContext_Folder(t *testing.T) {
 		t.Fatal("child node not in tree")
 	}
 	a.openTreeContext(node, 5, 5)
-	if !a.contextOpen {
-		t.Fatal("context should open")
-	}
-	wantLabels := []string{"New File", "Rename", "Delete", "Cut", "Copy", "Duplicate", "Copy rel path", "Copy abs path"}
-	if len(a.contextItems) != len(wantLabels) {
-		t.Fatalf("folder context should have %d items, got %d", len(wantLabels), len(a.contextItems))
-	}
-	for i, w := range wantLabels {
-		if a.contextItems[i].label != w {
-			t.Fatalf("item %d label: got %q, want %q", i, a.contextItems[i].label, w)
-		}
-	}
+	wantPopupLabels(t, a, []string{"New File", "Rename", "Delete", "Cut", "Copy", "Duplicate", "Copy rel path", "Copy abs path"})
 }
 
 // TestOpenTreeContext_File offers Rename / Delete / Cut / Copy /
@@ -309,15 +329,7 @@ func TestOpenTreeContext_File(t *testing.T) {
 		t.Fatal("file node not in tree")
 	}
 	a.openTreeContext(node, 5, 5)
-	wantLabels := []string{"Rename", "Delete", "Cut", "Copy", "Duplicate", "Copy rel path", "Copy abs path"}
-	if len(a.contextItems) != len(wantLabels) {
-		t.Fatalf("file context should have %d items, got %d", len(wantLabels), len(a.contextItems))
-	}
-	for i, w := range wantLabels {
-		if a.contextItems[i].label != w {
-			t.Fatalf("item %d label: got %q, want %q", i, a.contextItems[i].label, w)
-		}
-	}
+	wantPopupLabels(t, a, []string{"Rename", "Delete", "Cut", "Copy", "Duplicate", "Copy rel path", "Copy abs path"})
 }
 
 // TestOpenTreeContext_Root offers New File and the two clipboard rows —
@@ -325,81 +337,7 @@ func TestOpenTreeContext_File(t *testing.T) {
 func TestOpenTreeContext_Root(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.openTreeContext(a.tree.Root, 5, 5)
-	wantLabels := []string{"New File", "Copy rel path", "Copy abs path"}
-	if len(a.contextItems) != len(wantLabels) {
-		t.Fatalf("root context should have %d items, got %d", len(wantLabels), len(a.contextItems))
-	}
-	for i, w := range wantLabels {
-		if a.contextItems[i].label != w {
-			t.Fatalf("item %d label: got %q, want %q", i, a.contextItems[i].label, w)
-		}
-	}
-}
-
-// TestPlaceContext_FlipsLeftAndUp tests that the popup flips when it would
-// otherwise overflow the window edges, and clamps at 0.
-func TestPlaceContext_FlipsLeftAndUp(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	a.width, a.height = 30, 20
-
-	// Click far to the right → expect cx to flip left so the popup ends
-	// near the click x.
-	cx, cy := a.placeContext(28, 5, 3)
-	if cx >= 28 {
-		t.Fatalf("expected flip left when near right edge: cx=%d", cx)
-	}
-	if cy != 5 {
-		t.Fatalf("y unchanged at top half: cy=%d", cy)
-	}
-
-	// Click near the bottom → expect cy to flip up.
-	cx, cy = a.placeContext(5, 19, 5)
-	if cy >= 19 {
-		t.Fatalf("expected flip up when near bottom: cy=%d", cy)
-	}
-	_ = cx
-
-	// Click out at -10,-10 → expect clamp to (0,0).
-	cx, cy = a.placeContext(-10, -10, 3)
-	if cx != 0 || cy != 0 {
-		t.Fatalf("expected clamp (0,0); got (%d,%d)", cx, cy)
-	}
-}
-
-// TestContextActivate runs the highlighted item's action against the node
-// the menu was opened for, and closes all modals first.
-func TestContextActivate(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	called := 0
-	var seenNode *filetree.Node
-	a.contextOpen = true
-	a.contextNode = a.tree.Root
-	a.contextItems = []contextItem{
-		{label: "x", action: func(_ *App, n *filetree.Node) {
-			called++
-			seenNode = n
-		}},
-	}
-	a.contextHover = 0
-	a.contextActivate()
-	if called != 1 {
-		t.Fatalf("expected action to fire once, got %d", called)
-	}
-	if seenNode != a.tree.Root {
-		t.Fatal("action did not receive the contextNode")
-	}
-	if a.contextOpen {
-		t.Fatal("contextActivate should close modals")
-	}
-}
-
-// TestContextActivate_OutOfRangeIsNoop guards against stale events.
-func TestContextActivate_OutOfRangeIsNoop(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	a.contextHover = 5
-	a.contextActivate() // no panic, no state change
-	a.contextHover = -1
-	a.contextActivate()
+	wantPopupLabels(t, a, []string{"New File", "Copy rel path", "Copy abs path"})
 }
 
 // TestRuneLen counts visible cells one-per-rune.
@@ -432,99 +370,7 @@ func TestTrimSpace(t *testing.T) {
 			t.Errorf("trimSpace(%q) = %q, want %q", in, got, want)
 		}
 	}
-}
-
-// TestContextRect returns origin + width + count-derived height.
-func TestContextRect(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	a.contextX, a.contextY = 10, 5
-	a.contextItems = []contextItem{{label: "a"}, {label: "b"}}
-	x, y, w, h := a.contextRect()
-	if x != 10 || y != 5 || w != contextMenuWidth || h != 4 {
-		t.Fatalf("contextRect: (%d,%d,%d,%d)", x, y, w, h)
-	}
-}
-
-// TestHandleContextKey covers Up/Down clamps, Esc cancels, Enter activates.
-func TestHandleContextKey(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	called := 0
-	a.contextOpen = true
-	a.contextNode = a.tree.Root
-	a.contextItems = []contextItem{
-		{label: "one", action: func(*App, *filetree.Node) { called++ }},
-		{label: "two", action: func(*App, *filetree.Node) { called += 10 }},
-	}
-	a.contextHover = 0
-
-	// Up at top — clamp.
-	a.handleContextKey(keyEv(tcell.KeyUp, 0))
-	if a.contextHover != 0 {
-		t.Fatalf("Up clamp: got %d", a.contextHover)
-	}
-	// Down advances.
-	a.handleContextKey(keyEv(tcell.KeyDown, 0))
-	if a.contextHover != 1 {
-		t.Fatalf("Down: got %d", a.contextHover)
-	}
-	// Down at bottom — clamp.
-	a.handleContextKey(keyEv(tcell.KeyDown, 0))
-	if a.contextHover != 1 {
-		t.Fatalf("Down clamp: got %d", a.contextHover)
-	}
-	// Enter activates the second item.
-	a.handleContextKey(keyEv(tcell.KeyEnter, 0))
-	if called != 10 {
-		t.Fatalf("Enter: called=%d", called)
-	}
-	// Re-open and Esc.
-	a.contextOpen = true
-	a.handleContextKey(keyEv(tcell.KeyEsc, 0))
-	if a.contextOpen {
-		t.Fatal("Esc should close")
-	}
-}
-
-// TestHandleContextMouse_HoverAndClick verifies hover updates and click
-// activates; outside click dismisses.
-func TestHandleContextMouse_HoverAndClick(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	called := 0
-	a.contextOpen = true
-	a.contextX, a.contextY = 5, 5
-	a.contextNode = a.tree.Root
-	a.contextItems = []contextItem{
-		{label: "one", action: func(*App, *filetree.Node) { called++ }},
-		{label: "two", action: func(*App, *filetree.Node) { called += 10 }},
-	}
-	a.contextHover = 0
-
-	// Hover row index 1 (relY=2 inside box at y=5 → screen y=7).
-	a.handleContextMouse(7, 7, 0)
-	if a.contextHover != 1 {
-		t.Fatalf("hover: got %d", a.contextHover)
-	}
-	// Click row 0.
-	a.contextOpen = true
-	a.contextX, a.contextY = 5, 5
-	a.contextItems = []contextItem{
-		{label: "one", action: func(*App, *filetree.Node) { called++ }},
-	}
-	a.handleContextMouse(7, 6, tcell.Button1)
-	if called == 0 {
-		t.Fatal("click on row should activate")
-	}
-
-	// Outside click closes.
-	a.contextOpen = true
-	a.contextItems = []contextItem{{label: "x"}}
-	a.handleContextMouse(0, 0, tcell.Button1)
-	if a.contextOpen {
-		t.Fatal("outside click should close")
-	}
-}
-
-// -- small filesystem helpers used by the context-menu tests above ----------
+} // -- small filesystem helpers used by the context-menu tests above ----------
 
 // mkdir is a thin wrapper around os.Mkdir so the test bodies stay readable.
 func mkdir(path string) error { return os.Mkdir(path, 0755) }

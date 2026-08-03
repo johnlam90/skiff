@@ -48,22 +48,8 @@ func (o menuOverlay) Draw(tcell.Screen) { o.a.drawMenu() }
 // The confirm/info and dirty-close modals are real overlays now
 // (overlay.Confirm, overlay.Info, overlay.Dirty) — no shims.
 
-// formOverlay routes the multi-field custom-action form.
-type formOverlay struct{ a *App }
-
-func (o formOverlay) HandleKey(ev *tcell.EventKey)               { o.a.handleFormKey(ev) }
-func (o formOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) { o.a.handleFormMouse(x, y, btn) }
-func (o formOverlay) Draw(tcell.Screen)                          { o.a.drawForm() }
-
-// contextOverlay routes the right-click popup (tree nodes and the git
-// extras menu alike).
-type contextOverlay struct{ a *App }
-
-func (o contextOverlay) HandleKey(ev *tcell.EventKey) { o.a.handleContextKey(ev) }
-func (o contextOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
-	o.a.handleContextMouse(x, y, btn)
-}
-func (o contextOverlay) Draw(tcell.Screen) { o.a.drawContext() }
+// The form and the right-click popup are real overlays now
+// (overlay.Form, overlay.Popup) — no shims.
 
 // listPickOverlay routes the filterable list picker.
 type listPickOverlay struct{ a *App }

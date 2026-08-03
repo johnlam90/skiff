@@ -27,15 +27,6 @@ import (
 // the labels are short enough to fit comfortably.
 const contextMenuWidth = 19
 
-// contextItem is one row in the tree's right-click context menu. action runs
-// against the node the menu was opened for; enabled gates whether the row is
-// clickable.
-type contextItem struct {
-	label   string
-	action  func(*App, *filetree.Node)
-	enabled func(*App, *filetree.Node) bool
-}
-
 // closeAllModals dismisses every modal in one shot and parks any in-flight
 // drag / auto-scroll state. Every "open this modal" helper calls it first
 // so the modals stay mutually exclusive and a stale drag from before the
@@ -46,8 +37,6 @@ type contextItem struct {
 func (a *App) closeAllModals() {
 	a.overlays.Close()
 	a.menuOpen = false
-	a.contextOpen = false
-	a.formOpen = false
 	a.finderOpen = false
 	a.closeFind()
 	a.diffPanelRow = -1
@@ -65,14 +54,6 @@ func (a *App) closeAllModals() {
 	a.projFindFolded = nil
 	a.projFindBusy = false
 	a.hoveredMenuRow = -1
-	a.contextNode = nil
-	a.contextItems = nil
-	a.formPrompts = nil
-	a.formValues = nil
-	a.formText = nil
-	a.formCursor = nil
-	a.formScroll = nil
-	a.formCallback = nil
 	a.diffOpen = false
 	a.diffTitle = ""
 	a.diffRaw = nil
@@ -202,149 +183,47 @@ func (a *App) openDirtyClose(title, message string, saveCB, discardCB func(*App)
 // Tree right-click context menu
 // -----------------------------------------------------------------------------
 
-// openTreeContext opens a small right-click popup over the file tree, anchored
-// near (x, y). The items shown depend on whether n is a file or a folder.
-// Renaming or deleting the project root is intentionally not allowed.
+// openTreeContext opens the right-click popup over the file tree — an
+// overlay.Popup anchored near (x, y). The items shown depend on whether
+// n is a file or a folder; renaming or deleting the project root is
+// intentionally not allowed. Each item is a closure over the node, so
+// the popup itself needs no tree knowledge.
 func (a *App) openTreeContext(n *filetree.Node, x, y int) {
 	a.closeAllModals()
 
-	items := []contextItem{}
+	items := []overlay.PopupItem{}
+	add := func(label string, action func(*App, *filetree.Node)) {
+		items = append(items, overlay.PopupItem{Label: label, OnPick: func() { action(a, n) }})
+	}
 	if n.IsDir {
-		items = append(items, contextItem{label: "New File", action: ctxNewFile})
+		add("New File", ctxNewFile)
 	}
 	if n != a.tree.Root {
-		items = append(items, contextItem{label: "Rename", action: ctxRename})
-		items = append(items, contextItem{label: "Delete", action: ctxDelete})
-		items = append(items, contextItem{label: "Cut", action: ctxCutNode})
-		items = append(items, contextItem{label: "Copy", action: ctxCopyNode})
-		items = append(items, contextItem{label: "Duplicate", action: ctxDuplicateNode})
+		add("Rename", ctxRename)
+		add("Delete", ctxDelete)
+		add("Cut", ctxCutNode)
+		add("Copy", ctxCopyNode)
+		add("Duplicate", ctxDuplicateNode)
 	}
 	if a.hasFileClip() {
-		items = append(items, contextItem{label: "Paste here", action: ctxPasteNode})
+		add("Paste here", ctxPasteNode)
 	}
-	items = append(items, contextItem{label: "Copy rel path", action: ctxCopyRelativePath})
-	items = append(items, contextItem{label: "Copy abs path", action: ctxCopyAbsolutePath})
+	add("Copy rel path", ctxCopyRelativePath)
+	add("Copy abs path", ctxCopyAbsolutePath)
 
-	a.contextNode = n
-	a.contextItems = items
-	a.contextHover = 0
-	a.contextX, a.contextY = a.placeContext(x, y, len(items))
-	a.contextOpen = true
-	a.overlays.Open(contextOverlay{a})
+	a.openPopup(items, x, y)
 }
 
-// placeContext picks an on-screen origin for the context menu. Anchors on
-// the click point, but flips left or up when that would put part of the
-// popup off-screen.
-func (a *App) placeContext(x, y, count int) (int, int) {
-	w := contextMenuWidth
-	h := count + 2
-	cx := x
-	cy := y
-	if cx+w > a.width {
-		cx = x - w + 1
+// openPopup places and opens an anchored action popup — the shared tail
+// of the tree context menu and the git extras menu.
+func (a *App) openPopup(items []overlay.PopupItem, x, y int) {
+	pop := &overlay.Popup{
+		Items: items,
+		Theme: a.theme,
+		At:    overlay.PlacePopup(a.width, a.height, x, y, contextMenuWidth, len(items)),
 	}
-	if cy+h > a.height {
-		cy = y - h + 1
-	}
-	if cx < 0 {
-		cx = 0
-	}
-	if cy < 0 {
-		cy = 0
-	}
-	return cx, cy
-}
-
-// contextRect returns the on-screen rectangle of the context menu.
-func (a *App) contextRect() (x, y, w, h int) {
-	return a.contextX, a.contextY, contextMenuWidth, len(a.contextItems) + 2
-}
-
-// handleContextKey processes keyboard input for the context menu.
-func (a *App) handleContextKey(ev *tcell.EventKey) {
-	switch ev.Key() {
-	case tcell.KeyEsc:
-		a.closeAllModals()
-	case tcell.KeyDown:
-		if a.contextHover < len(a.contextItems)-1 {
-			a.contextHover++
-		}
-	case tcell.KeyUp:
-		if a.contextHover > 0 {
-			a.contextHover--
-		}
-	case tcell.KeyEnter:
-		a.contextActivate()
-	}
-}
-
-// handleContextMouse processes mouse input for the context menu. Hovering
-// a row highlights it; clicking activates. Any click outside the popup
-// dismisses it.
-func (a *App) handleContextMouse(x, y int, btn tcell.ButtonMask) {
-	mx, my, mw, mh := a.contextRect()
-	if x >= mx && x < mx+mw && y > my && y < my+mh-1 {
-		a.contextHover = y - my - 1
-	}
-	if btn&tcell.Button1 == 0 {
-		return
-	}
-	if x < mx || x >= mx+mw || y < my || y >= my+mh {
-		a.closeAllModals()
-		return
-	}
-	if y > my && y < my+mh-1 {
-		a.contextHover = y - my - 1
-		a.contextActivate()
-	}
-}
-
-// contextActivate runs the currently highlighted context item against the
-// node the menu was opened for.
-func (a *App) contextActivate() {
-	if a.contextHover < 0 || a.contextHover >= len(a.contextItems) {
-		return
-	}
-	item := a.contextItems[a.contextHover]
-	node := a.contextNode
-	a.closeAllModals()
-	if item.action != nil && node != nil {
-		item.action(a, node)
-	}
-}
-
-// drawContext renders the right-click context menu at its anchor.
-func (a *App) drawContext() {
-	mx, my, mw, mh := a.contextRect()
-
-	bg := a.theme.LineHL
-	bgStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
-	borderStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Subtle)
-	hoverBg := a.theme.Selection
-	hoverStyle := tcell.StyleDefault.Background(hoverBg).Foreground(a.theme.Text).Bold(true)
-	hoverChevStyle := tcell.StyleDefault.Background(hoverBg).Foreground(a.theme.AccentSoft).Bold(true)
-	chevStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.AccentSoft)
-
-	fillRect(a.screen, mx, my, mw, mh, bgStyle)
-	drawBorder(a.screen, mx, my, mw, mh, borderStyle)
-
-	for i, item := range a.contextItems {
-		cy := my + 1 + i
-		hovered := i == a.contextHover
-		if hovered {
-			for cx := mx + 1; cx < mx+mw-1; cx++ {
-				a.screen.SetContent(cx, cy, ' ', nil, hoverStyle)
-			}
-			drawAt(a.screen, mx+2, cy, "▸", hoverChevStyle)
-			drawAt(a.screen, mx+4, cy, item.label, hoverStyle)
-		} else {
-			drawAt(a.screen, mx+2, cy, "▸", chevStyle)
-			drawAt(a.screen, mx+4, cy, item.label, bgStyle)
-		}
-	}
-
-	a.screen.HideCursor()
+	pop.Close = func() { a.closeAllModals() }
+	a.overlays.Open(pop)
 }
 
 // -----------------------------------------------------------------------------

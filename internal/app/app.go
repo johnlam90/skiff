@@ -467,28 +467,9 @@ type App struct {
 	// overlay.Confirm / overlay.Info / overlay.Dirty prefabs — see
 	// modals.go for the openers; they carry all their own state.
 
-	// Form modal — multi-field input collected before a custom action's
-	// shell command runs. See formmodal.go for layout, focus traversal,
-	// and the env-var injection that turns submitted values into KEY=
-	// pairs the spawned shell can read. Mutually exclusive with every
-	// other modal, like prompt/confirm.
-	formOpen     bool
-	formTitle    string
-	formPrompts  []customactions.Prompt
-	formValues   map[string]string // canonical store keyed by Prompt.Key
-	formText     [][]rune          // per-prompt rune slice (text rows only; nil for selects)
-	formCursor   []int             // caret position into formText[i]; index for selects
-	formScroll   []int             // horizontal scroll offset for text rows
-	formFocus    int               // which prompt row owns the keyboard
-	formCallback func(*App, map[string]string)
-
-	// Right-click context menu over the file tree.
-	contextOpen  bool
-	contextX     int
-	contextY     int
-	contextNode  *filetree.Node
-	contextItems []contextItem
-	contextHover int
+	// The form and the right-click popup are overlay.Form /
+	// overlay.Popup prefabs — see formmodal.go and modals.go for the
+	// openers; they carry all their own state.
 
 	// Find bar — opened with Esc-f or the "Find in file" menu entry. The
 	// bar is a 1-row strip pinned above the status bar; while it's open
