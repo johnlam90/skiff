@@ -53,12 +53,8 @@ func (o menuOverlay) Draw(tcell.Screen) { o.a.drawMenu() }
 
 // The list picker is a real overlay now (overlay.Pick) — no shim.
 
-// finderOverlay routes the fuzzy file finder.
-type finderOverlay struct{ a *App }
-
-func (o finderOverlay) HandleKey(ev *tcell.EventKey)               { o.a.handleFinderKey(ev) }
-func (o finderOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) { o.a.handleFinderMouse(x, y, btn) }
-func (o finderOverlay) Draw(tcell.Screen)                          { o.a.drawFinder() }
+// The finder is a bespoke overlay implementing the contract directly —
+// see finder.go's finderOverlay.
 
 // diffOverlay routes the side-by-side diff viewer.
 type diffOverlay struct{ a *App }

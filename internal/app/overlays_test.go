@@ -95,9 +95,9 @@ func TestClosers_PopTheirOverlay(t *testing.T) {
 	}
 
 	a.openFinder()
-	a.closeFinder()
+	pressEsc(a)
 	if a.overlays.IsOpen() {
-		t.Fatal("closeFinder must pop the finder overlay")
+		t.Fatal("Esc must pop the finder overlay")
 	}
 
 	a.openListPick("T", []listPickItem{{Label: "one"}}, nil, nil, nil)

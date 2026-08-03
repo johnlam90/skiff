@@ -47,7 +47,6 @@ func (a *App) closeAllModals() {
 	}
 	a.overlays.Close()
 	a.menuOpen = false
-	a.finderOpen = false
 	a.closeFind()
 	a.diffPanelRow = -1
 	a.projFindOpen = false

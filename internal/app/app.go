@@ -563,13 +563,10 @@ type App struct {
 	// or ≡ → Find file). The Finder owns the cached index and a
 	// background-build goroutine; the rest of these fields are
 	// transient UI state for the modal itself.
-	finder         *finder.Finder
-	finderOpen     bool
-	finderQuery    []rune
-	finderCursor   int
-	finderScroll   int
-	finderSelected int
-	finderResults  []finder.Result
+	// finder is the long-lived fuzzy-file index cache; the finder UI
+	// itself is a bespoke overlay (finder.go's finderOverlay) that owns
+	// its transient state.
+	finder *finder.Finder
 
 	// Git panel state — the sidebar's second tab ("Esc g", ≡ → Git
 	// changes, the GIT header tab, or a click on the status bar's
@@ -1006,11 +1003,10 @@ func (a *App) handleEvent(ev tcell.Event) {
 	case *formatDoneEvent:
 		a.handleFormatDone(e)
 	case *finderRebuiltEvent:
-		// The background indexer just finished. Re-run the visible
-		// query so "Indexing…" gives way to real results without
-		// the user having to type or wait for the next keystroke.
-		if a.finderOpen {
-			a.refreshFinderResults()
+		// Refresh the open finder's results so a finished index build
+		// replaces "Indexing…" without waiting for a keystroke.
+		if fo, ok := a.overlays.Top().(*finderOverlay); ok {
+			fo.refreshResults()
 		}
 	case *gitStatusEvent:
 		a.handleGitStatusEvent(e)

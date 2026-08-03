@@ -1324,7 +1324,7 @@ func TestHandleKey_MenuShortcutAfterNavigation(t *testing.T) {
 	if a.menuOpen {
 		t.Fatal("Esc-p from the open menu should close the menu")
 	}
-	if !a.finderOpen {
+	if !finderIsOpen(a) {
 		t.Fatal("Esc-p from the open menu should open the project finder")
 	}
 }

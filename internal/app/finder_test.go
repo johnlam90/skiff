@@ -18,6 +18,23 @@ import (
 	"github.com/johnlam90/skiff/internal/finder"
 )
 
+// finderOv returns the open finder overlay, failing the test when none
+// is up.
+func finderOv(t *testing.T, a *App) *finderOverlay {
+	t.Helper()
+	fo, ok := a.overlays.Top().(*finderOverlay)
+	if !ok {
+		t.Fatalf("no finder overlay open; top = %T", a.overlays.Top())
+	}
+	return fo
+}
+
+// finderIsOpen reports whether the finder overlay is up.
+func finderIsOpen(a *App) bool {
+	_, ok := a.overlays.Top().(*finderOverlay)
+	return ok
+}
+
 // waitForFinderReady spins until the App's finder reports
 // StateReady or the timeout expires. Pulled out so each test
 // can read as the scenario it's pinning down rather than the
@@ -71,10 +88,10 @@ func TestOpenFinder_PopulatesResults(t *testing.T) {
 	a, _ := withFinder(t)
 	a.openFinder()
 
-	if !a.finderOpen {
+	if !finderIsOpen(a) {
 		t.Fatal("finderOpen should be true after openFinder")
 	}
-	if len(a.finderResults) == 0 {
+	if len(finderOv(t, a).results) == 0 {
 		t.Fatal("expected initial result list (empty query → alphabetical)")
 	}
 }
@@ -86,14 +103,14 @@ func TestFinderKey_TypingFiltersResults(t *testing.T) {
 	a, _ := withFinder(t)
 	a.openFinder()
 	for _, r := range "tab" {
-		a.handleFinderKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+		a.handleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
 	}
 
-	if len(a.finderResults) == 0 {
+	if len(finderOv(t, a).results) == 0 {
 		t.Fatal("expected results after typing query")
 	}
-	if !endsWith(a.finderResults[0].Path, "tab.go") {
-		t.Fatalf("top result: got %q, want ends-with tab.go", a.finderResults[0].Path)
+	if !endsWith(finderOv(t, a).results[0].Path, "tab.go") {
+		t.Fatalf("top result: got %q, want ends-with tab.go", finderOv(t, a).results[0].Path)
 	}
 }
 
@@ -104,18 +121,18 @@ func TestFinderKey_BackspaceShrinksQuery(t *testing.T) {
 	a, _ := withFinder(t)
 	a.openFinder()
 	for _, r := range "score" {
-		a.handleFinderKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+		a.handleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
 	}
-	narrow := len(a.finderResults)
+	narrow := len(finderOv(t, a).results)
 
 	// Backspace twice — the query becomes "sco", broader match.
-	a.handleFinderKey(tcell.NewEventKey(tcell.KeyBackspace, 0, tcell.ModNone))
-	a.handleFinderKey(tcell.NewEventKey(tcell.KeyBackspace, 0, tcell.ModNone))
+	a.handleKey(tcell.NewEventKey(tcell.KeyBackspace, 0, tcell.ModNone))
+	a.handleKey(tcell.NewEventKey(tcell.KeyBackspace, 0, tcell.ModNone))
 
-	if len(a.finderResults) < narrow {
-		t.Fatalf("backspace should not shrink results: was %d, now %d", narrow, len(a.finderResults))
+	if len(finderOv(t, a).results) < narrow {
+		t.Fatalf("backspace should not shrink results: was %d, now %d", narrow, len(finderOv(t, a).results))
 	}
-	if got := string(a.finderQuery); got != "sco" {
+	if got := finderOv(t, a).query.Text(); got != "sco" {
 		t.Fatalf("query: got %q, want %q", got, "sco")
 	}
 }
@@ -127,18 +144,18 @@ func TestFinderKey_ArrowsMoveSelection(t *testing.T) {
 	a, _ := withFinder(t)
 	a.openFinder()
 
-	a.handleFinderKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
-	if a.finderSelected != 1 {
-		t.Fatalf("selected after ↓: got %d, want 1", a.finderSelected)
+	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	if finderOv(t, a).selected != 1 {
+		t.Fatalf("selected after ↓: got %d, want 1", finderOv(t, a).selected)
 	}
-	a.handleFinderKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
-	if a.finderSelected != 0 {
-		t.Fatalf("selected after ↑: got %d, want 0", a.finderSelected)
+	a.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
+	if finderOv(t, a).selected != 0 {
+		t.Fatalf("selected after ↑: got %d, want 0", finderOv(t, a).selected)
 	}
 	// ↑ at the top stays put.
-	a.handleFinderKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
-	if a.finderSelected != 0 {
-		t.Fatalf("selected at top after ↑: got %d, want 0", a.finderSelected)
+	a.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
+	if finderOv(t, a).selected != 0 {
+		t.Fatalf("selected at top after ↑: got %d, want 0", finderOv(t, a).selected)
 	}
 }
 
@@ -150,16 +167,16 @@ func TestFinderKey_EnterOpensFile(t *testing.T) {
 	a, dir := withFinder(t)
 	a.openFinder()
 	for _, r := range "score" {
-		a.handleFinderKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+		a.handleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
 	}
-	if len(a.finderResults) == 0 {
+	if len(finderOv(t, a).results) == 0 {
 		t.Fatal("expected score results")
 	}
-	want := filepath.Join(dir, a.finderResults[0].Path)
+	want := filepath.Join(dir, finderOv(t, a).results[0].Path)
 
-	a.handleFinderKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	a.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
 
-	if a.finderOpen {
+	if finderIsOpen(a) {
 		t.Fatal("modal should close after Enter")
 	}
 	tab := a.activeTabPtr()
@@ -177,15 +194,14 @@ func TestFinderKey_EnterOpensFile(t *testing.T) {
 func TestFinderKey_EscClosesModal(t *testing.T) {
 	a, _ := withFinder(t)
 	a.openFinder()
-	a.handleFinderKey(tcell.NewEventKey(tcell.KeyRune, 'x', tcell.ModNone))
-	a.handleFinderKey(tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone))
+	a.handleKey(tcell.NewEventKey(tcell.KeyRune, 'x', tcell.ModNone))
+	a.handleKey(tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone))
 
-	if a.finderOpen {
+	if finderIsOpen(a) {
 		t.Fatal("Esc should close the finder")
 	}
-	if len(a.finderQuery) != 0 {
-		t.Fatalf("query should be cleared after close, got %q", string(a.finderQuery))
-	}
+	// The overlay is gone entirely — its state dies with it, so there
+	// is no query left to leak into a future open.
 }
 
 // TestFinderMouse_ClickOpensRow walks the click path: clicking on
@@ -195,15 +211,16 @@ func TestFinderKey_EscClosesModal(t *testing.T) {
 func TestFinderMouse_ClickOpensRow(t *testing.T) {
 	a, dir := withFinder(t)
 	a.openFinder()
-	if len(a.finderResults) < 2 {
-		t.Fatalf("need at least 2 results for click test, got %d", len(a.finderResults))
+	if len(finderOv(t, a).results) < 2 {
+		t.Fatalf("need at least 2 results for click test, got %d", len(finderOv(t, a).results))
 	}
-	mx, my, _, _ := a.finderModalRect()
-	target := filepath.Join(dir, a.finderResults[1].Path)
+	fr := finderOv(t, a).rect()
+	mx, my := fr.X, fr.Y
+	target := filepath.Join(dir, finderOv(t, a).results[1].Path)
 
-	a.handleFinderMouse(mx+5, my+4+1, tcell.Button1)
+	finderOv(t, a).HandleMouse(mx+5, my+4+1, tcell.Button1)
 
-	if a.finderOpen {
+	if finderIsOpen(a) {
 		t.Fatal("modal should close after click-open")
 	}
 	if got := a.activeTabPtr().Path; got != target {
@@ -220,9 +237,9 @@ func TestFinderMouse_ClickOutsideCloses(t *testing.T) {
 	a.openFinder()
 	tabsBefore := len(a.tabs)
 
-	a.handleFinderMouse(0, 0, tcell.Button1)
+	finderOv(t, a).HandleMouse(0, 0, tcell.Button1)
 
-	if a.finderOpen {
+	if finderIsOpen(a) {
 		t.Fatal("modal should close on outside click")
 	}
 	if len(a.tabs) != tabsBefore {
@@ -239,7 +256,7 @@ func TestLeader_PFiresFinder(t *testing.T) {
 	} else {
 		action(a)
 	}
-	if !a.finderOpen {
+	if !finderIsOpen(a) {
 		t.Fatal("Esc-p should open the finder")
 	}
 }
@@ -256,15 +273,15 @@ func TestFinder_EnterRevealsFileInTree(t *testing.T) {
 	a, dir := withFinder(t)
 	a.openFinder()
 	for _, r := range "score" {
-		a.handleFinderKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+		a.handleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
 	}
-	if len(a.finderResults) == 0 {
+	if len(finderOv(t, a).results) == 0 {
 		t.Fatal("expected score results")
 	}
-	rel := a.finderResults[0].Path
+	rel := finderOv(t, a).results[0].Path
 	want := filepath.Join(dir, rel)
 
-	a.handleFinderKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	a.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
 
 	// The finder returns paths like "internal/finder/score.go" — so the
 	// "internal" ancestor must now be expanded, and the file's row must be
@@ -341,7 +358,7 @@ func TestOpenFinder_NoOpInSingleFileMode(t *testing.T) {
 
 	a.openFinder()
 
-	if a.finderOpen {
+	if finderIsOpen(a) {
 		t.Fatal("openFinder should not open the modal when finder is nil")
 	}
 	if a.statusMsg == "" {
