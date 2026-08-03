@@ -217,3 +217,17 @@ loops forever.
 - Cross-repo release tokens. The `homebrew-skiff` tap repo mirrors
   `Formula/skiff.rb` from here via its own pull-sync cron — don't
   "simplify" that into a PAT-based push from this repo's CI.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues, managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five-role vocabulary, label strings equal to their names. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
