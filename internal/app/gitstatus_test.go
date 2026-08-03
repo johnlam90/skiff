@@ -38,8 +38,8 @@ func TestLoadGitStatus_NotARepo(t *testing.T) {
 	if st.IsRepo {
 		t.Fatalf("plain dir should not report as repo, got %+v", st)
 	}
-	if st.DirtyFiles != nil {
-		t.Fatalf("plain dir should have nil DirtyFiles, got %v", st.DirtyFiles)
+	if st.Files != nil {
+		t.Fatalf("plain dir should have nil DirtyFiles, got %v", st.Files)
 	}
 }
 
@@ -67,8 +67,8 @@ func TestLoadGitStatus_CleanRepo(t *testing.T) {
 	if !st.IsRepo {
 		t.Fatal("expected IsRepo=true on a real git repo")
 	}
-	if len(st.DirtyFiles) != 0 {
-		t.Fatalf("expected no dirty files, got %v", st.DirtyFiles)
+	if len(st.Files) != 0 {
+		t.Fatalf("expected no dirty files, got %v", st.Files)
 	}
 	if st.Branch != "main" {
 		t.Fatalf("expected Branch=main, got %q", st.Branch)
@@ -93,54 +93,6 @@ func TestLoadGitLineChanges_IncludesStagedChanges(t *testing.T) {
 	}
 	if got := changes[1]; got != editor.GitLineModified {
 		t.Fatalf("line 2 marker = %v, want modified", got)
-	}
-}
-
-// TestLoadGitAheadBehind_CountsBothDirections builds a repo with a
-// bare upstream, pushes, then creates one unpushed commit and rewinds
-// past one pushed commit — landing 1 ahead and 1 behind at once. Pins
-// the left/right order of rev-list's symmetric difference, the mistake
-// this helper exists to encapsulate.
-func TestLoadGitAheadBehind_CountsBothDirections(t *testing.T) {
-	requireGit(t)
-	repo := initRepo(t)
-	bare := t.TempDir()
-	gitRun(t, bare, "init", "-q", "--bare")
-	writeFileT(t, filepath.Join(repo, "a.txt"), "one\n")
-	gitRun(t, repo, "add", ".")
-	gitRun(t, repo, "commit", "-q", "-m", "c1")
-	writeFileT(t, filepath.Join(repo, "a.txt"), "two\n")
-	gitRun(t, repo, "commit", "-q", "-am", "c2")
-	gitRun(t, repo, "remote", "add", "origin", bare)
-	gitRun(t, repo, "push", "-q", "-u", "origin", "main")
-
-	// Rewind one pushed commit (now behind 1), then commit something
-	// new on top (now also ahead 1).
-	gitRun(t, repo, "reset", "-q", "--hard", "HEAD~1")
-	writeFileT(t, filepath.Join(repo, "b.txt"), "local\n")
-	gitRun(t, repo, "add", ".")
-	gitRun(t, repo, "commit", "-q", "-m", "local-only")
-
-	ahead, behind := loadGitAheadBehind(repo)
-	if ahead != 1 || behind != 1 {
-		t.Fatalf("ahead=%d behind=%d, want 1/1", ahead, behind)
-	}
-}
-
-// TestLoadGitAheadBehind_NoUpstreamIsZero verifies branches without an
-// upstream (and non-repos) degrade to 0/0 so the arrows just don't
-// render.
-func TestLoadGitAheadBehind_NoUpstreamIsZero(t *testing.T) {
-	requireGit(t)
-	repo := initRepo(t)
-	writeFileT(t, filepath.Join(repo, "a.txt"), "x\n")
-	gitRun(t, repo, "add", ".")
-	gitRun(t, repo, "commit", "-q", "-m", "c1")
-	if a, b := loadGitAheadBehind(repo); a != 0 || b != 0 {
-		t.Fatalf("no-upstream: got %d/%d, want 0/0", a, b)
-	}
-	if a, b := loadGitAheadBehind(t.TempDir()); a != 0 || b != 0 {
-		t.Fatalf("non-repo: got %d/%d, want 0/0", a, b)
 	}
 }
 
@@ -219,7 +171,7 @@ func TestApplyGitStatus_UpdatesOpenTabGutters(t *testing.T) {
 	a.tabs.At(1).GitLines = keep
 
 	a.applyGitStatus(gitStatusResult{
-		st: gitStatus{IsRepo: true, Root: dir, Branch: "main", DirtyFiles: map[string]filetree.GitChangeKind{}},
+		st: gitStatus{IsRepo: true, Root: dir, Branch: "main", Files: map[string]filetree.GitChangeKind{}},
 		tabLines: map[string]map[int]editor.GitLineChange{
 			tracked: {0: editor.GitLineModified},
 		},
@@ -299,68 +251,6 @@ func TestLoadGitFileDiff_Degrades(t *testing.T) {
 	}
 }
 
-// TestLoadGitBranch_NotARepo confirms the helper degrades quietly when
-// the directory isn't a git work tree — empty string, no panic, no
-// stderr noise reaching the editor.
-func TestLoadGitBranch_NotARepo(t *testing.T) {
-	if got := loadGitBranch(t.TempDir()); got != "" {
-		t.Fatalf("non-repo branch = %q, want empty", got)
-	}
-	if got := loadGitBranch(""); got != "" {
-		t.Fatalf("empty rootDir branch = %q, want empty", got)
-	}
-}
-
-// TestLoadGitBranch_OnBranch checks the happy path — a fresh repo
-// checked out on `main` returns "main".
-func TestLoadGitBranch_OnBranch(t *testing.T) {
-	requireGit(t)
-	repo := initRepo(t)
-	if got := loadGitBranch(repo); got != "main" {
-		t.Fatalf("branch = %q, want main", got)
-	}
-}
-
-// TestLoadGitBranch_TracksRename confirms a rename of the current
-// branch is reflected on the next call — this is the whole point of
-// the 10s tick: the user's checkout state is allowed to change behind
-// the editor's back.
-func TestLoadGitBranch_TracksRename(t *testing.T) {
-	requireGit(t)
-	repo := initRepo(t)
-	writeFileT(t, filepath.Join(repo, "a.txt"), "x")
-	gitRun(t, repo, "add", "a.txt")
-	gitRun(t, repo, "commit", "-m", "init")
-	gitRun(t, repo, "branch", "-m", "main", "feat/something")
-	if got := loadGitBranch(repo); got != "feat/something" {
-		t.Fatalf("after rename branch = %q, want feat/something", got)
-	}
-}
-
-// TestLoadGitBranch_DetachedHEAD asserts the symbolic-ref fallback
-// kicks in: when HEAD is detached at a commit, the helper returns a
-// short SHA instead of an empty string, so the status bar still shows
-// *something* useful instead of vanishing mid-rebase.
-func TestLoadGitBranch_DetachedHEAD(t *testing.T) {
-	requireGit(t)
-	repo := initRepo(t)
-	writeFileT(t, filepath.Join(repo, "a.txt"), "x")
-	gitRun(t, repo, "add", "a.txt")
-	gitRun(t, repo, "commit", "-m", "init")
-	gitRun(t, repo, "checkout", "-q", "--detach", "HEAD")
-
-	got := loadGitBranch(repo)
-	if got == "" {
-		t.Fatal("detached HEAD branch came back empty; expected a short SHA")
-	}
-	if got == "main" {
-		t.Fatalf("detached HEAD reported branch name %q; expected SHA", got)
-	}
-	if len(got) > 12 || len(got) < 4 {
-		t.Fatalf("detached HEAD output %q doesn't look like a short SHA", got)
-	}
-}
-
 // TestLoadGitStatus_FindsModifiedAndUntracked seeds a repo with one
 // committed file (later modified), one brand-new untracked file, and
 // one staged-but-uncommitted file. All three should show up as dirty,
@@ -387,8 +277,8 @@ func TestLoadGitStatus_FindsModifiedAndUntracked(t *testing.T) {
 	}
 	for _, want := range []string{"tracked.txt", "untracked.txt", "staged.txt"} {
 		abs := filepath.Join(repo, want)
-		if st.DirtyFiles[abs] == filetree.GitChangeNone {
-			t.Errorf("expected %s to be dirty; got %v", want, sortedKeys(st.DirtyFiles))
+		if st.Files[abs] == filetree.GitChangeNone {
+			t.Errorf("expected %s to be dirty; got %v", want, sortedKeys(st.Files))
 		}
 	}
 }
@@ -422,96 +312,8 @@ func TestLoadGitStatus_FromSubdirectory(t *testing.T) {
 		filepath.Join(sub, "inside.txt"),
 		filepath.Join(repo, "outside.txt"),
 	} {
-		if st.DirtyFiles[want] == filetree.GitChangeNone {
-			t.Errorf("expected %s to be dirty; got %v", want, sortedKeys(st.DirtyFiles))
-		}
-	}
-}
-
-// TestParsePorcelain_BasicCases pins down the byte-level porcelain v1
-// parser. Each case mirrors something `git status --porcelain` actually
-// produces — we want regression coverage on the format itself, not just
-// the happy path through real git.
-func TestParsePorcelain_BasicCases(t *testing.T) {
-	top := "/tmp/repo"
-	cases := []struct {
-		name     string
-		input    string
-		wantKeys []string
-	}{
-		{
-			name:     "single modified",
-			input:    " M file.txt\n",
-			wantKeys: []string{"/tmp/repo/file.txt"},
-		},
-		{
-			name:     "untracked",
-			input:    "?? new.go\n",
-			wantKeys: []string{"/tmp/repo/new.go"},
-		},
-		{
-			name:     "staged plus modified",
-			input:    "MM file.go\n",
-			wantKeys: []string{"/tmp/repo/file.go"},
-		},
-		{
-			name:     "multiple lines",
-			input:    " M a.txt\n?? b.txt\nA  c.txt\n",
-			wantKeys: []string{"/tmp/repo/a.txt", "/tmp/repo/b.txt", "/tmp/repo/c.txt"},
-		},
-		{
-			name:     "rename marks both old and new",
-			input:    "R  oldname.txt -> newname.txt\n",
-			wantKeys: []string{"/tmp/repo/oldname.txt", "/tmp/repo/newname.txt"},
-		},
-		{
-			name:     "quoted path with spaces",
-			input:    " M \"weird name.txt\"\n",
-			wantKeys: []string{"/tmp/repo/weird name.txt"},
-		},
-		{
-			name:     "blank input",
-			input:    "",
-			wantKeys: nil,
-		},
-		{
-			name:     "junk too short to parse is dropped",
-			input:    "M\n",
-			wantKeys: nil,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := parsePorcelain([]byte(tc.input), top)
-			if len(got) != len(tc.wantKeys) {
-				t.Fatalf("count mismatch: want %d (%v), got %d (%v)",
-					len(tc.wantKeys), tc.wantKeys,
-					len(got), sortedKeys(got))
-			}
-			for _, k := range tc.wantKeys {
-				if got[k] == filetree.GitChangeNone {
-					t.Errorf("missing %q in %v", k, sortedKeys(got))
-				}
-			}
-		})
-	}
-}
-
-// TestParsePorcelain_StatusKinds confirms the tree can color different git
-// states distinctly instead of collapsing everything to one dirty color.
-func TestParsePorcelain_StatusKinds(t *testing.T) {
-	top := "/tmp/repo"
-	got := parsePorcelain([]byte(" M mod.go\n?? new.go\n D gone.go\nR  old.go -> moved.go\n"), top)
-	want := map[string]filetree.GitChangeKind{
-		"/tmp/repo/mod.go":   filetree.GitChangeModified,
-		"/tmp/repo/new.go":   filetree.GitChangeAdded,
-		"/tmp/repo/gone.go":  filetree.GitChangeDeleted,
-		"/tmp/repo/old.go":   filetree.GitChangeDeleted,
-		"/tmp/repo/moved.go": filetree.GitChangeRenamed,
-	}
-	for path, kind := range want {
-		if got[path] != kind {
-			t.Fatalf("%s kind = %v, want %v; got %v", path, got[path], kind, got)
+		if st.Files[want] == filetree.GitChangeNone {
+			t.Errorf("expected %s to be dirty; got %v", want, sortedKeys(st.Files))
 		}
 	}
 }
@@ -555,28 +357,6 @@ func TestLineInHunk_IncludesDeletionAnchor(t *testing.T) {
 	}
 	if lineInHunk(13, 12, 0) {
 		t.Fatal("deleted-only hunk should not match unrelated lines")
-	}
-}
-
-// TestUnquotePath_Variants verifies the C-style unquoter handles git's
-// default quoting — quoted paths come back clean, unquoted paths pass
-// through, and a malformed quoted string falls back to the raw input
-// rather than dropping the path entirely.
-func TestUnquotePath_Variants(t *testing.T) {
-	cases := map[string]string{
-		`plain.txt`:          `plain.txt`,
-		`"quoted.txt"`:       `quoted.txt`,
-		`"with space.txt"`:   `with space.txt`,
-		`"escaped\nnewline"`: "escaped\nnewline",
-		`""`:                 ``,
-		`   spaced.txt   `:   `spaced.txt`,
-		``:                   ``,
-		`"unterminated`:      `"unterminated`, // malformed → raw fallback
-	}
-	for in, want := range cases {
-		if got := unquotePath(in); got != want {
-			t.Errorf("unquotePath(%q) = %q, want %q", in, got, want)
-		}
 	}
 }
 

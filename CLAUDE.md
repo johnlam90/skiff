@@ -65,6 +65,11 @@ internal/overlay/             Floating surfaces: the Stack (routing truth),
                               Field/chrome primitives, and the prefab
                               overlays (Prompt/Confirm/Info/Dirty/Form/
                               Popup/Pick)
+internal/git/                 Git process boundary: Repo over a Runner
+                              seam (real exec + in-memory Fake), hardened
+                              env + read timeouts on every call, and the
+                              Snapshot model (IsRepo/Branch/Ahead/Behind/
+                              Files) every git-aware surface consumes
 internal/clipboard/clipboard.go OSC 52 to /dev/tty with tmux passthrough wrap
 internal/userconfig/userconfig.go ~/.config/skiff/config.json (icons, theme)
 internal/icons/icons.go       Nerd Font detection + per-file glyph mapping

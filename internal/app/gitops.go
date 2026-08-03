@@ -262,14 +262,14 @@ func (a *App) menuGitPush() {
 	if !a.hasGitRepo() {
 		return
 	}
-	a.runGitOp("Push", "Pushed", false, gitPushCmds(a.rootDir, a.gitBranch)...)
+	a.runGitOp("Push", "Pushed", false, gitPushCmds(a.rootDir, a.gitSnap.Branch)...)
 }
 
 // doGitPullAndPush is the accepted "Push rejected" offer: merge-pull,
 // then push — one operation, stopping at the pull if it conflicts.
 func (a *App) doGitPullAndPush() {
 	cmds := [][]string{{"pull", "--no-rebase", "--no-edit"}}
-	cmds = append(cmds, gitPushCmds(a.rootDir, a.gitBranch)...)
+	cmds = append(cmds, gitPushCmds(a.rootDir, a.gitSnap.Branch)...)
 	a.runGitOp("Pull & push", "Pulled and pushed", true, cmds...)
 }
 
@@ -314,7 +314,7 @@ func (e *branchListEvent) When() time.Time { return e.when }
 // must never freeze the event loop — then reopens the flow via
 // handleBranchList.
 func (a *App) requestBranchList(purpose string) {
-	root, current := a.rootDir, a.gitBranch
+	root, current := a.rootDir, a.gitSnap.Branch
 	scr := a.screen
 	go func() {
 		names := gitBranchNames(root, current)
@@ -363,7 +363,7 @@ func (a *App) openComparePick(names []string) {
 
 // setDiffBase applies a new compare base and re-points every mark.
 func (a *App) setDiffBase(base string) {
-	if base == a.gitBranch {
+	if base == a.gitSnap.Branch {
 		base = "" // comparing a branch against itself is just HEAD
 	}
 	a.diffBase = base
@@ -437,7 +437,7 @@ func (a *App) openSwitchBranchPick(names []string) {
 		a.flash("No other branches")
 		return
 	}
-	a.openListPick("Switch branch", branchPickItems(names, a.gitBranch),
+	a.openListPick("Switch branch", branchPickItems(names, a.gitSnap.Branch),
 		func(app *App, i int) { app.doGitSwitchBranch(names[i]) }, nil, nil)
 }
 
@@ -458,7 +458,7 @@ func branchPickItems(names []string, current string) []listPickItem {
 // remote picks: first switch creates local x tracking origin/x, later
 // ones just move to x.
 func (a *App) doGitSwitchBranch(name string) {
-	if name == "" || name == a.gitBranch {
+	if name == "" || name == a.gitSnap.Branch {
 		return
 	}
 	cmds := gitSwitchCmds(a.rootDir, name)
@@ -495,7 +495,7 @@ func (a *App) menuGitNewBranch() {
 	if !a.hasGitRepo() {
 		return
 	}
-	a.openPrompt("New branch", "created from "+a.gitBranch, "", func(app *App, name string) {
+	a.openPrompt("New branch", "created from "+a.gitSnap.Branch, "", func(app *App, name string) {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			return
@@ -557,12 +557,12 @@ func (a *App) menuGitMergeBranch() {
 
 // openMergeBranchPick opens the merge picker for a collected list.
 func (a *App) openMergeBranchPick(all []string) {
-	names := otherNames(all, a.gitBranch, false)
+	names := otherNames(all, a.gitSnap.Branch, false)
 	if len(names) == 0 {
 		a.flash("No other branches to merge")
 		return
 	}
-	a.openListPick("Merge into "+a.gitBranch, branchPickItems(names, ""),
+	a.openListPick("Merge into "+a.gitSnap.Branch, branchPickItems(names, ""),
 		func(app *App, i int) {
 			app.runGitOp("Merge", "Merged "+names[i], true, []string{"merge", "--no-edit", names[i]})
 		}, nil, nil)
@@ -574,7 +574,7 @@ func (a *App) menuGitRenameBranch() {
 	if !a.hasGitRepo() {
 		return
 	}
-	old := a.gitBranch
+	old := a.gitSnap.Branch
 	a.openPrompt("Rename branch", "renames "+old, old, func(app *App, name string) {
 		name = strings.TrimSpace(name)
 		if name == "" || name == old {
@@ -597,7 +597,7 @@ func (a *App) menuGitDeleteBranch() {
 
 // openDeleteBranchPick opens the delete picker for a collected list.
 func (a *App) openDeleteBranchPick(all []string) {
-	names := otherNames(all, a.gitBranch, true)
+	names := otherNames(all, a.gitSnap.Branch, true)
 	if len(names) == 0 {
 		a.flash("No other local branches")
 		return

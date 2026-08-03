@@ -462,7 +462,7 @@ func TestStatusGitSegment(t *testing.T) {
 	if got := a.statusGitSegment(); got != "" {
 		t.Fatalf("non-repo segment should be empty, got %q", got)
 	}
-	a.gitBranch = "main"
+	a.gitSnap.Branch = "main"
 	if got := a.statusGitSegment(); got != " main " {
 		t.Fatalf("clean segment: got %q", got)
 	}
@@ -473,11 +473,11 @@ func TestStatusGitSegment(t *testing.T) {
 	if got := a.statusGitSegment(); got != " main · 2 " {
 		t.Fatalf("dirty segment: got %q", got)
 	}
-	a.gitAhead, a.gitBehind = 2, 1
+	a.gitSnap.Ahead, a.gitSnap.Behind = 2, 1
 	if got := a.statusGitSegment(); got != " main ↑2 ↓1 · 2 " {
 		t.Fatalf("diverged segment: got %q", got)
 	}
-	a.gitBehind = 0
+	a.gitSnap.Behind = 0
 	if got := a.statusGitSegment(); got != " main ↑2 · 2 " {
 		t.Fatalf("ahead-only segment: got %q", got)
 	}
@@ -517,7 +517,9 @@ func TestMenuGitChangesRow(t *testing.T) {
 	if item.enabled(a) {
 		t.Fatal("row should be disabled outside a git repo")
 	}
-	a.gitBranch = "main"
+	// Repo-ness is the explicit IsRepo fact now — a branch name alone
+	// no longer implies a repository.
+	a.gitSnap.IsRepo = true
 	if !item.enabled(a) {
 		t.Fatal("row should be enabled inside a git repo")
 	}

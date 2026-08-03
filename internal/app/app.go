@@ -33,6 +33,7 @@ import (
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/finder"
+	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/icons"
 	"github.com/johnlam90/skiff/internal/overlay"
 	"github.com/johnlam90/skiff/internal/search"
@@ -539,15 +540,10 @@ type App struct {
 	// treeRefreshStop signals the background tree-refresh goroutine to exit.
 	treeRefreshStop chan struct{}
 
-	// gitBranch is the current branch name for the project root (or a
-	// short commit SHA when HEAD is detached). Empty when the root isn't
-	// a git repo. Updated on the same 10-second tick as refreshGitStatus.
-	gitBranch string
-
-	// gitAhead / gitBehind count commits versus the branch's upstream —
-	// the status bar's ↑ ↓ arrows. Zero when in sync or no upstream.
-	gitAhead  int
-	gitBehind int
+	// gitSnap is the last applied repo snapshot — branch, ahead/behind,
+	// and (via the tree) the changed set. gitSnap.IsRepo is the explicit
+	// repo test; nothing infers repo-ness from a non-empty branch name.
+	gitSnap git.Snapshot
 
 	// gitRefreshInFlight marks a background status collection currently
 	// running; gitRefreshQueued remembers that more refresh requests
@@ -847,21 +843,18 @@ func (a *App) openTabPaths() []string {
 // via gitStatusEvent.
 func (a *App) applyGitStatus(res gitStatusResult) {
 	if a.tree != nil {
+		a.gitSnap = res.st
 		if !res.st.IsRepo {
 			a.tree.DirtyFiles = nil
 			a.tree.DirtyFolders = nil
-			a.gitBranch = ""
-			a.gitAhead, a.gitBehind = 0, 0
 			// No repo, no Git panel — fall back to the explorer rather
 			// than strand the user on a view with nothing behind it.
 			a.gitPanelActive = false
 			a.gitPanelRows = nil
 		} else {
-			dirtyFiles := rebaseGitPaths(res.st.DirtyFiles, a.tree.Root.Path)
+			dirtyFiles := rebaseGitPaths(res.st.Files, a.tree.Root.Path)
 			a.tree.DirtyFiles = dirtyFiles
 			a.tree.DirtyFolders = dirtyFolderSet(dirtyFiles, a.tree.Root.Path)
-			a.gitBranch = res.st.Branch
-			a.gitAhead, a.gitBehind = res.st.Ahead, res.st.Behind
 		}
 	}
 	// Tabs opened after the collection started aren't in the map and

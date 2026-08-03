@@ -125,7 +125,7 @@ func (a *App) openGitLog(title, path string) {
 // menuCommitHistory is the ≡ menu entry for the branch log.
 func (a *App) menuCommitHistory() {
 	a.closeMenu()
-	a.openGitLog("History · "+a.gitBranch, "")
+	a.openGitLog("History · "+a.gitSnap.Branch, "")
 }
 
 // menuFileHistory is the ≡ menu entry for the active file's history.
@@ -143,7 +143,7 @@ func (a *App) menuFileHistory() {
 // history is about the past, not the working tree.
 func (a *App) hasFileHistoryTab() bool {
 	tab := a.activeTabPtr()
-	return tab != nil && tab.Path != "" && !tab.IsImage() && a.gitBranch != ""
+	return tab != nil && tab.Path != "" && !tab.IsImage() && a.gitSnap.Branch != ""
 }
 
 // activate opens the selected commit's diff in the diff view. For file

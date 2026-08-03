@@ -84,7 +84,7 @@ func (a *App) toggleGitPanel() {
 	// Repo-ness comes from the cached branch (stamped at startup and on
 	// every 10-second tick) so the toggle never blocks on git; the async
 	// kick below brings the rows fully up to date a beat later.
-	if a.gitBranch == "" {
+	if a.gitSnap.Branch == "" {
 		a.flash("Not a git repository")
 		return
 	}
@@ -102,7 +102,7 @@ func (a *App) showGitPanel() {
 	if a.tree == nil {
 		return
 	}
-	if a.gitBranch == "" {
+	if a.gitSnap.Branch == "" {
 		a.flash("Not a git repository")
 		return
 	}
@@ -127,7 +127,7 @@ func (a *App) menuGitChanges() {
 // a project tree and a detected branch (refreshGitStatus clears the
 // branch whenever the root stops being a repo).
 func (a *App) hasGitRepo() bool {
-	return a.tree != nil && a.gitBranch != ""
+	return a.tree != nil && a.gitSnap.IsRepo
 }
 
 // rebuildGitChangesRows recomputes the sorted row list from the tree's
@@ -463,15 +463,15 @@ func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 	// vocabulary as the status-bar segment, promoted to where the
 	// source-control work happens. Clicking it opens the branch picker.
 	branchStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text).Bold(true)
-	branchLine := "⎇ " + a.gitBranch
+	branchLine := "⎇ " + a.gitSnap.Branch
 	if a.diffBase != "" {
 		branchLine += " ⇆ " + a.diffBase
 	}
-	if a.gitAhead > 0 {
-		branchLine += fmt.Sprintf(" ↑%d", a.gitAhead)
+	if a.gitSnap.Ahead > 0 {
+		branchLine += fmt.Sprintf(" ↑%d", a.gitSnap.Ahead)
 	}
-	if a.gitBehind > 0 {
-		branchLine += fmt.Sprintf(" ↓%d", a.gitBehind)
+	if a.gitSnap.Behind > 0 {
+		branchLine += fmt.Sprintf(" ↓%d", a.gitSnap.Behind)
 	}
 	drawClipped(a.screen, sx+1, sy+1, sw-1, branchLine, branchStyle)
 
@@ -615,18 +615,18 @@ func gitKindColor(th theme.Theme, kind filetree.GitChangeKind) tcell.Color {
 // project isn't a repo. Pure so the draw path and the click hit-test
 // derive the segment's width from the same source and can't drift.
 func (a *App) statusGitSegment() string {
-	if a.gitBranch == "" {
+	if a.gitSnap.Branch == "" {
 		return ""
 	}
-	seg := " " + a.gitBranch
+	seg := " " + a.gitSnap.Branch
 	if a.diffBase != "" {
 		seg += " ⇆ " + a.diffBase
 	}
-	if a.gitAhead > 0 {
-		seg += " ↑" + itoa(a.gitAhead)
+	if a.gitSnap.Ahead > 0 {
+		seg += " ↑" + itoa(a.gitSnap.Ahead)
 	}
-	if a.gitBehind > 0 {
-		seg += " ↓" + itoa(a.gitBehind)
+	if a.gitSnap.Behind > 0 {
+		seg += " ↓" + itoa(a.gitSnap.Behind)
 	}
 	if a.tree != nil && len(a.tree.DirtyFiles) > 0 {
 		seg += " · " + itoa(len(a.tree.DirtyFiles))

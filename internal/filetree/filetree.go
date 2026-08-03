@@ -22,6 +22,8 @@ import (
 
 	"github.com/johnlam90/skiff/internal/icons"
 	"github.com/johnlam90/skiff/internal/theme"
+
+	"github.com/johnlam90/skiff/internal/git"
 )
 
 // Node is a single entry in the file tree. Directories also carry their
@@ -42,16 +44,18 @@ type Node struct {
 // a trashed item never resurfaces in the UI before Undo restores it.
 const TrashPrefix = ".skifftrash-"
 
-// GitChangeKind describes the strongest git status a tree row should show.
-type GitChangeKind int
+// GitChangeKind describes the strongest git status a tree row should
+// show — the git package's ChangeKind under its historical tree-side
+// name, so the badge rendering below reads unchanged.
+type GitChangeKind = git.ChangeKind
 
 const (
-	GitChangeNone GitChangeKind = iota
-	GitChangeModified
-	GitChangeAdded
-	GitChangeDeleted
-	GitChangeRenamed
-	GitChangeMixed
+	GitChangeNone     = git.ChangeNone
+	GitChangeModified = git.ChangeModified
+	GitChangeAdded    = git.ChangeAdded
+	GitChangeDeleted  = git.ChangeDeleted
+	GitChangeRenamed  = git.ChangeRenamed
+	GitChangeMixed    = git.ChangeMixed
 )
 
 // Tree owns the root node and the most recently rendered flat list of

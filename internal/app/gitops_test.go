@@ -348,7 +348,7 @@ func TestGitMergeBranchEndToEnd(t *testing.T) {
 	a := newTestApp(t, dir)
 	a.menuGitMergeBranch()
 	waitListPick(t, a)
-	names := otherNames(gitBranchNames(dir, a.gitBranch), a.gitBranch, false)
+	names := otherNames(gitBranchNames(dir, a.gitSnap.Branch), a.gitSnap.Branch, false)
 	idx := -1
 	for i, n := range names {
 		if n == "feature" {
@@ -381,7 +381,7 @@ func TestGitDeleteBranchForceOffer(t *testing.T) {
 	a := newTestApp(t, dir)
 	a.menuGitDeleteBranch()
 	waitListPick(t, a)
-	names := otherNames(gitBranchNames(dir, a.gitBranch), a.gitBranch, true)
+	names := otherNames(gitBranchNames(dir, a.gitSnap.Branch), a.gitSnap.Branch, true)
 	if len(names) != 1 || names[0] != "orphan" {
 		t.Fatalf("local candidates: %v", names)
 	}
@@ -437,11 +437,11 @@ func TestDiffBaseStatusAndGuard(t *testing.T) {
 	commitAll(t, dir, "second") // worktree clean vs HEAD, dirty vs HEAD~1
 
 	st := loadGitStatus(dir, "HEAD~1")
-	if len(st.DirtyFiles) != 1 {
-		t.Fatalf("vs HEAD~1 should show 1 change, got %+v", st.DirtyFiles)
+	if len(st.Files) != 1 {
+		t.Fatalf("vs HEAD~1 should show 1 change, got %+v", st.Files)
 	}
-	if st2 := loadGitStatus(dir, ""); len(st2.DirtyFiles) != 0 {
-		t.Fatalf("vs HEAD should be clean, got %+v", st2.DirtyFiles)
+	if st2 := loadGitStatus(dir, ""); len(st2.Files) != 0 {
+		t.Fatalf("vs HEAD should be clean, got %+v", st2.Files)
 	}
 	if lines := loadGitLineChanges(dir, "HEAD~1", f); len(lines) == 0 {
 		t.Fatal("gutter vs base should mark the changed line")

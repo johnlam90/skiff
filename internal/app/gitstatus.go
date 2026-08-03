@@ -68,22 +68,9 @@ func collectGitStatus(rootDir, base string, tabPaths []string, skipStatus bool) 
 	return res
 }
 
-// gitStatus is the snapshot of a single git status run. IsRepo distinguishes
-// "not a git repo" (don't bother trying again) from "git error" (we tried
-// and bailed). DirtyFiles holds absolute paths to changed entries; callers
-// should treat absence-of-key as "clean" rather than as "unknown". Branch
-// is the human-readable current branch name, or a short SHA when HEAD is
-// detached, or "" when we aren't in a repo.
-type gitStatus struct {
-	IsRepo     bool
-	Root       string
-	DirtyFiles map[string]filetree.GitChangeKind
-	Branch     string
-	// Ahead/Behind count commits versus the branch's upstream — the
-	// status bar's ↑ ↓ arrows. Both zero when there is no upstream.
-	Ahead  int
-	Behind int
-}
+// gitStatus is the git package's Snapshot under its historical
+// app-side name.
+type gitStatus = git.Snapshot
 
 // loadGitStatus inspects rootDir and returns the set of dirty file paths
 // reported by `git status --porcelain`. A non-git directory yields the
@@ -91,100 +78,7 @@ type gitStatus struct {
 // commands degrades the same way — we'd rather lose the dirty highlight
 // than crash the editor over a transient git issue.
 func loadGitStatus(rootDir, base string) gitStatus {
-	if rootDir == "" {
-		return gitStatus{}
-	}
-
-	// rev-parse --show-toplevel does double duty: it tells us whether
-	// we're in a git work tree at all (non-zero exit otherwise) and
-	// gives us the absolute path of the repo root, which is the prefix
-	// every porcelain path is reported relative to.
-	topBytes, err := git.Output(rootDir, "rev-parse", "--show-toplevel")
-	if err != nil {
-		return gitStatus{}
-	}
-	toplevel := strings.TrimRight(string(topBytes), "\n\r")
-	if toplevel == "" {
-		return gitStatus{}
-	}
-
-	ahead, behind := loadGitAheadBehind(rootDir)
-	out, err := git.Output(rootDir, "status", "--porcelain")
-	if err != nil {
-		// We *are* in a repo (rev-parse succeeded) but couldn't read
-		// status. Mark the result as a repo with no known dirty files
-		// so the caller at least knows we tried.
-		return gitStatus{IsRepo: true, Root: toplevel, DirtyFiles: map[string]filetree.GitChangeKind{}, Branch: loadGitBranch(rootDir), Ahead: ahead, Behind: behind}
-	}
-
-	dirty := parsePorcelain(out, toplevel)
-	if base != "" {
-		// Compare-against-ref mode (druk's diffBase): the change set is
-		// everything different from base, merged with the porcelain's
-		// untracked entries (a diff can't see files git doesn't track).
-		vsBase := loadGitDiffNameStatus(rootDir, base, toplevel)
-		for abs, kind := range dirty {
-			if kind == filetree.GitChangeAdded {
-				if _, exists := vsBase[abs]; !exists {
-					vsBase[abs] = kind
-				}
-			}
-		}
-		dirty = vsBase
-	}
-	return gitStatus{IsRepo: true, Root: toplevel, DirtyFiles: dirty, Branch: loadGitBranch(rootDir), Ahead: ahead, Behind: behind}
-}
-
-// loadGitDiffNameStatus builds the dirty map versus an arbitrary ref
-// via `git diff --name-status <ref>` — the loader behind the
-// compare-against mode. Best-effort like every loader here.
-func loadGitDiffNameStatus(rootDir, base, toplevel string) map[string]filetree.GitChangeKind {
-	dirty := map[string]filetree.GitChangeKind{}
-	out, err := git.Output(rootDir, "diff", "--name-status", base)
-	if err != nil {
-		return dirty
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		parts := strings.Split(line, "\t")
-		if len(parts) < 2 || parts[0] == "" {
-			continue
-		}
-		rel := parts[len(parts)-1] // renames list old	new; keep the new
-		var kind filetree.GitChangeKind
-		switch parts[0][0] {
-		case 'A':
-			kind = filetree.GitChangeAdded
-		case 'D':
-			kind = filetree.GitChangeDeleted
-		case 'R':
-			kind = filetree.GitChangeRenamed
-		default:
-			kind = filetree.GitChangeModified
-		}
-		dirty[filepath.Join(toplevel, rel)] = kind
-	}
-	return dirty
-}
-
-// loadGitAheadBehind counts commits versus the current branch's
-// upstream: how many the user has that the upstream lacks (ahead — the
-// "you haven't pushed" nudge) and vice versa (behind). A branch with no
-// upstream, a detached HEAD, or any git failure yields 0/0 — the
-// arrows simply don't render.
-func loadGitAheadBehind(rootDir string) (ahead, behind int) {
-	out, err := git.Output(rootDir, "rev-list", "--left-right", "--count", "@{upstream}...HEAD")
-	if err != nil {
-		return 0, 0
-	}
-	fields := strings.Fields(string(out))
-	if len(fields) != 2 {
-		return 0, 0
-	}
-	// Left side of the symmetric difference is the upstream's commits
-	// (we are behind by that many); the right side is ours (ahead).
-	behind, _ = strconv.Atoi(fields[0])
-	ahead, _ = strconv.Atoi(fields[1])
-	return ahead, behind
+	return git.Open(rootDir).Status(base)
 }
 
 // rebaseGitPaths rewrites dirty paths to match the file tree root casing.
@@ -219,105 +113,6 @@ func relFromRoot(path, root string) (string, bool) {
 		return path[len(prefix):], true
 	}
 	return "", false
-}
-
-// loadGitBranch returns the current branch name for rootDir, or a short
-// commit SHA when HEAD is detached (rebase / bisect / a manual checkout
-// of a tag). Returns "" for non-repos and any other failure mode — the
-// caller treats that as "no branch label to show" and the status bar
-// just doesn't render one.
-//
-// We try `symbolic-ref --short HEAD` first because it's the cheapest way
-// to distinguish "on a branch" from "detached"; the fallback to
-// `rev-parse --short HEAD` only fires when symbolic-ref's non-zero exit
-// tells us we're detached.
-func loadGitBranch(rootDir string) string {
-	if rootDir == "" {
-		return ""
-	}
-	if out, err := git.Output(rootDir, "symbolic-ref", "--short", "HEAD"); err == nil {
-		return strings.TrimRight(string(out), "\n\r")
-	}
-	if out, err := git.Output(rootDir, "rev-parse", "--short", "HEAD"); err == nil {
-		return strings.TrimRight(string(out), "\n\r")
-	}
-	return ""
-}
-
-// parsePorcelain converts the bytes returned by `git status --porcelain`
-// into a set of absolute file paths. Split out from loadGitStatus so it
-// can be exercised by tests without spawning a subprocess.
-//
-// The porcelain v1 format (without -z) is:
-//
-//	XY <path>
-//	XY <oldpath> -> <newpath>      (renames / copies)
-//	XY "quoted path with spaces"   (when core.quotePath is on, the default)
-//
-// We treat any line as dirty regardless of the X/Y status codes; for renames
-// we mark both the old and new paths so the user sees both rows tinted.
-func parsePorcelain(out []byte, toplevel string) map[string]filetree.GitChangeKind {
-	dirty := map[string]filetree.GitChangeKind{}
-	for _, raw := range bytes.Split(out, []byte{'\n'}) {
-		line := string(raw)
-		if len(line) < 4 {
-			continue
-		}
-		kind := porcelainKind(line[:2])
-		// Drop the two status chars + the separating space.
-		body := line[3:]
-
-		if idx := strings.Index(body, " -> "); idx >= 0 {
-			oldPath := unquotePath(body[:idx])
-			newPath := unquotePath(body[idx+len(" -> "):])
-			if oldPath != "" {
-				dirty[filepath.Join(toplevel, oldPath)] = filetree.GitChangeDeleted
-			}
-			if newPath != "" {
-				dirty[filepath.Join(toplevel, newPath)] = filetree.GitChangeRenamed
-			}
-			continue
-		}
-
-		path := unquotePath(body)
-		if path == "" {
-			continue
-		}
-		dirty[filepath.Join(toplevel, path)] = kind
-	}
-	return dirty
-}
-
-// porcelainKind maps git porcelain's XY status pair to the tree status kind.
-func porcelainKind(code string) filetree.GitChangeKind {
-	if strings.Contains(code, "?") || strings.Contains(code, "A") {
-		return filetree.GitChangeAdded
-	}
-	if strings.Contains(code, "D") {
-		return filetree.GitChangeDeleted
-	}
-	if strings.Contains(code, "R") || strings.Contains(code, "C") {
-		return filetree.GitChangeRenamed
-	}
-	return filetree.GitChangeModified
-}
-
-// unquotePath undoes git's C-style quoting (enabled by default via
-// core.quotePath) so paths with spaces, unicode, or control chars come
-// back as a normal Go string. Falls back to the raw input on any parse
-// error — that's safer than dropping a path the user might want flagged.
-func unquotePath(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return ""
-	}
-	if !strings.HasPrefix(s, `"`) {
-		return s
-	}
-	if unq, err := strconv.Unquote(s); err == nil {
-		return unq
-	}
-	return s
 }
 
 // dirtyFolderSet rolls a set of dirty file paths up to every ancestor

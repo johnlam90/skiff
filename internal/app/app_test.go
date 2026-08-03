@@ -1694,7 +1694,7 @@ func TestTabBarClick_ClosesViaX(t *testing.T) {
 // the corner and read which checkout they're on.
 func TestDrawStatusBar_RendersBranchRightAligned(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	a.gitBranch = "feat/widgets"
+	a.gitSnap.Branch = "feat/widgets"
 	a.draw()
 	scr := a.screen.(tcell.SimulationScreen)
 	scr.Show() // SimulationScreen serves GetContents from the *front* buffer.
@@ -1718,7 +1718,7 @@ func TestDrawStatusBar_RendersBranchRightAligned(t *testing.T) {
 // the left-side text — the right edge should just be the bar's bg.
 func TestDrawStatusBar_OmitsBranchWhenEmpty(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	a.gitBranch = ""
+	a.gitSnap.Branch = ""
 	a.draw()
 	scr := a.screen.(tcell.SimulationScreen)
 	scr.Show()
