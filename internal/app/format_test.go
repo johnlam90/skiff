@@ -115,12 +115,12 @@ func TestRunFormatOnSave_NoConfigIsNoop(t *testing.T) {
 
 	a.runFormatOnSave(0)
 
-	if a.confirmOpen {
+	if confirmIsOpen(a) {
 		t.Fatal("no config should never open a confirm modal")
 	}
-	if a.confirmCancelHook != nil {
-		t.Fatal("no config should not install a cancel hook")
-	}
+	// No hook assertion needed anymore: the cancel hook lives on the
+	// confirm prefab itself, so with no confirm up there is structurally
+	// nothing to leak.
 }
 
 // TestRunFormatOnSave_UnknownExtensionIsNoop covers a project that
@@ -139,7 +139,7 @@ func TestRunFormatOnSave_UnknownExtensionIsNoop(t *testing.T) {
 
 	a.runFormatOnSave(0)
 
-	if a.confirmOpen {
+	if confirmIsOpen(a) {
 		t.Fatal("unknown extension should not prompt")
 	}
 }
@@ -161,10 +161,10 @@ func TestRunFormatOnSave_UnknownTrustOpensPrompt(t *testing.T) {
 
 	a.runFormatOnSave(0)
 
-	if !a.confirmOpen {
+	if !confirmIsOpen(a) {
 		t.Fatal("untrusted config should open the trust prompt")
 	}
-	if a.confirmCancelHook == nil {
+	if confirmPrefab(t, a).OnCancel == nil {
 		t.Fatal("trust prompt should install a cancel hook")
 	}
 }
@@ -187,12 +187,12 @@ func TestRunFormatOnSave_DeniedIsNoop(t *testing.T) {
 
 	a.runFormatOnSave(0)
 
-	if a.confirmOpen {
+	if confirmIsOpen(a) {
 		t.Fatal("denied trust should not re-prompt")
 	}
-	if a.confirmCancelHook != nil {
-		t.Fatal("denied trust should not install a cancel hook")
-	}
+	// No hook assertion needed anymore: the cancel hook lives on the
+	// confirm prefab itself, so with no confirm up there is structurally
+	// nothing to leak.
 }
 
 // TestTrustPromptCancel_PersistsDeny exercises the bridge between
@@ -214,10 +214,10 @@ func TestTrustPromptCancel_PersistsDeny(t *testing.T) {
 
 	// Run the save flow up to the prompt, then drive cancel directly.
 	a.runFormatOnSave(0)
-	if !a.confirmOpen {
+	if !confirmIsOpen(a) {
 		t.Fatal("expected trust prompt to be open")
 	}
-	a.confirmCancel()
+	pressEsc(a)
 
 	tf, err := format.LoadTrust(trustPath)
 	if err != nil {
@@ -226,19 +226,6 @@ func TestTrustPromptCancel_PersistsDeny(t *testing.T) {
 	if d := tf.CheckTrust(root, cfg.Hash()); d != format.TrustDenied {
 		t.Fatalf("expected TrustDenied recorded, got %v", d)
 	}
-}
-
-// TestConfirmCancel_NoHookIsInert guarantees the cancel branch is
-// inert for non-format confirm modals (today: Delete). Without this
-// isolation, cancelling a Delete prompt could fire a stale hook
-// from a format flow that never finished closing properly.
-func TestConfirmCancel_NoHookIsInert(t *testing.T) {
-	useTestTrustFile(t)
-	a := newTestApp(t, t.TempDir())
-	a.confirmOpen = true
-	a.confirmCancel()
-	// No assertion beyond "did not panic" — the test passes if we
-	// reach this line, since a stray hook would have run side effects.
 }
 
 // TestExecFormatter_RunsAndPostsEvent walks the async happy path: the
@@ -363,7 +350,7 @@ func TestMaybeOfferInstall_NoDefaultsIsNoop(t *testing.T) {
 
 	a.runFormatOnSave(0)
 
-	if a.confirmOpen {
+	if confirmIsOpen(a) {
 		t.Fatal("missing defaults should never prompt")
 	}
 }
@@ -384,10 +371,10 @@ func TestMaybeOfferInstall_OpensPrompt(t *testing.T) {
 
 	a.runFormatOnSave(0)
 
-	if !a.confirmOpen {
+	if !confirmIsOpen(a) {
 		t.Fatal("expected install prompt to open")
 	}
-	if a.confirmCancelHook == nil {
+	if confirmPrefab(t, a).OnCancel == nil {
 		t.Fatal("expected cancel hook to be armed for install decline")
 	}
 }
@@ -413,12 +400,11 @@ func TestMaybeOfferInstall_AcceptWritesProjectConfig(t *testing.T) {
 	openTabAtPath(t, a, target)
 
 	a.runFormatOnSave(0)
-	if !a.confirmOpen {
+	if !confirmIsOpen(a) {
 		t.Fatal("expected install prompt to open")
 	}
 	// Drive the Yes path manually.
-	a.confirmHover = 1
-	a.confirmYes()
+	confirmYes(a)
 
 	// Project config should now exist with a "go" entry that still
 	// contains the literal $FILE token — anything else means the
@@ -495,10 +481,10 @@ func TestMaybeOfferInstall_DeclinePersists(t *testing.T) {
 	openTabAtPath(t, a, target)
 
 	a.runFormatOnSave(0)
-	if !a.confirmOpen {
+	if !confirmIsOpen(a) {
 		t.Fatal("expected install prompt to open")
 	}
-	a.confirmCancel()
+	pressEsc(a)
 
 	tf, err := format.LoadTrust(trustPath)
 	if err != nil {
@@ -510,7 +496,7 @@ func TestMaybeOfferInstall_DeclinePersists(t *testing.T) {
 
 	// Next save should be silent.
 	a.runFormatOnSave(0)
-	if a.confirmOpen {
+	if confirmIsOpen(a) {
 		t.Fatal("declined extension should not re-prompt")
 	}
 }
@@ -537,7 +523,7 @@ func TestMaybeOfferInstall_ProjectHasEntryUsesTrustPath(t *testing.T) {
 	// shape, but the title text and hook signature would differ for
 	// install vs trust. The presence of *some* prompt + the project
 	// config's hash being TrustUnknown is the trust-path signal.
-	if !a.confirmOpen {
+	if !confirmIsOpen(a) {
 		t.Fatal("expected some prompt to open")
 	}
 	cfg, _ := format.Load(root)

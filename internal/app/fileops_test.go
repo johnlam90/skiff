@@ -368,11 +368,10 @@ func TestMenuDeleteFolder_Confirms(t *testing.T) {
 	a.setActiveFolder(sub)
 
 	a.menuDeleteFolder()
-	if !a.confirmOpen {
+	if !confirmIsOpen(a) {
 		t.Fatal("expected confirm modal to open")
 	}
-	a.confirmHover = 1
-	a.confirmYes()
+	confirmYes(a)
 
 	if _, err := os.Stat(sub); !os.IsNotExist(err) {
 		t.Fatalf("folder still exists: err=%v", err)
@@ -393,7 +392,7 @@ func TestMenuDeleteFolder_RefusesRoot(t *testing.T) {
 	a.setActiveFolder(root)
 
 	a.menuDeleteFolder()
-	if a.confirmOpen {
+	if confirmIsOpen(a) {
 		t.Fatal("root folder should not open a confirm modal")
 	}
 	if _, err := os.Stat(root); err != nil {

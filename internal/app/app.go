@@ -463,35 +463,9 @@ type App struct {
 	// Rename and New File) is an overlay.Prompt prefab — openPrompt in
 	// modals.go constructs it; it carries all its own state.
 
-	// Confirm modal — Yes / No, used by Delete. confirmHover is 0 for No
-	// (the safe default) or 1 for Yes.
-	confirmOpen     bool
-	confirmTitle    string
-	confirmMessage  string
-	confirmHover    int
-	confirmCallback func(*App)
-
-	// confirmInfo flips the confirm modal into a single-button "OK"
-	// flavour used for reporting things back to the user — like the
-	// full stderr from a failed custom action — that don't need a
-	// Yes/No decision. confirmMessageLines, when non-nil, supersedes
-	// confirmMessage so the renderer can draw a multi-line body for
-	// scp / ssh diagnostics that naturally wrap.
-	confirmInfo         bool
-	confirmMessageLines []string
-	confirmInfoScroll   int
-
-	// Save/Discard/Cancel modal — used when closing a dirty tab or
-	// quitting with unsaved changes. dirtyHover indexes the button row:
-	// 0 = Cancel (safe default for an accidental Enter), 1 = Discard,
-	// 2 = Save. Save and Discard run the corresponding callbacks; Cancel
-	// just dismisses.
-	dirtyOpen            bool
-	dirtyTitle           string
-	dirtyMessage         string
-	dirtyHover           int
-	dirtySaveCallback    func(*App)
-	dirtyDiscardCallback func(*App)
+	// The confirm (Yes/No + info flavour) and dirty-close overlays are
+	// overlay.Confirm / overlay.Info / overlay.Dirty prefabs — see
+	// modals.go for the openers; they carry all their own state.
 
 	// Form modal — multi-field input collected before a custom action's
 	// shell command runs. See formmodal.go for layout, focus traversal,
@@ -674,14 +648,6 @@ type App struct {
 	gitLogEntries  []gitLogEntry
 	gitLogSelected int
 	gitLogScroll   int
-
-	// confirmCancelHook runs when the active confirm modal is dismissed
-	// without a Yes — i.e. the user picked No, hit Esc, or clicked
-	// outside. Set after openConfirm by flows that want to react to the
-	// negative answer (today: format-trust deny, format-install
-	// decline). closeAllModals clears it so a stale hook can't fire on
-	// an unrelated future modal.
-	confirmCancelHook func(*App)
 
 	quit bool
 }

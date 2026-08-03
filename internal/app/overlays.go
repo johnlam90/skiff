@@ -45,22 +45,8 @@ func (o menuOverlay) Draw(tcell.Screen) { o.a.drawMenu() }
 // The prompt is a real overlay now — overlay.Prompt — so it has no shim;
 // openPrompt constructs the prefab directly.
 
-// confirmOverlay routes the Yes/No confirm and its single-button info
-// flavour — both share the confirm state and handlers.
-type confirmOverlay struct{ a *App }
-
-func (o confirmOverlay) HandleKey(ev *tcell.EventKey) { o.a.handleConfirmKey(ev) }
-func (o confirmOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
-	o.a.handleConfirmMouse(x, y, btn)
-}
-func (o confirmOverlay) Draw(tcell.Screen) { o.a.drawConfirm() }
-
-// dirtyOverlay routes the three-button unsaved-changes modal.
-type dirtyOverlay struct{ a *App }
-
-func (o dirtyOverlay) HandleKey(ev *tcell.EventKey)               { o.a.handleDirtyKey(ev) }
-func (o dirtyOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) { o.a.handleDirtyMouse(x, y, btn) }
-func (o dirtyOverlay) Draw(tcell.Screen)                          { o.a.drawDirtyClose() }
+// The confirm/info and dirty-close modals are real overlays now
+// (overlay.Confirm, overlay.Info, overlay.Dirty) — no shims.
 
 // formOverlay routes the multi-field custom-action form.
 type formOverlay struct{ a *App }

@@ -375,7 +375,7 @@ func TestGitPanelClick_IgnoresChrome(t *testing.T) {
 	a, _, _ := dirtyRepoApp(t)
 	a.toggleGitPanel()
 	a.gitPanelClick(5, 50)
-	if a.diffOpen || a.confirmOpen {
+	if a.diffOpen || confirmIsOpen(a) {
 		t.Fatal("clicks below the list should not open anything")
 	}
 }

@@ -29,6 +29,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/overlay"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -514,7 +515,7 @@ func (a *App) drawDiffView() {
 			// the scrolled slice — so sideways scrolling never changes
 			// a line's color.
 			line := a.diffRaw[idx]
-			st := confirmInfoLineStyle(a.theme, bg, line)
+			st := overlay.DiffLineStyle(a.theme, bg, line)
 			drawAt(a.screen, bodyX, my+3+i, sliceRunes(line, a.diffScrollX, bodyW), st)
 		}
 	}

@@ -94,3 +94,20 @@ func runeLen(s string) int {
 	}
 	return n
 }
+
+// trimRunes truncates s to max visible cells, rune-safe, appending an
+// ellipsis when anything was cut — a byte-slice truncation once split
+// multibyte filenames into replacement garbage.
+func trimRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if runeLen(s) <= max {
+		return s
+	}
+	if max == 1 {
+		return "…"
+	}
+	rs := []rune(s)
+	return string(rs[:max-1]) + "…"
+}

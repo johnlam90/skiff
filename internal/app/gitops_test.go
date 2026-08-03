@@ -241,19 +241,17 @@ func TestHandleGitOpDone_Routing(t *testing.T) {
 		when: time.Now(), label: "Push", err: errFake,
 		output: "! [rejected] main -> main (fetch first)",
 	})
-	if !a.confirmOpen || a.confirmTitle != "Push rejected" {
-		t.Fatalf("rejected push should offer pull-then-push, confirm=%v %q", a.confirmOpen, a.confirmTitle)
+	if c := confirmPrefab(t, a); c.Title != "Push rejected" {
+		t.Fatalf("rejected push should offer pull-then-push, got title %q", c.Title)
 	}
 	a.closeAllModals()
 
 	a.handleGitOpDone(&gitOpDoneEvent{
 		when: time.Now(), label: "Pull", err: errFake, output: "CONFLICT (content)",
 	})
-	if !a.confirmInfo {
-		t.Fatal("other failures should open the info modal")
-	}
-	if len(a.confirmMessageLines) == 0 || !strings.Contains(a.confirmMessageLines[0], "merge conflict") {
-		t.Fatalf("info should lead with the explainer, got %v", a.confirmMessageLines)
+	n := infoPrefab(t, a)
+	if len(n.Lines) == 0 || !strings.Contains(n.Lines[0], "merge conflict") {
+		t.Fatalf("info should lead with the explainer, got %v", n.Lines)
 	}
 }
 
@@ -390,17 +388,15 @@ func TestGitDeleteBranchForceOffer(t *testing.T) {
 	}
 	a.listPickSelected = 0
 	a.confirmListPick()
-	if !a.confirmOpen {
+	if !confirmIsOpen(a) {
 		t.Fatal("delete needs a confirm first")
 	}
-	a.confirmCallback(a) // yes, delete
+	confirmYes(a) // yes, delete
 	waitGitIdle(t, a)
-	if !a.confirmOpen || !strings.Contains(a.confirmMessage, "Force delete") {
-		t.Fatalf("unmerged delete should offer force, got %v %q", a.confirmOpen, a.confirmMessage)
+	if c := confirmPrefab(t, a); !strings.Contains(c.Message, "Force delete") {
+		t.Fatalf("unmerged delete should offer force, got %q", c.Message)
 	}
-	cb := a.confirmCallback
-	a.closeAllModals()
-	cb(a) // yes, force
+	confirmYes(a) // yes, force
 	waitGitIdle(t, a)
 	out, _ := exec.Command("git", "-C", dir, "branch", "--list", "orphan").Output()
 	if strings.TrimSpace(string(out)) != "" {

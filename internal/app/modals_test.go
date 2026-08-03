@@ -16,14 +16,12 @@ package app
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/overlay"
-	"github.com/johnlam90/skiff/internal/theme"
 )
 
 // TestCloseAllModals_ClearsEverything proves the helper turns off every
@@ -31,18 +29,16 @@ import (
 func TestCloseAllModals_ClearsEverything(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.menuOpen = true
-	a.confirmOpen = true
 	a.contextOpen = true
 	a.hoveredMenuRow = 3
 	a.contextNode = a.tree.Root
 	a.contextItems = []contextItem{{label: "x"}}
-	a.confirmCallback = func(*App) {}
 	a.dragMode = "editor"
 	a.autoScrollDir = 1
 
 	a.closeAllModals()
 
-	if a.menuOpen || a.confirmOpen || a.contextOpen {
+	if a.menuOpen || a.contextOpen {
 		t.Fatal("expected all modal flags off")
 	}
 	if a.hoveredMenuRow != -1 {
@@ -51,79 +47,11 @@ func TestCloseAllModals_ClearsEverything(t *testing.T) {
 	if a.contextNode != nil || a.contextItems != nil {
 		t.Fatal("context state not cleared")
 	}
-	if a.confirmCallback != nil {
-		t.Fatal("callbacks not cleared")
-	}
 	if a.dragMode != "" {
 		t.Fatalf("dragMode not cleared: %q", a.dragMode)
 	}
 	if a.autoScrollDir != 0 {
 		t.Fatalf("autoScrollDir not reset: %d", a.autoScrollDir)
-	}
-}
-
-// TestConfirmInfoLineStyle_ColorsDiffLines keeps git previews readable.
-func TestConfirmInfoLineStyle_ColorsDiffLines(t *testing.T) {
-	th := theme.Default()
-	bg := th.LineHL
-	cases := []struct {
-		line string
-		want tcell.Color
-	}{
-		{line: "+new code", want: th.GitAdded},
-		{line: "-old code", want: th.GitDeleted},
-		{line: "@@ -1 +1 @@", want: th.AccentSoft},
-		{line: " context", want: th.Text},
-	}
-	for _, tc := range cases {
-		fg, _, _ := confirmInfoLineStyle(th, bg, tc.line).Decompose()
-		if fg != tc.want {
-			t.Fatalf("%q fg = %v, want %v", tc.line, fg, tc.want)
-		}
-	}
-}
-
-func TestConfirmInfoScroll_ClampsToViewport(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	a.width = 100
-	a.height = 12
-	lines := make([]string, 20)
-	a.openInfo("Git change", lines)
-
-	if got := a.confirmInfoBodyRows(); got != 5 {
-		t.Fatalf("body rows = %d, want 5", got)
-	}
-	a.scrollConfirmInfo(100)
-	if want := len(lines) - 5; a.confirmInfoScroll != want {
-		t.Fatalf("scroll = %d, want %d", a.confirmInfoScroll, want)
-	}
-	a.scrollConfirmInfo(-100)
-	if a.confirmInfoScroll != 0 {
-		t.Fatalf("scroll = %d, want 0", a.confirmInfoScroll)
-	}
-}
-
-// TestHandleConfirmMouse_WheelScrollsInfoBody is the regression test
-// for trackpad scrolling in diff previews: tcell reports wheels as
-// WheelUp/WheelDown, and an earlier version listened for Button4/5 (the
-// X11 wheel convention) so wheel events fell through to the click
-// handling and did nothing.
-func TestHandleConfirmMouse_WheelScrollsInfoBody(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	a.width = 100
-	a.height = 12
-	a.openInfo("Diff · long.go", make([]string, 40))
-
-	a.handleConfirmMouse(50, 6, tcell.WheelDown)
-	if a.confirmInfoScroll != 3 {
-		t.Fatalf("WheelDown should scroll the body, scroll = %d", a.confirmInfoScroll)
-	}
-	a.handleConfirmMouse(50, 6, tcell.WheelUp)
-	if a.confirmInfoScroll != 0 {
-		t.Fatalf("WheelUp should scroll back, scroll = %d", a.confirmInfoScroll)
-	}
-	if !a.confirmOpen {
-		t.Fatal("wheel events must never dismiss the modal")
 	}
 }
 
@@ -186,6 +114,62 @@ func submitPrompt(a *App) {
 	a.handleKey(keyEv(tcell.KeyEnter, 0))
 }
 
+// confirmPrefab / infoPrefab / dirtyPrefab fetch the open overlay of
+// the given kind, failing the test when it isn't up — modal state lives
+// on the prefabs now, not on App.
+func confirmPrefab(t *testing.T, a *App) *overlay.Confirm {
+	t.Helper()
+	c, ok := a.overlays.Top().(*overlay.Confirm)
+	if !ok {
+		t.Fatalf("no confirm overlay open; top = %T", a.overlays.Top())
+	}
+	return c
+}
+
+func infoPrefab(t *testing.T, a *App) *overlay.Info {
+	t.Helper()
+	n, ok := a.overlays.Top().(*overlay.Info)
+	if !ok {
+		t.Fatalf("no info overlay open; top = %T", a.overlays.Top())
+	}
+	return n
+}
+
+func dirtyPrefab(t *testing.T, a *App) *overlay.Dirty {
+	t.Helper()
+	d, ok := a.overlays.Top().(*overlay.Dirty)
+	if !ok {
+		t.Fatalf("no dirty-close overlay open; top = %T", a.overlays.Top())
+	}
+	return d
+}
+
+// confirmIsOpen / infoIsOpen / dirtyIsOpen report whether that overlay
+// kind is up.
+func confirmIsOpen(a *App) bool { _, ok := a.overlays.Top().(*overlay.Confirm); return ok }
+func infoIsOpen(a *App) bool    { _, ok := a.overlays.Top().(*overlay.Info); return ok }
+func dirtyIsOpen(a *App) bool   { _, ok := a.overlays.Top().(*overlay.Dirty); return ok }
+
+// confirmYes picks Yes through real routing: Right arms the Yes button,
+// Enter fires it.
+func confirmYes(a *App) {
+	a.handleKey(keyEv(tcell.KeyRight, 0))
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+}
+
+// pressEsc dismisses the top overlay through real routing.
+func pressEsc(a *App) {
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+}
+
+// dirtyChoose activates one dirty-close button (0 Cancel, 1 Discard,
+// 2 Save) through real routing.
+func dirtyChoose(t *testing.T, a *App, idx int) {
+	t.Helper()
+	dirtyPrefab(t, a).Hover = idx
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+}
+
 // TestOpenPrompt_Submit runs the callback with a trimmed value and closes
 // the overlay. The editing/mouse/draw behavior itself is pinned in
 // internal/overlay's prompt tests — this pins the App wiring.
@@ -240,11 +224,8 @@ func TestPromptCancel(t *testing.T) {
 func TestOpenConfirm_DefaultsToNo(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.openConfirm("Delete", "Sure?", func(*App) {})
-	if !a.confirmOpen {
-		t.Fatal("confirm should open")
-	}
-	if a.confirmHover != 0 {
-		t.Fatalf("default focus should be No (0); got %d", a.confirmHover)
+	if c := confirmPrefab(t, a); c.Hover != 0 {
+		t.Fatalf("default focus should be No (0); got %d", c.Hover)
 	}
 }
 
@@ -253,23 +234,12 @@ func TestConfirmYes(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	called := false
 	a.openConfirm("T", "M", func(*App) { called = true })
-	a.confirmYes()
+	confirmYes(a)
 	if !called {
-		t.Fatal("confirmYes should run callback")
+		t.Fatal("Yes should run the callback")
 	}
-	if a.confirmOpen {
-		t.Fatal("confirmYes should close")
-	}
-}
-
-// TestConfirmYes_NoopWhenClosed protects against stale events.
-func TestConfirmYes_NoopWhenClosed(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	called := false
-	a.confirmCallback = func(*App) { called = true }
-	a.confirmYes()
-	if called {
-		t.Fatal("confirmYes should be a no-op when closed")
+	if confirmIsOpen(a) {
+		t.Fatal("Yes should close the overlay")
 	}
 }
 
@@ -278,61 +248,9 @@ func TestConfirmCancel(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	called := false
 	a.openConfirm("T", "M", func(*App) { called = true })
-	a.confirmCancel()
+	pressEsc(a)
 	if called {
 		t.Fatal("cancel should skip callback")
-	}
-}
-
-// TestHandleConfirmKey_AllBranches walks Tab, Left, Right, Enter, Esc.
-func TestHandleConfirmKey_AllBranches(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	called := false
-	a.openConfirm("T", "M", func(*App) { called = true })
-
-	// Tab cycles 0 ↔ 1.
-	a.handleConfirmKey(keyEv(tcell.KeyTab, 0))
-	if a.confirmHover != 1 {
-		t.Fatalf("Tab: got %d, want 1", a.confirmHover)
-	}
-	a.handleConfirmKey(keyEv(tcell.KeyTab, 0))
-	if a.confirmHover != 0 {
-		t.Fatalf("Tab back: got %d", a.confirmHover)
-	}
-
-	// Left snaps to No (0).
-	a.confirmHover = 1
-	a.handleConfirmKey(keyEv(tcell.KeyLeft, 0))
-	if a.confirmHover != 0 {
-		t.Fatalf("Left: got %d", a.confirmHover)
-	}
-
-	// Right snaps to Yes (1).
-	a.handleConfirmKey(keyEv(tcell.KeyRight, 0))
-	if a.confirmHover != 1 {
-		t.Fatalf("Right: got %d", a.confirmHover)
-	}
-
-	// Enter on Yes runs the callback.
-	a.handleConfirmKey(keyEv(tcell.KeyEnter, 0))
-	if !called {
-		t.Fatal("Enter on Yes should fire callback")
-	}
-
-	// Re-open and verify Enter on No cancels.
-	called = false
-	a.openConfirm("T", "M", func(*App) { called = true })
-	a.confirmHover = 0
-	a.handleConfirmKey(keyEv(tcell.KeyEnter, 0))
-	if called {
-		t.Fatal("Enter on No should cancel without firing callback")
-	}
-
-	// Esc cancels.
-	a.openConfirm("T", "M", func(*App) {})
-	a.handleConfirmKey(keyEv(tcell.KeyEsc, 0))
-	if a.confirmOpen {
-		t.Fatal("Esc should close confirm")
 	}
 }
 
@@ -516,22 +434,6 @@ func TestTrimSpace(t *testing.T) {
 	}
 }
 
-// TestConfirmModalRect centers the confirm modal and clamps a tiny window.
-func TestConfirmModalRect(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	x, y, w, h := a.confirmModalRect()
-	if w != confirmModalWidth || h != confirmModalHeight {
-		t.Fatalf("size: (%d,%d)", w, h)
-	}
-	_ = x
-	_ = y
-	a.width, a.height = 4, 4
-	x, y, _, _ = a.confirmModalRect()
-	if x != 0 || y != 0 {
-		t.Fatalf("clamp: (%d,%d)", x, y)
-	}
-}
-
 // TestContextRect returns origin + width + count-derived height.
 func TestContextRect(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
@@ -540,50 +442,6 @@ func TestContextRect(t *testing.T) {
 	x, y, w, h := a.contextRect()
 	if x != 10 || y != 5 || w != contextMenuWidth || h != 4 {
 		t.Fatalf("contextRect: (%d,%d,%d,%d)", x, y, w, h)
-	}
-}
-
-// TestHandleConfirmMouse_OutsideCancels closes when clicked outside.
-func TestHandleConfirmMouse_OutsideCancels(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	a.openConfirm("T", "M", nil)
-	a.handleConfirmMouse(0, 0, tcell.Button1)
-	if a.confirmOpen {
-		t.Fatal("outside click should cancel")
-	}
-}
-
-// TestHandleConfirmMouse_HoverAndClick covers hover (no button) and click
-// branches over both buttons.
-func TestHandleConfirmMouse_HoverAndClick(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	called := false
-	a.openConfirm("T", "M", func(*App) { called = true })
-	mx, my, _, _ := a.confirmModalRect()
-
-	// Hover over Yes (28..38) — sets confirmHover to 1.
-	a.handleConfirmMouse(mx+30, my+5, 0)
-	if a.confirmHover != 1 {
-		t.Fatalf("hover Yes: got %d", a.confirmHover)
-	}
-	// Hover back over No (14..22).
-	a.handleConfirmMouse(mx+16, my+5, 0)
-	if a.confirmHover != 0 {
-		t.Fatalf("hover No: got %d", a.confirmHover)
-	}
-
-	// Click Yes — fires callback.
-	a.handleConfirmMouse(mx+30, my+5, tcell.Button1)
-	if !called {
-		t.Fatal("click Yes should fire callback")
-	}
-
-	// Re-open and click No.
-	called = false
-	a.openConfirm("T", "M", func(*App) { called = true })
-	a.handleConfirmMouse(mx+16, my+5, tcell.Button1)
-	if called {
-		t.Fatal("click No should not fire callback")
 	}
 }
 
@@ -702,11 +560,11 @@ func seedDirtyApp(t *testing.T) *App {
 func TestOpenDirtyClose_DefaultsToCancel(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.openDirtyClose("T", "M", func(*App) {}, func(*App) {})
-	if !a.dirtyOpen {
+	if !dirtyIsOpen(a) {
 		t.Fatal("modal should open")
 	}
-	if a.dirtyHover != 0 {
-		t.Fatalf("default focus should be Cancel (0), got %d", a.dirtyHover)
+	if dirtyPrefab(t, a).Hover != 0 {
+		t.Fatalf("default focus should be Cancel (0), got %d", dirtyPrefab(t, a).Hover)
 	}
 }
 
@@ -718,11 +576,10 @@ func TestRequestCloseTab_DirtySaveClosesTab(t *testing.T) {
 	target := a.tabs[0].Path
 
 	a.requestCloseTab(0)
-	if !a.dirtyOpen {
+	if !dirtyIsOpen(a) {
 		t.Fatal("dirty close should open the modal")
 	}
-	a.dirtyHover = 2 // Save
-	a.dirtyActivate()
+	dirtyChoose(t, a, 2)
 
 	if len(a.tabs) != 0 {
 		t.Fatalf("Save should also close the tab; %d tabs left", len(a.tabs))
@@ -743,8 +600,7 @@ func TestRequestCloseTab_DirtyDiscardClosesWithoutSaving(t *testing.T) {
 	target := a.tabs[0].Path
 
 	a.requestCloseTab(0)
-	a.dirtyHover = 1 // Discard
-	a.dirtyActivate()
+	dirtyChoose(t, a, 1)
 
 	if len(a.tabs) != 0 {
 		t.Fatal("Discard should close the tab")
@@ -761,8 +617,7 @@ func TestRequestCloseTab_DirtyCancelKeepsTab(t *testing.T) {
 	a := seedDirtyApp(t)
 
 	a.requestCloseTab(0)
-	a.dirtyHover = 0 // Cancel
-	a.dirtyActivate()
+	dirtyChoose(t, a, 0)
 
 	if len(a.tabs) != 1 {
 		t.Fatalf("Cancel should keep the tab; got %d", len(a.tabs))
@@ -770,7 +625,7 @@ func TestRequestCloseTab_DirtyCancelKeepsTab(t *testing.T) {
 	if !a.activeTabPtr().Dirty {
 		t.Fatal("Cancel should not flip the dirty flag")
 	}
-	if a.dirtyOpen {
+	if dirtyIsOpen(a) {
 		t.Fatal("Cancel should dismiss the modal")
 	}
 }
@@ -787,7 +642,7 @@ func TestMenuQuit_NoDirtyTabsExitsImmediately(t *testing.T) {
 	a := newTestApp(t, dir)
 	a.openFile(target)
 	a.menuQuit()
-	if a.dirtyOpen {
+	if dirtyIsOpen(a) {
 		t.Fatal("clean state should skip the modal")
 	}
 	if !a.quit {
@@ -803,7 +658,7 @@ func TestMenuQuit_DirtyOpensModal(t *testing.T) {
 	if a.quit {
 		t.Fatal("dirty quit should not exit until the user picks an action")
 	}
-	if !a.dirtyOpen {
+	if !dirtyIsOpen(a) {
 		t.Fatal("dirty quit should open the modal")
 	}
 }
@@ -817,8 +672,7 @@ func TestMenuQuit_DirtySaveSavesAllAndQuits(t *testing.T) {
 	target := a.tabs[0].Path
 
 	a.menuQuit()
-	a.dirtyHover = 2 // Save
-	a.dirtyActivate()
+	dirtyChoose(t, a, 2)
 
 	if !a.quit {
 		t.Fatal("Save in quit modal should set quit")
@@ -836,8 +690,7 @@ func TestMenuQuit_DirtyDiscardQuitsWithoutSaving(t *testing.T) {
 	target := a.tabs[0].Path
 
 	a.menuQuit()
-	a.dirtyHover = 1 // Discard
-	a.dirtyActivate()
+	dirtyChoose(t, a, 1)
 
 	if !a.quit {
 		t.Fatal("Discard should still quit")
@@ -845,83 +698,6 @@ func TestMenuQuit_DirtyDiscardQuitsWithoutSaving(t *testing.T) {
 	got, _ := os.ReadFile(target)
 	if string(got) != "seed" {
 		t.Fatalf("Discard must not touch disk; got %q", got)
-	}
-}
-
-// TestHandleDirtyKey_AllBranches walks Left / Right / Tab / Enter / Esc.
-// Each branch is small; pinning all of them keeps the navigation
-// behaviour stable across refactors.
-func TestHandleDirtyKey_AllBranches(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	saveCalled, discardCalled := false, false
-	a.openDirtyClose("T", "M",
-		func(*App) { saveCalled = true },
-		func(*App) { discardCalled = true })
-
-	// Right walks Cancel -> Discard -> Save and stops at Save.
-	a.handleDirtyKey(keyEv(tcell.KeyRight, 0))
-	if a.dirtyHover != 1 {
-		t.Fatalf("Right(0->1) got %d", a.dirtyHover)
-	}
-	a.handleDirtyKey(keyEv(tcell.KeyRight, 0))
-	if a.dirtyHover != 2 {
-		t.Fatalf("Right(1->2) got %d", a.dirtyHover)
-	}
-	a.handleDirtyKey(keyEv(tcell.KeyRight, 0))
-	if a.dirtyHover != 2 {
-		t.Fatalf("Right(2->2) should clamp, got %d", a.dirtyHover)
-	}
-
-	// Left walks back, also clamps at 0.
-	a.handleDirtyKey(keyEv(tcell.KeyLeft, 0))
-	a.handleDirtyKey(keyEv(tcell.KeyLeft, 0))
-	a.handleDirtyKey(keyEv(tcell.KeyLeft, 0))
-	if a.dirtyHover != 0 {
-		t.Fatalf("Left should clamp at 0, got %d", a.dirtyHover)
-	}
-
-	// Tab cycles all the way around.
-	a.handleDirtyKey(keyEv(tcell.KeyTab, 0))
-	a.handleDirtyKey(keyEv(tcell.KeyTab, 0))
-	a.handleDirtyKey(keyEv(tcell.KeyTab, 0))
-	if a.dirtyHover != 0 {
-		t.Fatalf("Tab cycle should land back on 0, got %d", a.dirtyHover)
-	}
-
-	// Enter on Cancel (default) — runs neither callback.
-	a.handleDirtyKey(keyEv(tcell.KeyEnter, 0))
-	if saveCalled || discardCalled {
-		t.Fatalf("Enter on Cancel should run neither cb (save=%v discard=%v)",
-			saveCalled, discardCalled)
-	}
-
-	// Re-open and Enter on Discard.
-	a.openDirtyClose("T", "M",
-		func(*App) { saveCalled = true },
-		func(*App) { discardCalled = true })
-	a.dirtyHover = 1
-	a.handleDirtyKey(keyEv(tcell.KeyEnter, 0))
-	if !discardCalled {
-		t.Fatal("Enter on Discard should fire discard callback")
-	}
-
-	// Re-open and Enter on Save.
-	saveCalled = false
-	a.openDirtyClose("T", "M",
-		func(*App) { saveCalled = true },
-		func(*App) {})
-	a.dirtyHover = 2
-	a.handleDirtyKey(keyEv(tcell.KeyEnter, 0))
-	if !saveCalled {
-		t.Fatal("Enter on Save should fire save callback")
-	}
-
-	// Esc dismisses without firing anything.
-	a.openDirtyClose("T", "M", func(*App) { t.Fatal("save fired on Esc") },
-		func(*App) { t.Fatal("discard fired on Esc") })
-	a.handleDirtyKey(keyEv(tcell.KeyEsc, 0))
-	if a.dirtyOpen {
-		t.Fatal("Esc should close the modal")
 	}
 }
 
@@ -969,109 +745,7 @@ func TestDirtyTabCount(t *testing.T) {
 	if got := a.dirtyTabCount(); got != 1 {
 		t.Fatalf("expected 1 dirty, got %d", got)
 	}
-}
-
-// TestDrawConfirm_TruncatesOverflowMessageByRunes pins the truncation to
-// rune boundaries: the old byte slice could cut a multibyte filename
-// mid-sequence and paint UTF-8 replacement garbage into the modal body.
-func TestDrawConfirm_TruncatesOverflowMessageByRunes(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	// 60 runes (> the 50-cell budget) with a multibyte rune straddling
-	// byte 50, exactly where the old msg[:mw-4] slice cut.
-	msg := strings.Repeat("x", 49) + "é" + strings.Repeat("y", 10)
-	a.openConfirm("Delete file", msg, nil)
-	a.drawConfirm()
-	a.screen.Show()
-
-	scr := a.screen.(tcell.SimulationScreen)
-	cells, _, _ := scr.GetContents()
-	sawEllipsis := false
-	for _, c := range cells {
-		for _, r := range c.Runes {
-			if r == '�' {
-				t.Fatal("confirm modal painted a UTF-8 replacement rune — message was byte-sliced")
-			}
-			if r == '…' {
-				sawEllipsis = true
-			}
-		}
-	}
-	if !sawEllipsis {
-		t.Fatal("expected the truncated message to end in an ellipsis")
-	}
-}
-
-// TestDrawDirtyClose_TruncatesOverflowMessageByRunes is the dirty-close
-// twin of the confirm test above — same byte-slice bug, same fix.
-func TestDrawDirtyClose_TruncatesOverflowMessageByRunes(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	msg := strings.Repeat("x", 55) + "é" + strings.Repeat("y", 10)
-	a.openDirtyClose("Unsaved changes", msg, nil, nil)
-	a.drawDirtyClose()
-	a.screen.Show()
-
-	scr := a.screen.(tcell.SimulationScreen)
-	cells, _, _ := scr.GetContents()
-	sawEllipsis := false
-	for _, c := range cells {
-		for _, r := range c.Runes {
-			if r == '�' {
-				t.Fatal("dirty modal painted a UTF-8 replacement rune — message was byte-sliced")
-			}
-			if r == '…' {
-				sawEllipsis = true
-			}
-		}
-	}
-	if !sawEllipsis {
-		t.Fatal("expected the truncated message to end in an ellipsis")
-	}
-}
-
-// TestConfirmMouse_YesZoneMatchesDrawnButton pins the destructive Yes
-// button's click zone to its drawn cells. The old zone ran 3 cells past
-// the label, so a click on blank modal background fired the callback.
-func TestConfirmMouse_YesZoneMatchesDrawnButton(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	fired := false
-	a.openConfirm("Delete file", "sure?", func(*App) { fired = true })
-	mx, my, _, _ := a.confirmModalRect()
-
-	// One cell right of the drawn "[ Yes ]" (7 cells starting at relX 28).
-	a.handleConfirmMouse(mx+28+7, my+5, tcell.Button1)
-	if fired {
-		t.Fatal("click past the drawn Yes button fired the destructive callback")
-	}
-	if !a.confirmOpen {
-		t.Fatal("dead-zone click inside the modal should not dismiss it")
-	}
-
-	a.handleConfirmMouse(mx+28+3, my+5, tcell.Button1)
-	if !fired {
-		t.Fatal("click on the drawn Yes button should fire the callback")
-	}
-}
-
-// TestDirtyButtonAtRelX_HitsAndMisses pins the geometry helper so the
-// click rect math stays in sync with the draw layout.
-func TestDirtyButtonAtRelX_HitsAndMisses(t *testing.T) {
-	cases := []struct {
-		rx   int
-		want int
-	}{
-		{dirtyBtnCancelX + 1, 0},
-		{dirtyBtnDiscardX + 1, 1},
-		{dirtyBtnSaveX + 1, 2},
-		{0, -1},
-		{dirtyBtnSaveX + dirtyBtnSaveW + 5, -1},
-	}
-	for _, c := range cases {
-		if got := dirtyButtonAtRelX(c.rx); got != c.want {
-			t.Errorf("rx=%d: got %d, want %d", c.rx, got, c.want)
-		}
-	}
-}
-
+} // TestDirtyButtonAtRelX_HitsAndMisses pins the geometry helper so the
 // TestCloseAllModals_ClearsReplaceState pins the full find/replace
 // teardown. Opening a modal over a find-with-replace used to reset only
 // the find fields, leaving the replace row armed (replaceOpen,

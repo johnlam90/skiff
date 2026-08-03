@@ -142,12 +142,10 @@ func TestProjReplaceAll_MixedRouting(t *testing.T) {
 	}
 
 	a.projReplaceConfirmAll()
-	if !a.confirmOpen || !strings.Contains(a.confirmMessage, "3 match(es) in 3 file(s)") {
-		t.Fatalf("confirm: %v %q", a.confirmOpen, a.confirmMessage)
+	if c := confirmPrefab(t, a); !strings.Contains(c.Message, "3 match(es) in 3 file(s)") {
+		t.Fatalf("confirm: %q", c.Message)
 	}
-	cb := a.confirmCallback
-	a.closeAllModals()
-	cb(a)
+	confirmYes(a)
 	pumpReplaceDone(t, a)
 
 	if tab.Buffer.Lines[0] != "new here" || !tab.Dirty {

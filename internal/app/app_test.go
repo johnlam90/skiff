@@ -375,7 +375,7 @@ func TestRequestCloseTab_DirtyOpensModal(t *testing.T) {
 	if len(a.tabs) != 1 {
 		t.Fatalf("dirty tab should not close until the user picks an action")
 	}
-	if !a.dirtyOpen {
+	if !dirtyIsOpen(a) {
 		t.Fatal("dirty close modal should be open")
 	}
 }
@@ -1212,7 +1212,7 @@ func TestOpenGitHunkAt_OpensInfoOnMarker(t *testing.T) {
 	if !a.openGitHunkAt(tab, 0, 0) {
 		t.Fatal("expected gutter marker click to be handled")
 	}
-	if !a.confirmOpen || !a.confirmInfo {
+	if !infoIsOpen(a) {
 		t.Fatal("expected git hunk click to open info modal")
 	}
 }
@@ -1655,7 +1655,7 @@ func TestDraw_AllPanels(t *testing.T) {
 	a.closeAllModals()
 	a.openConfirm("T", "M", nil)
 	a.draw()
-	a.confirmCancel()
+	a.closeAllModals()
 	a.openTreeContext(a.tree.Root, 5, 5)
 	a.draw()
 	a.closeAllModals()
@@ -2172,15 +2172,13 @@ func TestHandleCustomActionDone_FailureOpensInfoModal(t *testing.T) {
 		err:    fmt.Errorf("exit status 1"),
 		output: []byte("scp: /etc/missing: No such file or directory\n"),
 	})
-	if !a.confirmOpen || !a.confirmInfo {
-		t.Fatal("info modal should be open")
-	}
-	joined := strings.Join(a.confirmMessageLines, "\n")
+	n := infoPrefab(t, a)
+	joined := strings.Join(n.Lines, "\n")
 	if !strings.Contains(joined, "scp:") || !strings.Contains(joined, "missing") {
 		t.Errorf("info body missing stderr preview: %q", joined)
 	}
-	if !strings.Contains(a.confirmTitle, "Copy from remote") {
-		t.Errorf("title = %q, want it to mention the action label", a.confirmTitle)
+	if !strings.Contains(n.Title, "Copy from remote") {
+		t.Errorf("title = %q, want it to mention the action label", n.Title)
 	}
 }
 

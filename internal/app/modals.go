@@ -5,48 +5,27 @@
 // Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 // =============================================================================
 
-// modals.go houses the editor's secondary modals: a single-line text prompt
-// (used for Rename and New File), a Yes/No confirmation (used for Delete),
-// and the small right-click context menu that appears over the file tree.
+// modals.go holds the openers for the prefab overlays — prompt, confirm,
+// info, and dirty-close (see internal/overlay for their behavior) — plus
+// closeAllModals and the right-click context menu, which is still an
+// App-side modal pending its own conversion.
 //
-// Each modal is mutually exclusive with the main action menu and with each
-// other — opening any one calls closeAllModals() first, so we can never end
-// up with two on screen at once.
+// Every surface stays mutually exclusive with every other: opening any
+// one calls closeAllModals() first, and the overlay stack replaces on
+// open, so two can never be up at once.
 
 package app
 
 import (
-	"strings"
-
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/overlay"
-	"github.com/johnlam90/skiff/internal/theme"
 )
 
-// Layout constants for the secondary modals. Width is wide enough to hold a
-// reasonably long filename or sentence; heights are fixed by the row layout
-// in the draw functions below.
-const (
-	confirmModalWidth  = 54
-	confirmModalHeight = 9
-
-	// contextMenuWidth is fixed so the popup geometry stays predictable —
-	// the labels are short enough to fit comfortably.
-	contextMenuWidth = 19
-)
-
-// Button geometry for the confirm modal, shared by the draw and mouse
-// paths so the highlight and the click zone can't disagree — the same
-// rule the dirty modal's dirtyBtn* constants and the diff view's
-// btnRect enforce. The widths are the literal label widths.
-const (
-	confirmBtnNoX  = 14
-	confirmBtnNoW  = 8 // "[  No  ]"
-	confirmBtnYesX = 28
-	confirmBtnYesW = 7 // "[ Yes ]"
-)
+// contextMenuWidth is fixed so the popup geometry stays predictable —
+// the labels are short enough to fit comfortably.
+const contextMenuWidth = 19
 
 // contextItem is one row in the tree's right-click context menu. action runs
 // against the node the menu was opened for; enabled gates whether the row is
@@ -67,9 +46,7 @@ type contextItem struct {
 func (a *App) closeAllModals() {
 	a.overlays.Close()
 	a.menuOpen = false
-	a.confirmOpen = false
 	a.contextOpen = false
-	a.dirtyOpen = false
 	a.formOpen = false
 	a.finderOpen = false
 	a.closeFind()
@@ -90,18 +67,12 @@ func (a *App) closeAllModals() {
 	a.hoveredMenuRow = -1
 	a.contextNode = nil
 	a.contextItems = nil
-	a.confirmCallback = nil
-	a.dirtySaveCallback = nil
-	a.dirtyDiscardCallback = nil
 	a.formPrompts = nil
 	a.formValues = nil
 	a.formText = nil
 	a.formCursor = nil
 	a.formScroll = nil
 	a.formCallback = nil
-	a.confirmInfo = false
-	a.confirmMessageLines = nil
-	a.confirmInfoScroll = 0
 	a.diffOpen = false
 	a.diffTitle = ""
 	a.diffRaw = nil
@@ -118,12 +89,6 @@ func (a *App) closeAllModals() {
 	a.gitLogPath = ""
 	a.gitLogSelected = 0
 	a.gitLogScroll = 0
-	// confirmCancelHook is parked here so an unrelated confirm modal
-	// opened after a format-trust / format-install prompt can't
-	// accidentally inherit the cancel hook. The flows that need a
-	// hook set it *after* calling openConfirm precisely so this
-	// clear doesn't erase their own arming.
-	a.confirmCancelHook = nil
 	a.dragMode = ""
 	a.stopAutoScroll()
 }
@@ -163,173 +128,39 @@ func (a *App) openPrompt(title, hint, initial string, callback func(*App, string
 // Confirm modal (Yes / No)
 // -----------------------------------------------------------------------------
 
-// openConfirm shows a Yes/No confirmation modal. message is the body text
-// shown to the user; callback runs only when the user picks Yes. The default
-// focus lands on No so an accidental Enter is harmless — important for
-// destructive actions like Delete.
-func (a *App) openConfirm(title, message string, callback func(*App)) {
+// openConfirm shows a Yes/No confirmation overlay — an
+// overlay.Confirm prefab. message is the body text; callback runs only
+// when the user picks Yes. Default focus lands on No so an accidental
+// Enter is harmless — important for destructive actions like Delete.
+// Returns the prefab so flows that must react to dismissal (the
+// formatter trust prompts) can attach OnCancel; the hook dies with the
+// overlay, so it can never leak into an unrelated confirm.
+func (a *App) openConfirm(title, message string, callback func(*App)) *overlay.Confirm {
 	a.closeAllModals()
-	a.confirmOpen = true
-	a.overlays.Open(confirmOverlay{a})
-	a.confirmTitle = title
-	a.confirmMessage = message
-	a.confirmHover = 0 // No
-	a.confirmCallback = callback
+	c := &overlay.Confirm{Title: title, Message: message, Theme: a.theme}
+	c.Size = func() (int, int) { return a.width, a.height }
+	c.Close = func() { a.closeAllModals() }
+	if callback != nil {
+		c.OnYes = func() { callback(a) }
+	}
+	a.overlays.Open(c)
+	return c
 }
 
-// openInfo flips the confirm modal into single-button "OK" flavour for
-// passive reporting — most importantly, the full stderr from a failed
-// custom action where the status-bar flash isn't enough room. Lines is
-// drawn one row per entry inside the modal body. Empty input falls
-// back to a single "(no output captured)" line so the dialog never
-// looks broken.
+// openInfo shows the single-button report overlay — an overlay.Info —
+// for passive reporting: most importantly, the full stderr from a
+// failed custom action where the status-bar flash isn't enough room.
+// Empty input falls back to a single "(no output captured)" line so the
+// dialog never looks broken.
 func (a *App) openInfo(title string, lines []string) {
 	a.closeAllModals()
 	if len(lines) == 0 {
 		lines = []string{"(no output captured)"}
 	}
-	a.confirmOpen = true
-	a.overlays.Open(confirmOverlay{a})
-	a.confirmInfo = true
-	a.confirmTitle = title
-	a.confirmMessageLines = lines
-	a.confirmInfoScroll = 0
-	a.confirmHover = 0
-}
-
-// confirmYes runs the confirm callback and closes the modal.
-func (a *App) confirmYes() {
-	if !a.confirmOpen {
-		return
-	}
-	cb := a.confirmCallback
-	a.closeAllModals()
-	if cb != nil {
-		cb(a)
-	}
-}
-
-// confirmCancel dismisses the confirm modal without running the callback.
-// If a flow armed confirmCancelHook (today: format-trust deny,
-// format-install decline) we run it after closing the modal. The
-// hook is captured before close so closeAllModals can clear the
-// pointer without losing the handler we're about to fire — same
-// capture-then-close pattern dirtySave / dirtyDiscard use.
-func (a *App) confirmCancel() {
-	hook := a.confirmCancelHook
-	a.closeAllModals()
-	if hook != nil {
-		hook(a)
-	}
-}
-
-// handleConfirmKey processes keyboard input while the confirm modal is open.
-// Left / Right toggle focus between [No] and [Yes]; Enter activates the
-// focused button; Esc cancels.
-func (a *App) handleConfirmKey(ev *tcell.EventKey) {
-	if a.confirmInfo {
-		// Info modal has only one button. Any "I'm done" key dismisses;
-		// cycling between buttons doesn't apply because there's only
-		// one. Routed early so Tab / arrow keys can't accidentally
-		// flip confirmHover into a state drawConfirm wouldn't render.
-		switch ev.Key() {
-		case tcell.KeyEsc, tcell.KeyEnter, tcell.KeyTab:
-			a.closeAllModals()
-		case tcell.KeyUp:
-			a.scrollConfirmInfo(-1)
-		case tcell.KeyDown:
-			a.scrollConfirmInfo(1)
-		case tcell.KeyPgUp:
-			a.scrollConfirmInfo(-a.confirmInfoBodyRows())
-		case tcell.KeyPgDn:
-			a.scrollConfirmInfo(a.confirmInfoBodyRows())
-		}
-		return
-	}
-	switch ev.Key() {
-	case tcell.KeyEsc:
-		a.confirmCancel()
-	case tcell.KeyEnter:
-		if a.confirmHover == 1 {
-			a.confirmYes()
-		} else {
-			a.confirmCancel()
-		}
-	case tcell.KeyLeft, tcell.KeyTab:
-		// Tab cycles between buttons; Left moves to No.
-		if ev.Key() == tcell.KeyTab {
-			a.confirmHover = 1 - a.confirmHover
-		} else {
-			a.confirmHover = 0
-		}
-	case tcell.KeyRight:
-		a.confirmHover = 1
-	}
-}
-
-// handleConfirmMouse processes mouse input for the confirm modal. Hovering
-// a button highlights it; clicking it activates. Clicks outside the modal
-// cancel.
-func (a *App) handleConfirmMouse(x, y int, btn tcell.ButtonMask) {
-	mx, my, mw, mh := a.confirmModalRect()
-	if a.confirmInfo {
-		// Single OK button at row mh-3, centered. Outside the modal
-		// dismisses too — same convention as the rest of the modals.
-		//
-		// Wheel scrolling matches the masks tcell actually emits for
-		// wheels and trackpads: WheelUp/WheelDown. (An earlier version
-		// checked Button4/Button5 — the X11 wheel convention — which
-		// tcell reserves for real extra mouse buttons, so trackpad
-		// scrolling in long output silently did nothing.)
-		if btn&tcell.WheelUp != 0 {
-			a.scrollConfirmInfo(-3)
-			return
-		}
-		if btn&tcell.WheelDown != 0 {
-			a.scrollConfirmInfo(3)
-			return
-		}
-		if btn&tcell.Button1 == 0 {
-			return
-		}
-		if x < mx || x >= mx+mw || y < my || y >= my+mh {
-			a.closeAllModals()
-			return
-		}
-		btnY := my + mh - 3
-		btnX := mx + (mw-10)/2
-		if y == btnY && x >= btnX && x < btnX+10 {
-			a.closeAllModals()
-		}
-		return
-	}
-	if x >= mx && x < mx+mw && y == my+5 {
-		relX := x - mx
-		switch {
-		case relX >= confirmBtnNoX && relX < confirmBtnNoX+confirmBtnNoW:
-			a.confirmHover = 0
-		case relX >= confirmBtnYesX && relX < confirmBtnYesX+confirmBtnYesW:
-			a.confirmHover = 1
-		}
-	}
-	if btn&tcell.Button1 == 0 {
-		return
-	}
-	if x < mx || x >= mx+mw || y < my || y >= my+mh {
-		a.confirmCancel()
-		return
-	}
-	if y == my+5 {
-		relX := x - mx
-		switch {
-		case relX >= confirmBtnNoX && relX < confirmBtnNoX+confirmBtnNoW:
-			a.confirmCancel()
-			return
-		case relX >= confirmBtnYesX && relX < confirmBtnYesX+confirmBtnYesW:
-			a.confirmYes()
-			return
-		}
-	}
+	n := &overlay.Info{Title: title, Lines: lines, Theme: a.theme}
+	n.Size = func() (int, int) { return a.width, a.height }
+	n.Close = func() { a.closeAllModals() }
+	a.overlays.Open(n)
 }
 
 // btnRect is a one-row button hit zone shared by a modal's draw and
@@ -345,366 +176,26 @@ func (r btnRect) contains(px, py int) bool {
 	return r.w > 0 && py == r.y && px >= r.x && px < r.x+r.w
 }
 
-// confirmModalRect returns the on-screen rectangle of the confirm modal,
-// centered in the window. In info mode the modal grows wider so a
-// command's stderr lines fit without aggressive truncation, and taller
-// to fit the line list — the chrome (border, title, divider, button
-// row) takes 6 rows on top of the body.
-func (a *App) confirmModalRect() (x, y, w, h int) {
-	w = confirmModalWidth
-	h = confirmModalHeight
-	if a.confirmInfo {
-		w = 84
-		bodyRows := a.confirmInfoBodyRows()
-		h = bodyRows + 7
-	}
-	x = (a.width - w) / 2
-	y = (a.height - h) / 2
-	if x < 0 {
-		x = 0
-	}
-	if y < 0 {
-		y = 0
-	}
-	return
-}
-
-// confirmInfoBodyRows returns the visible diff viewport height.
-func (a *App) confirmInfoBodyRows() int {
-	const chromeRows = 7
-	rows := a.height - chromeRows
-	if rows < 1 {
-		return 1
-	}
-	if len(a.confirmMessageLines) < rows {
-		if len(a.confirmMessageLines) < 1 {
-			return 1
-		}
-		return len(a.confirmMessageLines)
-	}
-	return rows
-}
-
-func (a *App) scrollConfirmInfo(delta int) {
-	if !a.confirmInfo {
-		return
-	}
-	maxScroll := len(a.confirmMessageLines) - a.confirmInfoBodyRows()
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	a.confirmInfoScroll += delta
-	if a.confirmInfoScroll < 0 {
-		a.confirmInfoScroll = 0
-	}
-	if a.confirmInfoScroll > maxScroll {
-		a.confirmInfoScroll = maxScroll
-	}
-}
-
-// drawConfirm renders the Yes/No modal.
-//
-// Rows (relY):
-//
-//	0   top border
-//	1   title — "<title>   esc"
-//	2   divider
-//	3   blank
-//	4   message (centered)
-//	5   buttons          [  No  ]      [ Yes ]
-//	6   blank
-//	7   blank
-//	8   bottom border
-func (a *App) drawConfirm() {
-	mx, my, mw, mh := a.confirmModalRect()
-
-	bg := a.theme.LineHL
-	bgStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
-	borderStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Subtle)
-	titleStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true)
-	mutedStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
-	bodyStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
-
-	fillRect(a.screen, mx, my, mw, mh, bgStyle)
-	drawBorder(a.screen, mx, my, mw, mh, borderStyle)
-	drawHDivider(a.screen, mx, my+2, mw, borderStyle)
-
-	drawAt(a.screen, mx+1, my+1, " "+a.confirmTitle, titleStyle)
-	hint := "esc "
-	drawAt(a.screen, mx+mw-1-runeLen(hint), my+1, hint, mutedStyle)
-
-	if a.confirmInfo {
-		// Info mode: left-aligned multi-line body + a single centered
-		// OK button. The body is left-aligned because scp/ssh stderr
-		// usually starts with file paths that read poorly when
-		// centered.
-		bodyRows := a.confirmInfoBodyRows()
-		a.scrollConfirmInfo(0)
-		end := a.confirmInfoScroll + bodyRows
-		if end > len(a.confirmMessageLines) {
-			end = len(a.confirmMessageLines)
-		}
-		for i, line := range a.confirmMessageLines[a.confirmInfoScroll:end] {
-			if runeLen(line) > mw-4 {
-				line = string([]rune(line)[:mw-4])
-			}
-			drawAt(a.screen, mx+2, my+3+i, line, confirmInfoLineStyle(a.theme, bg, line))
-		}
-		btnY := my + mh - 3
-		btnX := mx + (mw-10)/2
-		drawButton(a.screen, btnX, btnY, "[  OK  ]", bg, a.theme.Accent, true)
-		a.screen.HideCursor()
-		return
-	}
-
-	// Message — centered, rune-safe truncation (a byte slice here once
-	// split multibyte filenames into replacement garbage).
-	msg := trimRunes(a.confirmMessage, mw-4)
-	mxText := mx + (mw-runeLen(msg))/2
-	drawAt(a.screen, mxText, my+4, msg, bodyStyle)
-
-	// Buttons. Default focus is No so an accidental Enter is non-destructive.
-	// Columns come from the confirmBtn* constants shared with the mouse zones.
-	drawButton(a.screen, mx+confirmBtnNoX, my+5, "[  No  ]", bg, a.theme.Text, a.confirmHover == 0)
-	drawButton(a.screen, mx+confirmBtnYesX, my+5, "[ Yes ]", bg, a.theme.Error, a.confirmHover == 1)
-
-	a.screen.HideCursor()
-}
-
-// confirmInfoLineStyle colors git diff previews inside the info modal.
-func confirmInfoLineStyle(th theme.Theme, bg tcell.Color, line string) tcell.Style {
-	style := tcell.StyleDefault.Background(bg).Foreground(th.Text)
-	if strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---") {
-		return style.Foreground(th.Muted)
-	}
-	if strings.HasPrefix(line, "+") {
-		return style.Foreground(th.GitAdded)
-	}
-	if strings.HasPrefix(line, "-") {
-		return style.Foreground(th.GitDeleted)
-	}
-	if strings.HasPrefix(line, "@@") {
-		return style.Foreground(th.AccentSoft).Bold(true)
-	}
-	return style
-}
-
 // -----------------------------------------------------------------------------
 // Save / Discard / Cancel modal (unsaved-changes prompt)
 // -----------------------------------------------------------------------------
 
-// dirtyModalWidth and dirtyModalHeight pin the unsaved-changes modal's
-// geometry. Wider than the Yes/No confirm so the three buttons sit
-// comfortably on one row with breathing space between them.
-const (
-	dirtyModalWidth  = 60
-	dirtyModalHeight = 9
-)
-
-// Button column origins for the dirty-close modal, kept in one place so
-// the draw function and the click hit-tester agree on geometry. The
-// buttons are laid out as: [ Cancel ] [ Discard ] [ Save ]; spacing is
-// chosen to center the trio inside the 60-cell modal.
-const (
-	dirtyBtnCancelX  = 5
-	dirtyBtnCancelW  = 10 // "[ Cancel ]"
-	dirtyBtnDiscardX = 22
-	dirtyBtnDiscardW = 11 // "[ Discard ]"
-	dirtyBtnSaveX    = 42
-	dirtyBtnSaveW    = 8 // "[ Save ]"
-)
-
-// openDirtyClose shows the unsaved-changes modal. saveCB runs when the
-// user picks Save (typically: save the tab(s), then proceed); discardCB
-// runs when the user picks Discard (skip saving, proceed anyway). Cancel
-// just dismisses without running anything. Default focus is Cancel so a
-// stray Enter is non-destructive — same safety pattern the delete confirm
-// uses.
+// openDirtyClose shows the unsaved-changes overlay — an overlay.Dirty
+// prefab with Cancel / Discard / Save. saveCB runs when the user picks
+// Save (typically: save the tab(s), then proceed); discardCB when they
+// pick Discard (skip saving, proceed anyway). Cancel just dismisses.
 func (a *App) openDirtyClose(title, message string, saveCB, discardCB func(*App)) {
 	a.closeAllModals()
-	a.dirtyOpen = true
-	a.overlays.Open(dirtyOverlay{a})
-	a.dirtyTitle = title
-	a.dirtyMessage = message
-	a.dirtyHover = 0 // Cancel
-	a.dirtySaveCallback = saveCB
-	a.dirtyDiscardCallback = discardCB
-}
-
-// dirtyCancel dismisses the modal without running anything.
-func (a *App) dirtyCancel() {
-	a.closeAllModals()
-}
-
-// dirtyDiscard runs the discard callback and dismisses the modal. The
-// callback is captured before the close so closeAllModals can clear the
-// pointer without losing the handler we're about to fire.
-func (a *App) dirtyDiscard() {
-	if !a.dirtyOpen {
-		return
+	d := &overlay.Dirty{Title: title, Message: message, Theme: a.theme}
+	d.Size = func() (int, int) { return a.width, a.height }
+	d.Close = func() { a.closeAllModals() }
+	if saveCB != nil {
+		d.OnSave = func() { saveCB(a) }
 	}
-	cb := a.dirtyDiscardCallback
-	a.closeAllModals()
-	if cb != nil {
-		cb(a)
+	if discardCB != nil {
+		d.OnDiscard = func() { discardCB(a) }
 	}
-}
-
-// dirtySave runs the save callback and dismisses the modal. Same
-// capture-then-close pattern as dirtyDiscard.
-func (a *App) dirtySave() {
-	if !a.dirtyOpen {
-		return
-	}
-	cb := a.dirtySaveCallback
-	a.closeAllModals()
-	if cb != nil {
-		cb(a)
-	}
-}
-
-// dirtyActivate runs the focused button's action — used by Enter and by
-// keyboard-driven activations.
-func (a *App) dirtyActivate() {
-	switch a.dirtyHover {
-	case 0:
-		a.dirtyCancel()
-	case 1:
-		a.dirtyDiscard()
-	case 2:
-		a.dirtySave()
-	}
-}
-
-// handleDirtyKey processes keyboard input while the dirty-close modal
-// is open. Left/Right and Tab cycle focus across the three buttons;
-// Enter activates the focused button; Esc cancels.
-func (a *App) handleDirtyKey(ev *tcell.EventKey) {
-	switch ev.Key() {
-	case tcell.KeyEsc:
-		a.dirtyCancel()
-	case tcell.KeyEnter:
-		a.dirtyActivate()
-	case tcell.KeyLeft:
-		if a.dirtyHover > 0 {
-			a.dirtyHover--
-		}
-	case tcell.KeyRight:
-		if a.dirtyHover < 2 {
-			a.dirtyHover++
-		}
-	case tcell.KeyTab:
-		a.dirtyHover = (a.dirtyHover + 1) % 3
-	}
-}
-
-// handleDirtyMouse processes mouse input for the dirty-close modal.
-// Hovering a button highlights it; clicking activates. A click outside
-// the modal cancels — same as the confirm modal.
-func (a *App) handleDirtyMouse(x, y int, btn tcell.ButtonMask) {
-	mx, my, mw, mh := a.dirtyModalRect()
-	// Hover tracking — works for any move with a button bit set or not.
-	if x >= mx && x < mx+mw && y == my+5 {
-		switch idx := dirtyButtonAtRelX(x - mx); idx {
-		case 0, 1, 2:
-			a.dirtyHover = idx
-		}
-	}
-	if btn&tcell.Button1 == 0 {
-		return
-	}
-	if x < mx || x >= mx+mw || y < my || y >= my+mh {
-		a.dirtyCancel()
-		return
-	}
-	if y == my+5 {
-		switch dirtyButtonAtRelX(x - mx) {
-		case 0:
-			a.dirtyCancel()
-		case 1:
-			a.dirtyDiscard()
-		case 2:
-			a.dirtySave()
-		}
-	}
-}
-
-// dirtyButtonAtRelX maps an x offset within the modal to a button index
-// (0=Cancel, 1=Discard, 2=Save) or -1 when the offset misses every
-// button. Pulled out so the keyboard-free hover and the click handler
-// share one geometry source.
-func dirtyButtonAtRelX(rx int) int {
-	switch {
-	case rx >= dirtyBtnCancelX && rx < dirtyBtnCancelX+dirtyBtnCancelW:
-		return 0
-	case rx >= dirtyBtnDiscardX && rx < dirtyBtnDiscardX+dirtyBtnDiscardW:
-		return 1
-	case rx >= dirtyBtnSaveX && rx < dirtyBtnSaveX+dirtyBtnSaveW:
-		return 2
-	}
-	return -1
-}
-
-// dirtyModalRect returns the on-screen rectangle of the dirty-close
-// modal, centered in the window.
-func (a *App) dirtyModalRect() (x, y, w, h int) {
-	w = dirtyModalWidth
-	h = dirtyModalHeight
-	x = (a.width - w) / 2
-	y = (a.height - h) / 2
-	if x < 0 {
-		x = 0
-	}
-	if y < 0 {
-		y = 0
-	}
-	return
-}
-
-// drawDirtyClose renders the Save / Discard / Cancel modal.
-//
-// Rows (relY):
-//
-//	0   top border
-//	1   title — "<title>   esc"
-//	2   divider
-//	3   blank
-//	4   message (centered)
-//	5   buttons    [ Cancel ]    [ Discard ]    [ Save ]
-//	6   blank
-//	7   blank
-//	8   bottom border
-func (a *App) drawDirtyClose() {
-	mx, my, mw, mh := a.dirtyModalRect()
-
-	bg := a.theme.LineHL
-	bgStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
-	borderStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Subtle)
-	titleStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true)
-	mutedStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
-	bodyStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
-
-	fillRect(a.screen, mx, my, mw, mh, bgStyle)
-	drawBorder(a.screen, mx, my, mw, mh, borderStyle)
-	drawHDivider(a.screen, mx, my+2, mw, borderStyle)
-
-	drawAt(a.screen, mx+1, my+1, " "+a.dirtyTitle, titleStyle)
-	hint := "esc "
-	drawAt(a.screen, mx+mw-1-runeLen(hint), my+1, hint, mutedStyle)
-
-	// Message — centered, rune-safe truncation (same byte-slice bug the
-	// confirm modal had: multibyte filenames split into garbage).
-	msg := trimRunes(a.dirtyMessage, mw-4)
-	mxText := mx + (mw-runeLen(msg))/2
-	drawAt(a.screen, mxText, my+4, msg, bodyStyle)
-
-	// Buttons. Cancel is neutral, Discard is red (destructive),
-	// Save is the editor's accent so it reads as the productive default.
-	drawButton(a.screen, mx+dirtyBtnCancelX, my+5, "[ Cancel ]", bg, a.theme.Text, a.dirtyHover == 0)
-	drawButton(a.screen, mx+dirtyBtnDiscardX, my+5, "[ Discard ]", bg, a.theme.Error, a.dirtyHover == 1)
-	drawButton(a.screen, mx+dirtyBtnSaveX, my+5, "[ Save ]", bg, a.theme.Accent, a.dirtyHover == 2)
-
-	a.screen.HideCursor()
+	a.overlays.Open(d)
 }
 
 // -----------------------------------------------------------------------------

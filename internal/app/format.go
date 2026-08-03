@@ -185,17 +185,16 @@ func (a *App) openFormatTrustPrompt(idx int, cfg *format.Config, argv []string) 
 	hash := cfg.Hash()
 
 	msg := fmt.Sprintf("Allow %s to run formatters on save?", filepath.Join(format.ConfigDir, format.ConfigFile))
-	a.openConfirm("Trust this project's formatter?", msg, func(app *App) {
+	c := a.openConfirm("Trust this project's formatter?", msg, func(app *App) {
 		// Yes — record allow, persist, and run.
 		app.persistTrust(root, hash, true)
 		app.execFormatter(tabPath, argv)
 	})
 	// Cancel/No path: persist a denial so we don't re-prompt every
-	// save. We pin this on confirmCancelHook (cleared by
-	// closeAllModals) so an unrelated future confirm modal can't
-	// inherit the side effect.
-	a.confirmCancelHook = func(app *App) {
-		app.persistTrust(root, hash, false)
+	// save. The hook lives on the confirm prefab itself, so an
+	// unrelated future confirm can never inherit the side effect.
+	c.OnCancel = func() {
+		a.persistTrust(root, hash, false)
 	}
 }
 
@@ -233,7 +232,7 @@ func (a *App) openFormatInstallPrompt(idx int, ext string, argvTemplate []string
 	msg := fmt.Sprintf("Add %s for .%s to %s?", formatterName, ext,
 		filepath.Join(format.ConfigDir, format.ConfigFile))
 
-	a.openConfirm(title, msg, func(app *App) {
+	c := a.openConfirm(title, msg, func(app *App) {
 		// Yes — merge into project config, trust the new hash, run.
 		hash, err := format.InstallCommandIntoProject(root, ext, argvTemplate)
 		if err != nil {
@@ -257,8 +256,8 @@ func (a *App) openFormatInstallPrompt(idx int, ext string, argvTemplate []string
 		// the formatter at the file the user just saved.
 		app.execFormatter(tabPath, substituteFile(argvTemplate, tabPath))
 	})
-	a.confirmCancelHook = func(app *App) {
-		app.persistInstallDecline(root, ext, true)
+	c.OnCancel = func() {
+		a.persistInstallDecline(root, ext, true)
 	}
 }
 
