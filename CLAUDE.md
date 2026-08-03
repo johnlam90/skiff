@@ -45,6 +45,8 @@ features, make sure they're reachable from the main menu first.
 ```
 main.go                       Entry — parses optional rootDir / file[:line] arg
 internal/app/app.go           Event loop, layout, menu modal, splitter, all rendering
+internal/app/overlays.go      Overlay stack wiring: menu adapter + dropOverlay
+internal/app/modals.go        Openers for the prefab overlays + closeAllModals
 internal/app/projfind.go      Project-wide content search panel (Esc-F)
 internal/app/preview.go       Shared file-open path + preview-tab rules
 internal/app/fileclip.go      File clipboard: cut/copy/paste/duplicate tree entries
@@ -59,6 +61,10 @@ internal/editor/highlight.go  Chroma → []tcell.Style per line
 internal/filetree/filetree.go Lazy tree, identity-preserving refresh, hit-test, render
 internal/search/search.go     Literal smart-case project search engine
 internal/session/session.go   Per-project session store (~/.local/state/skiff)
+internal/overlay/             Floating surfaces: the Stack (routing truth),
+                              Field/chrome primitives, and the prefab
+                              overlays (Prompt/Confirm/Info/Dirty/Form/
+                              Popup/Pick)
 internal/clipboard/clipboard.go OSC 52 to /dev/tty with tmux passthrough wrap
 internal/userconfig/userconfig.go ~/.config/skiff/config.json (icons, theme)
 internal/icons/icons.go       Nerd Font detection + per-file glyph mapping
@@ -160,6 +166,17 @@ get fresh nodes; gone entries are dropped. This is what makes the
 On each tree-refresh tick, `reconcileOpenTabsWithDisk` checks each open
 tab's mtime: clean buffer + changed file → silent reload; dirty buffer
 + changed file → warning; file deleted → set `DiskGone` once.
+
+### The overlay stack is the routing truth
+Every floating surface (menu, prompt, confirm, pickers, diff, …) lives
+on `a.overlays` (`internal/overlay.Stack`): `handleKey`, `handleMouse`,
+`draw`, and `anyModalOpen` all consult the stack, never per-surface
+booleans. Opening replaces (at most one overlay is ever up), openers run
+`closeAllModals()` first, and activate paths are capture-then-close so a
+callback that opens the next overlay is never popped by the previous
+one's teardown. Strips (find bar, project-find bar, leader strip) are
+NOT overlays — see `docs/adr/0001-strips-are-not-overlays.md` before
+"fixing" the find bar's mouse pass-through.
 
 ### Modal layout via `relY` and dynamic `labelFor`
 The action menu uses named struct literals with an optional `labelFor`
