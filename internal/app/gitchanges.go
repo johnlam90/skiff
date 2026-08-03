@@ -197,7 +197,8 @@ func (a *App) gitPanelClick(x, y int) {
 		return
 	}
 	if y == 2 {
-		for _, b := range a.gitPanelButtons() {
+		_, _, sw, _ := a.sidebarRect()
+		for _, b := range a.gitPanelButtons(sw) {
 			if x >= b.x0 && x < b.x1 {
 				sx, sy, _, _ := a.sidebarRect()
 				b.action(a, sx+b.x0, sy+3)
@@ -238,10 +239,57 @@ type gitPanelBtn struct {
 	action func(a *App, anchorX, anchorY int)
 }
 
-// gitPanelButtons lays out the button row. Computed on the fly so the
-// click handler and the renderer can never disagree about geometry.
-func (a *App) gitPanelButtons() []gitPanelBtn {
-	labels := []string{"[ Commit ]", "[ Push ]", "[ Pull ]", "[ ⋯ ]"}
+// gitPanelButtons lays out the button row for a sidebar sw cells wide.
+// Computed on the fly so the click handler and the renderer can never
+// disagree about geometry. The labels are self-explaining — commit
+// carries the checked-file count, push/pull carry the ahead/behind
+// counts — and the row adapts down a ladder as the sidebar narrows:
+// full labels with counts, glyphs with counts, then bare glyphs, so no
+// button is ever painted past the splitter or silently dropped.
+func (a *App) gitPanelButtons(sw int) []gitPanelBtn {
+	checked := 0
+	for _, r := range a.gitPanelRows {
+		if !r.IsDir && a.commitCheckOn(r.Abs) {
+			checked++
+		}
+	}
+	wide := []string{"[ Commit ]", "[ Push ]", "[ Pull ]", "[ ⋯ ]"}
+	if checked > 0 {
+		wide[0] = fmt.Sprintf("[ Commit %d ]", checked)
+	}
+	if a.gitSnap.Ahead > 0 {
+		wide[1] = fmt.Sprintf("[ Push ↑%d ]", a.gitSnap.Ahead)
+	}
+	if a.gitSnap.Behind > 0 {
+		wide[2] = fmt.Sprintf("[ Pull ↓%d ]", a.gitSnap.Behind)
+	}
+	// Words beat counts: at middle widths the ladder drops the counts
+	// before it drops the verbs, because "[Commit]" teaches a new user
+	// what the button does and "[✓2]" doesn't.
+	medium := []string{"[Commit]", "[Push]", "[Pull]", "[⋯]"}
+	compact := []string{"[✓]", "[↑]", "[↓]", "[⋯]"}
+	if checked > 0 {
+		compact[0] = fmt.Sprintf("[✓%d]", checked)
+	}
+	if a.gitSnap.Ahead > 0 {
+		compact[1] = fmt.Sprintf("[↑%d]", a.gitSnap.Ahead)
+	}
+	if a.gitSnap.Behind > 0 {
+		compact[2] = fmt.Sprintf("[↓%d]", a.gitSnap.Behind)
+	}
+	bare := []string{"[✓]", "[↑]", "[↓]", "[⋯]"}
+
+	labels, gap := wide, 1
+	if 1+rowWidth(labels, gap) > sw {
+		labels, gap = medium, 1
+	}
+	if 1+rowWidth(labels, gap) > sw {
+		labels, gap = compact, 0
+	}
+	if 1+rowWidth(labels, gap) > sw {
+		labels, gap = bare, 0
+	}
+
 	actions := []func(a *App, x, y int){
 		func(app *App, _, _ int) { app.menuGitCommit() },
 		func(app *App, _, _ int) { app.menuGitPush() },
@@ -253,9 +301,21 @@ func (a *App) gitPanelButtons() []gitPanelBtn {
 	for i, l := range labels {
 		w := runeLen(l)
 		out = append(out, gitPanelBtn{label: l, x0: x, x1: x + w, action: actions[i]})
-		x += w + 1
+		x += w + gap
 	}
 	return out
+}
+
+// rowWidth sums a button row's cell width for the fit ladder.
+func rowWidth(labels []string, gap int) int {
+	total := 0
+	for i, l := range labels {
+		if i > 0 {
+			total += gap
+		}
+		total += runeLen(l)
+	}
+	return total
 }
 
 // toggleCommitCheck flips a path's membership in the commit set.
@@ -463,7 +523,9 @@ func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 	// vocabulary as the status-bar segment, promoted to where the
 	// source-control work happens. Clicking it opens the branch picker.
 	branchStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text).Bold(true)
-	branchLine := "⎇ " + a.gitSnap.Branch
+	// The trailing chevron marks the row as the branch picker's opener —
+	// without it the control renders exactly like a static label.
+	branchLine := "⎇ " + a.gitSnap.Branch + " ▾"
 	if a.diffBase != "" {
 		branchLine += " ⇆ " + a.diffBase
 	}
@@ -481,7 +543,10 @@ func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 		muted := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
 		drawClipped(a.screen, sx+1, sy+2, sw-1, "git is working…", muted)
 	} else {
-		for _, b := range a.gitPanelButtons() {
+		for _, b := range a.gitPanelButtons(sw) {
+			if b.x1 > sw {
+				break // belt: never paint past the splitter
+			}
 			drawButton(a.screen, sx+b.x0, sy+2, b.label, bg, a.theme.Accent, false)
 		}
 	}

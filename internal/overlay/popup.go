@@ -20,6 +20,9 @@ import (
 type PopupItem struct {
 	Label  string
 	OnPick func()
+	// Divider marks a non-interactive rule between groups: skipped by
+	// keyboard navigation, ignored by hover, never activatable.
+	Divider bool
 }
 
 // Popup is the small anchored action menu (the tree right-click menu,
@@ -59,21 +62,32 @@ func PlacePopup(scrW, scrH, x, y, w, count int) Rect {
 
 // HandleKey: Up/Down move the highlight (clamped, not wrapped — the
 // popup sits at an anchor, so wrapping past the end feels like a jump),
-// Enter activates, Esc dismisses.
+// skipping divider rows; Enter activates, Esc dismisses.
 func (p *Popup) HandleKey(ev *tcell.EventKey) {
 	switch ev.Key() {
 	case tcell.KeyEsc:
 		p.Close()
 	case tcell.KeyDown:
-		if p.Hover < len(p.Items)-1 {
-			p.Hover++
-		}
+		p.Hover = p.nextSelectable(p.Hover, +1)
 	case tcell.KeyUp:
-		if p.Hover > 0 {
-			p.Hover--
-		}
+		p.Hover = p.nextSelectable(p.Hover, -1)
 	case tcell.KeyEnter:
 		p.activate()
+	}
+}
+
+// nextSelectable walks from the current row in dir, skipping dividers;
+// hitting either end leaves the highlight where it was.
+func (p *Popup) nextSelectable(from, dir int) int {
+	i := from
+	for {
+		i += dir
+		if i < 0 || i >= len(p.Items) {
+			return from
+		}
+		if !p.Items[i].Divider {
+			return i
+		}
 	}
 }
 
@@ -81,8 +95,12 @@ func (p *Popup) HandleKey(ev *tcell.EventKey) {
 // click outside dismisses.
 func (p *Popup) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	r := p.At
+	row := -1
 	if x >= r.X && x < r.X+r.W && y > r.Y && y < r.Y+r.H-1 {
-		p.Hover = y - r.Y - 1
+		row = y - r.Y - 1
+	}
+	if row >= 0 && row < len(p.Items) && !p.Items[row].Divider {
+		p.Hover = row
 	}
 	if btn&tcell.Button1 == 0 {
 		return
@@ -91,8 +109,8 @@ func (p *Popup) HandleMouse(x, y int, btn tcell.ButtonMask) {
 		p.Close()
 		return
 	}
-	if y > r.Y && y < r.Y+r.H-1 {
-		p.Hover = y - r.Y - 1
+	if row >= 0 && row < len(p.Items) && !p.Items[row].Divider {
+		p.Hover = row
 		p.activate()
 	}
 }
@@ -115,6 +133,10 @@ func (p *Popup) Draw(scr tcell.Screen) {
 
 	for i, item := range p.Items {
 		cy := r.Y + 1 + i
+		if item.Divider {
+			drawHDivider(scr, r.X, cy, r.W, borderStyle)
+			continue
+		}
 		if i == p.Hover {
 			for cx := r.X + 1; cx < r.X+r.W-1; cx++ {
 				scr.SetContent(cx, cy, ' ', nil, hoverStyle)
@@ -132,7 +154,7 @@ func (p *Popup) Draw(scr tcell.Screen) {
 // activate runs the highlighted item — capture-then-close, like every
 // other overlay.
 func (p *Popup) activate() {
-	if p.Hover < 0 || p.Hover >= len(p.Items) {
+	if p.Hover < 0 || p.Hover >= len(p.Items) || p.Items[p.Hover].Divider {
 		return
 	}
 	pick := p.Items[p.Hover].OnPick

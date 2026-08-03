@@ -649,12 +649,15 @@ func (a *App) openGitExtras(x, y int) {
 	a.openPopup([]overlay.PopupItem{
 		{Label: "Fetch", OnPick: func() { a.menuGitFetch() }},
 		{Label: "Compare against…", OnPick: func() { a.menuGitCompareAgainst() }},
+		{Divider: true},
 		{Label: "New branch…", OnPick: func() { a.menuGitNewBranch() }},
 		{Label: "Merge branch…", OnPick: func() { a.menuGitMergeBranch() }},
 		{Label: "Rename branch…", OnPick: func() { a.menuGitRenameBranch() }},
 		{Label: "Delete branch…", OnPick: func() { a.menuGitDeleteBranch() }},
+		{Divider: true},
 		{Label: "Stash changes", OnPick: func() { a.menuGitStash() }},
 		{Label: "Pop stash", OnPick: func() { a.menuGitStashPop() }},
+		{Divider: true},
 		{Label: "Undo last commit", OnPick: func() { a.menuGitUndoCommit() }},
 		{Label: "Commit history", OnPick: func() { a.menuCommitHistory() }},
 	}, x, y)

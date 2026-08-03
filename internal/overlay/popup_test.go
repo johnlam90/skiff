@@ -123,3 +123,47 @@ func TestPopup_DrawShowsRowsAndHighlight(t *testing.T) {
 		}
 	}
 }
+
+// TestPopup_DividersAreInert pins the group-divider contract: divider
+// rows render between groups but are skipped by keyboard navigation,
+// ignore hover, and can never activate — they structure the list, they
+// are not part of it.
+func TestPopup_DividersAreInert(t *testing.T) {
+	var log []string
+	p := &Popup{Theme: theme.Default(), At: PlacePopup(80, 24, 10, 5, 19, 3)}
+	p.Close = func() { log = append(log, "close") }
+	p.Items = []PopupItem{
+		{Label: "one", OnPick: func() { log = append(log, "one") }},
+		{Divider: true},
+		{Label: "two", OnPick: func() { log = append(log, "two") }},
+	}
+
+	p.HandleKey(key(tcell.KeyDown, 0))
+	if p.Hover != 2 {
+		t.Fatalf("Down must skip the divider, hover=%d", p.Hover)
+	}
+	p.HandleKey(key(tcell.KeyUp, 0))
+	if p.Hover != 0 {
+		t.Fatalf("Up must skip the divider, hover=%d", p.Hover)
+	}
+
+	// Hovering the divider's row must not move the highlight onto it,
+	// and clicking it must not activate anything.
+	r := p.At
+	p.HandleMouse(r.X+3, r.Y+2, tcell.ButtonNone) // divider row
+	if p.Hover == 1 {
+		t.Fatal("hover must not land on a divider")
+	}
+	p.HandleMouse(r.X+3, r.Y+2, tcell.Button1)
+	if len(log) != 0 {
+		t.Fatalf("clicking a divider must be a no-op, got %v", log)
+	}
+
+	// The divider row draws as a rule, not as a blank or a label.
+	scr := simScreen(t)
+	p.Draw(scr)
+	scr.Show()
+	if got := cellAt(scr, r.X+3, r.Y+2); got != '─' {
+		t.Fatalf("divider row should draw a rule, got %q", got)
+	}
+}

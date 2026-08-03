@@ -600,3 +600,66 @@ func TestDiffWalk_ArrowsMoveBetweenFiles(t *testing.T) {
 		t.Fatalf("closing the diff must disarm walking, got %d", a.diffPanelRow)
 	}
 }
+
+// TestGitPanelButtons_CarryLiveState pins the self-explaining row: with
+// commits to push/pull and files checked for commit, the wide labels
+// carry those counts so the buttons say why you'd press them.
+func TestGitPanelButtons_CarryLiveState(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.gitSnap.IsRepo = true
+	a.gitSnap.Ahead, a.gitSnap.Behind = 2, 1
+	a.gitPanelRows = []gitChangeRow{
+		{Abs: "/p/a.go"}, {Abs: "/p/b.go"}, {Abs: "/p/dir", IsDir: true},
+	}
+	labels := []string{}
+	for _, b := range a.gitPanelButtons(60) {
+		labels = append(labels, b.label)
+	}
+	want := []string{"[ Commit 2 ]", "[ Push ↑2 ]", "[ Pull ↓1 ]", "[ ⋯ ]"}
+	for i, w := range want {
+		if labels[i] != w {
+			t.Fatalf("label %d = %q, want %q (all: %v)", i, labels[i], w, labels)
+		}
+	}
+}
+
+// TestGitPanelButtons_CollapseToGlyphsWhenNarrow pins the adaptive row:
+// at the minimum sidebar width the wide labels don't fit, so the row
+// falls back to glyph buttons — and every button's hit zone stays
+// inside the sidebar instead of overdrawing the splitter and editor.
+func TestGitPanelButtons_CollapseToGlyphsWhenNarrow(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.gitSnap.IsRepo = true
+	btns := a.gitPanelButtons(minSidebarWidth)
+	if len(btns) != 4 {
+		t.Fatalf("all four buttons must survive narrow widths, got %d", len(btns))
+	}
+	for _, b := range btns {
+		if b.x1 > minSidebarWidth {
+			t.Fatalf("button %q ends at %d, past the %d-cell sidebar", b.label, b.x1, minSidebarWidth)
+		}
+	}
+}
+
+// TestDrawGitPanel_BranchRowShowsPickerAffordance pins the ▾ cue: the
+// branch row opens the branch picker on click, so it must not render as
+// a static label.
+func TestDrawGitPanel_BranchRowShowsPickerAffordance(t *testing.T) {
+	a := newTestApp(t, initRepo(t))
+	a.gitSnap.IsRepo = true
+	a.gitSnap.Branch = "main"
+	a.showGitPanel()
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	row := ""
+	for x := 0; x < 30; x++ {
+		if len(cells[1*w+x].Runes) > 0 {
+			row += string(cells[1*w+x].Runes[0])
+		}
+	}
+	if !strings.Contains(row, "main ▾") {
+		t.Fatalf("branch row should carry the picker chevron, got %q", row)
+	}
+}
