@@ -128,30 +128,34 @@ func TestHandleConfirmMouse_WheelScrollsInfoBody(t *testing.T) {
 	}
 }
 
-// TestAnyModalOpen returns true for any one flag and false for none.
+// TestAnyModalOpen returns true while an overlay is up and false once
+// everything is closed. The report comes from the overlay stack, not
+// the per-modal booleans, so each surface must go through its real
+// opener — a flag flipped by hand no longer counts as open.
 func TestAnyModalOpen(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	if a.anyModalOpen() {
 		t.Fatal("none open")
 	}
-	a.menuOpen = true
+	a.openMenu()
 	if !a.anyModalOpen() {
 		t.Fatal("expected true with menu open")
 	}
-	a.menuOpen = false
-	a.promptOpen = true
+	a.openPrompt("T", "", "", nil)
 	if !a.anyModalOpen() {
 		t.Fatal("expected true with prompt open")
 	}
-	a.promptOpen = false
-	a.confirmOpen = true
+	a.openConfirm("T", "m", nil)
 	if !a.anyModalOpen() {
 		t.Fatal("expected true with confirm open")
 	}
-	a.confirmOpen = false
-	a.contextOpen = true
+	a.openTreeContext(a.tree.Root, 2, 2)
 	if !a.anyModalOpen() {
 		t.Fatal("expected true with context open")
+	}
+	a.closeAllModals()
+	if a.anyModalOpen() {
+		t.Fatal("expected false after closeAllModals")
 	}
 }
 

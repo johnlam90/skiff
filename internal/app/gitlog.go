@@ -106,6 +106,7 @@ func (a *App) openGitLog(title, path string) {
 	}
 	a.closeAllModals()
 	a.gitLogOpen = true
+	a.overlays.Open(gitLogOverlay{a})
 	a.gitLogTitle = title
 	a.gitLogPath = path
 	a.gitLogEntries = entries
@@ -116,6 +117,7 @@ func (a *App) openGitLog(title, path string) {
 // closeGitLog dismisses the modal and drops its transient state.
 func (a *App) closeGitLog() {
 	a.gitLogOpen = false
+	a.dropOverlay(gitLogOverlay{a})
 	a.gitLogEntries = nil
 	a.gitLogTitle = ""
 	a.gitLogPath = ""

@@ -62,6 +62,7 @@ func (a *App) openForm(title string, prompts []customactions.Prompt, callback fu
 	vars := a.captureActionVars()
 
 	a.formOpen = true
+	a.overlays.Open(formOverlay{a})
 	a.formTitle = title
 	a.formPrompts = append([]customactions.Prompt(nil), prompts...)
 	a.formValues = make(map[string]string, len(prompts))

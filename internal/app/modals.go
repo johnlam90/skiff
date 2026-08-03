@@ -71,6 +71,7 @@ type contextItem struct {
 // replace row and the tab's match highlights go with it rather than
 // staying armed under the modal.
 func (a *App) closeAllModals() {
+	a.overlays.Close()
 	a.menuOpen = false
 	a.promptOpen = false
 	a.confirmOpen = false
@@ -142,7 +143,7 @@ func (a *App) closeAllModals() {
 // would suppress editor behaviours (drag auto-scroll) that must keep
 // working while a strip is up. See docs/adr/0001-strips-are-not-overlays.md.
 func (a *App) anyModalOpen() bool {
-	return a.menuOpen || a.promptOpen || a.confirmOpen || a.contextOpen || a.dirtyOpen || a.formOpen || a.finderOpen || a.listPickOpen || a.diffOpen || a.gitLogOpen
+	return a.overlays.IsOpen()
 }
 
 // -----------------------------------------------------------------------------
@@ -156,6 +157,7 @@ func (a *App) anyModalOpen() bool {
 func (a *App) openPrompt(title, hint, initial string, callback func(*App, string)) {
 	a.closeAllModals()
 	a.promptOpen = true
+	a.overlays.Open(promptOverlay{a})
 	a.promptTitle = title
 	a.promptHint = hint
 	a.promptValue = []rune(initial)
@@ -402,6 +404,7 @@ func (a *App) adjustPromptScroll(width int) {
 func (a *App) openConfirm(title, message string, callback func(*App)) {
 	a.closeAllModals()
 	a.confirmOpen = true
+	a.overlays.Open(confirmOverlay{a})
 	a.confirmTitle = title
 	a.confirmMessage = message
 	a.confirmHover = 0 // No
@@ -420,6 +423,7 @@ func (a *App) openInfo(title string, lines []string) {
 		lines = []string{"(no output captured)"}
 	}
 	a.confirmOpen = true
+	a.overlays.Open(confirmOverlay{a})
 	a.confirmInfo = true
 	a.confirmTitle = title
 	a.confirmMessageLines = lines
@@ -753,6 +757,7 @@ const (
 func (a *App) openDirtyClose(title, message string, saveCB, discardCB func(*App)) {
 	a.closeAllModals()
 	a.dirtyOpen = true
+	a.overlays.Open(dirtyOverlay{a})
 	a.dirtyTitle = title
 	a.dirtyMessage = message
 	a.dirtyHover = 0 // Cancel
@@ -968,6 +973,7 @@ func (a *App) openTreeContext(n *filetree.Node, x, y int) {
 	a.contextHover = 0
 	a.contextX, a.contextY = a.placeContext(x, y, len(items))
 	a.contextOpen = true
+	a.overlays.Open(contextOverlay{a})
 }
 
 // placeContext picks an on-screen origin for the context menu. Anchors on

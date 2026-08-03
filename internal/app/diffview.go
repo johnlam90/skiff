@@ -170,6 +170,7 @@ const diffHighlightCap = 4000
 func (a *App) openDiffView(title string, raw []string, openPath, langPath string) {
 	a.closeAllModals()
 	a.diffOpen = true
+	a.overlays.Open(diffOverlay{a})
 	a.diffTitle = title
 	a.diffRaw = raw
 	a.diffRows = parseSideBySideDiff(raw)

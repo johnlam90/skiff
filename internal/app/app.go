@@ -34,6 +34,7 @@ import (
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/icons"
+	"github.com/johnlam90/skiff/internal/overlay"
 	"github.com/johnlam90/skiff/internal/search"
 	"github.com/johnlam90/skiff/internal/theme"
 	"github.com/johnlam90/skiff/internal/userconfig"
@@ -367,6 +368,14 @@ type App struct {
 	// themeID is the registry id of the active theme — what the picker
 	// pre-selects and what SetTheme persists. See themepick.go.
 	themeID string
+
+	// overlays is the single routing truth for which floating modal is
+	// up: handleKey, handleMouse, draw, and anyModalOpen all consult it
+	// instead of the per-modal booleans. The booleans below survive as
+	// modal-internal state until each modal becomes a real overlay
+	// adapter. Strips (find, project find, leader) never appear here —
+	// see docs/adr/0001-strips-are-not-overlays.md.
+	overlays overlay.Stack
 
 	rootDir   string
 	tree      *filetree.Tree
@@ -1390,28 +1399,13 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		}
 	}
 
-	// Secondary modals own the keyboard while they're up. Each handler
-	// understands Esc (cancel), Enter (submit / activate), and the keys
-	// relevant to its layout (text editing for the prompt, arrow keys for
-	// the context menu, etc.).
-	if a.promptOpen {
-		a.handlePromptKey(ev)
-		return
-	}
-	if a.confirmOpen {
-		a.handleConfirmKey(ev)
-		return
-	}
-	if a.dirtyOpen {
-		a.handleDirtyKey(ev)
-		return
-	}
-	if a.formOpen {
-		a.handleFormKey(ev)
-		return
-	}
-	if a.contextOpen {
-		a.handleContextKey(ev)
+	// The overlay stack owns the whole keyboard while an overlay is up —
+	// each overlay's handler understands Esc (cancel), Enter (submit /
+	// activate), and the keys relevant to its layout. Strips come next:
+	// keyboard-focused but mouse-transparent, and never up at the same
+	// time as an overlay because every opener runs closeAllModals first.
+	if ov := a.overlays.Top(); ov != nil {
+		ov.HandleKey(ev)
 		return
 	}
 	if a.findOpen {
@@ -1420,22 +1414,6 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 	}
 	if a.projFindOpen {
 		a.handleProjFindKey(ev)
-		return
-	}
-	if a.listPickOpen {
-		a.handleListPickKey(ev)
-		return
-	}
-	if a.finderOpen {
-		a.handleFinderKey(ev)
-		return
-	}
-	if a.diffOpen {
-		a.handleDiffKey(ev)
-		return
-	}
-	if a.gitLogOpen {
-		a.handleGitLogKey(ev)
 		return
 	}
 
@@ -1448,11 +1426,9 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		a.lastEscape = time.Time{}
 		switch ev.Key() {
 		case tcell.KeyEsc:
-			if a.menuOpen {
-				a.closeMenu()
-			} else {
-				a.openMenu()
-			}
+			// A key arriving here means no overlay is up (the stack
+			// routes first), so this can only be an open gesture.
+			a.openMenu()
 			return
 		case tcell.KeyRune:
 			if action := leaderActionFor(ev.Rune()); action != nil {
@@ -1463,19 +1439,15 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 	}
 
 	if ev.Key() == tcell.KeyEsc {
-		// Esc is the editor's only command key. Behavior:
-		//   • menu open  → close it
-		//   • menu shut  → open it on the SECOND Esc within menuEscMs;
-		//     a SINGLE Esc arms the leader table (see below).
-		// A lone Esc that isn't followed by a leader binding within the
-		// window is intentionally a no-op so the key still feels harmless
-		// to mash — and because tmux can munch a fast double-tap into
-		// one Esc, "mash Esc until the menu appears" must always work.
-		if a.menuOpen {
-			a.closeMenu()
-			a.lastEscape = time.Time{}
-			return
-		}
+		// Esc is the editor's only command key: it opens the menu on
+		// the SECOND Esc within menuEscMs, while a SINGLE Esc arms the
+		// leader table (see below). The close half of the toggle lives
+		// in handleMenuKey — with the menu up, the overlay stack routes
+		// keys there before this code can run. A lone Esc that isn't
+		// followed by a leader binding within the window is
+		// intentionally a no-op so the key still feels harmless to
+		// mash — and because tmux can munch a fast double-tap into one
+		// Esc, "mash Esc until the menu appears" must always work.
 		now := time.Now()
 		if !a.lastEscape.IsZero() && now.Sub(a.lastEscape) < menuEscMs {
 			a.openMenu()
@@ -1499,63 +1471,14 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		})
 		return
 	}
-	// Esc-leader hotkey: if Esc was pressed within doubleEscMs and this
-	// key is bound in the leader table, fire the action and consume the
-	// keystroke. Unbound keys fall through to normal handling so a stray
-	// Esc doesn't swallow the next character the user types.
-	if !a.lastEscape.IsZero() && time.Since(a.lastEscape) < doubleEscMs {
-		if ev.Key() == tcell.KeyRune {
-			if action := leaderActionFor(ev.Rune()); action != nil {
-				a.lastEscape = time.Time{}
-				action(a)
-				return
-			}
-		}
-	}
-	// Expired-leader grace: a bound rune landing after the leader window
-	// but inside the menu window is almost always a slow "Esc s" over a
-	// laggy link, not typing — the old behavior silently inserted the
-	// rune into the buffer while the user believed they had saved.
-	// Swallow it once and say what happened; unbound runes still fall
-	// through so ordinary typing after a stray Esc keeps working.
-	if !a.lastEscape.IsZero() && time.Since(a.lastEscape) < menuEscMs {
-		if ev.Key() == tcell.KeyRune && leaderActionFor(ev.Rune()) != nil {
-			a.lastEscape = time.Time{}
-			r := ev.Rune()
-			a.flash(fmt.Sprintf("Esc %c timed out — tap Esc, then %c right after", r, r))
-			return
-		}
+	// Esc-leader hotkey windows — shared with handleMenuKey so the
+	// leader table behaves identically whether or not the menu is up.
+	if a.leaderWindowIntercept(ev) {
+		return
 	}
 	// Any other key cancels a pending Esc so a stale half-tap doesn't
 	// surprise the user later.
 	a.lastEscape = time.Time{}
-
-	// While the menu is open, only the navigation keys do anything —
-	// editing keys are blocked, but Down/Up move the highlight and Enter
-	// activates the highlighted row. Pasted content is ignored outright:
-	// with no text focus behind the menu, dispatching pasted runes as
-	// leader shortcuts would fire arbitrary actions.
-	if a.menuOpen {
-		if a.pasting {
-			return
-		}
-		if ev.Key() == tcell.KeyRune {
-			if action := leaderActionFor(ev.Rune()); action != nil {
-				a.lastEscape = time.Time{}
-				action(a)
-				return
-			}
-		}
-		switch ev.Key() {
-		case tcell.KeyDown:
-			a.menuMoveSelection(1)
-		case tcell.KeyUp:
-			a.menuMoveSelection(-1)
-		case tcell.KeyEnter:
-			a.menuActivate()
-		}
-		return
-	}
 
 	tab := a.activeTabPtr()
 	if tab == nil {
@@ -1627,52 +1550,16 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		a.lastShiftAt = time.Now()
 	}
 
-	// Secondary modals absorb all mouse input. The order here matches
-	// keyboard routing so behavior stays predictable.
-	if a.promptOpen {
-		a.handlePromptMouse(x, y, btn)
-		return
-	}
-	if a.confirmOpen {
-		a.handleConfirmMouse(x, y, btn)
-		return
-	}
-	if a.dirtyOpen {
-		a.handleDirtyMouse(x, y, btn)
-		return
-	}
-	if a.formOpen {
-		a.handleFormMouse(x, y, btn)
-		return
-	}
-	if a.contextOpen {
-		a.handleContextMouse(x, y, btn)
+	// The overlay on the stack absorbs all mouse input — same routing
+	// truth as the keyboard. The project-find strip comes next: it has
+	// real mouse targets (result rows, fold arrows) unlike the find bar,
+	// which deliberately passes mouse through to the editor (ADR-0001).
+	if ov := a.overlays.Top(); ov != nil {
+		ov.HandleMouse(x, y, btn)
 		return
 	}
 	if a.projFindOpen {
 		a.handleProjFindMouse(x, y, btn)
-		return
-	}
-	if a.listPickOpen {
-		a.handleListPickMouse(x, y, btn)
-		return
-	}
-	if a.finderOpen {
-		a.handleFinderMouse(x, y, btn)
-		return
-	}
-	if a.diffOpen {
-		a.handleDiffMouse(x, y, btn)
-		return
-	}
-	if a.gitLogOpen {
-		a.handleGitLogMouse(x, y, btn)
-		return
-	}
-
-	if a.menuOpen {
-		a.updateMenuHover(x, y)
-		a.handleMenuMouse(x, y, btn)
 		return
 	}
 
@@ -2461,6 +2348,7 @@ func (a *App) pasteClipboard() {
 func (a *App) openMenu() {
 	a.closeAllModals()
 	a.menuOpen = true
+	a.overlays.Open(menuOverlay{a})
 	a.menuScroll = 0
 	a.menuMoveSelection(1)
 }
@@ -2499,6 +2387,82 @@ func (a *App) menuMoveSelection(dir int) {
 
 // menuActivate runs the currently-highlighted menu item, if any. It's the
 // keyboard-Enter equivalent of clicking a row.
+// leaderWindowIntercept applies the Esc-leader windows to one key event.
+// Within doubleEscMs a bound rune fires its action; within the longer
+// menuEscMs grace window a bound rune is swallowed with a hint instead —
+// a slow "Esc s" over a laggy link is almost always a save attempt, not
+// typing, and the old behavior silently inserted the rune. Returns true
+// when the key was consumed either way.
+func (a *App) leaderWindowIntercept(ev *tcell.EventKey) bool {
+	if !a.lastEscape.IsZero() && time.Since(a.lastEscape) < doubleEscMs {
+		if ev.Key() == tcell.KeyRune {
+			if action := leaderActionFor(ev.Rune()); action != nil {
+				a.lastEscape = time.Time{}
+				action(a)
+				return true
+			}
+		}
+	}
+	if !a.lastEscape.IsZero() && time.Since(a.lastEscape) < menuEscMs {
+		if ev.Key() == tcell.KeyRune && leaderActionFor(ev.Rune()) != nil {
+			a.lastEscape = time.Time{}
+			r := ev.Rune()
+			a.flash(fmt.Sprintf("Esc %c timed out — tap Esc, then %c right after", r, r))
+			return true
+		}
+	}
+	return false
+}
+
+// handleMenuKey owns the keyboard while the action menu is up. Only the
+// navigation keys do anything — editing keys are blocked — but leader
+// runes still fire their actions (the menu doubles as the shortcut
+// cheat-sheet, so the shortcuts must work while it shows). Pasted
+// content is ignored outright: with no text focus behind the menu,
+// dispatching pasted runes as leader shortcuts would fire arbitrary
+// actions. Esc and Alt+Esc close the menu — the same keys that open it.
+func (a *App) handleMenuKey(ev *tcell.EventKey) {
+	if a.pasting {
+		return
+	}
+	if ev.Modifiers()&tcell.ModAlt != 0 {
+		a.lastEscape = time.Time{}
+		switch ev.Key() {
+		case tcell.KeyEsc:
+			a.closeMenu()
+			return
+		case tcell.KeyRune:
+			if action := leaderActionFor(ev.Rune()); action != nil {
+				action(a)
+			}
+			return
+		}
+	}
+	if ev.Key() == tcell.KeyEsc {
+		a.closeMenu()
+		a.lastEscape = time.Time{}
+		return
+	}
+	if a.leaderWindowIntercept(ev) {
+		return
+	}
+	a.lastEscape = time.Time{}
+	if ev.Key() == tcell.KeyRune {
+		if action := leaderActionFor(ev.Rune()); action != nil {
+			action(a)
+			return
+		}
+	}
+	switch ev.Key() {
+	case tcell.KeyDown:
+		a.menuMoveSelection(1)
+	case tcell.KeyUp:
+		a.menuMoveSelection(-1)
+	case tcell.KeyEnter:
+		a.menuActivate()
+	}
+}
+
 func (a *App) menuActivate() {
 	items, _, _ := a.menuLayout()
 	if a.hoveredMenuRow < 0 || a.hoveredMenuRow >= len(items) {
@@ -2514,6 +2478,7 @@ func (a *App) menuActivate() {
 // closeMenu hides the action modal without running any action.
 func (a *App) closeMenu() {
 	a.menuOpen = false
+	a.dropOverlay(menuOverlay{a})
 	a.hoveredMenuRow = -1
 	a.menuScroll = 0
 }
@@ -2967,39 +2932,10 @@ func (a *App) draw() {
 	}
 	a.drawLeaderStrip()
 
-	// Modal layering, bottom-up. Only one of these is open at a time
-	// (closeAllModals enforces it), but the order still matters so a
-	// future contributor can't accidentally double-open them.
-	if a.menuOpen {
-		a.drawMenu()
-	}
-	if a.contextOpen {
-		a.drawContext()
-	}
-	if a.promptOpen {
-		a.drawPrompt()
-	}
-	if a.confirmOpen {
-		a.drawConfirm()
-	}
-	if a.dirtyOpen {
-		a.drawDirtyClose()
-	}
-	if a.formOpen {
-		a.drawForm()
-	}
-	if a.finderOpen {
-		a.drawFinder()
-	}
-	if a.listPickOpen {
-		a.drawListPick()
-	}
-	if a.diffOpen {
-		a.drawDiffView()
-	}
-	if a.gitLogOpen {
-		a.drawGitLog()
-	}
+	// The overlay stack paints last so the open overlay sits above
+	// everything — at most one is ever up (Open replaces), so there is
+	// no layering order left to maintain.
+	a.overlays.Draw(a.screen)
 }
 
 // iconsOn reports whether Nerd Font glyphs should render in places

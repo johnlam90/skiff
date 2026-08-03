@@ -67,6 +67,7 @@ func (a *App) openFinder() {
 	}
 	a.closeAllModals()
 	a.finderOpen = true
+	a.overlays.Open(finderOverlay{a})
 	a.finderQuery = nil
 	a.finderCursor = 0
 	a.finderSelected = 0
@@ -89,6 +90,7 @@ func (a *App) openFinder() {
 // reuses it.
 func (a *App) closeFinder() {
 	a.finderOpen = false
+	a.dropOverlay(finderOverlay{a})
 	a.finderQuery = nil
 	a.finderCursor = 0
 	a.finderResults = nil

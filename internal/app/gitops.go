@@ -676,4 +676,5 @@ func (a *App) openGitExtras(x, y int) {
 	a.contextHover = 0
 	a.contextX, a.contextY = a.placeContext(x, y, len(items))
 	a.contextOpen = true
+	a.overlays.Open(contextOverlay{a})
 }

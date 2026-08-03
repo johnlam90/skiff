@@ -38,6 +38,7 @@ type listPickItem struct {
 func (a *App) openListPick(title string, items []listPickItem, onPick, onMove func(*App, int), onCancel func(*App)) {
 	a.closeAllModals()
 	a.listPickOpen = true
+	a.overlays.Open(listPickOverlay{a})
 	a.listPickTitle = title
 	a.listPickItems = items
 	a.listPickQuery = nil
@@ -73,6 +74,7 @@ func (a *App) listPickFiltered() []int {
 // closeListPick tears the modal down without firing any hook.
 func (a *App) closeListPick() {
 	a.listPickOpen = false
+	a.dropOverlay(listPickOverlay{a})
 	a.listPickItems = nil
 	a.listPickQuery = nil
 	a.listPickInputScroll = 0
