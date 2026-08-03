@@ -497,9 +497,9 @@ func TestHandleDiffKey_TabDeclinesAction(t *testing.T) {
 	if diffOv(t, a).hover != 0 {
 		t.Fatalf("Tab should focus Close, hover=%d", diffOv(t, a).hover)
 	}
-	tabsBefore := len(a.tabs)
+	tabsBefore := a.tabs.Len()
 	a.handleKey(keyEv(tcell.KeyEnter, 0))
-	if diffIsOpen(a) || len(a.tabs) != tabsBefore {
+	if diffIsOpen(a) || a.tabs.Len() != tabsBefore {
 		t.Fatal("Enter on Close should dismiss without opening a tab")
 	}
 

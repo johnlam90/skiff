@@ -377,10 +377,13 @@ type App struct {
 	// see docs/adr/0001-strips-are-not-overlays.md.
 	overlays overlay.Stack
 
-	rootDir   string
-	tree      *filetree.Tree
-	tabs      []*editor.Tab
-	activeTab int
+	rootDir string
+	tree    *filetree.Tree
+	// tabs owns the open tabs, the active tab, and the preview-slot
+	// rules — its interface speaks *editor.Tab identity, so references
+	// held across mutations (modal callbacks, async results) can never
+	// act on the wrong tab.
+	tabs editor.TabList
 
 	// activeFolder is the directory the editor is currently "working
 	// in" — the default target for New File from the main menu. It
@@ -828,8 +831,8 @@ func (a *App) handleGitStatusEvent(e *gitStatusEvent) {
 // whose gutter markers a status collection should refresh. Image tabs
 // and untitled buffers have no diff to compute.
 func (a *App) openTabPaths() []string {
-	paths := make([]string, 0, len(a.tabs))
-	for _, tab := range a.tabs {
+	paths := make([]string, 0, a.tabs.Len())
+	for _, tab := range a.tabs.Tabs() {
 		if tab == nil || tab.Path == "" || tab.IsImage() {
 			continue
 		}
@@ -864,7 +867,7 @@ func (a *App) applyGitStatus(res gitStatusResult) {
 	// Tabs opened after the collection started aren't in the map and
 	// keep the gutter lines they loaded on open; tabs closed since are
 	// simply skipped by the path lookup.
-	for _, tab := range a.tabs {
+	for _, tab := range a.tabs.Tabs() {
 		if tab == nil || tab.Path == "" || tab.IsImage() {
 			continue
 		}
@@ -1090,7 +1093,7 @@ func splitErrorOutput(runErr error, out []byte) []string {
 // Untitled tabs (Path == "") are skipped because there's no disk file to
 // reconcile against.
 func (a *App) reconcileOpenTabsWithDisk() {
-	for _, tab := range a.tabs {
+	for _, tab := range a.tabs.Tabs() {
 		if tab.Path == "" {
 			continue
 		}
@@ -1789,10 +1792,10 @@ func (a *App) tabBarClick(x, _ int) {
 	for _, r := range a.lastTabRects {
 		if x >= r.X && x < r.X+r.Width {
 			if x == r.CloseX {
-				a.requestCloseTab(r.Index)
+				a.requestCloseTab(a.tabs.At(r.Index))
 				return
 			}
-			a.activeTab = r.Index
+			a.tabs.ActivateAt(r.Index)
 			a.ensureActiveTabVisible()
 			a.syncActiveTreeFile()
 			return
@@ -2059,10 +2062,7 @@ func isWordChar(r rune) bool {
 // activeTabPtr returns the currently active *editor.Tab, or nil when there
 // are no tabs open.
 func (a *App) activeTabPtr() *editor.Tab {
-	if a.activeTab < 0 || a.activeTab >= len(a.tabs) {
-		return nil
-	}
-	return a.tabs[a.activeTab]
+	return a.tabs.Active()
 }
 
 // flash sets a transient status message that displays for statusFlashFor
@@ -2090,20 +2090,19 @@ func (a *App) openFile(path string) {
 
 // saveActiveTab writes the active tab's buffer to disk.
 func (a *App) saveActiveTab() {
-	a.saveTabAt(a.activeTab)
+	a.saveTab(a.tabs.Active())
 }
 
-// saveTabAt saves the tab at idx. Returns true on success, false on
-// any kind of failure (no tab, untitled, IO error). Failures flash a
-// status message so the caller doesn't have to. Pulled out from
-// saveActiveTab so the dirty-close modal can save a specific tab and
-// branch on success — saving and then closing must not eat the user's
-// work when the save itself failed.
-func (a *App) saveTabAt(idx int) bool {
-	if idx < 0 || idx >= len(a.tabs) {
+// saveTab saves tab. Returns true on success, false on any kind of
+// failure (no tab, untitled, IO error). Failures flash a status message
+// so the caller doesn't have to. Pulled out from saveActiveTab so the
+// dirty-close modal can save a specific tab and branch on success —
+// saving and then closing must not eat the user's work when the save
+// itself failed.
+func (a *App) saveTab(tab *editor.Tab) bool {
+	if tab == nil {
 		return false
 	}
-	tab := a.tabs[idx]
 	if tab.Path == "" {
 		a.flash("Saving untitled tabs is not supported yet")
 		return false
@@ -2118,7 +2117,7 @@ func (a *App) saveTabAt(idx int) bool {
 	// formatter never blocks the user's save from landing. The
 	// formatter (when configured + trusted) reloads the buffer
 	// asynchronously via formatDoneEvent — see format.go.
-	a.runFormatOnSave(idx)
+	a.runFormatOnSave(tab)
 	return true
 }
 
@@ -2129,11 +2128,11 @@ func (a *App) saveTabAt(idx int) bool {
 // past one we've already flashed about, and the user needs to react to
 // the first error before deciding what to do with the rest.
 func (a *App) saveAllDirty() bool {
-	for i, tab := range a.tabs {
+	for _, tab := range a.tabs.Tabs() {
 		if !tab.Dirty {
 			continue
 		}
-		if !a.saveTabAt(i) {
+		if !a.saveTab(tab) {
 			return false
 		}
 	}
@@ -2144,7 +2143,7 @@ func (a *App) saveAllDirty() bool {
 // Used by the quit flow to decide whether to skip the modal entirely.
 func (a *App) dirtyTabCount() int {
 	n := 0
-	for _, tab := range a.tabs {
+	for _, tab := range a.tabs.Tabs() {
 		if tab.Dirty {
 			n++
 		}
@@ -2152,18 +2151,20 @@ func (a *App) dirtyTabCount() int {
 	return n
 }
 
-// requestCloseTab closes the tab at idx. A clean tab closes immediately;
-// a dirty tab opens the unsaved-changes modal so the user can pick
-// Save / Discard / Cancel. The Save path saves the buffer first and only
-// closes the tab on success — a save error would otherwise silently lose
-// the user's work.
-func (a *App) requestCloseTab(idx int) {
-	if idx < 0 || idx >= len(a.tabs) {
+// requestCloseTab closes tab. A clean tab closes immediately; a dirty
+// tab opens the unsaved-changes modal so the user can pick Save /
+// Discard / Cancel. The Save path saves the buffer first and only
+// closes the tab on success — a save error would otherwise silently
+// lose the user's work. The callbacks capture the tab itself, so any
+// list mutation between the modal opening and the user's click (a
+// preview replacement, another close) can never redirect them onto the
+// wrong tab.
+func (a *App) requestCloseTab(tab *editor.Tab) {
+	if tab == nil || a.tabs.IndexOf(tab) < 0 {
 		return
 	}
-	tab := a.tabs[idx]
 	if !tab.Dirty {
-		a.closeTab(idx)
+		a.closeTab(tab)
 		return
 	}
 	name := filepath.Base(tab.Path)
@@ -2174,31 +2175,26 @@ func (a *App) requestCloseTab(idx int) {
 		"Unsaved changes",
 		name+" has unsaved changes.",
 		func(app *App) {
-			// Save → close. saveTabAt flashes its own error, in which
+			// Save → close. saveTab flashes its own error, in which
 			// case we keep the tab around so the user can react.
-			if app.saveTabAt(idx) {
-				app.closeTab(idx)
+			if app.saveTab(tab) {
+				app.closeTab(tab)
 			}
 		},
-		func(app *App) { app.closeTab(idx) },
+		func(app *App) { app.closeTab(tab) },
 	)
 }
 
-// closeTab removes the tab at idx without any dirty-check. The tab is
-// recorded on the reopen stack first so Esc-o can bring it back.
-func (a *App) closeTab(idx int) {
-	if idx < 0 || idx >= len(a.tabs) {
+// closeTab removes tab without any dirty-check. The tab is recorded on
+// the reopen stack first so Esc-o can bring it back; a tab that is no
+// longer in the list (already closed by another path) is a no-op.
+func (a *App) closeTab(tab *editor.Tab) {
+	if tab == nil || a.tabs.IndexOf(tab) < 0 {
 		return
 	}
-	a.recordClosedTab(a.tabs[idx])
-	a.tabs = append(a.tabs[:idx], a.tabs[idx+1:]...)
+	a.recordClosedTab(tab)
+	a.tabs.Remove(tab)
 	defer a.saveSession()
-	if a.activeTab >= len(a.tabs) {
-		a.activeTab = len(a.tabs) - 1
-	}
-	if a.activeTab < 0 {
-		a.activeTab = 0
-	}
 	a.ensureActiveTabVisible()
 	a.syncActiveTreeFile()
 }
@@ -2609,14 +2605,14 @@ func (a *App) menuSaveAndClose() {
 	}
 	a.refreshGitStatusAsync()
 	a.flash(fmt.Sprintf("Saved %s — closed", filepath.Base(tab.Path)))
-	a.closeTab(a.activeTab)
+	a.closeTab(a.tabs.Active())
 }
 
 // menuClose closes the active tab via the same dirty-tab confirmation flow
 // used by clicking the × on the tab.
 func (a *App) menuClose() {
 	a.closeMenu()
-	a.requestCloseTab(a.activeTab)
+	a.requestCloseTab(a.tabs.Active())
 }
 
 // menuCopy copies the current selection.
@@ -2729,7 +2725,7 @@ func (a *App) sidebarToggleLabel() string {
 func (a *App) menuToggleWrap() {
 	a.closeMenu()
 	a.wrapOn = !a.wrapOn
-	for _, t := range a.tabs {
+	for _, t := range a.tabs.Tabs() {
 		t.SetWrap(a.wrapOn)
 	}
 	if err := userconfig.SetWrap(userconfig.DefaultPath(), a.wrapOn); err != nil {
@@ -2766,7 +2762,7 @@ func (a *App) menuQuit() {
 	var message string
 	if dirty == 1 {
 		// Find the one dirty tab so we can name it in the modal.
-		for _, tab := range a.tabs {
+		for _, tab := range a.tabs.Tabs() {
 			if tab.Dirty {
 				name := filepath.Base(tab.Path)
 				if name == "" || name == "." {
@@ -2902,7 +2898,7 @@ func (a *App) clampTabScroll() {
 // isn't fought by the renderer.
 func (a *App) ensureActiveTabVisible() {
 	rects := a.layoutTabs()
-	if a.activeTab < 0 || a.activeTab >= len(rects) {
+	if a.tabs.ActiveIndex() < 0 || a.tabs.ActiveIndex() >= len(rects) {
 		a.tabScroll = 0
 		return
 	}
@@ -2910,7 +2906,7 @@ func (a *App) ensureActiveTabVisible() {
 	if stripW <= 0 {
 		return
 	}
-	r := rects[a.activeTab]
+	r := rects[a.tabs.ActiveIndex()]
 	left := stripX + a.tabScroll
 	if r.X < left {
 		a.tabScroll = r.X - stripX
@@ -2945,13 +2941,13 @@ const tabScrollStep = 8
 // drawTabBar subtracts tabScroll before painting and stores the
 // shifted rects, so click hit-testing always works in screen space.
 func (a *App) layoutTabs() []tabRect {
-	out := make([]tabRect, 0, len(a.tabs))
+	out := make([]tabRect, 0, a.tabs.Len())
 	cursor := a.sidebarW() + menuButtonWidth
 	iconW := 0
 	if a.iconsOn() {
 		iconW = 2 // glyph + space
 	}
-	for i, t := range a.tabs {
+	for i, t := range a.tabs.Tabs() {
 		nameLen := len([]rune(t.DisplayName()))
 		w := 1 + 2 + iconW + nameLen + 1 + 1 + 1 // pad+dirty+icon?+name+space+×+pad
 		out = append(out, tabRect{
@@ -2986,7 +2982,7 @@ func (a *App) drawTabBar() {
 	}
 	a.lastTabRects = rects
 	for _, r := range rects {
-		active := r.Index == a.activeTab
+		active := r.Index == a.tabs.ActiveIndex()
 		bg := a.theme.SidebarBG
 		fg := a.theme.Muted
 		if active {
@@ -2999,7 +2995,7 @@ func (a *App) drawTabBar() {
 		}
 		// Preview tabs render in italics — the visual promise that the
 		// next tree click will replace this tab rather than add one.
-		if a.tabs[r.Index].IsPreview() {
+		if a.tabs.At(r.Index).IsPreview() {
 			st = st.Italic(true)
 		}
 		// Background. Cells scrolled off either edge of the strip are
@@ -3013,7 +3009,7 @@ func (a *App) drawTabBar() {
 			}
 			a.screen.SetContent(cx, ty, ' ', nil, st)
 		}
-		tab := a.tabs[r.Index]
+		tab := a.tabs.At(r.Index)
 		col := r.X + 1
 		if tab.Dirty && col >= stripX && col < tx+tw {
 			a.screen.SetContent(col, ty, '●', nil, st.Foreground(a.theme.Modified))

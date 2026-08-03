@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/format"
 )
 
@@ -62,12 +63,8 @@ func (e *formatDoneEvent) When() time.Time { return e.when }
 // and easy to follow. Errors loading config files are surfaced once
 // (so a typo isn't silently ignored) but never block the save itself
 // — that already happened before this function was called.
-func (a *App) runFormatOnSave(idx int) {
-	if idx < 0 || idx >= len(a.tabs) {
-		return
-	}
-	tab := a.tabs[idx]
-	if tab.Path == "" {
+func (a *App) runFormatOnSave(tab *editor.Tab) {
+	if tab == nil || tab.Path == "" {
 		return
 	}
 
@@ -79,21 +76,20 @@ func (a *App) runFormatOnSave(idx int) {
 
 	argv := cfg.CommandFor(tab.Path)
 	if argv != nil {
-		a.runWithTrust(idx, cfg, argv)
+		a.runWithTrust(tab, cfg, argv)
 		return
 	}
 
 	// Project doesn't format this extension. See if the user has a
 	// personal default we can offer to install.
-	a.maybeOfferInstall(idx, tab.Path)
+	a.maybeOfferInstall(tab, tab.Path)
 }
 
 // runWithTrust drives the existing trust-check + run path, factored
 // out so runFormatOnSave can stay a flat router. Behaviour matches
 // the previous monolithic version exactly — denied stays silent,
 // unknown opens the prompt, allowed runs.
-func (a *App) runWithTrust(idx int, cfg *format.Config, argv []string) {
-	tab := a.tabs[idx]
+func (a *App) runWithTrust(tab *editor.Tab, cfg *format.Config, argv []string) {
 	trust, err := format.LoadTrust(format.DefaultTrustPath())
 	if err != nil {
 		a.flash("format trust: " + err.Error())
@@ -103,7 +99,7 @@ func (a *App) runWithTrust(idx int, cfg *format.Config, argv []string) {
 	case format.TrustDenied:
 		return
 	case format.TrustUnknown:
-		a.openFormatTrustPrompt(idx, cfg, argv)
+		a.openFormatTrustPrompt(tab, cfg, argv)
 		return
 	}
 	a.execFormatter(tab.Path, argv)
@@ -121,7 +117,7 @@ func (a *App) runWithTrust(idx int, cfg *format.Config, argv []string) {
 //   - the project's format.json exists but is currently denied at
 //     the trust level — piling on an install prompt while trust is
 //     denied would be confusing UX.
-func (a *App) maybeOfferInstall(idx int, tabPath string) {
+func (a *App) maybeOfferInstall(tab *editor.Tab, tabPath string) {
 	defaults, err := format.LoadDefaults(format.DefaultsPath())
 	if err != nil {
 		a.flash("format defaults: " + err.Error())
@@ -161,7 +157,7 @@ func (a *App) maybeOfferInstall(idx int, tabPath string) {
 		}
 	}
 
-	a.openFormatInstallPrompt(idx, ext, template)
+	a.openFormatInstallPrompt(tab, ext, template)
 }
 
 // openFormatTrustPrompt asks the user whether to allow this project's
@@ -175,11 +171,10 @@ func (a *App) maybeOfferInstall(idx int, tabPath string) {
 // hash we trust is the exact one we evaluated, not whatever the file
 // looks like after an external edit between the prompt and the
 // answer. Same defense as the (path, hash) trust key itself.
-func (a *App) openFormatTrustPrompt(idx int, cfg *format.Config, argv []string) {
-	if idx < 0 || idx >= len(a.tabs) {
+func (a *App) openFormatTrustPrompt(tab *editor.Tab, cfg *format.Config, argv []string) {
+	if tab == nil {
 		return
 	}
-	tab := a.tabs[idx]
 	tabPath := tab.Path
 	root := a.rootDir
 	hash := cfg.Hash()
@@ -216,11 +211,10 @@ func (a *App) openFormatTrustPrompt(idx int, cfg *format.Config, argv []string) 
 // Substitution happens at run time inside execFormatter via
 // substituteFile, mirroring the path Config.CommandFor takes for
 // already-installed entries.
-func (a *App) openFormatInstallPrompt(idx int, ext string, argvTemplate []string) {
-	if idx < 0 || idx >= len(a.tabs) {
+func (a *App) openFormatInstallPrompt(tab *editor.Tab, ext string, argvTemplate []string) {
+	if tab == nil {
 		return
 	}
-	tab := a.tabs[idx]
 	tabPath := tab.Path
 	root := a.rootDir
 	// Use just the executable name (argvTemplate[0]) in the prompt —
@@ -378,7 +372,7 @@ func (a *App) handleFormatDone(e *formatDoneEvent) {
 		a.flash(fmt.Sprintf("%s failed: %v", e.label, e.err))
 		return
 	}
-	for _, tab := range a.tabs {
+	for _, tab := range a.tabs.Tabs() {
 		if tab.Path != e.tabPath {
 			continue
 		}

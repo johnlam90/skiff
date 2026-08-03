@@ -216,7 +216,7 @@ func TestApplyGitStatus_UpdatesOpenTabGutters(t *testing.T) {
 	a.openFile(tracked)
 	a.openFile(other)
 	keep := map[int]editor.GitLineChange{3: editor.GitLineAdded}
-	a.tabs[1].GitLines = keep
+	a.tabs.At(1).GitLines = keep
 
 	a.applyGitStatus(gitStatusResult{
 		st: gitStatus{IsRepo: true, Root: dir, Branch: "main", DirtyFiles: map[string]filetree.GitChangeKind{}},
@@ -225,10 +225,10 @@ func TestApplyGitStatus_UpdatesOpenTabGutters(t *testing.T) {
 		},
 	})
 
-	if got := a.tabs[0].GitLines[0]; got != editor.GitLineModified {
+	if got := a.tabs.At(0).GitLines[0]; got != editor.GitLineModified {
 		t.Fatalf("tab 0 gutter should update, got %v", got)
 	}
-	if got := a.tabs[1].GitLines[3]; got != editor.GitLineAdded {
+	if got := a.tabs.At(1).GitLines[3]; got != editor.GitLineAdded {
 		t.Fatalf("tab 1 (absent from result) should keep its markers, got %v", got)
 	}
 }

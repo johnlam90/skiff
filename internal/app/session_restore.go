@@ -33,7 +33,7 @@ func (a *App) captureSession() session.Project {
 		SidebarWidth: a.sidebarWidth,
 		SidebarShown: a.sidebarShown,
 	}
-	for i, t := range a.tabs {
+	for i, t := range a.tabs.Tabs() {
 		if t.Path == "" {
 			continue
 		}
@@ -41,7 +41,7 @@ func (a *App) captureSession() session.Project {
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			continue
 		}
-		if i == a.activeTab {
+		if i == a.tabs.ActiveIndex() {
 			p.Active = len(p.Tabs)
 		}
 		p.Tabs = append(p.Tabs, session.TabState{
@@ -80,23 +80,18 @@ func (a *App) restoreSession() {
 		if info, err := os.Stat(abs); err != nil || info.IsDir() {
 			continue
 		}
-		t, err := editor.NewTab(abs)
+		t, err := a.newTab(abs)
 		if err != nil {
 			continue
 		}
 		t.Cursor = t.Buffer.Clamp(editor.Position{Line: ts.Line, Col: ts.Col})
 		t.Anchor = t.Cursor
 		t.ScrollY = ts.ScrollY
-		t.Wrap = a.wrapOn
 		t.Preview = ts.Preview
-		t.GitLines = loadGitLineChanges(a.rootDir, a.diffBase, abs)
-		a.tabs = append(a.tabs, t)
+		a.tabs.Append(t)
 	}
-	if len(a.tabs) > 0 {
-		a.activeTab = p.Active
-		if a.activeTab < 0 || a.activeTab >= len(a.tabs) {
-			a.activeTab = 0
-		}
+	if a.tabs.Len() > 0 {
+		a.tabs.ActivateAt(p.Active)
 		a.syncActiveTreeFile()
 	}
 }

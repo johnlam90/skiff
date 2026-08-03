@@ -241,7 +241,7 @@ func TestDoRenameFolder_RewritesDescendantTabPaths(t *testing.T) {
 	if _, err := os.Stat(newLeaf); err != nil {
 		t.Fatalf("renamed file missing: %v", err)
 	}
-	if got := a.tabs[0].Path; got != newLeaf {
+	if got := a.tabs.At(0).Path; got != newLeaf {
 		t.Fatalf("descendant tab path: got %q, want %q", got, newLeaf)
 	}
 	if want := filepath.Join(root, "renamed"); a.activeFolder != want {

@@ -322,21 +322,21 @@ func TestOpenFile_Basic(t *testing.T) {
 
 	a := newTestApp(t, dir)
 	a.openFile(target)
-	if len(a.tabs) != 1 {
-		t.Fatalf("expected 1 tab, got %d", len(a.tabs))
+	if a.tabs.Len() != 1 {
+		t.Fatalf("expected 1 tab, got %d", a.tabs.Len())
 	}
 	if a.activeFolder != sub {
 		t.Fatalf("activeFolder: got %q, want %q", a.activeFolder, sub)
 	}
 
 	// Re-opening should switch to existing tab, not create a new one.
-	a.activeTab = -1
+	a.tabs.ActivateAt(-1)
 	a.openFile(target)
-	if len(a.tabs) != 1 {
+	if a.tabs.Len() != 1 {
 		t.Fatalf("re-open created duplicate tab")
 	}
-	if a.activeTab != 0 {
-		t.Fatalf("re-open didn't switch active: got %d", a.activeTab)
+	if a.tabs.ActiveIndex() != 0 {
+		t.Fatalf("re-open didn't switch active: got %d", a.tabs.ActiveIndex())
 	}
 }
 
@@ -353,8 +353,8 @@ func TestOpenFile_ErrorFlash(t *testing.T) {
 	if !strings.Contains(a.statusMsg, "Error") {
 		t.Fatalf("expected error flash, got %q", a.statusMsg)
 	}
-	if len(a.tabs) != 0 {
-		t.Fatalf("expected no tabs, got %d", len(a.tabs))
+	if a.tabs.Len() != 0 {
+		t.Fatalf("expected no tabs, got %d", a.tabs.Len())
 	}
 }
 
@@ -369,10 +369,10 @@ func TestRequestCloseTab_DirtyOpensModal(t *testing.T) {
 	}
 	a := newTestApp(t, dir)
 	a.openFile(target)
-	a.tabs[0].Dirty = true
+	a.tabs.At(0).Dirty = true
 
-	a.requestCloseTab(0)
-	if len(a.tabs) != 1 {
+	a.requestCloseTab(a.tabs.At(0))
+	if a.tabs.Len() != 1 {
 		t.Fatalf("dirty tab should not close until the user picks an action")
 	}
 	if !dirtyIsOpen(a) {
@@ -389,8 +389,8 @@ func TestRequestCloseTab_CleanClosesImmediately(t *testing.T) {
 	}
 	a := newTestApp(t, dir)
 	a.openFile(target)
-	a.requestCloseTab(0)
-	if len(a.tabs) != 0 {
+	a.requestCloseTab(a.tabs.At(0))
+	if a.tabs.Len() != 0 {
 		t.Fatalf("clean tab should close on first request")
 	}
 }
@@ -406,23 +406,23 @@ func TestCloseTab_ClampsActive(t *testing.T) {
 	a := newTestApp(t, dir)
 	a.openFile(filepath.Join(dir, "a.txt"))
 	a.openFile(filepath.Join(dir, "b.txt"))
-	a.activeTab = 1
-	a.closeTab(1)
-	if a.activeTab != 0 {
-		t.Fatalf("activeTab should clamp to 0 after closing last; got %d", a.activeTab)
+	a.tabs.ActivateAt(1)
+	a.closeTab(a.tabs.At(1))
+	if a.tabs.ActiveIndex() != 0 {
+		t.Fatalf("activeTab should clamp to 0 after closing last; got %d", a.tabs.ActiveIndex())
 	}
-	a.closeTab(0)
-	if a.activeTab != 0 {
-		t.Fatalf("activeTab should stay >=0 with no tabs; got %d", a.activeTab)
+	a.closeTab(a.tabs.At(0))
+	if a.tabs.ActiveIndex() != 0 {
+		t.Fatalf("activeTab should stay >=0 with no tabs; got %d", a.tabs.ActiveIndex())
 	}
 }
 
 // TestCloseTab_OutOfRange is a no-op.
 func TestCloseTab_OutOfRange(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	a.closeTab(-1)
-	a.closeTab(99)
-	a.requestCloseTab(99)
+	a.closeTab(nil)
+	a.closeTab(a.tabs.At(99))
+	a.requestCloseTab(a.tabs.At(99))
 }
 
 // TestHasTab_Predicates covers the "is X available?" checks used to dim menu
@@ -753,8 +753,8 @@ func TestTabBarClick_SwitchesTab(t *testing.T) {
 		clickX = tabA.X + 2
 	}
 	a.tabBarClick(clickX, 0)
-	if a.activeTab != 0 {
-		t.Fatalf("expected activeTab=0, got %d", a.activeTab)
+	if a.tabs.ActiveIndex() != 0 {
+		t.Fatalf("expected activeTab=0, got %d", a.tabs.ActiveIndex())
 	}
 }
 
@@ -779,12 +779,14 @@ func TestActiveTabPtr(t *testing.T) {
 		t.Fatal("expected nil with no tabs")
 	}
 	a.openFile(target)
-	if a.activeTabPtr() != a.tabs[0] {
-		t.Fatal("activeTabPtr should match tabs[activeTab]")
+	if a.activeTabPtr() != a.tabs.At(0) {
+		t.Fatal("activeTabPtr should match the active tab")
 	}
-	a.activeTab = 99
-	if a.activeTabPtr() != nil {
-		t.Fatal("out-of-range activeTab should yield nil")
+	// An out-of-range activation clamps onto a real tab — the
+	// "active index points past the list" state cannot exist anymore.
+	a.tabs.ActivateAt(99)
+	if a.activeTabPtr() != a.tabs.At(0) {
+		t.Fatal("out-of-range activation should clamp to a real tab")
 	}
 }
 
@@ -878,8 +880,8 @@ func TestMenuSaveAndClose(t *testing.T) {
 	a.openFile(target)
 	a.activeTabPtr().InsertString("Y")
 	a.menuSaveAndClose()
-	if len(a.tabs) != 0 {
-		t.Fatalf("expected tab closed; got %d tabs", len(a.tabs))
+	if a.tabs.Len() != 0 {
+		t.Fatalf("expected tab closed; got %d tabs", a.tabs.Len())
 	}
 }
 
@@ -1118,8 +1120,8 @@ func TestSidebarClick_File(t *testing.T) {
 	// Only a no-panic guarantee — depending on row order we may or may
 	// not have opened the file. Just make sure no crash and either zero
 	// or one tab is open.
-	if len(a.tabs) > 1 {
-		t.Fatalf("unexpected tabs: %d", len(a.tabs))
+	if a.tabs.Len() > 1 {
+		t.Fatalf("unexpected tabs: %d", a.tabs.Len())
 	}
 }
 
@@ -1155,8 +1157,8 @@ func TestSidebarClick_RootRowResetsActiveFolder(t *testing.T) {
 	if a.activeFolder != a.rootDir {
 		t.Errorf("active folder = %q, want root %q", a.activeFolder, a.rootDir)
 	}
-	if len(a.tabs) != 0 {
-		t.Errorf("clicking root opened tabs: %d", len(a.tabs))
+	if a.tabs.Len() != 0 {
+		t.Errorf("clicking root opened tabs: %d", a.tabs.Len())
 	}
 }
 
@@ -1681,8 +1683,8 @@ func TestTabBarClick_ClosesViaX(t *testing.T) {
 	a.lastTabRects = a.layoutTabs()
 	r := a.lastTabRects[0]
 	a.tabBarClick(r.CloseX, 0)
-	if len(a.tabs) != 0 {
-		t.Fatalf("expected close, got %d tabs", len(a.tabs))
+	if a.tabs.Len() != 0 {
+		t.Fatalf("expected close, got %d tabs", a.tabs.Len())
 	}
 }
 
@@ -2660,7 +2662,7 @@ func TestTabBar_ClickMapsThroughScroll(t *testing.T) {
 	a.screen.Show()
 
 	// Click inside the second-to-last tab's visible rect.
-	target := len(a.tabs) - 2
+	target := a.tabs.Len() - 2
 	var rect tabRect
 	found := false
 	for _, r := range a.lastTabRects {
@@ -2673,8 +2675,8 @@ func TestTabBar_ClickMapsThroughScroll(t *testing.T) {
 		t.Fatal("second-to-last tab should have a stored rect")
 	}
 	a.tabBarClick(rect.X+3, 0)
-	if a.activeTab != target {
-		t.Fatalf("click on scrolled tab selected %d, want %d", a.activeTab, target)
+	if a.tabs.ActiveIndex() != target {
+		t.Fatalf("click on scrolled tab selected %d, want %d", a.tabs.ActiveIndex(), target)
 	}
 
 	// Clicking the ‹ marker cell scrolls left rather than selecting.
@@ -2962,7 +2964,7 @@ func TestDrawTabBar_CloseButtonEmphasis(t *testing.T) {
 	cells, w, _ := scr.GetContents()
 	for _, r := range a.lastTabRects {
 		fg, _, _ := cells[0*w+r.CloseX].Style.Decompose()
-		if r.Index == a.activeTab {
+		if r.Index == a.tabs.ActiveIndex() {
 			if fg != a.theme.Muted {
 				t.Fatalf("active tab × fg = %v, want Muted (brighter)", fg)
 			}

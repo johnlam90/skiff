@@ -214,7 +214,7 @@ func (a *App) duplicatePath(path string) {
 // moved. Shared by the paste-move path and folder renames.
 func (a *App) repointPaths(oldPath, newPath string) {
 	prefix := oldPath + string(filepath.Separator)
-	for _, t := range a.tabs {
+	for _, t := range a.tabs.Tabs() {
 		switch {
 		case t.Path == oldPath:
 			t.Path = newPath

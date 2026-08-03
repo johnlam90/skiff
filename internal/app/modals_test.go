@@ -419,16 +419,16 @@ func TestOpenDirtyClose_DefaultsToCancel(t *testing.T) {
 // and close the tab.
 func TestRequestCloseTab_DirtySaveClosesTab(t *testing.T) {
 	a := seedDirtyApp(t)
-	target := a.tabs[0].Path
+	target := a.tabs.At(0).Path
 
-	a.requestCloseTab(0)
+	a.requestCloseTab(a.tabs.At(0))
 	if !dirtyIsOpen(a) {
 		t.Fatal("dirty close should open the modal")
 	}
 	dirtyChoose(t, a, 2)
 
-	if len(a.tabs) != 0 {
-		t.Fatalf("Save should also close the tab; %d tabs left", len(a.tabs))
+	if a.tabs.Len() != 0 {
+		t.Fatalf("Save should also close the tab; %d tabs left", a.tabs.Len())
 	}
 	got, err := os.ReadFile(target)
 	if err != nil {
@@ -443,12 +443,12 @@ func TestRequestCloseTab_DirtySaveClosesTab(t *testing.T) {
 // counterpart: Discard should drop the tab without touching disk.
 func TestRequestCloseTab_DirtyDiscardClosesWithoutSaving(t *testing.T) {
 	a := seedDirtyApp(t)
-	target := a.tabs[0].Path
+	target := a.tabs.At(0).Path
 
-	a.requestCloseTab(0)
+	a.requestCloseTab(a.tabs.At(0))
 	dirtyChoose(t, a, 1)
 
-	if len(a.tabs) != 0 {
+	if a.tabs.Len() != 0 {
 		t.Fatal("Discard should close the tab")
 	}
 	got, _ := os.ReadFile(target)
@@ -462,11 +462,11 @@ func TestRequestCloseTab_DirtyDiscardClosesWithoutSaving(t *testing.T) {
 func TestRequestCloseTab_DirtyCancelKeepsTab(t *testing.T) {
 	a := seedDirtyApp(t)
 
-	a.requestCloseTab(0)
+	a.requestCloseTab(a.tabs.At(0))
 	dirtyChoose(t, a, 0)
 
-	if len(a.tabs) != 1 {
-		t.Fatalf("Cancel should keep the tab; got %d", len(a.tabs))
+	if a.tabs.Len() != 1 {
+		t.Fatalf("Cancel should keep the tab; got %d", a.tabs.Len())
 	}
 	if !a.activeTabPtr().Dirty {
 		t.Fatal("Cancel should not flip the dirty flag")
@@ -515,7 +515,7 @@ func TestMenuQuit_DirtyOpensModal(t *testing.T) {
 // the user's edits.
 func TestMenuQuit_DirtySaveSavesAllAndQuits(t *testing.T) {
 	a := seedDirtyApp(t)
-	target := a.tabs[0].Path
+	target := a.tabs.At(0).Path
 
 	a.menuQuit()
 	dirtyChoose(t, a, 2)
@@ -533,7 +533,7 @@ func TestMenuQuit_DirtySaveSavesAllAndQuits(t *testing.T) {
 // save and exits anyway.
 func TestMenuQuit_DirtyDiscardQuitsWithoutSaving(t *testing.T) {
 	a := seedDirtyApp(t)
-	target := a.tabs[0].Path
+	target := a.tabs.At(0).Path
 
 	a.menuQuit()
 	dirtyChoose(t, a, 1)
@@ -560,15 +560,15 @@ func TestSaveAllDirty_SavesEveryTab(t *testing.T) {
 		a.openFile(full)
 	}
 	// Dirty tabs 0 and 2; leave 1 clean.
-	a.tabs[0].Buffer.InsertString(a.tabs[0].Cursor, "x")
-	a.tabs[0].Dirty = true
-	a.tabs[2].Buffer.InsertString(a.tabs[2].Cursor, "y")
-	a.tabs[2].Dirty = true
+	a.tabs.At(0).Buffer.InsertString(a.tabs.At(0).Cursor, "x")
+	a.tabs.At(0).Dirty = true
+	a.tabs.At(2).Buffer.InsertString(a.tabs.At(2).Cursor, "y")
+	a.tabs.At(2).Dirty = true
 
 	if !a.saveAllDirty() {
 		t.Fatal("expected saveAllDirty to succeed")
 	}
-	if a.tabs[0].Dirty || a.tabs[2].Dirty {
+	if a.tabs.At(0).Dirty || a.tabs.At(2).Dirty {
 		t.Fatal("dirty flags should clear after save")
 	}
 }
@@ -587,7 +587,7 @@ func TestDirtyTabCount(t *testing.T) {
 	if got := a.dirtyTabCount(); got != 0 {
 		t.Fatalf("expected 0 dirty, got %d", got)
 	}
-	a.tabs[0].Dirty = true
+	a.tabs.At(0).Dirty = true
 	if got := a.dirtyTabCount(); got != 1 {
 		t.Fatalf("expected 1 dirty, got %d", got)
 	}

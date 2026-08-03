@@ -235,15 +235,15 @@ func TestFinderMouse_ClickOpensRow(t *testing.T) {
 func TestFinderMouse_ClickOutsideCloses(t *testing.T) {
 	a, _ := withFinder(t)
 	a.openFinder()
-	tabsBefore := len(a.tabs)
+	tabsBefore := a.tabs.Len()
 
 	finderOv(t, a).HandleMouse(0, 0, tcell.Button1)
 
 	if finderIsOpen(a) {
 		t.Fatal("modal should close on outside click")
 	}
-	if len(a.tabs) != tabsBefore {
-		t.Fatalf("tab count changed unexpectedly: %d → %d", tabsBefore, len(a.tabs))
+	if a.tabs.Len() != tabsBefore {
+		t.Fatalf("tab count changed unexpectedly: %d → %d", tabsBefore, a.tabs.Len())
 	}
 }
 

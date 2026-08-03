@@ -42,9 +42,9 @@ func TestReopenRestoresCursor(t *testing.T) {
 	tab.Anchor = tab.Cursor
 	tab.ScrollY = 2
 
-	a.closeTab(a.activeTab)
-	if len(a.tabs) != 0 {
-		t.Fatalf("tab should be gone, have %d", len(a.tabs))
+	a.closeTab(a.tabs.Active())
+	if a.tabs.Len() != 0 {
+		t.Fatalf("tab should be gone, have %d", a.tabs.Len())
 	}
 	if !a.hasClosedTab() {
 		t.Fatal("closeTab should have recorded the tab")
@@ -74,14 +74,14 @@ func TestReopenSkipsDeletedFile(t *testing.T) {
 	path := seedFile(t, dir, "gone.txt")
 	a := newTestApp(t, dir)
 	a.openFile(path)
-	a.closeTab(a.activeTab)
+	a.closeTab(a.tabs.Active())
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 
 	a.menuReopenTab()
-	if len(a.tabs) != 0 {
-		t.Fatalf("deleted file must not reopen, got %d tabs", len(a.tabs))
+	if a.tabs.Len() != 0 {
+		t.Fatalf("deleted file must not reopen, got %d tabs", a.tabs.Len())
 	}
 	if a.hasClosedTab() {
 		t.Fatal("the dead entry should be consumed")
@@ -96,7 +96,7 @@ func TestReopenStackCap(t *testing.T) {
 	for i := 0; i < maxClosedTabs+5; i++ {
 		p := seedFile(t, dir, fmt.Sprintf("f%02d.txt", i))
 		a.openFile(p)
-		a.closeTab(a.activeTab)
+		a.closeTab(a.tabs.Active())
 	}
 	if got := len(a.closedTabs); got != maxClosedTabs {
 		t.Fatalf("stack len = %d, want cap %d", got, maxClosedTabs)
@@ -117,10 +117,10 @@ func TestCloseUntitledNotRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new tab: %v", err)
 	}
-	a.tabs = append(a.tabs, tab)
-	a.activeTab = 0
+	a.tabs.Append(tab)
+	a.tabs.ActivateAt(0)
 
-	a.closeTab(0)
+	a.closeTab(a.tabs.At(0))
 	if a.hasClosedTab() {
 		t.Fatal("untitled tab should not be recorded")
 	}

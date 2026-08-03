@@ -38,15 +38,15 @@ func TestPreviewReplacedByNextPreview(t *testing.T) {
 	a := newTestApp(t, dir)
 
 	a.openFilePreview(p1)
-	if len(a.tabs) != 1 || !a.tabs[0].IsPreview() {
-		t.Fatalf("first preview: %d tabs, preview=%v", len(a.tabs), a.tabs[0].IsPreview())
+	if a.tabs.Len() != 1 || !a.tabs.At(0).IsPreview() {
+		t.Fatalf("first preview: %d tabs, preview=%v", a.tabs.Len(), a.tabs.At(0).IsPreview())
 	}
 	a.openFilePreview(p2)
-	if len(a.tabs) != 1 {
-		t.Fatalf("second preview should reuse the slot, got %d tabs", len(a.tabs))
+	if a.tabs.Len() != 1 {
+		t.Fatalf("second preview should reuse the slot, got %d tabs", a.tabs.Len())
 	}
-	if a.tabs[0].Path != p2 {
-		t.Fatalf("slot holds %s, want %s", a.tabs[0].Path, p2)
+	if a.tabs.At(0).Path != p2 {
+		t.Fatalf("slot holds %s, want %s", a.tabs.At(0).Path, p2)
 	}
 }
 
@@ -65,17 +65,17 @@ func TestPreviewReplaceKeepsSlot(t *testing.T) {
 	a.openFile(p1)        // pinned, slot 0
 	a.openFilePreview(p2) // preview, slot 1
 	a.openFilePreview(p3)
-	if len(a.tabs) != 2 {
-		t.Fatalf("want 2 tabs, got %d", len(a.tabs))
+	if a.tabs.Len() != 2 {
+		t.Fatalf("want 2 tabs, got %d", a.tabs.Len())
 	}
-	if a.tabs[1].Path != p3 {
-		t.Fatalf("slot 1 holds %s, want %s", a.tabs[1].Path, p3)
+	if a.tabs.At(1).Path != p3 {
+		t.Fatalf("slot 1 holds %s, want %s", a.tabs.At(1).Path, p3)
 	}
-	if a.tabs[0].Path != p1 {
-		t.Fatalf("slot 0 disturbed: %s", a.tabs[0].Path)
+	if a.tabs.At(0).Path != p1 {
+		t.Fatalf("slot 0 disturbed: %s", a.tabs.At(0).Path)
 	}
-	if a.activeTab != 1 {
-		t.Fatalf("activeTab = %d, want 1", a.activeTab)
+	if a.tabs.ActiveIndex() != 1 {
+		t.Fatalf("activeTab = %d, want 1", a.tabs.ActiveIndex())
 	}
 }
 
@@ -89,12 +89,12 @@ func TestSecondClickPins(t *testing.T) {
 
 	a.openFilePreview(p1)
 	a.openFilePreview(p1) // second click
-	if a.tabs[0].IsPreview() {
+	if a.tabs.At(0).IsPreview() {
 		t.Fatal("second click should pin the preview")
 	}
 	a.openFilePreview(p2)
-	if len(a.tabs) != 2 {
-		t.Fatalf("pinned tab must not be replaced, got %d tabs", len(a.tabs))
+	if a.tabs.Len() != 2 {
+		t.Fatalf("pinned tab must not be replaced, got %d tabs", a.tabs.Len())
 	}
 }
 
@@ -106,13 +106,13 @@ func TestEditPinsPreview(t *testing.T) {
 	a := newTestApp(t, dir)
 
 	a.openFilePreview(p1)
-	a.tabs[0].InsertRune('x') // user starts editing
-	if a.tabs[0].IsPreview() {
+	a.tabs.At(0).InsertRune('x') // user starts editing
+	if a.tabs.At(0).IsPreview() {
 		t.Fatal("a dirty tab must not report IsPreview")
 	}
 	a.openFilePreview(p2)
-	if len(a.tabs) != 2 {
-		t.Fatalf("dirty preview replaced — %d tabs, want 2", len(a.tabs))
+	if a.tabs.Len() != 2 {
+		t.Fatalf("dirty preview replaced — %d tabs, want 2", a.tabs.Len())
 	}
 }
 
@@ -125,7 +125,7 @@ func TestOpenFilePinsExistingPreview(t *testing.T) {
 
 	a.openFilePreview(p1)
 	a.openFile(p1)
-	if a.tabs[0].IsPreview() {
+	if a.tabs.At(0).IsPreview() {
 		t.Fatal("permanent open should pin the existing preview")
 	}
 }

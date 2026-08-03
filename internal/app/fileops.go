@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/johnlam90/skiff/internal/clipboard"
+	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
 )
 
@@ -249,7 +250,7 @@ func (a *App) doRenameFile(oldPath, newName string) {
 	}
 	// Update any open tab that pointed at oldPath so its title reflects the
 	// new name and its disk-reconciliation logic stays correct.
-	for _, t := range a.tabs {
+	for _, t := range a.tabs.Tabs() {
 		if t.Path == oldPath {
 			t.Path = newPath
 			if info, err := os.Stat(newPath); err == nil {
@@ -291,10 +292,14 @@ func (a *App) doDeletePath(path string) {
 		a.flash(fmt.Sprintf("Delete failed: %v", err))
 		return
 	}
-	for i := len(a.tabs) - 1; i >= 0; i-- {
-		if tabPathRemoved(a.tabs[i].Path, path) {
-			a.closeTab(i)
+	var doomed []*editor.Tab
+	for _, t := range a.tabs.Tabs() {
+		if tabPathRemoved(t.Path, path) {
+			doomed = append(doomed, t)
 		}
+	}
+	for _, t := range doomed {
+		a.closeTab(t)
 	}
 	a.refreshTree()
 	a.refreshGitStatusAsync()

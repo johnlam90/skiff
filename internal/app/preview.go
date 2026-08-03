@@ -53,63 +53,54 @@ func (a *App) openFileMode(path string, preview bool) {
 		}
 		a.tree.Reveal(path, listH)
 	}
-	for i, t := range a.tabs {
-		if t.Path != path {
-			continue
-		}
-		if preview && i == a.activeTab && t.IsPreview() {
+	if t := a.tabs.Lookup(path); t != nil {
+		if preview && t == a.tabs.Active() && t.IsPreview() {
 			t.Pin()
 			return
 		}
 		if !preview {
 			t.Pin()
 		}
-		a.activeTab = i
+		a.tabs.Activate(t)
 		a.ensureActiveTabVisible()
 		t.GitLines = loadGitLineChanges(a.rootDir, a.diffBase, t.Path)
 		return
 	}
-	t, err := editor.NewTab(path)
+	t, err := a.newTab(path)
 	if err != nil {
 		a.flash(fmt.Sprintf("Error: %v", err))
 		return
 	}
-	t.Wrap = a.wrapOn
 	t.Preview = preview
 	if preview {
-		if idx := a.previewTabIndex(); idx >= 0 {
-			// Reuse the existing preview's slot so tab order — part of
-			// the user's spatial memory — survives browsing.
-			a.tabs[idx] = t
-			a.activeTab = idx
-			a.finishOpen(t, path)
-			return
-		}
+		a.tabs.InsertPreview(t)
+	} else {
+		a.tabs.Append(t)
 	}
-	a.tabs = append(a.tabs, t)
-	a.activeTab = len(a.tabs) - 1
 	a.finishOpen(t, path)
 }
 
+// newTab constructs a tab for path with the app-wide settings applied —
+// the ONE construction path, shared by openFileMode and restoreSession,
+// so a new per-tab step can never be added to one and forgotten in the
+// other.
+func (a *App) newTab(path string) (*editor.Tab, error) {
+	t, err := editor.NewTab(path)
+	if err != nil {
+		return nil, err
+	}
+	t.Wrap = a.wrapOn
+	t.GitLines = loadGitLineChanges(a.rootDir, a.diffBase, path)
+	return t, nil
+}
+
 // finishOpen applies the bookkeeping shared by both new-tab paths:
-// scroll the strip, seed git line marks, and announce the open.
+// scroll the strip and announce the open.
 func (a *App) finishOpen(t *editor.Tab, path string) {
 	a.ensureActiveTabVisible()
-	t.GitLines = loadGitLineChanges(a.rootDir, a.diffBase, t.Path)
 	// Preview opens stay quiet — flashing "Opened X" on every tree
 	// click while browsing is noise; a pinned open is worth announcing.
 	if !t.IsPreview() {
 		a.flash(fmt.Sprintf("Opened %s", filepath.Base(path)))
 	}
-}
-
-// previewTabIndex returns the index of the current preview tab, or -1.
-// There is at most one: every preview open either replaces or pins it.
-func (a *App) previewTabIndex() int {
-	for i, t := range a.tabs {
-		if t.IsPreview() {
-			return i
-		}
-	}
-	return -1
 }

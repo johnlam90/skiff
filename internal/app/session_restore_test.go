@@ -36,9 +36,9 @@ func TestCaptureSessionContents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scratch: %v", err)
 	}
-	a.tabs = append(a.tabs, scratch)
+	a.tabs.Append(scratch)
 	a.openFile(filepath.Join(root, "sub", "two.go"))
-	a.activeTab = 2 // two.go
+	a.tabs.ActivateAt(2) // two.go
 	a.sidebarWidth = 31
 	a.sidebarShown = false
 
@@ -82,8 +82,8 @@ func TestRestoreSkipsMissingFiles(t *testing.T) {
 
 	a := newTestApp(t, root)
 	a.restoreSession()
-	if len(a.tabs) != 1 {
-		t.Fatalf("tabs: got %d, want 1 (ghost skipped)", len(a.tabs))
+	if a.tabs.Len() != 1 {
+		t.Fatalf("tabs: got %d, want 1 (ghost skipped)", a.tabs.Len())
 	}
 	tab := a.activeTabPtr()
 	if tab == nil || filepath.Base(tab.Path) != "keep.go" {
@@ -103,8 +103,8 @@ func TestRestoreNoSessionIsNoop(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	a := newTestApp(t, t.TempDir())
 	a.restoreSession()
-	if len(a.tabs) != 0 {
-		t.Fatalf("expected no tabs, got %d", len(a.tabs))
+	if a.tabs.Len() != 0 {
+		t.Fatalf("expected no tabs, got %d", a.tabs.Len())
 	}
 	if !a.sidebarShown || a.sidebarWidth != defaultSidebarWidth {
 		t.Fatal("defaults must survive a no-session restore")
@@ -124,8 +124,8 @@ func TestSaveSessionRoundTrip(t *testing.T) {
 
 	b := newTestApp(t, root)
 	b.restoreSession()
-	if len(b.tabs) != 1 || b.activeTabPtr().Cursor.Line != 2 {
-		t.Fatalf("round trip failed: %d tabs", len(b.tabs))
+	if b.tabs.Len() != 1 || b.activeTabPtr().Cursor.Line != 2 {
+		t.Fatalf("round trip failed: %d tabs", b.tabs.Len())
 	}
 }
 
@@ -141,8 +141,8 @@ func TestSessionPreservesPreviewFlag(t *testing.T) {
 
 	b := newTestApp(t, root)
 	b.restoreSession()
-	if len(b.tabs) != 1 || !b.tabs[0].IsPreview() {
-		t.Fatalf("preview flag lost: %d tabs", len(b.tabs))
+	if b.tabs.Len() != 1 || !b.tabs.At(0).IsPreview() {
+		t.Fatalf("preview flag lost: %d tabs", b.tabs.Len())
 	}
 }
 
@@ -156,11 +156,11 @@ func TestCloseTabSavesSession(t *testing.T) {
 	a := newTestApp(t, root)
 	a.openFile(p1)
 	a.openFile(p2)
-	a.closeTab(1)
+	a.closeTab(a.tabs.At(1))
 
 	b := newTestApp(t, root)
 	b.restoreSession()
-	if len(b.tabs) != 1 || filepath.Base(b.tabs[0].Path) != "a.go" {
-		t.Fatalf("close should have persisted one tab, got %d", len(b.tabs))
+	if b.tabs.Len() != 1 || filepath.Base(b.tabs.At(0).Path) != "a.go" {
+		t.Fatalf("close should have persisted one tab, got %d", b.tabs.Len())
 	}
 }

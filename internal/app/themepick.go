@@ -35,7 +35,7 @@ func (a *App) applyTheme(id string, persist bool) {
 	a.theme = th
 	a.themeID = id
 	a.screen.SetStyle(tcell.StyleDefault.Background(th.BG).Foreground(th.Text))
-	for _, t := range a.tabs {
+	for _, t := range a.tabs.Tabs() {
 		t.StyleStale = true
 	}
 	if !persist {

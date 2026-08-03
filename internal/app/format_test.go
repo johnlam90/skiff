@@ -95,8 +95,8 @@ func openTabAtPath(t *testing.T, a *App, path string) *editor.Tab {
 	if err != nil {
 		t.Fatalf("NewTab: %v", err)
 	}
-	a.tabs = append(a.tabs, tab)
-	a.activeTab = len(a.tabs) - 1
+	a.tabs.Append(tab)
+	a.tabs.ActivateAt(a.tabs.Len() - 1)
 	return tab
 }
 
@@ -113,7 +113,7 @@ func TestRunFormatOnSave_NoConfigIsNoop(t *testing.T) {
 	}
 	openTabAtPath(t, a, target)
 
-	a.runFormatOnSave(0)
+	a.runFormatOnSave(a.tabs.At(0))
 
 	if confirmIsOpen(a) {
 		t.Fatal("no config should never open a confirm modal")
@@ -137,7 +137,7 @@ func TestRunFormatOnSave_UnknownExtensionIsNoop(t *testing.T) {
 	}
 	openTabAtPath(t, a, target)
 
-	a.runFormatOnSave(0)
+	a.runFormatOnSave(a.tabs.At(0))
 
 	if confirmIsOpen(a) {
 		t.Fatal("unknown extension should not prompt")
@@ -159,7 +159,7 @@ func TestRunFormatOnSave_UnknownTrustOpensPrompt(t *testing.T) {
 	}
 	openTabAtPath(t, a, target)
 
-	a.runFormatOnSave(0)
+	a.runFormatOnSave(a.tabs.At(0))
 
 	if !confirmIsOpen(a) {
 		t.Fatal("untrusted config should open the trust prompt")
@@ -185,7 +185,7 @@ func TestRunFormatOnSave_DeniedIsNoop(t *testing.T) {
 	}
 	openTabAtPath(t, a, target)
 
-	a.runFormatOnSave(0)
+	a.runFormatOnSave(a.tabs.At(0))
 
 	if confirmIsOpen(a) {
 		t.Fatal("denied trust should not re-prompt")
@@ -213,7 +213,7 @@ func TestTrustPromptCancel_PersistsDeny(t *testing.T) {
 	openTabAtPath(t, a, target)
 
 	// Run the save flow up to the prompt, then drive cancel directly.
-	a.runFormatOnSave(0)
+	a.runFormatOnSave(a.tabs.At(0))
 	if !confirmIsOpen(a) {
 		t.Fatal("expected trust prompt to be open")
 	}
@@ -348,7 +348,7 @@ func TestMaybeOfferInstall_NoDefaultsIsNoop(t *testing.T) {
 	}
 	openTabAtPath(t, a, target)
 
-	a.runFormatOnSave(0)
+	a.runFormatOnSave(a.tabs.At(0))
 
 	if confirmIsOpen(a) {
 		t.Fatal("missing defaults should never prompt")
@@ -369,7 +369,7 @@ func TestMaybeOfferInstall_OpensPrompt(t *testing.T) {
 	}
 	openTabAtPath(t, a, target)
 
-	a.runFormatOnSave(0)
+	a.runFormatOnSave(a.tabs.At(0))
 
 	if !confirmIsOpen(a) {
 		t.Fatal("expected install prompt to open")
@@ -399,7 +399,7 @@ func TestMaybeOfferInstall_AcceptWritesProjectConfig(t *testing.T) {
 	a := newTestApp(t, root)
 	openTabAtPath(t, a, target)
 
-	a.runFormatOnSave(0)
+	a.runFormatOnSave(a.tabs.At(0))
 	if !confirmIsOpen(a) {
 		t.Fatal("expected install prompt to open")
 	}
@@ -480,7 +480,7 @@ func TestMaybeOfferInstall_DeclinePersists(t *testing.T) {
 	}
 	openTabAtPath(t, a, target)
 
-	a.runFormatOnSave(0)
+	a.runFormatOnSave(a.tabs.At(0))
 	if !confirmIsOpen(a) {
 		t.Fatal("expected install prompt to open")
 	}
@@ -495,7 +495,7 @@ func TestMaybeOfferInstall_DeclinePersists(t *testing.T) {
 	}
 
 	// Next save should be silent.
-	a.runFormatOnSave(0)
+	a.runFormatOnSave(a.tabs.At(0))
 	if confirmIsOpen(a) {
 		t.Fatal("declined extension should not re-prompt")
 	}
@@ -516,7 +516,7 @@ func TestMaybeOfferInstall_ProjectHasEntryUsesTrustPath(t *testing.T) {
 	}
 	openTabAtPath(t, a, target)
 
-	a.runFormatOnSave(0)
+	a.runFormatOnSave(a.tabs.At(0))
 
 	// The trust prompt is open — not the install prompt — and its
 	// hook is set. We can't trivially distinguish the two by struct

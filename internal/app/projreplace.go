@@ -88,7 +88,7 @@ func (a *App) projReplaceEnter(all bool) {
 // findOpenTab returns the open tab backing abs (nil when the file
 // isn't open) plus whether it was clean before we touch it.
 func (a *App) findOpenTab(abs string) (*editor.Tab, bool) {
-	for _, t := range a.tabs {
+	for _, t := range a.tabs.Tabs() {
 		if t.Path == abs && !t.IsImage() {
 			return t, !t.Dirty
 		}

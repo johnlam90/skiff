@@ -124,7 +124,7 @@ func TestProjFindActivateHeaderFolds(t *testing.T) {
 	if !a.projFindFolded["a.go"] {
 		t.Fatal("header activation should fold the file")
 	}
-	if len(a.tabs) != 0 {
+	if a.tabs.Len() != 0 {
 		t.Fatal("folding must not open a tab")
 	}
 }
