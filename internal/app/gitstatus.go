@@ -22,7 +22,6 @@ package app
 import (
 	"bytes"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -30,6 +29,7 @@ import (
 
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/git"
 )
 
 // gitStatusResult bundles everything one status collection produces:
@@ -99,7 +99,7 @@ func loadGitStatus(rootDir, base string) gitStatus {
 	// we're in a git work tree at all (non-zero exit otherwise) and
 	// gives us the absolute path of the repo root, which is the prefix
 	// every porcelain path is reported relative to.
-	topBytes, err := exec.Command("git", "-C", rootDir, "rev-parse", "--show-toplevel").Output()
+	topBytes, err := git.Output(rootDir, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return gitStatus{}
 	}
@@ -109,7 +109,7 @@ func loadGitStatus(rootDir, base string) gitStatus {
 	}
 
 	ahead, behind := loadGitAheadBehind(rootDir)
-	out, err := exec.Command("git", "-C", rootDir, "status", "--porcelain").Output()
+	out, err := git.Output(rootDir, "status", "--porcelain")
 	if err != nil {
 		// We *are* in a repo (rev-parse succeeded) but couldn't read
 		// status. Mark the result as a repo with no known dirty files
@@ -140,7 +140,7 @@ func loadGitStatus(rootDir, base string) gitStatus {
 // compare-against mode. Best-effort like every loader here.
 func loadGitDiffNameStatus(rootDir, base, toplevel string) map[string]filetree.GitChangeKind {
 	dirty := map[string]filetree.GitChangeKind{}
-	out, err := exec.Command("git", "-C", rootDir, "diff", "--name-status", base).Output()
+	out, err := git.Output(rootDir, "diff", "--name-status", base)
 	if err != nil {
 		return dirty
 	}
@@ -172,7 +172,7 @@ func loadGitDiffNameStatus(rootDir, base, toplevel string) map[string]filetree.G
 // upstream, a detached HEAD, or any git failure yields 0/0 — the
 // arrows simply don't render.
 func loadGitAheadBehind(rootDir string) (ahead, behind int) {
-	out, err := exec.Command("git", "-C", rootDir, "rev-list", "--left-right", "--count", "@{upstream}...HEAD").Output()
+	out, err := git.Output(rootDir, "rev-list", "--left-right", "--count", "@{upstream}...HEAD")
 	if err != nil {
 		return 0, 0
 	}
@@ -235,10 +235,10 @@ func loadGitBranch(rootDir string) string {
 	if rootDir == "" {
 		return ""
 	}
-	if out, err := exec.Command("git", "-C", rootDir, "symbolic-ref", "--short", "HEAD").Output(); err == nil {
+	if out, err := git.Output(rootDir, "symbolic-ref", "--short", "HEAD"); err == nil {
 		return strings.TrimRight(string(out), "\n\r")
 	}
-	if out, err := exec.Command("git", "-C", rootDir, "rev-parse", "--short", "HEAD").Output(); err == nil {
+	if out, err := git.Output(rootDir, "rev-parse", "--short", "HEAD"); err == nil {
 		return strings.TrimRight(string(out), "\n\r")
 	}
 	return ""
@@ -364,7 +364,7 @@ func loadGitLineChanges(rootDir, base, path string) map[int]editor.GitLineChange
 	if base == "" {
 		base = "HEAD"
 	}
-	out, err := exec.Command("git", "-C", rootDir, "diff", "--unified=0", base, "--", path).Output()
+	out, err := git.Output(rootDir, "diff", "--unified=0", base, "--", path)
 	if err != nil || len(out) == 0 {
 		return nil
 	}
@@ -388,7 +388,7 @@ func loadGitFileDiff(rootDir, base, path string, untracked bool) []string {
 	if base == "" {
 		base = "HEAD"
 	}
-	out, err := exec.Command("git", "-C", rootDir, "diff", base, "--", path).Output()
+	out, err := git.Output(rootDir, "diff", base, "--", path)
 	if err != nil || len(out) == 0 {
 		if !untracked {
 			return nil
@@ -401,7 +401,7 @@ func loadGitFileDiff(rootDir, base, path string, untracked bool) []string {
 		}
 		// --no-index exits 1 whenever the files differ, so the error is
 		// expected; the output being non-empty is the success signal.
-		out, _ = exec.Command("git", "-C", rootDir, "diff", "--no-index", "--", os.DevNull, path).Output()
+		out, _ = git.Output(rootDir, "diff", "--no-index", "--", os.DevNull, path)
 		if len(out) == 0 {
 			return nil
 		}
@@ -414,7 +414,7 @@ func loadGitHunkPreview(rootDir, path string, line int) []string {
 	if rootDir == "" || path == "" || line < 0 {
 		return nil
 	}
-	out, err := exec.Command("git", "-C", rootDir, "diff", "--unified=3", "HEAD", "--", path).Output()
+	out, err := git.Output(rootDir, "diff", "--unified=3", "HEAD", "--", path)
 	if err != nil || len(out) == 0 {
 		return nil
 	}

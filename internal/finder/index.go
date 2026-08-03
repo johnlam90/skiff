@@ -31,7 +31,6 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
@@ -40,6 +39,8 @@ import (
 	gitignore "github.com/sabhiram/go-gitignore"
 
 	"github.com/johnlam90/skiff/internal/filetree"
+
+	"github.com/johnlam90/skiff/internal/git"
 )
 
 // hardcodedIgnores is the floor we apply in the *fallback* path —
@@ -99,14 +100,13 @@ func BuildIndex(rootDir string) ([]string, bool, error) {
 // the command fails for any other reason — the caller falls back
 // to the manual walk path.
 func buildIndexGit(rootDir string) ([]string, error) {
-	cmd := exec.Command("git", "-C", rootDir,
+	out, err := git.Output(rootDir,
 		"ls-files",
 		"--cached",
 		"--others",
 		"--exclude-standard",
 		"-z",
 	)
-	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}

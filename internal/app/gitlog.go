@@ -21,12 +21,12 @@ package app
 
 import (
 	"bytes"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/overlay"
 )
 
@@ -59,11 +59,11 @@ func loadGitLog(rootDir, path string, limit int) []gitLogEntry {
 	if rootDir == "" || limit <= 0 {
 		return nil
 	}
-	args := []string{"-C", rootDir, "log", "--format=%h%x09%s%x09%cr", "-n", itoa(limit)}
+	args := []string{"log", "--format=%h%x09%s%x09%cr", "-n", itoa(limit)}
 	if path != "" {
 		args = append(args, "--follow", "--", path)
 	}
-	out, err := exec.Command("git", args...).Output()
+	out, err := git.Output(rootDir, args...)
 	if err != nil || len(out) == 0 {
 		return nil
 	}
@@ -86,11 +86,11 @@ func loadGitCommitDiff(rootDir, sha, path string) []string {
 	if rootDir == "" || sha == "" {
 		return nil
 	}
-	args := []string{"-C", rootDir, "show", "--format=", sha}
+	args := []string{"show", "--format=", sha}
 	if path != "" {
 		args = append(args, "--", path)
 	}
-	out, err := exec.Command("git", args...).Output()
+	out, err := git.Output(rootDir, args...)
 	if err != nil || len(out) == 0 {
 		return nil
 	}

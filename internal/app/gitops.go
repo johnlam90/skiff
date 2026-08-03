@@ -16,11 +16,10 @@ package app
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/overlay"
 )
 
@@ -39,22 +38,10 @@ type gitOpDoneEvent struct {
 func (e *gitOpDoneEvent) When() time.Time { return e.when }
 
 // execGitSequence runs a series of git commands in root, stopping at
-// the first failure. Output accumulates across commands so an error
-// report shows everything git said. GIT_TERMINAL_PROMPT=0 keeps a
-// credential prompt from hanging a goroutine forever; GIT_EDITOR=true
-// keeps merge-ish commands from trying to open an editor we can't host.
+// the first failure — a thin door to the git package's write side,
+// which owns the environment hardening.
 func execGitSequence(root string, cmds [][]string) (string, error) {
-	var out strings.Builder
-	for _, args := range cmds {
-		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
-		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_EDITOR=true")
-		b, err := cmd.CombinedOutput()
-		out.Write(b)
-		if err != nil {
-			return out.String(), err
-		}
-	}
-	return out.String(), nil
+	return git.RunSequence(root, cmds)
 }
 
 // runGitOp launches cmds in the background, guarded by the one-at-a-
@@ -184,7 +171,7 @@ func splitNonEmptyLines(s string) []string {
 
 // gitHasUpstream reports whether the current branch tracks an upstream.
 func gitHasUpstream(root string) bool {
-	err := exec.Command("git", "-C", root, "rev-parse", "--abbrev-ref", "@{upstream}").Run()
+	_, err := git.Output(root, "rev-parse", "--abbrev-ref", "@{upstream}")
 	return err == nil
 }
 
@@ -400,7 +387,7 @@ func (a *App) menuGitCompareAgainst() {
 // gitBranchNames lists local then remote branch names, current first,
 // origin/HEAD noise filtered, remote duplicates of locals dropped.
 func gitBranchNames(root, current string) (names []string) {
-	out, err := exec.Command("git", "-C", root, "branch", "--all", "--format=%(refname:short)").Output()
+	out, err := git.Output(root, "branch", "--all", "--format=%(refname:short)")
 	if err != nil {
 		return nil
 	}
@@ -486,7 +473,7 @@ func gitSwitchCmds(root, name string) [][]string {
 		return [][]string{{"checkout", name}}
 	}
 	local := name[i+1:]
-	err := exec.Command("git", "-C", root, "rev-parse", "--verify", "--quiet", "refs/heads/"+local).Run()
+	_, err := git.Output(root, "rev-parse", "--verify", "--quiet", "refs/heads/"+local)
 	if err == nil {
 		return [][]string{{"checkout", local}}
 	}
