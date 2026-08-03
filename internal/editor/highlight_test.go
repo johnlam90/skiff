@@ -16,6 +16,7 @@ package editor
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -225,5 +226,25 @@ func TestHighlightVisible_LeadRecoversCommentState(t *testing.T) {
 		if !hasComment {
 			t.Errorf("line %d has no comment-styled rune; lead did not recover comment state", i)
 		}
+	}
+}
+
+// TestHighlightVisible_SkipsGiantLines pins the long-line guard: a
+// minified-bundle-sized line is excluded from tokenisation (drawn
+// plain) so one pathological line can't make every keystroke re-lex
+// megabytes; its humane neighbours keep their colors.
+func TestHighlightVisible_SkipsGiantLines(t *testing.T) {
+	giant := strings.Repeat("x:=1;", 200_000) // ~1MB single line
+	lines := []string{"package main", giant, "var y = 2"}
+	start := time.Now()
+	styles := HighlightVisible("a.go", lines, 0, 3, theme.Default())
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("giant line still dominates lexing: %v", elapsed)
+	}
+	if len(styles[1]) != 0 {
+		t.Fatalf("giant line should be left unstyled, got %d styles", len(styles[1]))
+	}
+	if len(styles[0]) == 0 || len(styles[2]) == 0 {
+		t.Fatal("humane neighbours must keep their styles")
 	}
 }

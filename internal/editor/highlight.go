@@ -43,6 +43,38 @@ func Highlight(filename, src string, t theme.Theme) [][]tcell.Style {
 // mis-colours.
 const highlightLeadLines = 256
 
+// highlightMaxLineBytes caps how long a line can be and still get
+// tokenised. Past it — minified bundles, generated one-liner data —
+// the line draws plain: one pathological line must not make every
+// keystroke re-lex megabytes (a 1MB line costs seconds per pass), and
+// syntax color on a line nobody can read buys nothing.
+const highlightMaxLineBytes = 4096
+
+// capLongLines returns lines with over-long entries emptied so the
+// joined source fed to the lexer stays humane. The emptied rows come
+// back with no styles and the renderer draws them plain.
+func capLongLines(lines []string) []string {
+	capped := false
+	for _, l := range lines {
+		if len(l) > highlightMaxLineBytes {
+			capped = true
+			break
+		}
+	}
+	if !capped {
+		return lines
+	}
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		if len(l) > highlightMaxLineBytes {
+			out[i] = ""
+			continue
+		}
+		out[i] = l
+	}
+	return out
+}
+
 // HighlightVisible returns a style grid for the current viewport. Only
 // visible rows are kept in the output so keystroke cost follows terminal
 // height, not file size. To stay correct inside multi-line comments and
@@ -73,7 +105,7 @@ func HighlightVisible(filename string, lines []string, startLine, height int, t 
 	if leadEnd > len(lines) {
 		leadEnd = len(lines)
 	}
-	src := strings.Join(lines[leadStart:leadEnd], "\n")
+	src := strings.Join(capLongLines(lines[leadStart:leadEnd]), "\n")
 	leadStyles := highlightSource(filename, src, t)
 	for i := startLine; i < endLine; i++ {
 		idx := i - leadStart
