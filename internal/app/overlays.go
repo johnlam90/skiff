@@ -51,14 +51,7 @@ func (o menuOverlay) Draw(tcell.Screen) { o.a.drawMenu() }
 // The form and the right-click popup are real overlays now
 // (overlay.Form, overlay.Popup) — no shims.
 
-// listPickOverlay routes the filterable list picker.
-type listPickOverlay struct{ a *App }
-
-func (o listPickOverlay) HandleKey(ev *tcell.EventKey) { o.a.handleListPickKey(ev) }
-func (o listPickOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
-	o.a.handleListPickMouse(x, y, btn)
-}
-func (o listPickOverlay) Draw(tcell.Screen) { o.a.drawListPick() }
+// The list picker is a real overlay now (overlay.Pick) — no shim.
 
 // finderOverlay routes the fuzzy file finder.
 type finderOverlay struct{ a *App }

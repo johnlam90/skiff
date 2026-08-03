@@ -489,15 +489,8 @@ type App struct {
 	replaceScroll    int
 	findFocusReplace bool
 
-	// Generic filter-list picker modal (see listpick.go) — themes,
-	// branches, any pick-one-of-N flow.
-	listPickOpen     bool
-	listPickTitle    string
-	listPickItems    []listPickItem
-	listPickQuery    []rune
-	listPickCursor   int
-	listPickSelected int
-	listPickScroll   int
+	// The list picker is an overlay.Pick prefab — see listpick.go for
+	// the opener; it carries all its own state.
 	// listPickInputScroll is the filter field's horizontal scroll
 	// window — caret-tracking, like promptScroll for the prompt modal.
 	listPickInputScroll int

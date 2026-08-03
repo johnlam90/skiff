@@ -323,7 +323,7 @@ func (fakeErr) Error() string { return "exit status 1" }
 func waitListPick(t *testing.T, a *App) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
-	for !a.listPickOpen {
+	for !pickIsOpen(a) {
 		if time.Now().After(deadline) {
 			t.Fatal("picker never opened")
 		}
@@ -358,8 +358,7 @@ func TestGitMergeBranchEndToEnd(t *testing.T) {
 	if idx < 0 {
 		t.Fatalf("feature branch missing from %v", names)
 	}
-	a.listPickSelected = idx
-	a.confirmListPick()
+	pickChoose(t, a, idx)
 	waitGitIdle(t, a)
 	if _, err := os.Stat(filepath.Join(dir, "feat.txt")); err != nil {
 		t.Fatalf("merge should bring feat.txt onto main: %v", err)
@@ -386,8 +385,7 @@ func TestGitDeleteBranchForceOffer(t *testing.T) {
 	if len(names) != 1 || names[0] != "orphan" {
 		t.Fatalf("local candidates: %v", names)
 	}
-	a.listPickSelected = 0
-	a.confirmListPick()
+	pickChoose(t, a, 0)
 	if !confirmIsOpen(a) {
 		t.Fatal("delete needs a confirm first")
 	}
@@ -472,18 +470,16 @@ func TestComparePickSetsAndClearsBase(t *testing.T) {
 	a := newTestApp(t, dir)
 
 	a.openComparePick([]string{"other", "main"})
-	if !a.listPickOpen {
+	if !pickIsOpen(a) {
 		t.Fatal("picker should open")
 	}
-	a.listPickSelected = 1 // "other"
-	a.confirmListPick()
+	pickChoose(t, a, 1) // "other"
 	if a.diffBase != "other" {
 		t.Fatalf("base: got %q, want other", a.diffBase)
 	}
 
 	a.openComparePick([]string{"other", "main"})
-	a.listPickSelected = 0 // HEAD row
-	a.confirmListPick()
+	pickChoose(t, a, 0) // HEAD row
 	if a.diffBase != "" {
 		t.Fatalf("HEAD row should clear the base, got %q", a.diffBase)
 	}

@@ -193,7 +193,7 @@ func TestGitPanelClick_BranchRowOpensPicker(t *testing.T) {
 	gitRun(t, a.rootDir, "branch", "other")
 	a.gitPanelClick(5, 1)
 	deadline := time.Now().Add(5 * time.Second)
-	for !a.listPickOpen {
+	for !pickIsOpen(a) {
 		if time.Now().After(deadline) {
 			t.Fatal("branch row click should open the switch-branch picker")
 		}

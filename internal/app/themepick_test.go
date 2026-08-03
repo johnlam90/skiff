@@ -84,16 +84,17 @@ func TestThemePick_ArrowsPreviewLive(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	a := newTestApp(t, t.TempDir())
 	a.openThemePick()
-	if !a.listPickOpen {
+	if !pickIsOpen(a) {
 		t.Fatal("picker should open")
 	}
 	before := a.themeID
-	a.handleListPickKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
 	if a.themeID == before {
 		t.Fatal("arrow move must preview the highlighted theme live")
 	}
 	entries := theme.List()
-	if a.themeID != entries[a.listPickFiltered()[a.listPickSelected]].ID {
+	p := pickPrefab(t, a)
+	if a.themeID != entries[p.Filtered()[p.Selected]].ID {
 		t.Fatalf("preview out of sync: theme %q vs highlight", a.themeID)
 	}
 }
@@ -105,10 +106,10 @@ func TestThemePick_EscReverts(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	original := a.currentThemeID()
 	a.openThemePick()
-	a.handleListPickKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
-	a.handleListPickKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
-	a.handleListPickKey(tcell.NewEventKey(tcell.KeyEsc, 0, 0))
-	if a.listPickOpen {
+	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	a.handleKey(tcell.NewEventKey(tcell.KeyEsc, 0, 0))
+	if pickIsOpen(a) {
 		t.Fatal("esc should close the picker")
 	}
 	if a.themeID != original {
@@ -122,10 +123,10 @@ func TestThemePick_EnterPersists(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	a := newTestApp(t, t.TempDir())
 	a.openThemePick()
-	a.handleListPickKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
 	picked := a.themeID
-	a.handleListPickKey(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
-	if a.listPickOpen {
+	a.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
+	if pickIsOpen(a) {
 		t.Fatal("enter should close the picker")
 	}
 	if a.themeID != picked {
@@ -144,9 +145,9 @@ func TestThemePick_FilterNarrowsAndPreviews(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.openThemePick()
 	for _, r := range "nord" {
-		a.handleListPickKey(tcell.NewEventKey(tcell.KeyRune, r, 0))
+		a.handleKey(tcell.NewEventKey(tcell.KeyRune, r, 0))
 	}
-	filtered := a.listPickFiltered()
+	filtered := pickPrefab(t, a).Filtered()
 	if len(filtered) != 1 || theme.List()[filtered[0]].ID != "nord" {
 		t.Fatalf("filter: got %+v", filtered)
 	}
@@ -162,15 +163,16 @@ func TestThemePick_MouseHoverPreviewsClickConfirms(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	a := newTestApp(t, t.TempDir())
 	a.openThemePick()
-	mx, my, _, _ := a.listPickRect()
-	rowY := my + 4 + 2 // third visible row
+	p := pickPrefab(t, a)
+	r := p.Rect()
+	rowY := r.Y + 4 + 2 // third visible row
 
-	a.handleListPickMouse(mx+5, rowY, 0) // hover
-	if a.listPickSelected != 2 || a.themeID != theme.List()[a.listPickFiltered()[2]].ID {
-		t.Fatalf("hover should preview row 2: sel %d theme %q", a.listPickSelected, a.themeID)
+	p.HandleMouse(r.X+5, rowY, 0) // hover
+	if p.Selected != 2 || a.themeID != theme.List()[p.Filtered()[2]].ID {
+		t.Fatalf("hover should preview row 2: sel %d theme %q", p.Selected, a.themeID)
 	}
-	a.handleListPickMouse(mx+5, rowY, tcell.Button1) // click keeps
-	if a.listPickOpen {
+	p.HandleMouse(r.X+5, rowY, tcell.Button1) // click keeps
+	if pickIsOpen(a) {
 		t.Fatal("click should confirm and close")
 	}
 
@@ -178,9 +180,9 @@ func TestThemePick_MouseHoverPreviewsClickConfirms(t *testing.T) {
 	// reverts to the theme confirmed above (the picker's new original).
 	confirmed := a.currentThemeID()
 	a.openThemePick()
-	a.handleListPickKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
-	a.handleListPickMouse(0, 0, tcell.Button1)
-	if a.listPickOpen {
+	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	pickPrefab(t, a).HandleMouse(0, 0, tcell.Button1)
+	if pickIsOpen(a) {
 		t.Fatal("outside click should close")
 	}
 	if a.currentThemeID() != confirmed {
@@ -195,9 +197,9 @@ func TestThemePick_ModalOverPickerReverts(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	original := a.currentThemeID()
 	a.openThemePick()
-	a.handleListPickKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
 	a.openMenu()
-	if a.listPickOpen {
+	if pickIsOpen(a) {
 		t.Fatal("menu should close the picker")
 	}
 	if a.themeID != original {

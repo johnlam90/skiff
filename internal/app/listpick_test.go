@@ -5,42 +5,65 @@
 // Copyright: 2026 John Lam. All rights reserved.
 // =============================================================================
 
-// Tests for the generic pick-one-of-N modal in listpick.go. The picker's
-// hooks (OnPick / OnMove / OnCancel) are exercised end-to-end by the
-// theme-picker tests; here we pin the modal's own input behaviour.
+// Wiring tests for openListPick — the pick overlay's own behavior
+// (filtering, hooks, mouse, caret window) is pinned in internal/overlay;
+// here we pin the App bridge and provide the pick helpers flow tests
+// share.
 
 package app
 
 import (
-	"strings"
 	"testing"
+
+	"github.com/gdamore/tcell/v2"
+
+	"github.com/johnlam90/skiff/internal/overlay"
 )
 
-// TestDrawListPick_ScrollsFilterToCaret pins the filter input's scroll
-// window: a query longer than the field used to draw from index 0 with
-// the caret placed past the field edge — typing appeared dead. The
-// window must keep the caret inside the visible field.
-func TestDrawListPick_ScrollsFilterToCaret(t *testing.T) {
+// pickPrefab returns the open pick overlay, failing the test when none
+// is up.
+func pickPrefab(t *testing.T, a *App) *overlay.Pick {
+	t.Helper()
+	p, ok := a.overlays.Top().(*overlay.Pick)
+	if !ok {
+		t.Fatalf("no pick overlay open; top = %T", a.overlays.Top())
+	}
+	return p
+}
+
+// pickIsOpen reports whether a pick overlay is up.
+func pickIsOpen(a *App) bool {
+	_, ok := a.overlays.Top().(*overlay.Pick)
+	return ok
+}
+
+// pickChoose highlights row idx (into the filtered view) and presses
+// Enter through real routing.
+func pickChoose(t *testing.T, a *App, idx int) {
+	t.Helper()
+	pickPrefab(t, a).Selected = idx
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+}
+
+// TestOpenListPick_WiresHooksAndSnapsToCurrent pins the App bridge:
+// items land on the prefab, the highlight starts on the Current row,
+// and the OnPick wrapper delivers the original index to the App-side
+// callback.
+func TestOpenListPick_WiresHooksAndSnapsToCurrent(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	items := []listPickItem{{Label: "one"}, {Label: "two"}}
-	a.openListPick("Theme", items, nil, nil, nil)
-	a.listPickQuery = []rune(strings.Repeat("q", 60))
-	a.listPickCursor = len(a.listPickQuery)
-
-	a.drawListPick()
-	if a.listPickInputScroll == 0 {
-		t.Fatal("filter input did not scroll; caret sits off-field")
+	picked := -1
+	a.openListPick("T", []listPickItem{
+		{Label: "one"}, {Label: "two", Current: true},
+	}, func(_ *App, i int) { picked = i }, nil, nil)
+	p := pickPrefab(t, a)
+	if p.Selected != 1 {
+		t.Fatalf("highlight should snap to Current, got %d", p.Selected)
 	}
-	mx, _, mw, _ := a.listPickRect()
-	fieldStart, fieldEnd := mx+3, mx+mw-3
-	caret := fieldStart + (a.listPickCursor - a.listPickInputScroll)
-	if caret < fieldStart || caret > fieldEnd {
-		t.Fatalf("caret column %d outside the field [%d, %d]", caret, fieldStart, fieldEnd)
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+	if picked != 1 {
+		t.Fatalf("OnPick wrapper should deliver the original index, got %d", picked)
 	}
-
-	a.listPickCursor = 0
-	a.drawListPick()
-	if a.listPickInputScroll != 0 {
-		t.Fatalf("scroll should follow the caret home, got %d", a.listPickInputScroll)
+	if pickIsOpen(a) {
+		t.Fatal("pick should close on confirm")
 	}
 }

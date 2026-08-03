@@ -101,9 +101,9 @@ func TestClosers_PopTheirOverlay(t *testing.T) {
 	}
 
 	a.openListPick("T", []listPickItem{{Label: "one"}}, nil, nil, nil)
-	a.cancelListPick()
+	pickPrefab(t, a).Cancel()
 	if a.overlays.IsOpen() {
-		t.Fatal("cancelListPick must pop the list-pick overlay")
+		t.Fatal("cancelling the pick must pop it off the stack")
 	}
 }
 

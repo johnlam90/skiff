@@ -35,17 +35,21 @@ const contextMenuWidth = 19
 // replace row and the tab's match highlights go with it rather than
 // staying armed under the modal.
 func (a *App) closeAllModals() {
+	// A modal opening over a pick cancels it properly — popped first,
+	// hook after — so a preview hook (the theme picker's live preview)
+	// gets reverted rather than stranded. The pop happens before the
+	// hook so the hook can never re-enter this teardown.
+	if pick, ok := a.overlays.Top().(*overlay.Pick); ok {
+		a.overlays.Close()
+		if pick.OnCancel != nil {
+			pick.OnCancel()
+		}
+	}
 	a.overlays.Close()
 	a.menuOpen = false
 	a.finderOpen = false
 	a.closeFind()
 	a.diffPanelRow = -1
-	// A modal opening over a list picker cancels it properly so a
-	// preview hook (the theme picker's live preview) gets reverted
-	// rather than stranded.
-	if a.listPickOpen {
-		a.cancelListPick()
-	}
 	a.projFindOpen = false
 	a.projFindValue = nil
 	a.projFindCursor = 0
