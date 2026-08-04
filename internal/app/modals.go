@@ -30,10 +30,12 @@ const contextMenuWidth = 19
 // closeAllModals dismisses every modal in one shot and parks any in-flight
 // drag / auto-scroll state. Every "open this modal" helper calls it first
 // so the modals stay mutually exclusive and a stale drag from before the
-// modal opened can't keep extending a selection underneath it. The find
-// bar is torn down through closeFind — one teardown path — so the
-// replace row and the tab's match highlights go with it rather than
-// staying armed under the modal.
+// modal opened can't keep extending a selection underneath it. Both
+// strips are torn down through their own single teardown — closeFind and
+// closeProjFind — so the replace rows, the match highlights and the
+// in-flight sweep generation all go with them rather than staying armed
+// under the modal. Hand-clearing a subset here is how projReplaceOpen
+// once survived an overlay opening on top of the panel.
 func (a *App) closeAllModals() {
 	// A modal opening over a pick cancels it properly — popped first,
 	// hook after — so a preview hook (the theme picker's live preview)
@@ -49,13 +51,7 @@ func (a *App) closeAllModals() {
 	a.menuOpen = false
 	a.closeFind()
 	a.diffPanelRow = -1
-	a.projFindOpen = false
-	a.projFindValue = nil
-	a.projFindCursor = 0
-	a.projFindScroll = 0
-	a.projFindMatches = nil
-	a.projFindFolded = nil
-	a.projFindBusy = false
+	a.closeProjFind()
 	a.hoveredMenuRow = -1
 	a.dragMode = ""
 	a.stopAutoScroll()

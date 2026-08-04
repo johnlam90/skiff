@@ -8,6 +8,7 @@
 package overlay
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
@@ -91,6 +92,69 @@ func TestInfo_OKButtonAndOutsideClick(t *testing.T) {
 	n.HandleMouse(r.X-1, r.Y-1, tcell.Button1)
 	if *closed != 1 {
 		t.Fatal("outside click should dismiss")
+	}
+}
+
+// TestInfo_DrawTruncatesWithEllipsis pins the truncation marker. The
+// body used to be hard-cut with a rune slice, so a clipped stderr path
+// read as a complete-but-wrong path — the one failure mode where the
+// user is reading the text character by character. Every line now goes
+// through trimRunes, which spends the last cell on "…".
+func TestInfo_DrawTruncatesWithEllipsis(t *testing.T) {
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	defer scr.Fini()
+	scr.SetSize(100, 12)
+
+	long := strings.Repeat("x", 200)
+	n, _ := testInfo(1)
+	n.Lines = []string{long, "short"}
+	n.Draw(scr)
+	scr.Show()
+
+	r := n.rect()
+	cells, w, _ := scr.GetContents()
+	body := r.W - 4
+	row := make([]rune, 0, body)
+	for i := range body {
+		row = append(row, cells[(r.Y+3)*w+r.X+2+i].Runes[0])
+	}
+	if got := string(row); !strings.HasSuffix(got, "…") {
+		t.Fatalf("truncated body line = %q, want a trailing ellipsis", got)
+	}
+	// The untruncated neighbour must be left exactly as it came in.
+	next := make([]rune, 0, 5)
+	for i := range 5 {
+		next = append(next, cells[(r.Y+4)*w+r.X+2+i].Runes[0])
+	}
+	if string(next) != "short" {
+		t.Fatalf("short line = %q, want %q", string(next), "short")
+	}
+}
+
+// TestInfo_DrawKeepsDiffColorAfterTruncation guards the style pick:
+// truncation must not repaint a clipped diff line, so the color is
+// chosen from the original text and not from the ellipsised copy.
+func TestInfo_DrawKeepsDiffColorAfterTruncation(t *testing.T) {
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	defer scr.Fini()
+	scr.SetSize(100, 12)
+
+	n, _ := testInfo(1)
+	n.Lines = []string{"+" + strings.Repeat("y", 200)}
+	n.Draw(scr)
+	scr.Show()
+
+	r := n.rect()
+	cells, w, _ := scr.GetContents()
+	fg, _, _ := cells[(r.Y+3)*w+r.X+2+r.W-5].Style.Decompose()
+	if fg != n.Theme.GitAdded {
+		t.Fatalf("ellipsis cell fg = %v, want the addition color %v", fg, n.Theme.GitAdded)
 	}
 }
 

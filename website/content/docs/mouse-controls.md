@@ -57,6 +57,8 @@ The single column between the sidebar and the editor is the splitter.
 | Hover                                  | Highlight the row under the cursor.                                    |
 | Click outside the modal                | Dismiss.                                                               |
 
+The action menu's type-to-filter field changes none of this: a click still runs the row it landed on, and clicking outside still dismisses. Filtering only changes which rows are on screen. The `Git…` and `File clipboard…` rows open a second pick, which behaves the same way.
+
 ## Status bar
 
-The status bar shows the active file's path, language, cursor position, dirty marker, git branch and change count (when applicable), and any flash messages from background work. One region is clickable: the branch segment on the right flips the sidebar to the GIT panel — the mouse-first sibling of `Esc g`. The sidebar's own header is clickable too: the `EXPLORER` and `GIT` tabs switch between the file tree and the uncommitted-changes list, and clicking a change row opens its diff — side-by-side on wide terminals, unified on narrow ones — with an `[ Open file ]` button that jumps to the first changed line.
+The status bar shows the active file's path, language, cursor position, dirty marker, git branch and change count (when applicable), a `⚠ disk conflict` marker while an open dirty buffer has diverged from the file on disk, and any flash messages from background work. One region is clickable: the branch segment on the right flips the sidebar to the GIT panel — the mouse-first sibling of `Esc g`. The sidebar's own header is clickable too: the `EXPLORER` and `GIT` tabs switch between the file tree and the uncommitted-changes list, and clicking a change row opens its diff — side-by-side on wide terminals, unified on narrow ones — with an `[ Open file ]` button that jumps to the first changed line.

@@ -187,6 +187,130 @@ func TestRefresh_PreservesExpandedState(t *testing.T) {
 	}
 }
 
+// TestLoadedDirs_OnlyLoadedDirectories pins the work list a background
+// sweep gets: every directory the tree has actually read, and nothing
+// else. An unexpanded folder must stay off it — re-reading directories
+// the user has never opened is exactly the cost the lazy tree exists to
+// avoid, and hidden names never become nodes at all.
+func TestLoadedDirs_OnlyLoadedDirectories(t *testing.T) {
+	root := mkTree(t)
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := tr.LoadedDirs(); len(got) != 1 || got[0] != tr.Root.Path {
+		t.Fatalf("fresh tree should list only the root, got %v", got)
+	}
+
+	alpha := findChild(tr.Root, "alpha")
+	if alpha == nil {
+		t.Fatal("alpha missing")
+	}
+	tr.Toggle(alpha) // expand + load
+
+	got := tr.LoadedDirs()
+	if len(got) != 2 || got[0] != tr.Root.Path || got[1] != alpha.Path {
+		t.Fatalf("expanded alpha should join the list depth-first, got %v", got)
+	}
+	// Beta was never opened, so its contents are nobody's business yet.
+	for _, p := range got {
+		if strings.HasSuffix(p, "Beta") {
+			t.Fatalf("unexpanded Beta must not be scanned: %v", got)
+		}
+	}
+}
+
+// TestScanDirsApplyScan_MatchesRefresh is the equivalence contract for
+// the split refresh: reading the disk off-thread (ScanDirs) and merging
+// on the main thread (ApplyScan) must land the tree in the same place
+// Refresh does, pointer identity and Expanded state included. That
+// equivalence is the whole reason the 10-second tick can stop doing its
+// ReadDir walk on the event thread.
+func TestScanDirsApplyScan_MatchesRefresh(t *testing.T) {
+	root := mkTree(t)
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	alpha := findChild(tr.Root, "alpha")
+	if alpha == nil {
+		t.Fatal("alpha missing")
+	}
+	tr.Toggle(alpha)
+	inner := findChild(alpha, "inner.go")
+	if inner == nil {
+		t.Fatal("inner.go missing")
+	}
+
+	mustWrite(t, filepath.Join(root, "Newcomer.txt"), "n")
+	if err := os.Remove(filepath.Join(root, "zeta.txt")); err != nil {
+		t.Fatalf("remove zeta: %v", err)
+	}
+	mustWrite(t, filepath.Join(root, "alpha", "second.go"), "package x")
+
+	tr.ApplyScan(ScanDirs(tr.LoadedDirs()))
+
+	if findChild(tr.Root, "alpha") != alpha {
+		t.Fatal("alpha pointer changed across the applied scan")
+	}
+	if !alpha.Expanded || !alpha.Loaded {
+		t.Fatalf("alpha state lost across the applied scan: %+v", alpha)
+	}
+	if findChild(alpha, "inner.go") != inner {
+		t.Fatal("a surviving grandchild's pointer changed")
+	}
+	if findChild(alpha, "second.go") == nil {
+		t.Fatal("a nested new file should appear — the sweep is recursive")
+	}
+	if findChild(tr.Root, "Newcomer.txt") == nil {
+		t.Fatal("Newcomer.txt should have been picked up")
+	}
+	if findChild(tr.Root, "zeta.txt") != nil {
+		t.Fatal("zeta.txt should have been removed from the tree")
+	}
+	if findChild(tr.Root, ".git") != nil {
+		t.Fatal("the scan must apply the same hide rules as a reload")
+	}
+}
+
+// TestApplyScan_LeavesUnscannedAndFailedDirsAlone pins the conservative
+// half of the merge. A background scan is always a little stale by the
+// time it lands, so a directory the scan never saw — because the user
+// expanded it after the sweep started — must keep the children its own
+// read just produced, and a directory that failed to read must keep what
+// it had rather than blinking empty.
+func TestApplyScan_LeavesUnscannedAndFailedDirsAlone(t *testing.T) {
+	root := mkTree(t)
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Sweep captured the root only; the user then opened alpha.
+	scans := ScanDirs(tr.LoadedDirs())
+	alpha := findChild(tr.Root, "alpha")
+	if alpha == nil {
+		t.Fatal("alpha missing")
+	}
+	tr.Toggle(alpha)
+	if len(alpha.Children) != 1 {
+		t.Fatalf("alpha should have loaded its one child, got %d", len(alpha.Children))
+	}
+
+	tr.ApplyScan(scans)
+	if len(alpha.Children) != 1 {
+		t.Fatalf("a directory absent from the scan must keep its children, got %d",
+			len(alpha.Children))
+	}
+
+	// A failed read carries an Err and must not empty the branch.
+	before := len(tr.Root.Children)
+	tr.ApplyScan([]DirScan{{Path: tr.Root.Path, Err: os.ErrPermission}})
+	if got := len(tr.Root.Children); got != before {
+		t.Fatalf("failed scan emptied the root: %d children, want %d", got, before)
+	}
+}
+
 // TestShouldHide is an exhaustive table for the small hide list — keeps
 // future edits to that list honest by showing exactly what's in/out.
 func TestShouldHide(t *testing.T) {
@@ -459,6 +583,80 @@ func TestRender_ProjectNameAndChevrons(t *testing.T) {
 	// Beta is collapsed — verify '▸' present.
 	if !findRowWithBoth(cells, w, 20, "Beta", '▸') {
 		t.Fatal("expected a collapsed-row showing Beta with '▸'")
+	}
+}
+
+// TestRender_EmptyRootShowsPlaceholder pins the empty-project state. A
+// bare root row with nothing under it reads as "the tree failed to
+// load"; the muted placeholder says which of the two it is. This is the
+// very first screen after `mkdir proj && skiff proj`.
+func TestRender_EmptyRootShowsPlaceholder(t *testing.T) {
+	root := t.TempDir()
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cells, w := renderAndCollect(t, tr, 40, 20)
+
+	if got := rowText(cells, w, 2); !containsRune(got, EmptyFolderLabel) {
+		t.Fatalf("first list row = %q, want %q", got, EmptyFolderLabel)
+	}
+	// Muted, not Text: it's an explanation, not a file.
+	fg, _, _ := cells[2*w+1].Style.Decompose()
+	if fg != theme.Default().Muted {
+		t.Fatalf("placeholder fg = %v, want Muted", fg)
+	}
+	// It is not a row you can click — HitTest must miss it, or the
+	// placeholder would behave like a file and open nothing.
+	if n, ok := tr.HitTest(0, 2); ok || n != nil {
+		t.Fatalf("placeholder must not be a hit target, got %v", n)
+	}
+}
+
+// TestRender_EmptyRootClipsToSidebarWidth keeps the placeholder inside
+// the sidebar: like every other row it is drawn through drawString, so a
+// sidebar narrower than the label truncates instead of painting over the
+// splitter and the editor beyond it.
+func TestRender_EmptyRootClipsToSidebarWidth(t *testing.T) {
+	tr, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const narrow = 8 // narrower than "(folder is empty)"
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("scr.Init: %v", err)
+	}
+	t.Cleanup(scr.Fini)
+	scr.SetSize(40, 20)
+	tr.Render(scr, theme.Default(), 0, 0, narrow, 20)
+	scr.Show()
+
+	cells, w, _ := scr.GetContents()
+	// Cells the renderer never touched carry no runes at all; anything
+	// with a visible glyph past the sidebar edge is a bleed.
+	for x := narrow; x < w; x++ {
+		if c := cells[2*w+x]; len(c.Runes) > 0 && c.Runes[0] != ' ' {
+			t.Fatalf("placeholder painted past the sidebar at x=%d: %q", x, c.Runes[0])
+		}
+	}
+	if got := rowText(cells, w, 2)[:narrow]; !strings.HasPrefix(got, " (folder") {
+		t.Fatalf("clipped placeholder = %q", got)
+	}
+}
+
+// TestRender_NonEmptyRootHasNoPlaceholder is the negative: a project
+// with files must never show the empty-folder row.
+func TestRender_NonEmptyRootHasNoPlaceholder(t *testing.T) {
+	tr, err := New(mkTree(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cells, w := renderAndCollect(t, tr, 40, 20)
+	for y := range 20 {
+		if containsRune(rowText(cells, w, y), EmptyFolderLabel) {
+			t.Fatalf("row %d shows the empty placeholder in a populated tree", y)
+		}
 	}
 }
 

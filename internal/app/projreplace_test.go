@@ -168,3 +168,48 @@ func TestProjReplaceAll_MixedRouting(t *testing.T) {
 		t.Fatalf("report flash: %q", a.statusMsg)
 	}
 }
+
+// TestProjReplaceAll_ReportsBufferSaveFailure pins the swallowed-error
+// regression: replace-all re-saved clean open tabs with `_ = tab.Save()`,
+// so a failed write vanished and the done handler still flashed a plain
+// success count. The user was told N files were replaced while one of
+// them was never written. The report has to name the file and the tab has
+// to stay dirty so the work is still recoverable.
+func TestProjReplaceAll_ReportsBufferSaveFailure(t *testing.T) {
+	root := t.TempDir()
+	p := mkFile(t, root, "a.txt", "old value\n")
+	a := projFindApp(t, root)
+	a.openFile(p)
+	tab := a.activeTabPtr()
+
+	// Force a real save failure that doesn't depend on who is running the
+	// test: swap the file for a directory of the same name, so the write
+	// hits EISDIR even as root.
+	if err := os.Remove(p); err != nil {
+		t.Fatalf("swap: %v", err)
+	}
+	if err := os.Mkdir(p, 0755); err != nil {
+		t.Fatalf("swap: %v", err)
+	}
+
+	a.projFindValue = []rune("old")
+	a.projReplaceValue = []rune("new")
+	a.projFindMatches = []search.Match{{Path: "a.txt", Line: 1, Col: 0, Text: "old value"}}
+
+	a.projReplaceConfirmAll()
+	confirmYes(a)
+	pumpReplaceDone(t, a)
+
+	if tab.Buffer.Lines[0] != "new value" {
+		t.Fatalf("buffer should still carry the replacement: %q", tab.Buffer.Lines[0])
+	}
+	if !tab.Dirty {
+		t.Fatal("a tab whose save failed must stay dirty")
+	}
+	if !strings.Contains(a.statusMsg, "a.txt") {
+		t.Fatalf("report must name the file that failed to save: %q", a.statusMsg)
+	}
+	if !strings.Contains(a.statusMsg, "save failed") {
+		t.Fatalf("report must say the save failed, not just count successes: %q", a.statusMsg)
+	}
+}

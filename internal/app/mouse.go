@@ -24,6 +24,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/git"
 )
 
 // autoScrollEvent is the custom tcell event our auto-scroll goroutine
@@ -163,6 +164,12 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	if leftDown && a.dragMode == "" {
 		sw := a.sidebarW()
 		splitX := a.splitterX()
+		// A press anywhere but the sidebar means the user has moved on
+		// from the Git panel's keyboard mode — drop the key capture so
+		// Enter/Space go back to the editor. No-op when unarmed.
+		if !(sw > 0 && x <= splitX) {
+			a.exitGitPanelKeys()
+		}
 		switch {
 		case splitX >= 0 && x == splitX:
 			a.dragMode = "sidebar"
@@ -178,8 +185,16 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 				a.dragMode = "scrollbar"
 				return
 			}
-			a.editorPress(x, y)
-			a.dragMode = "editor"
+			// Only a press editorPress claims as its own arms the drag.
+			// This case's band is wider than the editor rect (an open
+			// find bar keeps its row in here, mouse-transparent per
+			// ADR-0001) and covers surfaces with no caret at all, so
+			// arming unconditionally let the next motion event drag out
+			// a selection the user never started — and the release copy
+			// it to the clipboard.
+			if a.editorPress(x, y) {
+				a.dragMode = "editor"
+			}
 		}
 		return
 	}
@@ -367,34 +382,53 @@ func (a *App) syncActiveTreeFile() {
 	a.tree.ActiveFile = tab.Path
 }
 
-// editorPress handles the initial mouse press inside the editor — placing
-// the caret, optionally selecting a word on double-click. Image tabs
-// have no caret, so the press is dropped.
-func (a *App) editorPress(x, y int) {
+// editorPress handles the initial mouse press inside the editor —
+// placing the caret, optionally selecting a word on double-click. It
+// reports whether the press belongs to the editor surface at all, which
+// is what the dispatcher uses to decide whether a drag is starting.
+//
+// The band the dispatcher hands us is wider than the editor: an open
+// find bar shrinks the rect but keeps its own row inside that band,
+// because the strip stays mouse-transparent (ADR-0001). So the rect is
+// re-checked here rather than assumed. Image tabs and an empty editor
+// have no caret at all, and a gutter click opens a diff preview instead
+// of placing one — none of those may arm a drag. A press below the last
+// line does: there's no caret to move, but the empty space under a
+// short file is still editor space you can drag a selection out of,
+// exactly as in every GUI editor.
+func (a *App) editorPress(x, y int) bool {
 	tab := a.activeTabPtr()
 	if tab == nil || tab.IsImage() {
-		return
+		return false
 	}
 	ex, ey, ew, eh := a.editorRect()
+	if x < ex || x >= ex+ew || y < ey || y >= ey+eh {
+		return false
+	}
 	if a.openGitHunkAt(tab, x-ex, y-ey) {
-		return
+		return false
 	}
 	pos, ok := tab.HitTest(x-ex, y-ey, ew, eh)
 	if !ok {
-		return
+		return true
 	}
 
 	now := time.Now()
 	if a.lastClick.x == x && a.lastClick.y == y && now.Sub(a.lastClick.when) < doubleClickWindow {
 		a.selectWordAt(tab, pos)
 		a.lastClick = clickRecord{} // prevent triple-click from selecting nothing.
-		return
+		return true
 	}
 	a.lastClick = clickRecord{x: x, y: y, when: now}
 	tab.MoveCursorTo(pos, false)
+	return true
 }
 
-// openGitHunkAt opens a diff preview when the user clicks a gutter marker.
+// openGitHunkAt kicks a diff preview when the user clicks a gutter
+// marker, returning whether the click belonged to the gutter. The git
+// call runs off-thread (see App.requestDiff) — a gutter click used to
+// block the event loop for up to internal/git's ten-second read
+// timeout on a slow or network-mounted repo.
 func (a *App) openGitHunkAt(tab *editor.Tab, localX, localY int) bool {
 	if localX != 0 || localY < 0 {
 		return false
@@ -403,14 +437,9 @@ func (a *App) openGitHunkAt(tab *editor.Tab, localX, localY int) bool {
 	if tab.GitLines[line] == editor.GitLineNone {
 		return false
 	}
-	lines := loadGitHunkPreview(a.rootDir, tab.Path, line)
-	if len(lines) == 0 {
-		a.openInfo("Git change", []string{"No git diff found for this line."})
-		return true
-	}
-	// The file is already open in front of the user, so the diff view
-	// gets no [ Open file ] button — Close is the only way out.
-	a.openDiffView("Git change · "+filepath.Base(tab.Path), lines, "", tab.Path)
+	path := tab.Path
+	a.requestDiff(diffLoadHunk, "Git change · "+filepath.Base(path), path,
+		func(repo *git.Repo) []string { return repoHunkPreview(repo, path, line) })
 	return true
 }
 
@@ -574,34 +603,10 @@ func (a *App) scrollbarTo(localY int) {
 
 // selectWordAt selects the word under the buffer position p (or does
 // nothing if p sits in whitespace / punctuation).
+//
+// The word boundary rule itself lives in internal/editor so double-click
+// selection and the Alt+arrow / Esc-b / Esc-e caret motions can never
+// disagree about where a token starts — see editor.IsWordChar.
 func (a *App) selectWordAt(tab *editor.Tab, p editor.Position) {
-	line := tab.Buffer.LineRunes(p.Line)
-	if len(line) == 0 {
-		return
-	}
-	start := p.Col
-	if start > len(line) {
-		start = len(line)
-	}
-	for start > 0 && isWordChar(line[start-1]) {
-		start--
-	}
-	end := p.Col
-	for end < len(line) && isWordChar(line[end]) {
-		end++
-	}
-	if start == end {
-		return
-	}
-	tab.Anchor = editor.Position{Line: p.Line, Col: start}
-	tab.Cursor = editor.Position{Line: p.Line, Col: end}
-}
-
-// isWordChar reports whether r is part of a "word" for double-click select.
-// Intentionally simple ASCII-ish definition; covers the common cases.
-func isWordChar(r rune) bool {
-	return r == '_' ||
-		(r >= 'a' && r <= 'z') ||
-		(r >= 'A' && r <= 'Z') ||
-		(r >= '0' && r <= '9')
+	tab.SelectWordAt(p)
 }

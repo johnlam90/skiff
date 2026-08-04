@@ -81,6 +81,19 @@ func loadGitStatus(rootDir, base string) gitStatus {
 	return git.Open(rootDir).Status(base)
 }
 
+// readRepo returns the handle the app's asynchronous git reads go
+// through: real git in production, or the injected Runner when a test
+// installed one. Call it on the main thread and hand the result to the
+// goroutine — a *git.Repo is immutable after construction, so passing
+// it across is the safe alternative to letting background work reach
+// back into App for a.rootDir.
+func (a *App) readRepo() *git.Repo {
+	if a.gitRunner != nil {
+		return git.OpenWith(a.rootDir, a.gitRunner)
+	}
+	return git.Open(a.rootDir)
+}
+
 // rebaseGitPaths rewrites dirty paths to match the file tree root casing.
 func rebaseGitPaths(paths map[string]filetree.GitChangeKind, treeRoot string) map[string]filetree.GitChangeKind {
 	if len(paths) == 0 || treeRoot == "" {
@@ -177,13 +190,24 @@ func loadGitLineChanges(rootDir, base, path string) map[int]editor.GitLineChange
 // contract as every other loader here: nil on any failure and the
 // caller shows a friendly placeholder instead.
 func loadGitFileDiff(rootDir, base, path string, untracked bool) []string {
+	return repoFileDiff(git.Open(rootDir), base, path, untracked)
+}
+
+// repoFileDiff is loadGitFileDiff's body over an explicit Repo handle.
+// The handle is the seam the async diff path needs: a *git.Repo is
+// immutable once opened, so the main loop can capture one and hand it to
+// a goroutine without sharing App state — and a test can hand over one
+// backed by git.Fake instead of paying for a subprocess and a repo in
+// exactly the right state.
+func repoFileDiff(repo *git.Repo, base, path string, untracked bool) []string {
+	rootDir := repo.Root()
 	if rootDir == "" || path == "" {
 		return nil
 	}
 	if base == "" {
 		base = "HEAD"
 	}
-	out, err := git.Output(rootDir, "diff", base, "--", path)
+	out, err := repo.Output("diff", base, "--", path)
 	if err != nil || len(out) == 0 {
 		if !untracked {
 			return nil
@@ -196,7 +220,7 @@ func loadGitFileDiff(rootDir, base, path string, untracked bool) []string {
 		}
 		// --no-index exits 1 whenever the files differ, so the error is
 		// expected; the output being non-empty is the success signal.
-		out, _ = git.Output(rootDir, "diff", "--no-index", "--", os.DevNull, path)
+		out, _ = repo.Output("diff", "--no-index", "--", os.DevNull, path)
 		if len(out) == 0 {
 			return nil
 		}
@@ -204,12 +228,19 @@ func loadGitFileDiff(rootDir, base, path string, untracked bool) []string {
 	return strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 }
 
-// loadGitHunkPreview returns the unified diff hunk covering zero-based line.
-func loadGitHunkPreview(rootDir, path string, line int) []string {
-	if rootDir == "" || path == "" || line < 0 {
+// repoHunkPreview returns the unified diff hunk covering zero-based line.
+// It takes a Repo handle rather than a root path because its only caller
+// is the asynchronous gutter-click path: a *git.Repo is immutable once
+// opened, so the main loop can capture one and hand it to a goroutine
+// without sharing App state — and a test can hand over one backed by
+// git.Fake instead of paying for a subprocess and a repo in exactly the
+// right state. See repoFileDiff, whose rootDir-taking wrapper survives
+// for the Git panel's synchronous callers.
+func repoHunkPreview(repo *git.Repo, path string, line int) []string {
+	if repo.Root() == "" || path == "" || line < 0 {
 		return nil
 	}
-	out, err := git.Output(rootDir, "diff", "--unified=3", "HEAD", "--", path)
+	out, err := repo.Output("diff", "--unified=3", "HEAD", "--", path)
 	if err != nil || len(out) == 0 {
 		return nil
 	}

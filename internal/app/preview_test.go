@@ -151,3 +151,38 @@ func TestOpenFile_BinaryFlashesInsteadOfFreezing(t *testing.T) {
 		t.Fatalf("flash should name the problem, got %q", a.statusMsg)
 	}
 }
+
+// TestOpenFile_OversizedFileFlashesSizeAndOpensNoTab is the app end of
+// editor's open size cap. A click on a several-hundred-megabyte log used
+// to read the whole thing into a buffer on the event thread; now the
+// open path refuses it the same way it refuses a binary — no tab, and a
+// status flash that names the file's size and the limit, so the refusal
+// reads as deliberate rather than as the editor losing the file. The
+// file is sparse, so the test costs an inode rather than 33 MiB.
+func TestOpenFile_OversizedFileFlashesSizeAndOpensNoTab(t *testing.T) {
+	dir := t.TempDir()
+	huge := filepath.Join(dir, "huge.log")
+	f, err := os.Create(huge)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := f.Truncate(33 << 20); err != nil {
+		f.Close()
+		t.Fatalf("truncate: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	a := newTestApp(t, dir)
+
+	a.openFile(huge)
+
+	if a.tabs.Len() != 0 {
+		t.Fatalf("a refused open must not leave a tab behind, got %d", a.tabs.Len())
+	}
+	for _, want := range []string{"huge.log", "33.0 MiB", "32.0 MiB"} {
+		if !strings.Contains(a.statusMsg, want) {
+			t.Fatalf("flash %q should name %q", a.statusMsg, want)
+		}
+	}
+}

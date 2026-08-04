@@ -23,7 +23,10 @@ import (
 	"time"
 
 	"github.com/johnlam90/skiff/internal/customactions"
+	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/icons"
+	"github.com/johnlam90/skiff/internal/session"
 	"github.com/johnlam90/skiff/internal/userconfig"
 )
 
@@ -47,6 +50,32 @@ type treeRefreshEvent struct {
 
 // When satisfies the tcell.Event interface.
 func (e *treeRefreshEvent) When() time.Time { return e.when }
+
+// treeScanEvent carries a finished background disk sweep onto the main
+// event loop: the directory listings the file tree should adopt and the
+// Stat results the open tabs should be reconciled against. Same
+// goroutine → custom event pattern as gitStatusEvent — the sweep reads
+// disk, the main loop mutates the node graph and the tabs. gen pins the
+// sweep to the tree generation it started from; see handleTreeScan.
+type treeScanEvent struct {
+	when time.Time
+	gen  int
+	dirs []filetree.DirScan
+	tabs []tabProbe
+}
+
+// When satisfies the tcell.Event interface.
+func (e *treeScanEvent) When() time.Time { return e.when }
+
+// tabProbe is one open tab's on-disk state as observed by a background
+// sweep. err is carried verbatim rather than pre-interpreted so the main
+// thread runs exactly the same os.IsNotExist / other-error branches the
+// synchronous reconcile always did.
+type tabProbe struct {
+	path  string
+	mtime time.Time
+	err   error
+}
 
 // loadCustomActions reads the user's actions.json (if any) and stores
 // the parsed list on the App. Failures are surfaced as a status flash
@@ -90,7 +119,13 @@ func (a *App) loadUserConfig() {
 // call this after touching the disk so callers don't have to nil-check
 // every site. The git-status and finder refreshes that usually
 // accompany it already guard themselves internally.
+//
+// The generation bump retires any background sweep already in flight:
+// its listing was read before this mutation, so applying it afterwards
+// would put the file the user just deleted back on screen for a whole
+// tick. See handleTreeScan.
 func (a *App) refreshTree() {
+	a.treeScanGen++
 	if a.tree == nil {
 		return
 	}
@@ -137,64 +172,215 @@ func (a *App) stopTreeRefresh() {
 // Called from the periodic event and from runCustomAction's success
 // path so a Copy-from-remote action's output is visible immediately
 // instead of after the next tick.
+//
+// Every stage is off-thread now. The tick used to run a recursive
+// ReadDir of the whole loaded tree, a Stat per open tab, and a session
+// write inside the event handler, which stuttered visibly every ten
+// seconds on a large tree over NFS.
 func (a *App) refreshTreeNow() {
-	a.refreshTree()
-	a.reconcileOpenTabsWithDisk()
+	a.refreshTreeAsync()
 	a.refreshGitStatusAsync()
 	a.invalidateFinder()
-	a.saveSession()
 }
 
-// reconcileOpenTabsWithDisk runs once per background tick. For every
-// open tab with a real path it stats the file, compares the on-disk
-// mtime to what the tab last knew, and reacts:
+// refreshTreeAsync starts one background disk sweep: the session write,
+// the ReadDir walk of every loaded directory, and one Stat per open tab.
+// The goroutine gets nothing but path strings and an unaliased session
+// payload captured here on the main thread — it never reads or writes
+// App, Tab, or Node state, and handleTreeScan does all the mutating.
+// Overlapping ticks coalesce into a single follow-up sweep exactly the
+// way refreshGitStatusAsync does, so a burst of triggers costs at most
+// two sweeps rather than one each.
+//
+// The session write rides along rather than getting its own goroutine so
+// that treeScanInFlight covers the whole sweep: one flag, and a caller
+// that has seen the treeScanEvent knows nothing is still touching disk
+// on this tick's behalf. It goes first because it is small and bounded
+// while the walk is neither, and delaying a durability write behind a
+// slow NFS walk widens the window where a killed terminal loses tab
+// state.
+func (a *App) refreshTreeAsync() {
+	if a.treeScanInFlight {
+		a.treeScanQueued = true
+		return
+	}
+	a.treeScanInFlight = true
+	var dirs []string
+	if a.tree != nil {
+		dirs = a.tree.LoadedDirs()
+	}
+	paths := a.openTabDiskPaths()
+	gen := a.treeScanGen
+	scr := a.screen
+	// The session payload is captured here for the same reason the path
+	// lists are: it reads tabs, cursors, and the tree's expanded set.
+	// captureSession builds fresh slices nothing else aliases, so only
+	// the write itself crosses over. Single-file mode has no project to
+	// remember, hence the nil.
+	var snap *session.Project
+	if a.tree != nil {
+		p := a.captureSession()
+		p.SavedAt = time.Now()
+		snap = &p
+	}
+	root := a.rootDir
+	go func() {
+		if snap != nil {
+			_ = session.Save(root, *snap)
+		}
+		_ = scr.PostEvent(&treeScanEvent{
+			when: time.Now(),
+			gen:  gen,
+			dirs: filetree.ScanDirs(dirs),
+			tabs: probeOpenTabs(paths),
+		})
+	}()
+}
+
+// handleTreeScan applies a finished background sweep on the main thread
+// and starts the follow-up sweep if more triggers arrived while this one
+// was in flight.
+//
+// A generation mismatch means a main-thread tree mutation — a create,
+// rename, delete, or paste, each of which refreshes the tree
+// synchronously — landed after the sweep read the disk. Its listing
+// predates that change, so applying it would resurrect the file the user
+// just deleted until the next tick. Drop it; the mutation already
+// refreshed the tree correctly.
+func (a *App) handleTreeScan(e *treeScanEvent) {
+	a.treeScanInFlight = false
+	if e.gen == a.treeScanGen {
+		if a.tree != nil {
+			a.tree.ApplyScan(e.dirs)
+		}
+		a.applyTabProbes(e.tabs)
+	}
+	if a.treeScanQueued {
+		a.treeScanQueued = false
+		a.refreshTreeAsync()
+	}
+}
+
+// openTabDiskPaths returns the path of every open tab backed by a real
+// file — the Stat list for a disk sweep. Untitled tabs (Path == "") have
+// no disk file to reconcile against; image tabs stay in, because they
+// reload from disk too.
+func (a *App) openTabDiskPaths() []string {
+	paths := make([]string, 0, a.tabs.Len())
+	for _, tab := range a.tabs.Tabs() {
+		if tab == nil || tab.Path == "" {
+			continue
+		}
+		paths = append(paths, tab.Path)
+	}
+	return paths
+}
+
+// probeOpenTabs stats each path and records what it found. One syscall
+// per open tab — cheap on a local disk, not cheap over NFS, and it used
+// to run on the event thread every ten seconds. Touches no Tab, so it is
+// safe on a background goroutine.
+func probeOpenTabs(paths []string) []tabProbe {
+	probes := make([]tabProbe, 0, len(paths))
+	for _, p := range paths {
+		pr := tabProbe{path: p}
+		info, err := os.Stat(p)
+		if err != nil {
+			pr.err = err
+		} else {
+			pr.mtime = info.ModTime()
+		}
+		probes = append(probes, pr)
+	}
+	return probes
+}
+
+// applyTabProbes runs the three-way external-change reconciliation over
+// a sweep's Stat results. Tabs opened after the sweep started aren't in
+// the map and are skipped — the next tick covers them.
+func (a *App) applyTabProbes(probes []tabProbe) {
+	if len(probes) == 0 {
+		return
+	}
+	byPath := make(map[string]tabProbe, len(probes))
+	for _, p := range probes {
+		byPath[p.path] = p
+	}
+	for _, tab := range a.tabs.Tabs() {
+		if tab == nil || tab.Path == "" {
+			continue
+		}
+		if p, ok := byPath[tab.Path]; ok {
+			a.reconcileTab(tab, p)
+		}
+	}
+}
+
+// reconcileTab decides what one open tab should do about what a Stat
+// found:
 //
 //   - File missing  → flash once, mark the tab dirty so the user knows.
 //   - Disk newer, tab clean → reload the buffer silently, flash success.
-//   - Disk newer, tab dirty → leave the buffer alone, flash a warning
-//     that saving will overwrite.
+//   - Disk newer, tab dirty → a real conflict: prompt (Keep mine /
+//     Reload / Diff) and leave a marker on the tab until it is resolved.
 //
-// Untitled tabs (Path == "") are skipped because there's no disk file to
-// reconcile against.
-func (a *App) reconcileOpenTabsWithDisk() {
-	for _, tab := range a.tabs.Tabs() {
-		if tab.Path == "" {
-			continue
+// The reload's ReadFile stays synchronous on purpose: it only fires when
+// a file actually changed under a clean tab, which is an event rather
+// than a per-tick cost, and reading the bytes off-thread would need a
+// second "load from memory" entry point into editor.Tab that could drift
+// from Tab.Reload.
+func (a *App) reconcileTab(tab *editor.Tab, p tabProbe) {
+	if os.IsNotExist(p.err) {
+		if !tab.DiskGone {
+			tab.DiskGone = true
+			tab.Dirty = true
+			a.flash(fmt.Sprintf("%s deleted on disk", filepath.Base(tab.Path)))
 		}
-		info, err := os.Stat(tab.Path)
-		if os.IsNotExist(err) {
-			if !tab.DiskGone {
-				tab.DiskGone = true
-				tab.Dirty = true
-				a.flash(fmt.Sprintf("%s deleted on disk", filepath.Base(tab.Path)))
-			}
-			continue
-		}
-		if err != nil {
-			// Permission denied or some other transient stat error — leave
-			// the tab as-is rather than spamming the user with a flash.
-			continue
-		}
-		if tab.DiskGone {
-			// File reappeared. Force the mtime check below to fire so we
-			// either reload or warn about a dirty conflict.
-			tab.DiskGone = false
-			tab.Mtime = time.Time{}
-		}
-		if !info.ModTime().After(tab.Mtime) {
-			continue // unchanged on disk.
-		}
-		if tab.Dirty {
-			a.flash(fmt.Sprintf("%s changed on disk — your edits will overwrite on save",
-				filepath.Base(tab.Path)))
-			// Update Mtime so we don't re-flash every tick for the same change.
-			tab.Mtime = info.ModTime()
-			continue
-		}
-		if err := tab.Reload(); err != nil {
-			a.flash(fmt.Sprintf("%s reload failed: %v", filepath.Base(tab.Path), err))
-			continue
-		}
-		a.flash(fmt.Sprintf("%s reloaded from disk", filepath.Base(tab.Path)))
+		return
 	}
+	if p.err != nil {
+		// Permission denied or some other transient stat error — leave
+		// the tab as-is rather than spamming the user with a flash.
+		return
+	}
+	if tab.DiskGone {
+		// File reappeared. Force the mtime check below to fire so we
+		// either reload or warn about a dirty conflict.
+		tab.DiskGone = false
+		tab.Mtime = time.Time{}
+	}
+	// A tab that stopped being dirty resolved its conflict by
+	// being saved; drop the marker so the status bar stops warning.
+	if !tab.Dirty {
+		a.clearDiskConflict(tab.Path)
+	}
+	if !p.mtime.After(tab.Mtime) {
+		return // unchanged on disk.
+	}
+	if tab.Dirty {
+		// Two writers, one file: the user has to choose, because
+		// every automatic answer here loses somebody's work. Only
+		// prompt once per disk revision — openDiskConflict records
+		// the mtime it warned about, and Mtime moves with it so a
+		// later external write asks again.
+		if a.diskConflicts[tab.Path].Equal(p.mtime) {
+			tab.Mtime = p.mtime
+			return
+		}
+		// Don't yank an overlay the user is already working in out
+		// from under them; the next tick will prompt instead. Tab
+		// Mtime is left alone so that tick still sees the change.
+		if a.anyModalOpen() {
+			return
+		}
+		a.openDiskConflict(tab, p.mtime)
+		tab.Mtime = p.mtime
+		return
+	}
+	if err := tab.Reload(); err != nil {
+		a.flash(fmt.Sprintf("%s reload failed: %v", filepath.Base(tab.Path), err))
+		return
+	}
+	a.clearDiskConflict(tab.Path)
+	a.flash(fmt.Sprintf("%s reloaded from disk", filepath.Base(tab.Path)))
 }

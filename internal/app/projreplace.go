@@ -19,6 +19,8 @@ package app
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/johnlam90/skiff/internal/editor"
@@ -27,17 +29,23 @@ import (
 
 // projReplaceDoneEvent reports a finished background disk apply,
 // carrying the buffer-side counts so the user gets ONE combined flash.
+// bufSaveFailed names the open buffers we rewrote but could not write
+// back — those tabs are still dirty and the report has to say so, or
+// the user reads a success count that covers files nothing reached.
 type projReplaceDoneEvent struct {
 	when                      time.Time
 	rep                       search.ReplaceReport
 	bufOcc, bufFiles, bufSkip int
+	bufSaveFailed             []string
 }
 
 // When implements tcell.Event.
 func (e *projReplaceDoneEvent) When() time.Time { return e.when }
 
-// resetProjReplace clears the replace field state — panel open/close
-// and closeAllModals all funnel through here.
+// resetProjReplace clears the replace field state. Every teardown
+// funnels through closeProjFind, which calls this — including
+// closeAllModals, so an overlay opening over the panel can't leave the
+// replace field armed underneath it.
 func (a *App) resetProjReplace() {
 	a.projReplaceOpen = false
 	a.projReplaceValue = nil
@@ -184,6 +192,13 @@ func (a *App) projReplaceConfirmAll() {
 // doProjReplaceAll applies everywhere: open buffers synchronously (the
 // editor owns them), closed files in the background behind the shared
 // file-op gate. One combined report lands via projReplaceDoneEvent.
+//
+// Re-saving a clean tab can fail (the file turned into a directory, the
+// disk filled, permissions changed under us). Those failures are
+// collected rather than dropped: the buffer keeps the replacement and
+// stays dirty, and the report names the file. Reporting a bare success
+// count for a write that never landed is the one outcome worse than the
+// failure itself.
 func (a *App) doProjReplaceAll(matches []search.Match, query, repl string, opts search.Options) {
 	if a.fileOpBusy {
 		a.flash("Another file operation is still running")
@@ -204,6 +219,7 @@ func (a *App) doProjReplaceAll(matches []search.Match, query, repl string, opts 
 		diskMatches = append(diskMatches, m)
 	}
 	var bufOcc, bufFiles, bufSkip int
+	var saveFailed []string
 	for tab, group := range byTab {
 		occ, skipped := applyMatchesToTab(tab, group, query, repl, opts)
 		bufOcc += occ
@@ -211,10 +227,15 @@ func (a *App) doProjReplaceAll(matches []search.Match, query, repl string, opts 
 		if occ > 0 {
 			bufFiles++
 			if tabClean[tab] {
-				_ = tab.Save()
+				if err := tab.Save(); err != nil {
+					saveFailed = append(saveFailed, tab.DisplayName())
+				}
 			}
 		}
 	}
+	// Map iteration order is random, so sort the names — the same
+	// failure must not produce a different message on each run.
+	sort.Strings(saveFailed)
 	root := a.rootDir
 	scr := a.screen
 	a.fileOpBusy = true
@@ -223,12 +244,17 @@ func (a *App) doProjReplaceAll(matches []search.Match, query, repl string, opts 
 		_ = scr.PostEvent(&projReplaceDoneEvent{
 			when: time.Now(), rep: rep,
 			bufOcc: bufOcc, bufFiles: bufFiles, bufSkip: bufSkip,
+			bufSaveFailed: saveFailed,
 		})
 	}()
 }
 
 // handleProjReplaceDone lands the combined report and refreshes
-// everything the rewrite touched.
+// everything the rewrite touched. The flash is deliberately the LAST
+// thing this does: refreshTreeNow reconciles open tabs against disk and
+// flashes its own warning for any tab that now disagrees with the file
+// — which is exactly the tab whose save just failed. Flashing first
+// would let that generic warning bury the specific report.
 func (a *App) handleProjReplaceDone(e *projReplaceDoneEvent) {
 	a.fileOpBusy = false
 	occ := e.rep.Replaced + e.bufOcc
@@ -238,9 +264,13 @@ func (a *App) handleProjReplaceDone(e *projReplaceDoneEvent) {
 	if skipped > 0 {
 		msg += fmt.Sprintf(" (%d skipped — changed since search)", skipped)
 	}
-	a.flash(msg)
+	if len(e.bufSaveFailed) > 0 {
+		msg += fmt.Sprintf(" — save failed for %s, still unsaved",
+			strings.Join(e.bufSaveFailed, ", "))
+	}
 	a.refreshTreeNow()
 	if a.projFindOpen {
 		a.projFindQueryChanged()
 	}
+	a.flash(msg)
 }

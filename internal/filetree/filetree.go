@@ -44,6 +44,12 @@ type Node struct {
 // a trashed item never resurfaces in the UI before Undo restores it.
 const TrashPrefix = ".skifftrash-"
 
+// EmptyFolderLabel is the muted placeholder row drawn under the project
+// name when the root has no visible children. Without it an empty
+// project is indistinguishable from a tree that failed to load, which
+// is the first thing a user hits after `mkdir proj && skiff proj`.
+const EmptyFolderLabel = "(folder is empty)"
+
 // GitChangeKind describes the strongest git status a tree row should
 // show — the git package's ChangeKind under its historical tree-side
 // name, so the badge rendering below reads unchanged.
@@ -135,7 +141,48 @@ func (n *Node) reload() error {
 	if err != nil {
 		return err
 	}
+	n.merge(scanEntries(entries))
+	return nil
+}
 
+// ScanEntry is all the merge needs from a dirent: the name and whether
+// it is a directory. Reducing os.DirEntry to this is what lets a
+// directory listing cross a goroutine boundary — an os.DirEntry can lazily
+// stat behind Info(), a ScanEntry cannot.
+type ScanEntry struct {
+	Name  string
+	IsDir bool
+}
+
+// DirScan is one directory's freshly-read contents. Err records a read
+// that failed (permissions, the directory vanished mid-sweep) so the
+// merge can leave that branch alone rather than emptying it.
+type DirScan struct {
+	Path    string
+	Entries []ScanEntry
+	Err     error
+}
+
+// scanEntries reduces a ReadDir result to the fields the merge uses,
+// dropping the names the tree refuses to show while we're already
+// walking the list.
+func scanEntries(entries []os.DirEntry) []ScanEntry {
+	out := make([]ScanEntry, 0, len(entries))
+	for _, e := range entries {
+		if shouldHide(e.Name()) {
+			continue
+		}
+		out = append(out, ScanEntry{Name: e.Name(), IsDir: e.IsDir()})
+	}
+	return out
+}
+
+// merge replaces n.Children from a directory listing, keeping surviving
+// child Nodes by pointer so their Expanded state and loaded
+// grandchildren live on. This is the half of a refresh that mutates the
+// node graph the renderer walks, so it must run on the main thread —
+// see Tree.ApplyScan.
+func (n *Node) merge(entries []ScanEntry) {
 	existing := make(map[string]*Node, len(n.Children))
 	for _, c := range n.Children {
 		existing[c.Name] = c
@@ -143,17 +190,14 @@ func (n *Node) reload() error {
 
 	children := make([]*Node, 0, len(entries))
 	for _, e := range entries {
-		if shouldHide(e.Name()) {
-			continue
-		}
-		if old, ok := existing[e.Name()]; ok && old.IsDir == e.IsDir() {
+		if old, ok := existing[e.Name]; ok && old.IsDir == e.IsDir {
 			children = append(children, old)
 			continue
 		}
 		children = append(children, &Node{
-			Path:  filepath.Join(n.Path, e.Name()),
-			Name:  e.Name(),
-			IsDir: e.IsDir(),
+			Path:  filepath.Join(n.Path, e.Name),
+			Name:  e.Name,
+			IsDir: e.IsDir,
 		})
 	}
 	sort.SliceStable(children, func(i, j int) bool {
@@ -164,13 +208,16 @@ func (n *Node) reload() error {
 	})
 	n.Children = children
 	n.Loaded = true
-	return nil
 }
 
 // Refresh re-reads every directory in the tree that has been loaded at
 // least once (i.e. anywhere the user has previously expanded). Surviving
 // entries keep their Node pointers so deeper Expanded state is preserved;
-// new files appear, deleted files vanish.
+// new files appear, deleted files vanish. Scan and merge both happen
+// here, so this is the synchronous flavour — right after a file
+// operation, where the tree must be correct before the next draw. The
+// periodic background refresh uses LoadedDirs / ScanDirs / ApplyScan
+// instead so the ReadDir walk doesn't land on the event loop.
 func (t *Tree) Refresh() {
 	refreshNode(t.Root)
 }
@@ -185,6 +232,83 @@ func refreshNode(n *Node) {
 	_ = n.reload()
 	for _, c := range n.Children {
 		refreshNode(c)
+	}
+}
+
+// LoadedDirs returns the path of every directory the tree has read at
+// least once — exactly the set Refresh would re-read, in the same
+// depth-first order. It walks the in-memory node graph and touches no
+// disk, so the main loop can hand a background sweep its work list
+// without stalling on it.
+func (t *Tree) LoadedDirs() []string {
+	var paths []string
+	collectLoadedDirs(t.Root, &paths)
+	return paths
+}
+
+// collectLoadedDirs is LoadedDirs' recursive worker.
+func collectLoadedDirs(n *Node, paths *[]string) {
+	if n == nil || !n.IsDir || !n.Loaded {
+		return
+	}
+	*paths = append(*paths, n.Path)
+	for _, c := range n.Children {
+		collectLoadedDirs(c, paths)
+	}
+}
+
+// ScanDirs reads each directory in paths and returns the listings. It
+// touches no Node and no Tree field, which is the whole point: this is
+// the expensive, latency-prone half of a refresh (one ReadDir per loaded
+// directory, brutal over NFS) and it is safe to run on a background
+// goroutine while the renderer walks the tree. Hand the result to
+// Tree.ApplyScan on the main thread.
+func ScanDirs(paths []string) []DirScan {
+	scans := make([]DirScan, 0, len(paths))
+	for _, p := range paths {
+		entries, err := os.ReadDir(p)
+		if err != nil {
+			scans = append(scans, DirScan{Path: p, Err: err})
+			continue
+		}
+		scans = append(scans, DirScan{Path: p, Entries: scanEntries(entries)})
+	}
+	return scans
+}
+
+// ApplyScan merges a completed background scan into the node graph with
+// the same identity-preserving semantics as Refresh. Main-thread only —
+// it rewrites Children on the nodes the renderer walks.
+//
+// The scan may be slightly stale by the time it lands, so the merge is
+// deliberately conservative: only directories that are still Loaded and
+// still present in the scan are touched. A directory the user expanded
+// after the scan started isn't in the listing and keeps the fresh
+// children its own read just produced; a directory that failed to read
+// keeps what it had rather than blinking empty.
+func (t *Tree) ApplyScan(scans []DirScan) {
+	byPath := make(map[string][]ScanEntry, len(scans))
+	for _, s := range scans {
+		if s.Err != nil {
+			continue
+		}
+		byPath[s.Path] = s.Entries
+	}
+	applyScanNode(t.Root, byPath)
+}
+
+// applyScanNode is ApplyScan's recursive worker. It walks the live graph
+// rather than the scan list because the graph is the authority on what
+// is still Loaded and still reachable.
+func applyScanNode(n *Node, byPath map[string][]ScanEntry) {
+	if n == nil || !n.IsDir || !n.Loaded {
+		return
+	}
+	if entries, ok := byPath[n.Path]; ok {
+		n.merge(entries)
+	}
+	for _, c := range n.Children {
+		applyScanNode(c, byPath)
 	}
 }
 
@@ -271,6 +395,20 @@ func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		listH = 0
 	}
 	t.clampScroll(len(flat), listH)
+
+	// An empty project renders as a bare root row with nothing under
+	// it, which reads as "the tree failed to load" rather than "there
+	// is nothing here". Say so explicitly, in the muted tone the row
+	// deserves. drawString clips to w, so a narrow sidebar truncates
+	// instead of bleeding into the editor.
+	if len(flat) == 0 {
+		if listH > 0 {
+			emptyStyle := tcell.StyleDefault.Background(bg).Foreground(th.Muted).Italic(true)
+			drawString(scr, x, listTop, w, " "+EmptyFolderLabel, emptyStyle)
+		}
+		t.visible = nil
+		return
+	}
 
 	visible := make([]*Node, 0, listH)
 	for row := 0; row < listH; row++ {

@@ -166,3 +166,72 @@ func defaultIndentForPath(path string) string {
 	}
 	return defaultSpaceIndent
 }
+
+// autoIndentFor returns the whitespace a freshly-created line should open
+// with, given the text that will sit behind the caret on the line being
+// split (prefix), the tab's detected indent unit, and the file path.
+//
+// The rule is deliberately shallow — copy the current line's leading
+// whitespace, plus one unit when the line opens a block. No reflow, no
+// de-denting of closing braces, no language model. An auto-indent that
+// occasionally guesses wrong is only forgivable if the user can predict
+// exactly when; anything cleverer here would be a formatter, and this
+// project already has one behind format-on-save.
+//
+// Taking the prefix rather than the whole line is what makes splitting a
+// line mid-indent behave: the new line inherits only the whitespace that
+// was actually before the caret, so the text that moves down keeps its own
+// leading whitespace and lands back at the column it started at.
+func autoIndentFor(prefix []rune, unit, path string) string {
+	n := 0
+	for n < len(prefix) && (prefix[n] == ' ' || prefix[n] == '\t') {
+		n++
+	}
+	lead := string(prefix[:n])
+	if !opensIndentBlock(prefix, path) {
+		return lead
+	}
+	if unit == "" {
+		// Only hand-built tabs get here — NewTab always runs
+		// DetectIndent — but an empty unit would silently turn the
+		// block rule off, which is worse than picking the default.
+		unit = defaultSpaceIndent
+	}
+	return lead + unit
+}
+
+// opensIndentBlock reports whether prefix ends with something that should
+// push the next line one level deeper: an opening brace / bracket / paren
+// in any language, or a colon in the languages where a trailing colon
+// introduces a block. Trailing whitespace is ignored so "if x {   " counts.
+func opensIndentBlock(prefix []rune, path string) bool {
+	i := len(prefix) - 1
+	for i >= 0 && (prefix[i] == ' ' || prefix[i] == '\t') {
+		i--
+	}
+	if i < 0 {
+		return false
+	}
+	switch prefix[i] {
+	case '{', '[', '(':
+		return true
+	case ':':
+		return colonOpensBlock(path)
+	}
+	return false
+}
+
+// colonOpensBlock reports whether a trailing ':' introduces an indented
+// block in this file type. Python and YAML are the two the editor opens
+// often enough to matter; everywhere else a trailing colon is a label
+// (Go, C), a ternary, or a map value, and indenting after it would be
+// wrong. Detection is by extension only — a shebang script with no
+// extension gets the plain copy-the-indent behavior, which is never
+// actively wrong, just less helpful.
+func colonOpensBlock(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".py", ".pyi", ".pyw", ".yml", ".yaml":
+		return true
+	}
+	return false
+}

@@ -22,22 +22,42 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/git"
 )
 
-// TestIsWordChar pins down the ASCII-only word definition we use for
-// double-click word selection.
-func TestIsWordChar(t *testing.T) {
-	word := []rune{'a', 'z', 'A', 'Z', '0', '9', '_'}
-	for _, r := range word {
-		if !isWordChar(r) {
-			t.Errorf("isWordChar(%q) = false, want true", r)
+// TestSelectWordAt_UsesSharedWordPredicate pins the contract that matters
+// now that the word definition lives in internal/editor: the span
+// double-click produces is exactly a maximal run of editor.IsWordChar
+// runes. Caret motion (Alt+Left / Alt+Right, Esc-b / Esc-e) walks by the
+// same predicate, so asserting against it here is what keeps the mouse and
+// the keyboard from drifting apart. The predicate's own cases are pinned
+// in internal/editor/word_test.go.
+func TestSelectWordAt_UsesSharedWordPredicate(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "w.go")
+	if err := os.WriteFile(target, []byte("call(my_arg9, x)\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+
+	a.selectWordAt(tab, editor.Position{Line: 0, Col: 7}) // inside "my_arg9"
+	line := tab.Buffer.LineRunes(0)
+	start, end := tab.Anchor.Col, tab.Cursor.Col
+	if start >= end {
+		t.Fatalf("no word selected: anchor=%v cursor=%v", tab.Anchor, tab.Cursor)
+	}
+	for i := start; i < end; i++ {
+		if !editor.IsWordChar(line[i]) {
+			t.Errorf("selection covers non-word rune %q at col %d", line[i], i)
 		}
 	}
-	nonWord := []rune{' ', '\t', '.', ',', '-', '!', '\n', '/'}
-	for _, r := range nonWord {
-		if isWordChar(r) {
-			t.Errorf("isWordChar(%q) = true, want false", r)
-		}
+	if start > 0 && editor.IsWordChar(line[start-1]) {
+		t.Errorf("selection starts mid-word at col %d", start)
+	}
+	if end < len(line) && editor.IsWordChar(line[end]) {
+		t.Errorf("selection ends mid-word at col %d", end)
 	}
 }
 
@@ -203,8 +223,12 @@ func TestEditorPress_PlacesCaret(t *testing.T) {
 	}
 }
 
-// TestOpenGitHunkAt_OpensInfoOnMarker proves gutter markers are clickable.
-func TestOpenGitHunkAt_OpensInfoOnMarker(t *testing.T) {
+// TestOpenGitHunkAt_RequestsDiffOffThread proves gutter markers are
+// clickable and that the click no longer pays for the git read inline —
+// internal/git's ten-second read timeout used to be a ten-second freeze
+// on a slow repo. The click returns handled with nothing on screen but a
+// "Loading" flash; the diff arrives on the posted event.
+func TestOpenGitHunkAt_RequestsDiffOffThread(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "p.txt")
 	if err := os.WriteFile(target, []byte("hello\n"), 0644); err != nil {
@@ -215,11 +239,23 @@ func TestOpenGitHunkAt_OpensInfoOnMarker(t *testing.T) {
 	tab := a.activeTabPtr()
 	tab.GitLines = map[int]editor.GitLineChange{0: editor.GitLineModified}
 
+	fake := &git.Fake{}
+	fake.Script("diff --unified=3 HEAD -- "+target,
+		"@@ -1 +1 @@\n-hell\n+hello\n", nil)
+	a.gitRunner = fake
+
 	if !a.openGitHunkAt(tab, 0, 0) {
 		t.Fatal("expected gutter marker click to be handled")
 	}
-	if !infoIsOpen(a) {
-		t.Fatal("expected git hunk click to open info modal")
+	if a.anyModalOpen() {
+		t.Fatal("the git read is off-thread; the click must not open anything inline")
+	}
+	pumpDiffLoad(t, a)
+	if !diffIsOpen(a) {
+		t.Fatal("the posted event should open the hunk diff")
+	}
+	if body := strings.Join(diffOv(t, a).raw, "\n"); !strings.Contains(body, "+hello") {
+		t.Fatalf("scripted hunk missing, got:\n%s", body)
 	}
 }
 
@@ -635,5 +671,53 @@ func TestDragRelease_NonEditorDragDoesNotCopy(t *testing.T) {
 
 	if a.clipBuf != "keep me" {
 		t.Fatalf("sidebar-drag release must not copy, clipBuf = %q", a.clipBuf)
+	}
+}
+
+// TestHandleMouse_FindBarPressDoesNotArmEditorDrag pins the press-branch
+// regression: dragMode used to be set to "editor" for every left press in
+// the middle band of the screen, whether or not the press actually landed
+// on text. With the find bar open the editor rect shrinks by a row, so the
+// bar's own row falls inside that band — editorPress correctly no-ops
+// there (the hit-test rejects it), but the drag armed anyway and the next
+// motion event dragged out a selection the user never started. The bar
+// stays mouse-transparent (ADR-0001); it just must not arm a drag.
+func TestHandleMouse_FindBarPressDoesNotArmEditorDrag(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "p.txt")
+	if err := os.WriteFile(target, []byte("hello world\nsecond line\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	a.openFind()
+
+	_, fy, _, _ := a.findBarRect()
+	x := a.sidebarW() + 10
+	a.handleMouse(tcell.NewEventMouse(x, fy, tcell.Button1, tcell.ModNone))
+
+	if a.dragMode != "" {
+		t.Fatalf("press on the find-bar row must not arm a drag, got %q", a.dragMode)
+	}
+
+	// The follow-up motion is where the old behavior did its damage.
+	a.handleMouse(tcell.NewEventMouse(x+8, fy, tcell.Button1, tcell.ModNone))
+	if tab := a.activeTabPtr(); tab.HasSelection() {
+		t.Fatalf("sliding along the find bar must not select editor text: anchor=%v cursor=%v",
+			tab.Anchor, tab.Cursor)
+	}
+}
+
+// TestHandleMouse_EmptyEditorPressDoesNotArmEditorDrag covers the other
+// half of the same bug: with no tab open there is no caret to place, so a
+// press in the empty editor body must leave the drag state alone rather
+// than parking a stale "editor" drag that survives until the next release.
+func TestHandleMouse_EmptyEditorPressDoesNotArmEditorDrag(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+
+	a.handleMouse(tcell.NewEventMouse(a.sidebarW()+10, 5, tcell.Button1, tcell.ModNone))
+
+	if a.dragMode != "" {
+		t.Fatalf("press with no open tab must not arm a drag, got %q", a.dragMode)
 	}
 }

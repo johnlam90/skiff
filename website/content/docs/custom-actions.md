@@ -51,7 +51,7 @@ The full set of env vars available to every action's shell:
 
 Prompt-less actions only enable when there's a file open — their command lines almost always reference `$FILE`. Actions with `prompts` stay enabled with no tab open, since they're typically pulling something *into* the project rather than acting on what's already there.
 
-Commands run in a background goroutine, so a slow `scp` or hanging `ssh` won't freeze the editor. Success flashes in the status bar and forces an immediate sidebar refresh so a freshly-pulled file shows up without waiting on the auto-refresh tick. Failure opens an info modal with the captured `stderr` so the actual diagnostic is visible (the full output is also in `actions.log`).
+Commands run in a background goroutine, so a slow `scp` or hanging `ssh` won't freeze the editor. Every run forces an immediate sidebar refresh, so a freshly-pulled file shows up without waiting on the auto-refresh tick. How the result is reported scales with how much there is to report: a fast, silent success just flashes in the status bar; a success that printed something or took longer than a second opens an info modal with the output (and how long it took); a failure always opens the modal with the captured `stderr`, because that is exactly the case where a one-line flash truncated the diagnostic you needed. Both modals cap the inline output and point at `actions.log` for the rest.
 
 ## Prompts
 

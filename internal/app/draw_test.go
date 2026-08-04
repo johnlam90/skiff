@@ -22,6 +22,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/icons"
+	"github.com/johnlam90/skiff/internal/theme"
 )
 
 // TestDetectLangLabel covers the language label helper's three cases.
@@ -327,6 +328,149 @@ func TestDrawEmptyEditor_ClipsToEditorRect(t *testing.T) {
 	ex, _, _, _ := a.editorRect()
 	if r := cells[hintRow*w+ex].Runes[0]; r != 'C' {
 		t.Fatalf("hint should start at the editor's left edge, got %q", r)
+	}
+}
+
+// TestDrawEmptyEditor_NamesKeyboardRoutes pins the second hint line. The
+// mouse hint alone is a dead end on an SSH session with no mouse
+// reporting, so the empty state has to name the Esc-leader gestures that
+// actually open something: Esc p, Esc n, and Esc Esc for the menu.
+func TestDrawEmptyEditor_NamesKeyboardRoutes(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.draw()
+	a.screen.Show()
+
+	for _, want := range []string{"Esc p", "find file", "Esc n", "new file", "Esc Esc"} {
+		if !screenHasText(t, a, want) {
+			t.Errorf("empty editor should mention %q", want)
+		}
+	}
+}
+
+// TestDrawEmptyEditor_HintsAreLeaderBindings guards the hint text
+// against the bindings drifting out from under it: every key the second
+// hint advertises must still be a live leader binding, because a hint
+// that names a removed gesture is worse than no hint.
+func TestDrawEmptyEditor_HintsAreLeaderBindings(t *testing.T) {
+	hint := emptyEditorHints[len(emptyEditorHints)-1]
+	bound := map[rune]bool{}
+	for _, b := range leaderBindings() {
+		bound[b.key] = true
+	}
+	for _, key := range []rune{'p', 'n'} {
+		if !bound[key] {
+			t.Fatalf("hint %q advertises Esc %c but nothing is bound to it", hint, key)
+		}
+	}
+}
+
+// TestDrawEmptyEditor_ClipsEveryHintRow extends the narrow-pane clip
+// guarantee to the keyboard hint: the longer second line is the one most
+// likely to overrun, and it must not paint on the splitter either.
+func TestDrawEmptyEditor_ClipsEveryHintRow(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.SetSize(60, 24)
+	a.width, a.height = scr.Size()
+	a.draw()
+	a.screen.Show()
+
+	cells, w, _ := scr.GetContents()
+	_, ey, _, eh := a.editorRect()
+	sx := a.splitterX()
+	for row := range len(emptyEditorHints) {
+		y := ey + eh/2 + 1 + row
+		if r := cells[y*w+sx].Runes[0]; r != '│' {
+			t.Fatalf("hint row %d bled onto the splitter: %q", row, r)
+		}
+	}
+}
+
+// TestDrawStatusBar_DiskConflictMarker pins the persistent conflict
+// warning: dismissing the conflict overlay must not mean forgetting the
+// conflict, so the status bar keeps a marker until the tab is saved or
+// reloaded.
+func TestDrawStatusBar_DiskConflictMarker(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("disk\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	a.draw()
+	a.screen.Show()
+	if screenHasText(t, a, "disk conflict") {
+		t.Fatal("no conflict recorded, marker must not show")
+	}
+
+	a.activeTabPtr().Dirty = true
+	a.noteDiskConflict(target, time.Now())
+	a.draw()
+	a.screen.Show()
+	if !screenHasText(t, a, "disk conflict") {
+		t.Fatal("unresolved conflict should keep a status-bar marker")
+	}
+
+	// Saving resolves it — a clean buffer can't still be in conflict.
+	a.activeTabPtr().Dirty = false
+	a.draw()
+	a.screen.Show()
+	if screenHasText(t, a, "disk conflict") {
+		t.Fatal("clean buffer must drop the conflict marker")
+	}
+}
+
+// TestDrawStatusBar_LowColorUsesAttributes pins the degraded-palette
+// wiring: with StatusBG/StatusFg collapsed onto the terminal default,
+// reverse video is the only thing left that says "this row is a bar".
+func TestDrawStatusBar_LowColorUsesAttributes(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.theme = theme.Degrade(a.theme, 16)
+	a.drawStatusBar()
+	a.screen.Show()
+
+	scr := a.screen.(tcell.SimulationScreen)
+	cells, w, _ := scr.GetContents()
+	_, sy, _, _ := a.statusRect()
+	_, _, attrs := cells[sy*w].Style.Decompose()
+	if attrs&tcell.AttrReverse == 0 {
+		t.Fatalf("degraded status bar attrs = %v, want AttrReverse", attrs)
+	}
+}
+
+// TestDrawTabBar_LowColorMarksActiveTabWithAttributes covers the tab
+// strip half of the same fallback: on a degraded palette the active
+// tab's background matches every other tab's, so Attrs.ActiveTab has to
+// carry the distinction.
+func TestDrawTabBar_LowColorMarksActiveTabWithAttributes(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x\n"), 0o644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	a := newTestApp(t, dir)
+	a.openFile(filepath.Join(dir, "a.txt"))
+	a.openFile(filepath.Join(dir, "b.txt"))
+	a.theme = theme.Degrade(a.theme, 16)
+	a.drawTabBar()
+	a.screen.Show()
+
+	cells, w, _ := a.screen.(tcell.SimulationScreen).GetContents()
+	want := a.theme.Attrs.ActiveTab
+	if want == 0 {
+		t.Fatal("degraded palette should define an ActiveTab attribute")
+	}
+	for _, r := range a.lastTabRects {
+		_, _, attrs := cells[0*w+r.X].Style.Decompose()
+		active := r.Index == a.tabs.ActiveIndex()
+		if active && attrs&want != want {
+			t.Fatalf("active tab attrs = %v, want %v set", attrs, want)
+		}
+		if !active && attrs&want == want {
+			t.Fatalf("inactive tab must not wear the active attributes (%v)", attrs)
+		}
 	}
 }
 

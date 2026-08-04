@@ -29,6 +29,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/overlay"
 	"github.com/johnlam90/skiff/internal/theme"
 )
@@ -131,9 +132,102 @@ func annotateDiffSpans(rows []diffRow) {
 	}
 }
 
+// diffLoadKind names which surface asked for a diff. The two differ
+// only in what they do when git reports nothing: the menu entry flashes
+// (the user asked a question and deserves the answer inline), while a
+// gutter click opens an info modal — the marker promised a change, so
+// its absence is surprising enough to warrant a dialog.
+type diffLoadKind int
+
+const (
+	// diffLoadFile is ≡ → Diff this file.
+	diffLoadFile diffLoadKind = iota
+	// diffLoadHunk is a click on an editor gutter change marker.
+	diffLoadHunk
+)
+
+// diffLoadEvent carries a finished background diff load onto the main
+// event loop, following the same custom-event pattern as
+// gitStatusEvent. gen and tabPath are the staleness guards — see
+// handleDiffLoaded.
+type diffLoadEvent struct {
+	when    time.Time
+	gen     int
+	kind    diffLoadKind
+	title   string
+	tabPath string
+	lines   []string
+}
+
+// When satisfies the tcell.Event interface.
+func (e *diffLoadEvent) When() time.Time { return e.when }
+
+// requestDiff runs load on a background goroutine and posts the result
+// back as a diffLoadEvent. Both callers are click paths and
+// internal/git's read timeout is ten seconds, so running the diff inline
+// meant one click on a gutter marker could freeze the editor for that
+// long on a slow or network-mounted repo. load receives an immutable
+// *git.Repo and must close over nothing but plain values captured here,
+// on the main thread — it never touches App, tab, or tree state.
+//
+// Every request bumps diffLoadGen and every request spawns. A click is a
+// discrete, low-rate gesture bounded by git's own read deadline, so the
+// newest click winning matters more than capping concurrency; the
+// generation check in handleDiffLoaded is what makes that safe.
+func (a *App) requestDiff(kind diffLoadKind, title, tabPath string, load func(*git.Repo) []string) {
+	a.diffLoadGen++
+	gen := a.diffLoadGen
+	repo := a.readRepo()
+	scr := a.screen
+	// Acknowledge the click immediately: the diff is a git round trip
+	// away, and a click that paints nothing reads as a dropped click.
+	a.flash("Loading diff…")
+	go func() {
+		lines := load(repo)
+		_ = scr.PostEvent(&diffLoadEvent{
+			when:    time.Now(),
+			gen:     gen,
+			kind:    kind,
+			title:   title,
+			tabPath: tabPath,
+			lines:   lines,
+		})
+	}()
+}
+
+// handleDiffLoaded opens the diff a background load produced, or
+// explains its absence. Three things can have happened while git was
+// working and all of them mean "drop it": a newer request superseded
+// this one (gen), an overlay went up (a diff yanking itself over a
+// prompt the user is typing into is worse than no diff at all), or the
+// active tab moved on, which would leave the diff describing a file
+// that is no longer in front of the user.
+func (a *App) handleDiffLoaded(e *diffLoadEvent) {
+	if e.gen != a.diffLoadGen || a.anyModalOpen() {
+		return
+	}
+	tab := a.activeTabPtr()
+	if tab == nil || tab.Path != e.tabPath {
+		return
+	}
+	if len(e.lines) == 0 {
+		switch e.kind {
+		case diffLoadHunk:
+			a.openInfo("Git change", []string{"No git diff found for this line."})
+		default:
+			a.flash("No uncommitted changes in this file")
+		}
+		return
+	}
+	// The file is already open in front of the user, so the diff view
+	// gets no [ Open file ] button — Close is the only way out.
+	a.openDiffView(e.title, e.lines, "", e.tabPath)
+}
+
 // menuDiffFile is the ≡ menu entry that opens the active tab's own
 // diff — the same view a Git panel row click gives, without having to
-// leave the file to reach it.
+// leave the file to reach it. The git call itself runs off-thread; see
+// requestDiff.
 func (a *App) menuDiffFile() {
 	a.closeMenu()
 	tab := a.activeTabPtr()
@@ -144,19 +238,16 @@ func (a *App) menuDiffFile() {
 	if a.tree != nil {
 		kind = a.tree.DirtyFiles[tab.Path]
 	}
-	lines := loadGitFileDiff(a.rootDir, a.diffBase, tab.Path, kind == filetree.GitChangeAdded)
-	if len(lines) == 0 {
-		a.flash("No uncommitted changes in this file")
-		return
-	}
 	title := filepath.Base(tab.Path)
 	if a.tree != nil {
 		if rel, ok := relFromRoot(tab.Path, a.tree.Root.Path); ok && rel != "." {
 			title = filepath.ToSlash(rel)
 		}
 	}
-	// The file is already open in front of the user — no Open button.
-	a.openDiffView("Diff · "+title, lines, "", tab.Path)
+	base, path, untracked := a.diffBase, tab.Path, kind == filetree.GitChangeAdded
+	a.requestDiff(diffLoadFile, "Diff · "+title, tab.Path, func(repo *git.Repo) []string {
+		return repoFileDiff(repo, base, path, untracked)
+	})
 }
 
 // hasDiffableTab is the menu enabled-predicate for Diff this file: the

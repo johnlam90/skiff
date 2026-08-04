@@ -41,9 +41,11 @@ The fastest way onto a Linux box — including remote SSH targets and Alpine ima
 curl -fsSL https://raw.githubusercontent.com/johnlam90/skiff/main/install.sh | sh
 ```
 
-The script detects your OS and architecture (`linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`), downloads the matching archive from the latest GitHub Release, extracts the `skiff` binary, and drops it into `~/.local/bin` if writable, otherwise `/usr/local/bin`. Re-run the same command to upgrade.
+The script detects your OS and architecture (`linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`), downloads the matching archive from the latest GitHub Release, verifies it against the release's published `checksums.txt`, extracts the `skiff` binary, and drops it into `~/.local/bin` if writable, otherwise `/usr/local/bin`. Re-run the same command to upgrade.
 
-It's plain POSIX `sh` — no bash, no curl-isms. It needs `tar` and one of `curl` or `wget`. Override behavior with environment variables:
+A missing checksum entry, a mismatch, or a host with no sha256 tool aborts the install. There's deliberately no flag to skip verification — this is remote code about to land on your `PATH`.
+
+It's plain POSIX `sh` — no bash, no curl-isms. It needs `tar`, one of `curl` or `wget`, and one of `sha256sum` or `shasum`. Override behavior with environment variables:
 
 ```sh
 # Pin a specific version (any tag from the Releases page).

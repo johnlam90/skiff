@@ -60,7 +60,9 @@ The finder index refreshes every 10 seconds and immediately after any create / r
 
 ## My terminal's color is off
 
-Skiff assumes 24-bit truecolor. Most modern terminals support it, but some older ones default to 256-color mode. Check `tput colors` — anything less than `16777216` means truecolor isn't on. Set `COLORTERM=truecolor` in your shell rc and reconnect.
+Skiff's palettes are authored in 24-bit color. Most modern terminals support it; some older ones default to 256-color mode. Check `tput colors` — anything less than `16777216` means truecolor isn't on. Set `COLORTERM=truecolor` in your shell rc and reconnect, and if you run tmux, start it with `tmux -2`.
+
+Below 256 colors Skiff stops relying on hue and switches to an attribute-based palette instead: reverse video for the selection and the status bar, bold for the active tab and dirty markers, underline for the current find match. That is deliberate, not a broken theme — on a 16-color `TERM` every gray in a theme collapses onto the same ANSI "bright black", so a color-only cue would be invisible. If the editor looks unexpectedly monochrome, `tput colors` is the thing to check.
 
 ## The image preview is blocky
 

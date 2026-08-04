@@ -61,6 +61,11 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 	// Alt+s and a quick double-Esc as Alt+Esc. Treat both as the gesture
 	// the user actually made. An Alt rune is never inserted — outside a
 	// paste it is always a mangled Esc sequence, not text.
+	//
+	// Alt+Left / Alt+Right are NOT that gesture — they are word motion,
+	// handled with the other arrows further down so the Git panel and
+	// the image-tab guard get their say first. They fall through here
+	// having only disarmed the leader, which is correct either way.
 	if !a.pasting && ev.Modifiers()&tcell.ModAlt != 0 {
 		a.lastEscape = time.Time{}
 		switch ev.Key() {
@@ -75,6 +80,17 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 			}
 			return
 		}
+	}
+
+	// The focused Git panel claims the navigation keys — arrows, Space,
+	// Enter and Tab — so a keyboard-only user can walk the change list,
+	// stage rows and reach the action buttons without a mouse (Button3
+	// and mouse reporting are exactly what macOS Terminal + tmux eat).
+	// It sits below the overlay/strip checks so an open overlay always
+	// wins, and above the Esc block because Esc has to fall through:
+	// it drops the panel's capture and still arms the leader.
+	if a.handleGitPanelKey(ev) {
+		return
 	}
 
 	if ev.Key() == tcell.KeyEsc {
@@ -130,6 +146,11 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		return
 	}
 	extend := ev.Modifiers()&tcell.ModShift != 0
+	// Alt turns the horizontal arrows into word motion. Alt is safe where
+	// Ctrl is not: no multiplexer prefix and no terminal flow control
+	// claims it, and every terminal already sends Alt+arrow for exactly
+	// this. See leader.go for the Esc-b / Esc-e equivalents.
+	byWord := ev.Modifiers()&tcell.ModAlt != 0
 
 	switch ev.Key() {
 	case tcell.KeyUp:
@@ -137,9 +158,17 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 	case tcell.KeyDown:
 		tab.MoveCursor(1, 0, extend)
 	case tcell.KeyLeft:
-		tab.MoveCursor(0, -1, extend)
+		if byWord {
+			tab.MoveWordLeft(extend)
+		} else {
+			tab.MoveCursor(0, -1, extend)
+		}
 	case tcell.KeyRight:
-		tab.MoveCursor(0, 1, extend)
+		if byWord {
+			tab.MoveWordRight(extend)
+		} else {
+			tab.MoveCursor(0, 1, extend)
+		}
 	case tcell.KeyHome:
 		tab.MoveLineHome(extend)
 	case tcell.KeyEnd:
@@ -151,7 +180,14 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		_, h := a.editorSize()
 		tab.MoveCursor(h, 0, extend)
 	case tcell.KeyEnter:
-		tab.InsertString("\n")
+		// Inside a bracketed paste the source text's own indentation is
+		// already in the stream; adding the current line's on top would
+		// double every level of pasted code.
+		if a.pasting {
+			tab.InsertString("\n")
+		} else {
+			tab.InsertNewline()
+		}
 	case tcell.KeyBackspace, tcell.KeyBackspace2:
 		tab.Backspace()
 	case tcell.KeyDelete:

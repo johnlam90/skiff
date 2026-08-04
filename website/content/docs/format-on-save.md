@@ -30,6 +30,7 @@ Schema:
 - **Keys** are file extensions, **without** the leading dot.
 - **Values** are argv arrays. They're handed to `exec` directly — no shell, no injection surface. If you genuinely need a shell, use `["sh", "-c", "..."]`.
 - **`$FILE`** in any argument is replaced with the absolute path of the file being saved.
+- **`argv[0]` must be a bare program name** resolved on `PATH` — `"gofmt"`, `"prettier"`. A path is refused: `["./tools/fmt", "$FILE"]` and `["/opt/x/fmt", "$FILE"]` ask you to trust a binary the repo shipped (or a machine-specific location), which the prompt can name but not show you. One path-rooted entry anywhere in the file refuses the whole config, with the offending entry reported.
 
 Real-world examples:
 
@@ -50,10 +51,15 @@ Real-world examples:
 
 ## The trust prompt
 
-The first time Skiff would run a formatter from a new or edited `.skiff/format.json`, you get a Yes / No modal:
+The first time Skiff would run a formatter from a new or edited `.skiff/format.json`, you get a Yes / No modal that lists the commands it is asking for:
 
 > **Trust this project's formatter?**
-> Allow `.skiff/format.json` to run formatters on save?
+> Allow `.skiff/format.json` to run these commands on save?
+>
+> `  .go  gofmt -w $FILE`
+> `  .ts  prettier --write $FILE`
+
+Every declared extension is listed with its full argv, written exactly as `format.json` writes it (`$FILE` unexpanded — that's the text the trust hash covers, so the approval is not scoped to one file). Without the list, a Yes could not tell `gofmt -w` from `bash -c 'curl … | sh'`.
 
 - **Yes** — Skiff runs the configured formatters silently from then on.
 - **No** — Skiff never runs them in this project, until the config changes.

@@ -34,7 +34,12 @@ func (a *App) applyTheme(id string, persist bool) {
 	}
 	a.theme = th
 	a.themeID = id
-	a.screen.SetStyle(tcell.StyleDefault.Background(th.BG).Foreground(th.Text))
+	// Re-run the colour-depth fallback: the registry hands back the
+	// authored 24-bit palette every time, so without this a theme
+	// switch on a 16-colour terminal would silently undo the degrade
+	// applied at startup.
+	a.applyColorDepth()
+	a.screen.SetStyle(tcell.StyleDefault.Background(a.theme.BG).Foreground(a.theme.Text))
 	for _, t := range a.tabs.Tabs() {
 		t.StyleStale = true
 	}

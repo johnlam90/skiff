@@ -185,7 +185,9 @@ func TestMenuFileHistory_ScopesToActiveTab(t *testing.T) {
 }
 
 // TestMenuCommitHistory_Predicates pins the ≡ rows' gating: both
-// history rows grey out outside a repo.
+// history rows — demoted into the Git… drill-in by the menu redesign —
+// stay disabled outside a repo, which is what keeps them out of the
+// pick entirely there.
 func TestMenuCommitHistory_Predicates(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	if menuItemByLabel(t, a, "Commit history").enabled(a) {

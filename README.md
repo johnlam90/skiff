@@ -65,13 +65,28 @@ The goals, in order:
   scroll wheel scrolls, double-click selects a word, drag past the edge
   to auto-scroll a selection.
 - **Syntax highlighting** for dozens of languages via Chroma.
-- **Action menu** opened with the `≡` icon, right-click, or double-tap
-  `Esc`. Keyboard navigation works too — arrow keys + `Enter`.
+- **Action menu, filterable** — open it with the `≡` icon, right-click,
+  or a double-tap of `Esc`, then just type: the filter narrows every
+  group at once ("branch" finds **Switch branch…**, and so does "sb").
+  Seven groups — File, Edit, Go, Git, View, Custom, Quit — with the git
+  verbs and the file-clipboard actions one keystroke deeper behind
+  **Git…** and **File clipboard…**. Arrows + `Enter` still walk the
+  list; `Esc` clears the filter, a second `Esc` closes. Rows that
+  can't apply right now (git verbs with no repo, edit verbs with no
+  tab) are hidden rather than greyed out.
 - **Live file tree** — auto-refreshes every 10 seconds so files added
   or removed from disk show up without you doing anything.
 - **External change detection** — if a file on disk changes underneath
   an open clean buffer, the editor reloads it; if your buffer is dirty,
-  you get a heads-up; if the file is deleted, the tab is flagged once.
+  you get the [disk-conflict prompt](#when-a-file-changes-under-you) —
+  Keep mine / Reload / Diff — instead of quietly overwriting the other
+  writer on your next save; if the file is deleted, the tab is flagged
+  once.
+- **Refuses what it can't edit** — a file with NUL bytes in its first
+  8KB (a zip, a stray binary) or one larger than 32 MiB never reaches a
+  buffer. The status bar says which, and names the size, instead of the
+  editor going away for a while: a several-hundred-megabyte log used to
+  load synchronously on a single click.
 - **Git awareness** — changed files tint the file tree, gutter bars mark
   added/modified/deleted lines (click one for a diff popup), the status
   bar shows the branch plus a change count, and the sidebar's
@@ -102,12 +117,26 @@ The goals, in order:
   draggable scrollbar on the editor's right edge with the file's git
   changes marked along it, so "where did I change this file" is one
   glance (and one click) away.
+- **Editing that keeps up** — `Enter` opens the new line with the same
+  indentation the old one had, plus one level after an opening `{`,
+  `[`, `(` (or a trailing `:` in Python / YAML). `Alt+←` / `Alt+→`
+  move the caret a word at a time (`Shift` extends the selection), and
+  the bracket under the caret is highlighted together with its
+  partner — `Esc %` jumps between them. An unmatched bracket is marked
+  in the error color rather than passed over in silence.
+- **Respects the file's conventions** — the indent unit is read off the
+  file itself (tab vs N spaces), and a file that arrived with CRLF
+  line endings is written back with CRLF, so editing one line of a
+  Windows-authored file doesn't turn the whole file into a diff.
 - **File clipboard** — cut, copy, paste, and duplicate files or folders
   from the tree's right-click menu or the main `≡` menu. Nothing is
   ever overwritten: a taken name becomes `name copy.ext`.
 - **Session restore** — reopening a project brings back your open tabs
   (cursor and scroll included), expanded folders, and sidebar exactly
-  as you left them.
+  as you left them. State lives in one file per project under
+  `~/.local/state/skiff/sessions/` (`$XDG_STATE_HOME` when set), so a
+  corrupt or half-written file can only ever cost you that one
+  project's tab list.
 - **26 themes with live preview** — `≡` → **Theme…** opens a picker
   that restyles the whole editor as you arrow (or hover) through the
   list; type to filter ("cat" → the Catppuccins), `Enter` keeps,
@@ -119,6 +148,12 @@ The goals, in order:
   menu, or drag the splitter to resize it.
 - **Clipboard over SSH** — OSC 52, including a `tmux` passthrough so
   copy works from inside a tmux session on a remote host.
+- **Survives a low-color terminal** — under 256 colors the palettes
+  stop being distinguishable, so skiff spends attributes instead of
+  hue: reverse video for the selection and the status bar, bold for the
+  active tab and dirty markers, underline for the current find match.
+  Plain `TERM=xterm`, a serial console, and a `tmux` started without
+  `-2` all stay readable.
 - **Format on save** — opt-in per-project via `.skiff/format.json`
   with a first-run trust prompt so cloning a repo never silently
   executes its commands. See [Format on save](#format-on-save).
@@ -167,9 +202,13 @@ curl -fsSL https://raw.githubusercontent.com/johnlam90/skiff/main/install.sh | s
 
 It detects your OS / arch, downloads the matching archive from the
 latest [GitHub Release](https://github.com/johnlam90/skiff/releases),
-and drops the `skiff` binary into `~/.local/bin` (or `/usr/local/bin`
-when `~/.local/bin` isn't writable). **Re-run the same command to
-upgrade** — it always fetches the latest tagged release.
+verifies it against that release's published `checksums.txt`, and drops
+the `skiff` binary into `~/.local/bin` (or `/usr/local/bin` when
+`~/.local/bin` isn't writable). **Re-run the same command to
+upgrade** — it always fetches the latest tagged release. A missing
+checksum entry, a mismatch, or a host with no sha256 tool aborts the
+install; there is deliberately no way to skip verification, because
+this is remote code about to land on your `$PATH`.
 
 Override behaviour with environment variables:
 
@@ -184,8 +223,8 @@ curl -fsSL https://raw.githubusercontent.com/johnlam90/skiff/main/install.sh \
 ```
 
 The script is plain POSIX `sh` — it works on Alpine / BusyBox / any
-SSH target where you don't want to depend on bash. It only needs `tar`
-plus one of `curl` or `wget`.
+SSH target where you don't want to depend on bash. It needs `tar`, one
+of `curl` or `wget`, and one of `sha256sum` or `shasum`.
 
 ### Other platforms (manual binary install)
 
@@ -219,7 +258,8 @@ Then:
 - Click a file in the tree to open it.
 - Click a tab to switch, click the `×` to close it.
 - Click `≡` (top-left), right-click anywhere, or double-tap `Esc`
-  for the action menu — including New file, Rename, Delete.
+  for the action menu — including New file, Rename, Delete — then type
+  to filter it down.
 - If your terminal forwards Button3, right-click on a file or folder
   in the tree opens a per-item context menu (New File on folders,
   Rename, Delete). macOS Terminal + tmux often swallows right-click,
@@ -264,13 +304,25 @@ within half a second tap one of the letters below.
 | `Esc F`     | Find in project        |
 | `Esc l`     | Go to line             |
 | `Esc p`     | Find file in project   |
-| `Esc g`     | Git changes            |
+| `Esc b`     | Move to previous word  |
+| `Esc e`     | Move to next word      |
+| `Esc %`     | Go to matching bracket |
+| `Esc g`     | Focus the Git panel    |
 
 A lone `Esc` is harmless — if you don't follow it with a bound key
 within the window, your next keystroke goes to the editor as normal,
 so accidental `Esc` taps never swallow a real character. And while the
 window is armed, a one-row cheat-strip above the status bar lists every
 key that works right now — no memorizing required.
+
+Under `tmux`, a fast `Esc s` often reaches the editor as `Alt+s`;
+skiff treats the two as the same gesture, so the table works either
+way — including while the ≡ menu is up, where a bare `s` types into
+the filter instead and `Alt+s` still saves.
+
+Two motions don't need the leader at all: `Alt+←` / `Alt+→` move by
+word (`Shift` extends the selection), and `Enter` indents the new line
+to match the one it split.
 
 Everything reachable by hotkey is also reachable from the `≡` menu —
 the hotkeys are just a faster path for the actions you reach for most.
@@ -336,7 +388,7 @@ fuzzy file finder over every non-ignored file in the project:
 ### Git changes
 
 The sidebar has two tabs: **EXPLORER** and **GIT**. Click `GIT` (or
-press `Esc g`, pick **Git changes** from the `≡` menu, or click the
+press `Esc g`, pick **Git changes** from `≡` → **Git…**, or click the
 branch segment in the status bar) and the sidebar flips to the
 uncommitted-changes list — VS Code's Source Control view, shrunk to a
 Skiff panel:
@@ -355,6 +407,16 @@ Skiff panel:
   **R** renamed — the same colors the file tree uses. The file name
   leads and the directory trails dimmed, so the narrow sidebar stays
   scannable.
+- **Drive it from the keyboard.** `Esc g` (and the menu route) hands
+  the keyboard to the panel: `↑`/`↓` walk the rows, `Space` toggles the
+  selected row's commit checkbox, `Enter` opens its diff, `Tab` (or
+  `←`/`→`) moves between the row list and the action buttons, `Enter`
+  runs the focused one, and `Esc` gives the keys back to the editor.
+  While it's armed, a hint strip docks at the bottom of the panel
+  naming the bindings and the focused button's verb — which is what
+  makes the compact `[✓][↑][↓][⋯]` ladder decodable on a narrow
+  sidebar. No `Ctrl+` anything, so it works over SSH inside tmux where
+  Button3 never arrives.
 - **Click a row to see its diff** — side-by-side on a wide terminal
   (old text left, new text right, line numbers on both, changes
   aligned row-for-row like VS Code's diff editor), automatically
@@ -369,7 +431,10 @@ Skiff panel:
   parked on its first changed line; from there the gutter bars mark
   each hunk — and clicking a gutter bar opens this same diff view for
   that hunk. **Diff this file** in the `≡` menu shows the active
-  tab's own diff without a trip through the panel.
+  tab's own diff without a trip through the panel. Both of those read
+  git on a background goroutine — the click flashes "Loading diff…"
+  and the view appears when git answers, so a slow or network-mounted
+  repo can't freeze the editor on the way there.
 - The `GIT` tab wears a change-count badge (`GIT 4`), and git status
   collection runs on a background goroutine — a slow `git status` on
   a huge or network-mounted repo can never stall typing.
@@ -420,11 +485,37 @@ Skiff panel:
   clicking it is the mouse-first way in from anywhere.
 - The list refreshes live on the same 10-second cadence as the file
   tree, so a `git checkout` in the next tmux pane empties it on its
-  own. `Esc g` toggles back to the explorer, or just click `EXPLORER`.
+  own. Click `EXPLORER` in the sidebar header to switch the sidebar
+  back to the tree.
 
-Read-only by design: staging, committing, and discarding stay in your
-shell. Skiff shows you what changed and takes you there — it
-doesn't try to be a git client.
+Staging is per-commit and lives in the panel's checkboxes rather than
+a persistent index: skiff never runs `git add`, so anything you staged
+in a shell stays exactly as you left it. Rewriting history stays in
+your shell too — the log views are read-only.
+
+### When a file changes under you
+
+The pane next door running `git pull` or `sed -i` is the normal case
+this editor was built for, so a file changing on disk is handled
+explicitly rather than flashed at you:
+
+- **Clean buffer** — the tab silently reloads on the next 10-second
+  tick. Nothing to decide.
+- **Dirty buffer** — a three-way prompt: **Keep mine** (your buffer
+  wins on the next save), **Reload** (take what's on disk and drop
+  your edits), or **Diff** (your buffer against the bytes on disk, in
+  the ordinary diff viewer, so you can answer "whose change matters?"
+  before choosing). Focus starts on Keep mine, so a reflex `Enter`
+  can't discard work.
+- The status bar keeps a `⚠ disk conflict` marker until the conflict is
+  actually resolved — dismissing the prompt doesn't make it go away —
+  and `≡` → **Resolve disk conflict…** reopens the prompt. Looking at
+  the diff is not resolving; saving or reloading is.
+- **Deleted file** — the tab is flagged once and left alone.
+
+Deleting a file that has unsaved changes in an open tab prompts first
+(naming the files, or how many there are for a folder delete) instead
+of discarding the buffer with the file.
 
 ## Custom actions (open remote files on your laptop)
 
@@ -483,8 +574,11 @@ Each entry needs:
 
 The action only enables when there's a file open. Commands run in a
 background goroutine, so a slow `scp` or hanging `ssh` won't freeze
-the editor; success or failure flashes in the status bar when it
-finishes.
+the editor. A quick, silent run just flashes in the status bar; a
+failure always opens a modal with the captured stderr (a one-line
+flash truncated exactly the diagnostics you needed), and so does a
+success that printed something or took longer than a second — with a
+pointer to the full log below.
 
 ### Debugging — every run is logged
 
@@ -591,21 +685,37 @@ Create `.skiff/format.json` in your project root:
 ### First save: trust prompt
 
 The first time Skiff would run a formatter from a new (or edited)
-`.skiff/format.json`, you get a Yes / No prompt:
+`.skiff/format.json`, you get a Yes / No prompt that spells out
+exactly what it is asking for:
 
 > **Trust this project's formatter?**
-> Allow .skiff/format.json to run formatters on save?
+> Allow .skiff/format.json to run these commands on save?
+>
+> `  .go  gofmt -w $FILE`
+> `  .ts  prettier --write $FILE`
+
+Every declared extension and its full argv is listed, written the way
+`format.json` writes it (`$FILE` unexpanded — that's the text the
+trust hash covers). Without the list, a Yes would be consent to
+something you were never shown.
 
 Pick **Yes** once and Skiff will run the configured formatters
-silently from then on. Pick **No** and it will never run them in this
-project — until the config file changes, at which point you'll be
-prompted again. The remembered answer (and the SHA-256 hash of the
-config it applies to) lives in
+silently from then on. Pick **No** (or `Esc`) and it will never run
+them in this project — until the config file changes, at which point
+you'll be prompted again. The remembered answer (and the SHA-256 hash
+of the config it applies to) lives in
 `~/.config/skiff/format-trust.json`.
 
 The hash is the security trick: a teammate can't push a "v2" of the
 config that runs `rm -rf` — your editor will re-prompt the next time
 you save, because the file has changed since you trusted it.
+
+One shape is refused outright, trusted or not: `argv[0]` must be a
+bare program name resolved on `PATH` (`gofmt`, `prettier`), never a
+path. `["./tools/fmt", "$FILE"]` or `["/opt/x/fmt", "$FILE"]` turns
+"trust the commands you just read" into "trust every byte in this
+clone", and the prompt can only show you the path, not the code behind
+it. Skiff reports the offending entry and skips the whole config.
 
 ### What happens on save
 
@@ -673,18 +783,25 @@ them while still making it one click to opt a project in.
 
 ```
 .
-├── main.go                   # Entry point — parses optional rootDir arg
+├── main.go                   # Entry point — parses optional rootDir / file[:line]
 ├── internal/
-│   ├── app/                  # Event loop, layout, menu modal, splitter
-│   ├── editor/               # Buffer, tab, cursor, syntax highlighting
+│   ├── app/                  # Event loop, layout, menu, keys, mouse, drawing
+│   ├── editor/               # Buffer, tab, cursor, wrap, indent, brackets, highlighting
 │   ├── filetree/             # Lazy directory tree with identity-preserving refresh
+│   ├── overlay/              # Overlay stack + the prefab floating surfaces
+│   ├── git/                  # Git process boundary + the Snapshot model
+│   ├── search/               # Literal smart-case project search engine
+│   ├── finder/               # Project file index + fuzzy matcher
+│   ├── session/              # Per-project session store
+│   ├── atomicfile/           # Temp-file + fsync + rename writes for config/state
 │   ├── clipboard/            # OSC 52 clipboard with tmux passthrough
 │   ├── customactions/        # Loader for ~/.config/skiff/actions.json
 │   ├── format/               # Format-on-save config + trust store
-│   ├── finder/               # Project file index + fuzzy matcher
-│   ├── theme/                # Tokyo Night-inspired palette
+│   ├── userconfig/           # ~/.config/skiff/config.json (icons, theme, wrap)
+│   ├── icons/                # Nerd Font detection + per-file glyphs
+│   ├── theme/                # 26 palettes + the low-color fallback
 │   └── version/              # Single-line version constant
-├── .github/workflows/        # Auto-release pipeline
+├── .github/workflows/        # Test pipeline + auto-release pipeline
 ├── .goreleaser.yml           # Cross-compile + brew formula config
 ├── Formula/                  # Homebrew formula (written by CI)
 └── Makefile
@@ -699,17 +816,23 @@ make build-linux  # cross-compile a linux/amd64 binary
 make test         # full suite with -race (same as CI)
 make test-short   # quick iteration loop (-short, no race)
 make coverage     # writes coverage.out + a browsable coverage.html
+make lint         # gofmt + go vet + staticcheck (the same three CI gates)
 make tidy         # go mod tidy
 make clean        # rm -rf bin + coverage artifacts
 ```
 
-Every push and PR runs `go test ./...` on Linux + macOS via
-[`.github/workflows/test.yml`](.github/workflows/test.yml). New code
-needs a corresponding `_test.go` — see CLAUDE.md for the bar.
+Every PR runs the pipeline in
+[`.github/workflows/test.yml`](.github/workflows/test.yml) on Linux +
+macOS: `go mod tidy` verification, `go build`, `gofmt -l`, `go vet`,
+a pinned `staticcheck`, then `go test -race ./...`. `make lint` runs
+the three static gates locally. New code needs a corresponding
+`_test.go` — see CLAUDE.md for the bar.
 
 ## Releases
 
-Releases are fully automated. Every push to `main`:
+Releases are fully automated. Every push to `main` runs the test
+workflow first — a red suite, an unformatted file, or a staticcheck
+finding blocks the tag — and then:
 
 1. Reads `internal/version/version.go`.
 2. If that file was hand-edited in the pushed commit, the version is

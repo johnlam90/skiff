@@ -139,10 +139,13 @@ func (n *Info) Draw(scr tcell.Screen) {
 		end = len(n.Lines)
 	}
 	for i, line := range n.Lines[n.scroll:end] {
-		if runeLen(line) > r.W-4 {
-			line = string([]rune(line)[:r.W-4])
-		}
-		drawText(scr, r.X+2, r.Y+3+i, line, DiffLineStyle(th, bg, line))
+		// trimRunes appends the ellipsis a hard rune-slice cut used to
+		// drop, so a clipped stderr path no longer looks like a
+		// complete-but-wrong path. Style is picked from the untruncated
+		// line: a diff marker lives in column 0 either way, and the
+		// ellipsis must not recolor the row.
+		st := DiffLineStyle(th, bg, line)
+		drawText(scr, r.X+2, r.Y+3+i, trimRunes(line, r.W-4), st)
 	}
 	DrawButton(scr, r.X+(r.W-10)/2, r.Y+r.H-3, "[  OK  ]", bg, th.Accent, true)
 	scr.HideCursor()

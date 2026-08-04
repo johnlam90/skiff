@@ -233,7 +233,11 @@ func (a *App) drawTabBar() {
 		}
 		st := tcell.StyleDefault.Background(bg).Foreground(fg)
 		if active {
-			st = st.Bold(true)
+			// On a degraded palette the active tab's BG/Text have
+			// collapsed onto the inactive ones, so Attrs.ActiveTab is
+			// the only thing left separating "focused" from "open".
+			// It is AttrNone on a truecolor palette.
+			st = st.Attributes(tcell.AttrBold | a.theme.Attrs.ActiveTab)
 		}
 		// Preview tabs render in italics — the visual promise that the
 		// next tree click will replace this tab rather than add one.
@@ -254,7 +258,15 @@ func (a *App) drawTabBar() {
 		tab := a.tabs.At(r.Index)
 		col := r.X + 1
 		if tab.Dirty && col >= stripX && col < tx+tw {
-			a.screen.SetContent(col, ty, '●', nil, st.Foreground(a.theme.Modified))
+			// Same story for the dirty dot: Modified is ColorDefault
+			// once the palette degrades, so the marker leans on
+			// Attrs.Modified to stay distinguishable from the name.
+			// Decompose keeps the row's own attributes (bold/italic)
+			// instead of clobbering them.
+			_, _, rowAttrs := st.Decompose()
+			dot := st.Foreground(a.theme.Modified).
+				Attributes(rowAttrs | a.theme.Attrs.Modified)
+			a.screen.SetContent(col, ty, '●', nil, dot)
 		}
 		col += 2 // skip dirty slot.
 		// Per-language Nerd Font glyph between the dirty dot and the
@@ -333,9 +345,22 @@ func (a *App) drawSplitter() {
 	}
 }
 
+// emptyEditorHints are the ways out of the "no file open" state, in the
+// order a new user is likely to want them. Both a mouse line and a
+// keyboard line are shown on purpose: skiff is mouse-first, but its
+// natural habitat is an SSH session where the mouse may not be wired
+// through at all, and a hint that only names the mouse is a dead end
+// there. The Esc leader is the only shortcut mechanism the editor has
+// (no Ctrl+ bindings), so naming its three most useful gestures is the
+// whole keyboard onboarding story.
+var emptyEditorHints = []string{
+	"Click a file in the tree, or  ≡  for the menu",
+	"Esc p  find file  ·  Esc n  new file  ·  Esc Esc  menu",
+}
+
 // drawEmptyEditor paints the placeholder shown when no tabs are open.
-// Both hint lines are trimmed to the editor's width before centering —
-// on a narrow pane the untrimmed 45-rune hint used to start left of the
+// Every line is trimmed to the editor's width before centering — on a
+// narrow pane the untrimmed 45-rune hint used to start left of the
 // editor rect and overwrite file-tree rows and the splitter.
 func (a *App) drawEmptyEditor() {
 	ex, ey, ew, eh := a.editorRect()
@@ -348,18 +373,34 @@ func (a *App) drawEmptyEditor() {
 		}
 	}
 	cy := ey + eh/2
-	msg1 := trimRunes("No file open", ew)
-	msg2 := trimRunes("Click a file in the tree, or  ≡  for the menu", ew)
-	cx1 := ex + (ew-runeLen(msg1))/2
-	for i, r := range msg1 {
+	title := trimRunes("No file open", ew)
+	cx1 := ex + (ew-runeLen(title))/2
+	for i, r := range title {
 		a.screen.SetContent(cx1+i, cy-1, r, nil, bold)
 	}
-	cx2 := ex + (ew-runeLen(msg2))/2
-	for i, r := range msg2 {
-		a.screen.SetContent(cx2+i, cy+1, r, nil, muted)
+	// Hints stack downward from one row below the title. Rows that
+	// would fall outside the editor rect are dropped rather than
+	// clipped, so a two-row pane still shows the title cleanly.
+	for h, hint := range emptyEditorHints {
+		hy := cy + 1 + h
+		if hy >= ey+eh {
+			break
+		}
+		msg := trimRunes(hint, ew)
+		hx := ex + (ew-runeLen(msg))/2
+		for i, r := range msg {
+			a.screen.SetContent(hx+i, hy, r, nil, muted)
+		}
 	}
 	a.screen.HideCursor()
 }
+
+// statusConflictTag is the persistent "this buffer and the file on disk
+// have diverged" marker. It lives in the status bar rather than in a
+// flash because a dismissed conflict overlay must not mean a forgotten
+// conflict — the warning has to survive until the user saves, reloads,
+// or closes the tab.
+const statusConflictTag = "⚠ disk conflict "
 
 // drawStatusBar paints the bottom status bar.
 func (a *App) drawStatusBar() {
@@ -368,7 +409,14 @@ func (a *App) drawStatusBar() {
 	// StatusFg is paired with StatusBG per palette — hardcoding BG here
 	// broke ported themes whose status bar isn't an accent color.
 	fg := a.theme.StatusFg
-	style := tcell.StyleDefault.Background(bg).Foreground(fg).Bold(true)
+	// Attrs.StatusBar is empty (AttrNone) on a truecolor palette, so
+	// this is a no-op there. On a degraded palette StatusBG/StatusFg
+	// have collapsed onto the terminal default and reverse video is
+	// the only thing left that still says "this row is a bar".
+	// Attributes replaces the mask outright, so AttrBold is carried
+	// explicitly rather than chained through .Bold(true).
+	style := tcell.StyleDefault.Background(bg).Foreground(fg).
+		Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar)
 	for cx := sx; cx < sx+sw; cx++ {
 		a.screen.SetContent(cx, sy, ' ', nil, style)
 	}
@@ -400,6 +448,21 @@ func (a *App) drawStatusBar() {
 		if tw+rightWidth < sw {
 			drawAt(a.screen, sx+sw-rightWidth-tw, sy, tag, style)
 			rightWidth += tw
+		}
+	}
+
+	// Persistent disk-conflict marker for the active tab. Drawn after
+	// the transient Esc tag so it sits furthest left of the right-hand
+	// group and never jumps around as the leader arms and expires. It
+	// stays put until the conflict is actually resolved — see
+	// tabDiskConflict.
+	if a.tabDiskConflict(a.activeTabPtr()) {
+		cw := runeLen(statusConflictTag)
+		if cw+rightWidth < sw {
+			warn := style.Foreground(a.theme.Error).
+				Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar | a.theme.Attrs.Error)
+			drawAt(a.screen, sx+sw-rightWidth-cw, sy, statusConflictTag, warn)
+			rightWidth += cw
 		}
 	}
 

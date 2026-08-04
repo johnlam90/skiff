@@ -505,12 +505,13 @@ func TestStatusBarClick_TogglesGitPanel(t *testing.T) {
 }
 
 // TestMenuGitChangesRow pins the ≡ menu contract from CLAUDE.md: the
-// feature must be reachable from the main menu. The row exists, carries
-// the Esc-g shortcut, is greyed out outside a repo, and enabled inside
-// one.
+// feature must be reachable from the main menu. Since the git verbs
+// moved behind the "Git…" drill-in, the row lives there — it still
+// carries the Esc-g shortcut, is greyed out outside a repo, and is the
+// keyboard route into the panel (menuGitChanges arms keyboard focus).
 func TestMenuGitChangesRow(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	item := menuItemByLabel(t, a, "Git changes")
+	item := drillInItemByLabel(t, a, "Git changes")
 	if item.shortcut != "Esc g" {
 		t.Fatalf("shortcut: got %q, want %q", item.shortcut, "Esc g")
 	}
@@ -661,5 +662,379 @@ func TestDrawGitPanel_BranchRowShowsPickerAffordance(t *testing.T) {
 	}
 	if !strings.Contains(row, "main ▾") {
 		t.Fatalf("branch row should carry the picker chevron, got %q", row)
+	}
+}
+
+// keyboardGitApp returns a dirty-repo app in the state Esc-g leaves the
+// user in: Git panel up, keyboard mode armed, two change rows
+// (modified.txt then untracked.txt, sorted).
+func keyboardGitApp(t *testing.T) *App {
+	t.Helper()
+	a, _, _ := dirtyRepoApp(t)
+	a.focusGitPanel()
+	if !a.gitPanelKeysOn() {
+		t.Fatal("Esc-g should hand the keyboard to the Git panel")
+	}
+	if len(a.gitPanelRows) != 2 {
+		t.Fatalf("expected 2 change rows, got %d", len(a.gitPanelRows))
+	}
+	return a
+}
+
+// gitScreenRow draws the app and reads sidebar row y back off the
+// simulation screen — the only way to prove a focus cue is painted
+// rather than merely computed.
+func gitScreenRow(t *testing.T, a *App, y int) string {
+	t.Helper()
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show() // GetContents serves the front buffer.
+	cells, w, _ := scr.GetContents()
+	_, _, sw, _ := a.sidebarRect()
+	var b strings.Builder
+	for x := range sw {
+		if r := cells[y*w+x].Runes; len(r) > 0 {
+			b.WriteRune(r[0])
+		}
+	}
+	return b.String()
+}
+
+// gitHintText draws the app and returns the keyboard hint strip as it
+// is actually painted at the bottom of the sidebar.
+func gitHintText(t *testing.T, a *App) string {
+	t.Helper()
+	_, hint := a.gitPanelBody()
+	_, _, _, sh := a.sidebarRect()
+	out := make([]string, 0, len(hint))
+	for i := range hint {
+		out = append(out, gitScreenRow(t, a, sh-len(hint)+i))
+	}
+	return strings.Join(out, " ")
+}
+
+// TestGitPanelKeys_DownMovesSelection pins the fix for the panel being
+// mouse-only: with keyboard mode armed, ↓ walks the change list, the
+// caret cue follows it on screen, and the ends clamp instead of
+// wrapping so a held arrow key can't lose your place.
+func TestGitPanelKeys_DownMovesSelection(t *testing.T) {
+	a := keyboardGitApp(t)
+	if got := gitScreenRow(t, a, gitPanelListTop); !strings.HasPrefix(got, "›") {
+		t.Fatalf("first row should carry the keyboard caret, got %q", got)
+	}
+
+	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	if a.gitPanelSelected != 1 {
+		t.Fatalf("down should select row 1, got %d", a.gitPanelSelected)
+	}
+	if got := gitScreenRow(t, a, gitPanelListTop+1); !strings.HasPrefix(got, "›") {
+		t.Fatalf("caret should have moved to row 1, got %q", got)
+	}
+	if got := gitScreenRow(t, a, gitPanelListTop); strings.HasPrefix(got, "›") {
+		t.Fatalf("row 0 should have released the caret, got %q", got)
+	}
+
+	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	if a.gitPanelSelected != 1 {
+		t.Fatalf("selection must clamp at the last row, got %d", a.gitPanelSelected)
+	}
+	a.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, 0))
+	a.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, 0))
+	if a.gitPanelSelected != 0 {
+		t.Fatalf("selection must clamp at the first row, got %d", a.gitPanelSelected)
+	}
+}
+
+// TestGitPanelKeys_SpaceStagesSelectedRowOnly pins the staging key:
+// Space flips the selected row's commit checkbox and leaves every other
+// row alone, so a keyboard user can deselect one file out of twenty
+// without a mouse.
+func TestGitPanelKeys_SpaceStagesSelectedRowOnly(t *testing.T) {
+	a := keyboardGitApp(t)
+	first, second := a.gitPanelRows[0].Abs, a.gitPanelRows[1].Abs
+
+	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	a.handleKey(tcell.NewEventKey(tcell.KeyRune, ' ', 0))
+	if a.commitCheckOn(second) {
+		t.Fatal("space should unstage the selected row")
+	}
+	if !a.commitCheckOn(first) {
+		t.Fatal("space must not touch any row but the selected one")
+	}
+
+	a.handleKey(tcell.NewEventKey(tcell.KeyRune, ' ', 0))
+	if !a.commitCheckOn(second) {
+		t.Fatal("space should stage the row back")
+	}
+}
+
+// TestGitPanelKeys_EnterOpensDiff pins Enter's meaning on a row: it
+// shows the change, the same thing a click does, and arms the diff's
+// ↑↓ file walk.
+func TestGitPanelKeys_EnterOpensDiff(t *testing.T) {
+	a := keyboardGitApp(t)
+	a.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
+	if !diffIsOpen(a) {
+		t.Fatalf("enter on a row should open the diff, top = %T", a.overlays.Top())
+	}
+	if !strings.Contains(diffOv(t, a).title, "modified.txt") {
+		t.Fatalf("diff should be for the selected row, title %q", diffOv(t, a).title)
+	}
+	if a.diffPanelRow != 0 {
+		t.Fatalf("enter should arm the diff walk, got row %d", a.diffPanelRow)
+	}
+}
+
+// TestGitPanelKeys_TabReachesButtonsAndEnterRuns pins the second half of
+// the keyboard route: Tab hops from the list to the action row, the
+// focused button actually renders focused (it used to always draw
+// focused=false), ← → walk the row, and Enter runs what's focused.
+func TestGitPanelKeys_TabReachesButtonsAndEnterRuns(t *testing.T) {
+	a := keyboardGitApp(t)
+	a.handleKey(tcell.NewEventKey(tcell.KeyTab, 0, 0))
+	if !a.gitPanelOnBtns || a.gitPanelBtn != 0 {
+		t.Fatalf("tab should focus the first button, onBtns=%v idx=%d", a.gitPanelOnBtns, a.gitPanelBtn)
+	}
+
+	// drawButton's focus language is an inverted block: the label sits
+	// on the accent color instead of the sidebar background.
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	btns := a.gitPanelButtons(29)
+	_, bg, _ := cells[2*w+btns[0].x0].Style.Decompose()
+	if bg != a.theme.Accent {
+		t.Fatalf("focused button bg = %v, want the Accent block DrawButton paints", bg)
+	}
+	_, bg, _ = cells[2*w+btns[1].x0].Style.Decompose()
+	if bg == a.theme.Accent {
+		t.Fatal("only the focused button may render inverted")
+	}
+
+	for range 3 {
+		a.handleKey(tcell.NewEventKey(tcell.KeyRight, 0, 0))
+	}
+	if a.gitPanelBtn != 3 {
+		t.Fatalf("→ should walk the button row, got %d", a.gitPanelBtn)
+	}
+	a.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
+	if labels := popupLabels(t, a); len(labels) == 0 {
+		t.Fatal("enter on the ⋯ button should open the git extras popup")
+	}
+}
+
+// TestGitPanelKeys_FocusFallsBackToTheList pins the closed cycle:
+// stepping off either end of the button row returns to the change
+// list rather than wrapping around it.
+func TestGitPanelKeys_FocusFallsBackToTheList(t *testing.T) {
+	a := keyboardGitApp(t)
+	a.handleKey(tcell.NewEventKey(tcell.KeyTab, 0, 0))
+	for range 4 {
+		a.handleKey(tcell.NewEventKey(tcell.KeyRight, 0, 0))
+	}
+	if a.gitPanelOnBtns {
+		t.Fatal("stepping past the last button should return to the list")
+	}
+	// Shift-Tab from the list enters the row at its far end.
+	a.handleKey(tcell.NewEventKey(tcell.KeyBacktab, 0, 0))
+	if !a.gitPanelOnBtns || a.gitPanelBtn != 3 {
+		t.Fatalf("shift-tab should focus the last button, onBtns=%v idx=%d", a.gitPanelOnBtns, a.gitPanelBtn)
+	}
+	a.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, 0))
+	if a.gitPanelOnBtns {
+		t.Fatal("up from the button row should return to the list")
+	}
+}
+
+// TestGitPanelKeys_EscReturnsToEditor pins the exit: Esc drops the
+// panel's key capture (leaving the panel itself up) and the arrow keys
+// go back to moving the caret.
+func TestGitPanelKeys_EscReturnsToEditor(t *testing.T) {
+	a, modified, _ := dirtyRepoApp(t)
+	a.openFile(modified)
+	a.focusGitPanel()
+	if !a.gitPanelKeysOn() {
+		t.Fatal("panel should own the keyboard")
+	}
+
+	a.handleKey(tcell.NewEventKey(tcell.KeyEsc, 0, 0))
+	if a.gitPanelKeysOn() {
+		t.Fatal("esc should hand the keyboard back to the editor")
+	}
+	if !a.gitPanelActive {
+		t.Fatal("esc releases focus, it does not close the panel")
+	}
+
+	tab := a.activeTabPtr()
+	if tab == nil {
+		t.Fatal("expected the opened file in front")
+	}
+	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	if tab.Cursor.Line != 1 {
+		t.Fatalf("arrows should move the caret again, cursor line %d", tab.Cursor.Line)
+	}
+	if a.gitPanelSelected != 0 {
+		t.Fatalf("the panel must not react after esc, selection %d", a.gitPanelSelected)
+	}
+}
+
+// TestGitPanelKeys_IgnoredWhileOverlayOpen pins the routing order the
+// overlay stack owns: an open overlay takes the whole keyboard, so the
+// panel underneath it never sees a key.
+func TestGitPanelKeys_IgnoredWhileOverlayOpen(t *testing.T) {
+	a := keyboardGitApp(t)
+	a.openMenu()
+	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	a.handleKey(tcell.NewEventKey(tcell.KeyRune, ' ', 0))
+	a.handleKey(tcell.NewEventKey(tcell.KeyTab, 0, 0))
+	if a.gitPanelSelected != 0 {
+		t.Fatalf("selection moved under an open overlay, got %d", a.gitPanelSelected)
+	}
+	if a.gitPanelOnBtns {
+		t.Fatal("focus moved to the buttons under an open overlay")
+	}
+	if len(a.gitCommitChecks) != 0 {
+		t.Fatalf("staging changed under an open overlay: %v", a.gitCommitChecks)
+	}
+}
+
+// TestGitPanelKeys_NoCtrlBindings pins CLAUDE.md's hard rule: the panel
+// grew a keyboard mode without growing a single Ctrl chord, because
+// Ctrl is exactly what tmux and terminal flow control eat. (KeyCtrlI /
+// KeyCtrlM are Tab / Enter and are deliberately not in this list —
+// they're the same bytes as the bindings we do want.)
+func TestGitPanelKeys_NoCtrlBindings(t *testing.T) {
+	a := keyboardGitApp(t)
+	ctrl := []tcell.Key{
+		tcell.KeyCtrlA, tcell.KeyCtrlB, tcell.KeyCtrlD, tcell.KeyCtrlE,
+		tcell.KeyCtrlF, tcell.KeyCtrlG, tcell.KeyCtrlK, tcell.KeyCtrlN,
+		tcell.KeyCtrlP, tcell.KeyCtrlS, tcell.KeyCtrlU, tcell.KeyCtrlW,
+	}
+	for _, k := range ctrl {
+		if a.handleGitPanelKey(tcell.NewEventKey(k, 0, tcell.ModCtrl)) {
+			t.Fatalf("Ctrl key %v must not be bound in the Git panel", k)
+		}
+	}
+	if a.gitPanelSelected != 0 || a.gitPanelOnBtns || len(a.gitCommitChecks) != 0 {
+		t.Fatal("Ctrl keys must leave the panel completely untouched")
+	}
+}
+
+// TestGitPanelHint_DocumentsKeysAndNamesFocusedButton pins the hint
+// strip: while the panel has the keyboard it documents its bindings
+// bottom-docked (a strip, not an overlay), and on the action row it
+// names the focused button — which is what makes the minimum-width
+// [✓][↑][↓][⋯] ladder decodable at all, since that tier has no verbs.
+func TestGitPanelHint_DocumentsKeysAndNamesFocusedButton(t *testing.T) {
+	a := keyboardGitApp(t)
+	a.resizeSidebar(minSidebarWidth)
+	a.gitSnap.Ahead = 2
+
+	painted := gitHintText(t, a)
+	for _, want := range []string{"↑↓", "␣", "⏎", "⇥", "esc"} {
+		if !strings.Contains(painted, want) {
+			t.Fatalf("hint strip is missing %q, got %q", want, painted)
+		}
+	}
+
+	// Focus Push: the compact ladder renders it as "[↑2]".
+	a.handleKey(tcell.NewEventKey(tcell.KeyTab, 0, 0))
+	a.handleKey(tcell.NewEventKey(tcell.KeyRight, 0, 0))
+	if got := a.gitPanelButtons(minSidebarWidth - 1)[1].label; !strings.Contains(got, "↑") {
+		t.Fatalf("expected the glyph ladder at minimum width, got %q", got)
+	}
+	painted = gitHintText(t, a)
+	if !strings.Contains(painted, "Push") {
+		t.Fatalf("hint strip must name the focused button, got %q", painted)
+	}
+}
+
+// TestGitPanelHint_YieldsRowsToTheList pins the strip's manners: on a
+// terminal too short to hold both, the hint gives its rows back rather
+// than starving the change list it exists to explain.
+func TestGitPanelHint_YieldsRowsToTheList(t *testing.T) {
+	a := keyboardGitApp(t)
+	// Sidebar height is a.height-1, so this leaves exactly one row
+	// below the panel's fixed header rows for list + hint to share.
+	a.height = gitPanelListTop + 2
+	listH, hint := a.gitPanelBody()
+	if listH != 1 || len(hint) != 0 {
+		t.Fatalf("the one spare row belongs to the list: list %d, hint %d", listH, len(hint))
+	}
+
+	// Given room for both, the split still adds up to what's available.
+	a.height = gitPanelListTop + 8
+	listH, hint = a.gitPanelBody()
+	if len(hint) == 0 {
+		t.Fatal("with room to spare the hint should draw")
+	}
+	if listH+len(hint) != 7 {
+		t.Fatalf("body split must add up: list %d + hint %d, want 7", listH, len(hint))
+	}
+}
+
+// TestWrapHintSegments pins the strip's wrap rule: segments pack
+// greedily, never split mid-binding (half a key hint is worse than
+// none), and stop at the row cap.
+func TestWrapHintSegments(t *testing.T) {
+	got := wrapHintSegments([]string{"aaa", "bbb", "cc"}, 8, 3)
+	want := []string{"aaa  bbb", "cc"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("greedy pack: got %v, want %v", got, want)
+	}
+	if got := wrapHintSegments([]string{"abcdefghij"}, 4, 2); len(got) != 1 || got[0] != "abcdefghij" {
+		t.Fatalf("an oversize segment keeps its own row for clipping, got %v", got)
+	}
+	if got := wrapHintSegments([]string{"aaa", "bbb", "ccc"}, 3, 1); len(got) != 1 {
+		t.Fatalf("maxRows must cap the strip, got %v", got)
+	}
+	if got := wrapHintSegments([]string{"aaa"}, 0, 3); got != nil {
+		t.Fatalf("a zero-width sidebar has no room for a hint, got %v", got)
+	}
+}
+
+// TestFocusGitPanel_GrabsAMousePanelThenToggles pins Esc-g's two jobs:
+// on a panel already opened by mouse it takes the keyboard (you're
+// asking to get in, not to leave), and pressing it again from inside
+// falls back to the original toggle-to-explorer contract.
+func TestFocusGitPanel_GrabsAMousePanelThenToggles(t *testing.T) {
+	a, _, _ := dirtyRepoApp(t)
+	a.showGitPanel() // the mouse route: GIT header tab
+	if a.gitPanelKeysOn() {
+		t.Fatal("a mouse route must not steal the keyboard")
+	}
+	a.focusGitPanel()
+	if !a.gitPanelKeysOn() || !a.gitPanelActive {
+		t.Fatal("Esc-g on an open panel should grab focus, not close it")
+	}
+	a.focusGitPanel()
+	if a.gitPanelActive || a.gitPanelKeysOn() {
+		t.Fatal("Esc-g from inside should toggle back to the explorer")
+	}
+}
+
+// TestGitPanelKeys_EditorPressDropsCapture pins the mouse half of the
+// handoff: a press inside the sidebar keeps keyboard mode, a press
+// anywhere else releases it. Without this a user who reached the panel
+// from the ≡ menu and then clicked into the editor would find Enter
+// and Space still being eaten by the panel.
+func TestGitPanelKeys_EditorPressDropsCapture(t *testing.T) {
+	a := keyboardGitApp(t)
+
+	// The checkbox column: a sidebar press that opens no overlay.
+	a.handleMouse(tcell.NewEventMouse(1, gitPanelListTop, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(1, gitPanelListTop, tcell.ButtonNone, 0))
+	if !a.gitPanelKeysOn() {
+		t.Fatal("a press inside the sidebar must keep the keyboard mode")
+	}
+
+	a.handleMouse(tcell.NewEventMouse(60, 5, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(60, 5, tcell.ButtonNone, 0))
+	if a.gitPanelKeysOn() {
+		t.Fatal("a press outside the sidebar must release the keyboard mode")
+	}
+	if !a.gitPanelActive {
+		t.Fatal("the press releases focus, it does not close the panel")
 	}
 }

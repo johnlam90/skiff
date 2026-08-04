@@ -191,12 +191,44 @@ type Tab struct {
 	// real tab; a 2-space-indented file gets two spaces. Mixed-style
 	// files take the dominant signal.
 	IndentUnit string
+
+	// Bracket-match cache. bracket holds the pair the caret is touching
+	// (see bracket.go), bracketFor is the cursor it was computed for,
+	// and bracketCached distinguishes "computed, and the answer was no
+	// bracket" from "never computed" — Position{} is a legitimate
+	// cursor, so the zero value can't carry that on its own.
+	bracket       BracketMatch
+	bracketFor    Position
+	bracketCached bool
 }
 
 // ErrBinaryFile marks a refusal to open non-text content into a text
 // buffer. Callers surface it as a flash; image formats never hit it —
 // they take the image-tab path first.
 var ErrBinaryFile = errors.New("looks like a binary file")
+
+// maxOpenBytes is the largest file NewTab will pull into a text buffer.
+// Opening costs the file's bytes several times over — the []byte from
+// ReadFile, the buffer's per-line strings, and the on-open undo
+// snapshot — and every later stage (Chroma lexing, per-rune style
+// grids, soft-wrap math) walks all of it. The binary probe only reads
+// the first 8KB, so a NUL-free multi-hundred-megabyte log sails past it
+// and used to load synchronously on a single click. 32 MiB is far past
+// any real source file while making that case impossible.
+const maxOpenBytes = 32 << 20
+
+// ErrFileTooLarge marks a refusal to open a file above maxOpenBytes.
+// Callers surface it as a flash exactly the way they surface
+// ErrBinaryFile; the wrapped message names the file's size and the cap
+// so the user can tell "seen and declined" from "missing".
+var ErrFileTooLarge = errors.New("file is too large to open")
+
+// mibString renders a byte count as MiB for the too-large message.
+// Sizes that trip the cap are only ever discussed in MiB, so a full
+// unit ladder would be dead code.
+func mibString(n int64) string {
+	return strconv.FormatFloat(float64(n)/(1<<20), 'f', 1, 64) + " MiB"
+}
 
 // looksBinary applies git's own heuristic: a NUL byte in the first 8KB
 // means binary. UTF-8 text of any language never contains NUL, so
@@ -246,6 +278,19 @@ func NewTab(path string) (*Tab, error) {
 	var data []byte
 	var mtime time.Time
 	if path != "" {
+		// Stat first: the size guard exists to avoid reading the file,
+		// so it cannot be paid for by reading it. The same call supplies
+		// the on-disk mtime the app compares against to detect external
+		// edits — a missing file leaves it as the zero value, which the
+		// reconcile loop handles explicitly.
+		if info, statErr := os.Stat(path); statErr == nil {
+			if info.Size() > maxOpenBytes {
+				return nil, fmt.Errorf("%s is %s (limit %s): %w",
+					filepath.Base(path), mibString(info.Size()), mibString(maxOpenBytes),
+					ErrFileTooLarge)
+			}
+			mtime = info.ModTime()
+		}
 		b, err := os.ReadFile(path)
 		if err != nil && !os.IsNotExist(err) {
 			return nil, err
@@ -259,12 +304,6 @@ func NewTab(path string) (*Tab, error) {
 			return nil, fmt.Errorf("%s: %w", filepath.Base(path), ErrBinaryFile)
 		}
 		data = b
-		// Record the on-disk mtime so the app can detect external edits
-		// later. A missing file leaves mtime as the zero value, which is
-		// fine — the reconcile loop handles that case explicitly.
-		if info, statErr := os.Stat(path); statErr == nil {
-			mtime = info.ModTime()
-		}
 	}
 	t := &Tab{
 		Path:       path,
@@ -471,6 +510,39 @@ func (t *Tab) InsertString(s string) {
 	t.Dirty = true
 	t.StyleStale = true
 	t.cursorMoved = true
+}
+
+// InsertNewline is what Enter does: split the line at the caret and open
+// the new line with the same indentation the old one had, plus one level
+// when the caret was sitting after an opening brace / bracket / paren (or,
+// in Python and YAML, a colon). Without this, every line in an indented
+// block starts at column 0 and the user re-types the leading whitespace by
+// hand, which is the single most-noticed thing a terminal editor can get
+// wrong.
+//
+// The whole press is one InsertString call and therefore exactly one undo
+// step: Enter-then-undo returns the buffer to where it was, rather than
+// stranding the user on a half-indented line.
+//
+// The indent is read from the text BEFORE the caret at the point the split
+// will happen — the start of the selection, when there is one. Deleting a
+// selection never touches the runes ahead of its start, so reading the
+// prefix up front gives the same answer as reading it after the delete,
+// and avoids splitting the operation into two undo entries.
+//
+// Only "\n" is ever inserted; the file's own ending is restored by Save
+// (see Tab.LineEnding), so a CRLF file must not get a CR spliced into the
+// middle of a line here.
+func (t *Tab) InsertNewline() {
+	if t.IsImage() {
+		return
+	}
+	at, _ := PosOrdered(t.Anchor, t.Cursor)
+	prefix := t.Buffer.LineRunes(at.Line)
+	if at.Col < len(prefix) {
+		prefix = prefix[:at.Col]
+	}
+	t.InsertString("\n" + autoIndentFor(prefix, t.IndentUnit, t.Path))
 }
 
 // InsertRune inserts a single typed character at the cursor. Coalesces
@@ -777,6 +849,11 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		}
 		t.clampScroll(h)
 	}
+	// Resolve the caret's bracket pair before the highlight block below
+	// clears StyleStale — that flag is how the cache learns the buffer
+	// changed. One scan per frame at most; cellStyle then just compares
+	// positions.
+	t.refreshBracketMatch()
 	// Re-tokenise only when the cached highlight window no longer
 	// covers the viewport (content edit, resize, or the view scrolled
 	// near the window's edge). Inside the window, scrolling reuses the
@@ -936,8 +1013,13 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 
 // cellStyle resolves the final style for the rune at (lineIdx, runeIdx):
 // the cached syntax style re-based onto the row background, then the
-// selection tint, then the find-match tint on top. Shared by the line
-// and wrap render paths so the two can't drift on styling rules.
+// selection tint, then the bracket-pair marker, then the find-match tint
+// on top. Shared by the line and wrap render paths so the two can't drift
+// on styling rules.
+//
+// Find wins over the bracket marker on purpose: a find sweep is a
+// deliberate, transient mode, and its amber background would fight an
+// accent-colored bracket sitting inside a hit.
 func (t *Tab) cellStyle(th theme.Theme, styles []tcell.Style, lineIdx, runeIdx int, lineBg tcell.Color, hasSel bool, selStart, selEnd Position) tcell.Style {
 	st := tcell.StyleDefault.Background(th.BG).Foreground(th.Text)
 	if runeIdx < len(styles) {
@@ -954,6 +1036,14 @@ func (t *Tab) cellStyle(th theme.Theme, styles []tcell.Style, lineIdx, runeIdx i
 			// keeps the ones that stay readable.
 			fg, _, _ := st.Decompose()
 			st = st.Foreground(th.SelectionFg(fg))
+		}
+	}
+	if t.bracket.Found {
+		p := Position{Line: lineIdx, Col: runeIdx}
+		if p == t.bracket.At {
+			st = bracketCellStyle(th, st, t.bracket.Matched)
+		} else if t.bracket.Matched && p == t.bracket.Match {
+			st = bracketCellStyle(th, st, true)
 		}
 	}
 	if mIdx := t.matchAtRune(lineIdx, runeIdx); mIdx >= 0 {

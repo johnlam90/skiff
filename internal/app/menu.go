@@ -6,9 +6,10 @@
 // =============================================================================
 
 // menu.go owns the action modal's behavior and rendering: opening and
-// closing it, keyboard navigation, mouse hover/click routing, the scroll
-// window a short terminal needs, and the draw pass for both the modal and
-// the ≡ button that opens it.
+// closing it, the type-to-filter field, keyboard navigation, mouse
+// hover/click routing, the scroll window a short terminal needs, the
+// drill-in picks the top level demotes rows into, and the draw pass for
+// both the modal and the ≡ button that opens it.
 //
 // The modal's row and height layout comes from menudef.go's menuLayout,
 // and its place in the input routing comes from the overlay stack (see
@@ -17,10 +18,12 @@
 package app
 
 import (
+	"strings"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/overlay"
 	"github.com/johnlam90/skiff/internal/version"
 )
 
@@ -29,14 +32,24 @@ import (
 // so adding custom actions grows the modal automatically — but it is
 // clamped to the screen (one row of margin) so a short terminal can
 // scroll the overflow instead of losing the bottom rows, Quit first.
+//
+// The origin comes from the UNFILTERED height (menuNaturalHeight) while
+// the height comes from the filtered one: the frame then shrinks from
+// the bottom as a query narrows the list, instead of re-centering — and
+// jumping the title and the filter caret out from under the user — on
+// every keystroke.
 func (a *App) menuModalRect() (x, y, w, h int) {
 	w = modalWidth
 	_, _, h = a.menuLayout()
-	if maxH := a.height - 2; h > maxH {
-		h = maxH
+	full := a.menuNaturalHeight()
+	if maxH := a.height - 2; full > maxH {
+		full = maxH
+	}
+	if h > full {
+		h = full
 	}
 	x = (a.width - w) / 2
-	y = (a.height - h) / 2
+	y = (a.height - full) / 2
 	if x < 0 {
 		x = 0
 	}
@@ -77,9 +90,9 @@ func (a *App) ensureMenuRowVisible(idx int) {
 	}
 	_, _, _, h := a.menuModalRect()
 	relY := items[idx].relY
-	// Visible virtual rows span [3+menuScroll, h-2+menuScroll].
-	if relY < 3+a.menuScroll {
-		a.menuScroll = relY - 3
+	// Visible virtual rows span [menuContentY+menuScroll, h-2+menuScroll].
+	if relY < menuContentY+a.menuScroll {
+		a.menuScroll = relY - menuContentY
 	} else if relY > h-2+a.menuScroll {
 		a.menuScroll = relY - (h - 2)
 	}
@@ -89,7 +102,8 @@ func (a *App) ensureMenuRowVisible(idx int) {
 // handleMenuMouse processes mouse events while the action menu is open.
 // Left-click outside the modal closes it; left-click on a row runs that
 // row's action (if it is currently enabled). Wheel events scroll the
-// content when the layout is taller than the terminal.
+// content when the layout is taller than the terminal. The filter never
+// changes what a click does — it only changes which rows are on screen.
 func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
 	if btn&tcell.WheelUp != 0 {
 		a.menuScroll--
@@ -114,11 +128,11 @@ func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
 		a.closeMenu()
 		return
 	}
-	// Only the scrollable content region (below the title and its
-	// divider, above the bottom border) can hold items; clicks on the
-	// chrome rows stay inert even when scrolled rows share their
-	// virtual position.
-	if y < my+3 || y > my+mh-2 {
+	// Only the scrollable content region (below the title, the filter
+	// field and their divider, above the bottom border) can hold items;
+	// clicks on the chrome rows stay inert even when scrolled rows share
+	// their virtual position.
+	if y < my+menuContentY || y > my+mh-2 {
 		return
 	}
 	relY := y - my + a.menuScroll
@@ -135,21 +149,24 @@ func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
 }
 
 // openMenu shows the action modal. While it is up, the editor doesn't
-// receive typed keys, and clicks outside the modal dismiss it. We pre-
-// select the first enabled row so Down/Up/Enter keyboard navigation has
-// somewhere sensible to start.
+// receive typed keys, and clicks outside the modal dismiss it. The
+// filter starts empty and focused, and menuFilterChanged pre-selects the
+// first enabled row so Down/Up/Enter navigation has somewhere sensible
+// to start.
 func (a *App) openMenu() {
 	a.closeAllModals()
 	a.menuOpen = true
 	a.overlays.Open(menuOverlay{a})
 	a.menuScroll = 0
-	a.menuMoveSelection(1)
+	a.menuFilter = overlay.Field{}
+	a.menuFilterChanged()
 }
 
 // menuMoveSelection advances hoveredMenuRow to the next (dir=+1) or
 // previous (dir=-1) enabled menu item, wrapping around at the ends so the
 // list feels continuous. Disabled items and dividers are skipped. If no
-// item is currently enabled hoveredMenuRow stays -1.
+// item is currently enabled hoveredMenuRow stays -1. With a filter typed
+// the "list" is the match set, so the arrows walk exactly what's drawn.
 func (a *App) menuMoveSelection(dir int) {
 	items, _, _ := a.menuLayout()
 	n := len(items)
@@ -178,13 +195,80 @@ func (a *App) menuMoveSelection(dir int) {
 	a.hoveredMenuRow = -1
 }
 
-// handleMenuKey owns the keyboard while the action menu is up. Only the
-// navigation keys do anything — editing keys are blocked — but leader
-// runes still fire their actions (the menu doubles as the shortcut
-// cheat-sheet, so the shortcuts must work while it shows). Pasted
-// content is ignored outright: with no text focus behind the menu,
-// dispatching pasted runes as leader shortcuts would fire arbitrary
-// actions. Esc and Alt+Esc close the menu — the same keys that open it.
+// menuFilterChanged re-selects after the query moved: scroll back to the
+// top and highlight the best-ranked enabled match (ties break toward
+// menu order), so Enter runs the row the user was aiming at rather than
+// whichever match happens to sit highest in the table. With an empty
+// query every row ranks 0 and this degenerates to "select the first
+// enabled row" — the pre-filter open behaviour.
+func (a *App) menuFilterChanged() {
+	a.menuScroll = 0
+	items, _, _ := a.menuLayout()
+	q := a.menuQuery()
+	best, bestRank := -1, 0
+	for i, it := range items {
+		if !it.enabled(a) {
+			continue
+		}
+		rank := 0
+		if q != "" {
+			rank = menuMatchRank(strings.ToLower(a.menuLabel(it)), q)
+		}
+		if best < 0 || rank < bestRank {
+			best, bestRank = i, rank
+			if rank == 0 {
+				break
+			}
+		}
+	}
+	a.hoveredMenuRow = best
+	if best >= 0 {
+		a.ensureMenuRowVisible(best)
+	}
+	a.clampMenuScroll()
+}
+
+// clearMenuFilter empties the query and re-selects against the restored
+// full list.
+func (a *App) clearMenuFilter() {
+	a.menuFilter = overlay.Field{}
+	a.menuFilterChanged()
+}
+
+// handleMenuKey owns the keyboard while the action menu is up: Up/Down
+// walk the (possibly filtered) rows, Enter runs the highlighted one,
+// Esc unwinds one layer — a typed filter first, then the menu — and
+// every other printable key edits the filter. Pasted content is ignored
+// outright: with no text focus behind the menu, dispatching pasted runes
+// would fire arbitrary actions.
+//
+// # Filter vs. Esc-leader runes
+//
+// Before type-to-filter, a bare rune pressed with the menu up fired its
+// leader action — the menu doubles as the shortcut cheat-sheet, so the
+// shortcuts had to work while it showed. That cannot survive a focused
+// text input, and not for a stylistic reason: 21 of the 26 letters are
+// bound in leaderBindings, so honouring bare runes would make almost
+// every filter untypeable ("switch branch" would save the file on its
+// first keystroke), and silently running an action while a caret blinks
+// in an input is exactly the class of surprise the no-Ctrl rule exists
+// to avoid. So bare runes always go to the filter.
+//
+// The cheat-sheet role is intact, and is now literally accurate:
+//   - every row still renders its "Esc s" hint, filtered or not;
+//   - Alt+<rune> still fires the action, and that is not a fallback —
+//     it is how tmux and most terminals actually deliver a fast
+//     "Esc s" (the Alt block above), so the printed gesture keeps
+//     working with the menu up on the setups skiff targets;
+//   - an already-armed leader window still beats the filter through
+//     leaderWindowIntercept, below, for the terminals that send Esc and
+//     the rune as two separate events. That is the same precedence the
+//     editor itself applies — an armed Esc window wins over typing into
+//     the buffer (handleKey) — so the filter is not a special case.
+//
+// Esc itself stays the menu's own key (clear filter, then close) rather
+// than re-arming the leader: dismissing a modal must not leave a live
+// hotkey window that turns the user's next keystroke into an action.
 func (a *App) handleMenuKey(ev *tcell.EventKey) {
 	if a.pasting {
 		return
@@ -203,7 +287,14 @@ func (a *App) handleMenuKey(ev *tcell.EventKey) {
 		}
 	}
 	if ev.Key() == tcell.KeyEsc {
-		a.closeMenu()
+		// One layer at a time: bailing straight out of a narrowed menu
+		// would throw away the user's place over a typo they could have
+		// fixed with one more keystroke.
+		if len(a.menuFilter.Value) > 0 {
+			a.clearMenuFilter()
+		} else {
+			a.closeMenu()
+		}
 		a.lastEscape = time.Time{}
 		return
 	}
@@ -211,19 +302,25 @@ func (a *App) handleMenuKey(ev *tcell.EventKey) {
 		return
 	}
 	a.lastEscape = time.Time{}
-	if ev.Key() == tcell.KeyRune {
-		if action := leaderActionFor(ev.Rune()); action != nil {
-			action(a)
-			return
-		}
-	}
 	switch ev.Key() {
 	case tcell.KeyDown:
 		a.menuMoveSelection(1)
+		return
 	case tcell.KeyUp:
 		a.menuMoveSelection(-1)
+		return
 	case tcell.KeyEnter:
 		a.menuActivate()
+		return
+	}
+	// Everything else is text. Value length changes exactly when an edit
+	// changed the query — cursor motion keeps it, insert/delete moves
+	// it — so only a real edit pays for a re-layout. Same test the pick
+	// overlay uses; the two surfaces should feel identical.
+	before := len(a.menuFilter.Value)
+	a.menuFilter.HandleKey(ev)
+	if len(a.menuFilter.Value) != before {
+		a.menuFilterChanged()
 	}
 }
 
@@ -247,7 +344,47 @@ func (a *App) closeMenu() {
 	a.dropOverlay(menuOverlay{a})
 	a.hoveredMenuRow = -1
 	a.menuScroll = 0
+	a.menuFilter = overlay.Field{}
 }
+
+// openMenuDrillIn replaces the action menu with an overlay.Pick over one
+// demoted cluster's rows — the git verbs, the file-clipboard actions.
+// Only rows that are visible AND enabled right now make it in: a pick
+// has no dimmed state, and a drill-in the user opened deliberately
+// should list what it can actually do. The Esc-leader hint rides along
+// in the pick's dimmed tag column so the cheat-sheet survives the
+// demotion.
+func (a *App) openMenuDrillIn(d menuDrillIn) {
+	a.closeMenu()
+	rows := make([]menuItemDef, 0, len(d.items))
+	items := make([]listPickItem, 0, len(d.items))
+	for _, it := range d.items {
+		if it.visible != nil && !it.visible(a) {
+			continue
+		}
+		if it.enabled != nil && !it.enabled(a) {
+			continue
+		}
+		rows = append(rows, it)
+		items = append(items, listPickItem{Label: a.menuLabel(it), Tag: it.shortcut})
+	}
+	if len(items) == 0 {
+		// The row's own visibility predicate should have hidden it, but
+		// predicates and contents can drift — say so instead of opening
+		// an empty frame.
+		a.flash("No " + strings.ToLower(d.title) + " actions available right now")
+		return
+	}
+	a.openListPick(d.title, items, func(app *App, i int) { rows[i].action(app) }, nil, nil)
+}
+
+// menuGitMenu is the ≡ → Git… row: the nine git verbs as a filterable
+// pick instead of nine rows of the main menu.
+func (a *App) menuGitMenu() { a.openMenuDrillIn(gitDrillIn()) }
+
+// menuFileClipboard is the ≡ → File clipboard… row: cut / copy /
+// duplicate / paste plus the two copy-path actions.
+func (a *App) menuFileClipboard() { a.openMenuDrillIn(fileClipDrillIn()) }
 
 // updateMenuHover sets hoveredMenuRow to the index of the enabled menu row
 // at (x, y), or to -1 when the mouse is over a disabled row, a divider, the
@@ -258,9 +395,10 @@ func (a *App) updateMenuHover(x, y int) {
 	if x < mx || x >= mx+mw || y < my || y >= my+mh {
 		return
 	}
-	// Chrome rows (title, divider, borders) never hover; the content
-	// region maps through the scroll offset like the click hit-test.
-	if y < my+3 || y > my+mh-2 {
+	// Chrome rows (title, filter, divider, borders) never hover; the
+	// content region maps through the scroll offset like the click
+	// hit-test.
+	if y < my+menuContentY || y > my+mh-2 {
 		return
 	}
 	relY := y - my + a.menuScroll
@@ -294,8 +432,8 @@ func (a *App) drawMenuButton() {
 
 // drawMenu renders the action modal centered in the window. The
 // item / divider / height layout comes from menuLayout so adding
-// custom actions or new built-in groups doesn't require touching this
-// function.
+// custom actions, new built-in groups, or a filter query doesn't
+// require touching this function.
 func (a *App) drawMenu() {
 	mx, my, mw, mh := a.menuModalRect()
 	items, dividers, _ := a.menuLayout()
@@ -329,16 +467,16 @@ func (a *App) drawMenu() {
 	}
 
 	// Horizontal dividers between action groups. The dy list comes from
-	// menuLayout — including the always-on row under the title — so it
+	// menuLayout — including the always-on row under the filter — so it
 	// stays in sync with whatever rows are actually being drawn. The
-	// title divider (relY 2) is fixed chrome; the rest live in the
+	// chrome divider (menuDividerY) is fixed; the rest live in the
 	// scrollable content region and map through menuScroll, dropping
 	// out when they leave the visible window.
 	for _, dy := range dividers {
 		cy := my + dy
-		if dy > 2 {
+		if dy > menuDividerY {
 			cy -= a.menuScroll
-			if cy < my+3 || cy > my+mh-2 {
+			if cy < my+menuContentY || cy > my+mh-2 {
 				continue
 			}
 		}
@@ -350,9 +488,22 @@ func (a *App) drawMenu() {
 	}
 
 	// Title row: " Menu" on the left, "esc " on the right.
-	drawAt(a.screen, mx+1, my+1, " Menu", titleStyle)
+	drawAt(a.screen, mx+1, my+menuTitleY, " Menu", titleStyle)
 	hint := "esc "
-	drawAt(a.screen, mx+mw-1-len([]rune(hint)), my+1, hint, mutedStyle)
+	drawAt(a.screen, mx+mw-1-len([]rune(hint)), my+menuTitleY, hint, mutedStyle)
+
+	// Filter field, on the darker editor background so it reads as an
+	// input well rather than another row — same treatment, same
+	// geometry offsets and same placeholder voice as overlay.Pick, so
+	// the two filter surfaces feel like one idea.
+	fieldStyle := tcell.StyleDefault.Background(a.theme.BG).Foreground(a.theme.Text)
+	fieldX := mx + 3
+	fieldW := mw - 5
+	a.menuFilter.Draw(a.screen, fieldX, my+menuFilterY, fieldW, fieldStyle, true)
+	if len(a.menuFilter.Value) == 0 {
+		drawAt(a.screen, fieldX, my+menuFilterY, "type to filter actions…",
+			tcell.StyleDefault.Background(a.theme.BG).Foreground(a.theme.Subtle))
+	}
 
 	// Version stamp baked into the bottom border, right-aligned. A small
 	// pad of dashes is left between the version text and the corner so it
@@ -374,7 +525,7 @@ func (a *App) drawMenu() {
 		cy := my + item.relY - a.menuScroll
 		// Rows scrolled out of the content window aren't drawn; the
 		// ▲/▼ chrome markers below tell the user they exist.
-		if cy < my+3 || cy > my+mh-2 {
+		if cy < my+menuContentY || cy > my+mh-2 {
 			continue
 		}
 		enabled := item.enabled(a)
@@ -402,12 +553,7 @@ func (a *App) drawMenu() {
 			chevStyle = mutedStyle
 			shortcutStyle = mutedStyle
 		}
-		// Dynamic label (e.g. the file-explorer toggle row) takes precedence
-		// over the static one when present.
-		label := item.label
-		if item.labelFor != nil {
-			label = item.labelFor(a)
-		}
+		label := a.menuLabel(item)
 		drawAt(a.screen, mx+2, cy, "▸", chevStyle)
 		if item.shortcut == "" {
 			drawAt(a.screen, mx+4, cy, label, labelStyle)
@@ -418,18 +564,23 @@ func (a *App) drawMenu() {
 		drawAt(a.screen, mx+4, cy, label, labelStyle)
 		drawAt(a.screen, shortcutX, cy, item.shortcut, shortcutStyle)
 	}
+	if len(items) == 0 {
+		drawAt(a.screen, mx+4, my+menuContentY, "no matches", mutedStyle)
+	}
 
-	// Overflow markers, drawn into the fixed chrome (the title divider
-	// and the bottom border) so they cost no content rows: ▲ when rows
-	// are hidden above, ▼ when rows are hidden below. Accent-colored —
-	// they're the only hint that more actions exist off-frame.
+	// Overflow markers, drawn into the fixed chrome (the divider under
+	// the filter and the bottom border) so they cost no content rows:
+	// ▲ when rows are hidden above, ▼ when rows are hidden below.
+	// Accent-colored — they're the only hint that more actions exist
+	// off-frame.
 	moreStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent)
 	if a.menuScroll > 0 {
-		drawAt(a.screen, mx+2, my+2, " ▲ ", moreStyle)
+		drawAt(a.screen, mx+2, my+menuDividerY, " ▲ ", moreStyle)
 	}
 	if a.menuScroll < a.menuMaxScroll() {
 		drawAt(a.screen, mx+2, my+mh-1, " ▼ ", moreStyle)
 	}
-
-	a.screen.HideCursor()
+	// No HideCursor here on purpose: the filter field is focused and
+	// Field.Draw parked the terminal caret in it, which is the whole
+	// affordance telling the user they can just type.
 }

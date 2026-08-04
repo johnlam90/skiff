@@ -464,8 +464,12 @@ func TestHandleCustomActionDone_FailureOpensInfoModal(t *testing.T) {
 // freshly-pulled file appears without waiting on the 10-second
 // auto-refresh tick. Pinning this avoids a regression where a user
 // runs Copy-from-remote, sees "done", and then has to pause before
-// the new file becomes clickable in the sidebar.
+// the new file becomes clickable in the sidebar. "Immediate" now means
+// "this tick, not the next one": the ReadDir walk happens on a
+// goroutine and lands on the posted treeScanEvent, so the test pumps
+// that event the way the real loop does.
 func TestHandleCustomActionDone_SuccessRefreshesTree(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	dir := t.TempDir()
 	a := newTestApp(t, dir)
 	// Drop a file directly on disk that the tree hasn't seen yet —
@@ -477,8 +481,91 @@ func TestHandleCustomActionDone_SuccessRefreshesTree(t *testing.T) {
 	}
 	beforeChildren := len(a.tree.Root.Children)
 	a.handleCustomActionDone(&customActionDoneEvent{label: "X"})
+	pumpTreeScan(t, a)
 	if got := len(a.tree.Root.Children); got <= beforeChildren {
 		t.Errorf("tree was not refreshed: %d → %d children", beforeChildren, got)
+	}
+}
+
+// TestHandleCustomActionDone_SuccessWithOutputOpensInfo pins the
+// asymmetry fix: failure got the full modal while success got a
+// two-second flash, so anyone watching a slow scp finish had no
+// confirmation and never saw its stdout. An action that printed
+// something now reports through the same surface as a failure.
+func TestHandleCustomActionDone_SuccessWithOutputOpensInfo(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.handleCustomActionDone(&customActionDoneEvent{
+		label:  "Copy from remote",
+		output: []byte("sent 4 files, 1.2 MB\n"),
+	})
+	n := infoPrefab(t, a)
+	if !strings.Contains(strings.Join(n.Lines, "\n"), "sent 4 files") {
+		t.Errorf("info body missing stdout: %q", n.Lines)
+	}
+	if strings.Contains(n.Title, "failed") {
+		t.Errorf("success title reads as a failure: %q", n.Title)
+	}
+}
+
+// TestHandleCustomActionDone_SlowSilentSuccessOpensInfo covers the other
+// trigger: a long run with no output still deserves a confirmation,
+// because a flash that expires while the user is looking at another pane
+// is the same as no confirmation at all.
+func TestHandleCustomActionDone_SlowSilentSuccessOpensInfo(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.handleCustomActionDone(&customActionDoneEvent{
+		label:    "Deploy",
+		duration: 9 * time.Second,
+	})
+	n := infoPrefab(t, a)
+	if !strings.Contains(strings.Join(n.Lines, "\n"), "9s") {
+		t.Errorf("slow-run report should state the duration: %q", n.Lines)
+	}
+}
+
+// TestHandleCustomActionDone_FastSilentSuccessOnlyFlashes is the
+// restraint half. A quick, silent action must not make the user dismiss
+// a modal — the flash is proportionate and the overlay would be noise.
+func TestHandleCustomActionDone_FastSilentSuccessOnlyFlashes(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.handleCustomActionDone(&customActionDoneEvent{
+		label:    "Format",
+		duration: 50 * time.Millisecond,
+	})
+	if a.overlays.IsOpen() {
+		t.Fatalf("fast silent action should not open an overlay; top = %T", a.overlays.Top())
+	}
+	if !strings.Contains(a.statusMsg, "Format — done") {
+		t.Fatalf("status = %q, want the brief confirmation", a.statusMsg)
+	}
+}
+
+// TestSplitActionOutput_Thresholds pins the routing rule itself, without
+// a screen: nil means "a flash says it all".
+func TestSplitActionOutput_Thresholds(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	if got := splitActionOutput(nil, 10*time.Millisecond); got != nil {
+		t.Errorf("fast + silent should stay a flash, got %v", got)
+	}
+	if got := splitActionOutput([]byte("x\n"), time.Millisecond); len(got) == 0 {
+		t.Error("output alone should earn the modal")
+	}
+	if got := splitActionOutput(nil, customActionQuietRun); len(got) == 0 {
+		t.Error("a run at the slow threshold should earn the modal")
+	}
+
+	// Over-long lines are ellipsised by the same helper the failure
+	// path uses, so the two reports can't drift apart.
+	long := strings.Repeat("z", 200)
+	body := splitActionOutput([]byte(long), 0)
+	for _, ln := range body {
+		if runeLen(ln) > 80 {
+			t.Errorf("line over 80 cells: %q", ln)
+		}
+	}
+	if !strings.HasSuffix(body[0], "…") {
+		t.Errorf("truncated line = %q, want a trailing ellipsis", body[0])
 	}
 }
 
@@ -568,5 +655,154 @@ func TestMenuToggleWrap(t *testing.T) {
 	a.menuToggleWrap()
 	if !a.wrapOn || !a.activeTabPtr().Wrap {
 		t.Fatal("second toggle should turn wrap back on")
+	}
+}
+
+// TestMenuSaveAndClose_GoesThroughSaveTab pins that Save & close reuses
+// the one shared save path instead of calling tab.Save() itself. The
+// observable difference is format-on-save: a project with an untrusted
+// .skiff/format.json must raise the trust prompt on this action exactly
+// as it does on a plain Save. Before the fix Save & close skipped
+// formatting entirely, so the same buffer landed on disk formatted or
+// unformatted depending on which menu row the user clicked.
+func TestMenuSaveAndClose_GoesThroughSaveTab(t *testing.T) {
+	useTestTrustFile(t)
+	root := t.TempDir()
+	writeFormatConfig(t, root, `{"commands":{"txt":["echo","ran","$FILE"]}}`)
+	target := filepath.Join(root, "sc.txt")
+	if err := os.WriteFile(target, []byte("seed\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, root)
+	a.openFile(target)
+	a.activeTabPtr().InsertString("Y")
+
+	a.menuSaveAndClose()
+
+	if a.tabs.Len() != 0 {
+		t.Fatalf("expected the tab closed; got %d tabs", a.tabs.Len())
+	}
+	if !confirmIsOpen(a) {
+		t.Fatalf("Save & close must run format-on-save like a plain Save; top = %T", a.overlays.Top())
+	}
+}
+
+// TestMenuSaveAndClose_FailedSaveKeepsTab is the other half of routing
+// through saveTab: a save that can't land must flash and leave the tab
+// open, never close it and drop the buffer.
+func TestMenuSaveAndClose_FailedSaveKeepsTab(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "sc.txt")
+	if err := os.WriteFile(target, []byte("seed\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, root)
+	a.openFile(target)
+	a.activeTabPtr().InsertString("Y")
+	// A directory in the file's place makes the write fail for everyone,
+	// root included.
+	if err := os.Remove(target); err != nil {
+		t.Fatalf("swap: %v", err)
+	}
+	if err := os.Mkdir(target, 0755); err != nil {
+		t.Fatalf("swap: %v", err)
+	}
+
+	a.menuSaveAndClose()
+
+	if a.tabs.Len() != 1 {
+		t.Fatalf("a failed save must not close the tab; got %d tabs", a.tabs.Len())
+	}
+	if !strings.Contains(a.statusMsg, "Save failed") {
+		t.Fatalf("expected a Save failed flash, got %q", a.statusMsg)
+	}
+}
+
+// newNavTestApp opens a small Go file and returns the app plus its tab,
+// shared by the caret-navigation action tests below.
+func newNavTestApp(t *testing.T, content string) (*App, *editor.Tab) {
+	t.Helper()
+	root := t.TempDir()
+	target := filepath.Join(root, "nav.go")
+	if err := os.WriteFile(target, []byte(content), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, root)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	tab.Cursor = editor.Position{}
+	tab.Anchor = tab.Cursor
+	return a, tab
+}
+
+// TestMenuMoveWord_WalksTheCaret drives the two word-motion rows the way a
+// click would: the menu closes and the caret lands on a word boundary.
+func TestMenuMoveWord_WalksTheCaret(t *testing.T) {
+	a, tab := newNavTestApp(t, "alpha beta gamma\n")
+
+	a.openMenu()
+	a.menuMoveWordRight()
+	if a.menuOpen {
+		t.Fatal("menuMoveWordRight left the menu open")
+	}
+	if want := (editor.Position{Line: 0, Col: 5}); tab.Cursor != want {
+		t.Fatalf("cursor = %v, want %v", tab.Cursor, want)
+	}
+
+	a.menuMoveWordLeft()
+	if want := (editor.Position{}); tab.Cursor != want {
+		t.Fatalf("cursor = %v, want %v", tab.Cursor, want)
+	}
+}
+
+// TestMenuMoveWord_NoTabIsSafe covers the startup screen: the rows are
+// reachable before any file is open and must not panic.
+func TestMenuMoveWord_NoTabIsSafe(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.menuMoveWordLeft()
+	a.menuMoveWordRight()
+}
+
+// TestMenuGoToMatchingBracket jumps to the partner and says so when there
+// isn't one — a silent no-op on a menu row reads as a broken editor.
+func TestMenuGoToMatchingBracket(t *testing.T) {
+	a, tab := newNavTestApp(t, "func f() {\n\tg()\n}\n")
+	tab.Cursor = editor.Position{Line: 0, Col: 9} // the '{'
+	tab.Anchor = tab.Cursor
+
+	a.openMenu()
+	a.menuGoToMatchingBracket()
+	if a.menuOpen {
+		t.Fatal("menuGoToMatchingBracket left the menu open")
+	}
+	if want := (editor.Position{Line: 2, Col: 0}); tab.Cursor != want {
+		t.Fatalf("cursor = %v, want %v", tab.Cursor, want)
+	}
+
+	tab.Cursor = editor.Position{Line: 1, Col: 1} // on 'g', no bracket
+	tab.Anchor = tab.Cursor
+	a.menuGoToMatchingBracket()
+	if !strings.Contains(a.statusMsg, "No matching bracket") {
+		t.Fatalf("expected a no-match flash, got %q", a.statusMsg)
+	}
+}
+
+// TestHasMatchingBracket_GatesTheMenuRow checks the enable predicate the
+// row carries: true only where the jump would actually go somewhere, and
+// false with no tab at all.
+func TestHasMatchingBracket_GatesTheMenuRow(t *testing.T) {
+	a, tab := newNavTestApp(t, "x := f(1)\n")
+	tab.Cursor = editor.Position{Line: 0, Col: 6} // the '('
+	if !a.hasMatchingBracket() {
+		t.Fatal("caret on a balanced '(' should enable the row")
+	}
+	tab.Cursor = editor.Position{Line: 0, Col: 0}
+	if a.hasMatchingBracket() {
+		t.Fatal("caret on a plain rune should disable the row")
+	}
+
+	empty := newTestApp(t, t.TempDir())
+	if empty.hasMatchingBracket() {
+		t.Fatal("no tab should disable the row")
 	}
 }

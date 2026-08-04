@@ -30,6 +30,19 @@ _Avoid_: bar, bottom panel
 A ready-made overlay kind (prompt, confirm, pick, form) that a feature
 fills with text and callbacks instead of drawing its own surface.
 
+**Drill-in**:
+A single menu row that opens a pick of the rows it demoted — "Git…",
+"File clipboard…". A drill-in keeps a cluster reachable from the action
+menu without spending a top-level row per verb; every drill-in is
+registered in `menuDrillIns()` so the reachability test can see it.
+_Avoid_: submenu, nested menu
+
+**Filter**:
+The action menu's focused text field. Typing narrows rows across all
+groups at once, so a row's group never has to be known to reach it. With
+a filter typed the groups collapse into one flat match list.
+_Avoid_: search box, palette query
+
 **Action menu**:
 The ≡ menu — the primary, always-reachable home of every editor and file
 action. Right-click and shortcuts are redundant paths to it, never the
@@ -53,6 +66,22 @@ Promoting a preview tab to a permanent one (double-click, edit, or
 explicit open).
 _Avoid_: keep open
 
+### Files
+
+**Disk conflict**:
+A dirty buffer whose file changed on disk underneath it. It is a decision
+the user has to make — Keep mine / Reload / Diff — not a notification, so
+it raises a prompt and keeps a status-bar marker until it is resolved.
+Looking at the diff is not resolving; saving or reloading is.
+_Avoid_: external change (that's the clean-buffer case, which just
+reloads), merge conflict (that's git's)
+
+**Line ending**:
+The newline convention a file had on disk, remembered per tab. Buffers
+hold unterminated lines and every write restores the file's own ending,
+so editing one line of a CRLF file never rewrites the whole file.
+_Avoid_: newline mode, EOL setting (there is no setting — it is detected)
+
 ### Git
 
 **Repo**:
@@ -67,4 +96,6 @@ _Avoid_: git status (that's the command, not the model)
 
 **Git panel**:
 The sidebar's second mode: the list of changed files with their change
-kinds, replacing the explorer tree while active.
+kinds, replacing the explorer tree while active. Mouse-first, but it can
+take keyboard focus (`Esc g`) to walk rows, stage them, and reach the
+action buttons without a mouse.

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -37,6 +38,15 @@ func diffOv(t *testing.T, a *App) *diffOverlay {
 func diffIsOpen(a *App) bool {
 	_, ok := a.overlays.Top().(*diffOverlay)
 	return ok
+}
+
+// pumpDiffLoad applies the diffLoadEvent an async diff request posted.
+func pumpDiffLoad(t *testing.T, a *App) {
+	t.Helper()
+	pumpUntil(t, a, "diffLoadEvent", func(ev tcell.Event) bool {
+		_, ok := ev.(*diffLoadEvent)
+		return ok
+	})
 }
 
 // sampleDiff is a small captured `git diff` with one modification
@@ -390,9 +400,12 @@ func TestDiffContextStyles_SkipsHugeDiffs(t *testing.T) {
 }
 
 // TestMenuDiffFile_OpensActiveTabDiff pins the ≡ → Diff this file flow:
-// with a modified file in front, the row is enabled and opens that
-// file's diff (no Open button — the file is already open); with a
-// clean tab it stays greyed out.
+// with a modified file in front the row is enabled and opens that file's
+// diff (no Open button — the file is already open); with a clean tab it
+// stays greyed out. The row lives one level down in the git drill-in, so
+// the lookup goes through drillInItemByLabel — that keeps the
+// reachability half of the check, which asserting hasDiffableTab alone
+// would lose.
 func TestMenuDiffFile_OpensActiveTabDiff(t *testing.T) {
 	requireGit(t)
 	dir := initRepo(t)
@@ -403,7 +416,7 @@ func TestMenuDiffFile_OpensActiveTabDiff(t *testing.T) {
 	a := newTestApp(t, dir)
 	a.openFile(target)
 
-	item := menuItemByLabel(t, a, "Diff this file")
+	item := drillInItemByLabel(t, a, "Diff this file")
 	if item.enabled(a) {
 		t.Fatal("clean file should grey out Diff this file")
 	}
@@ -415,6 +428,10 @@ func TestMenuDiffFile_OpensActiveTabDiff(t *testing.T) {
 	}
 
 	a.menuDiffFile()
+	if diffIsOpen(a) {
+		t.Fatal("the git read is off-thread; nothing should open inline")
+	}
+	pumpDiffLoad(t, a)
 	if !diffIsOpen(a) {
 		t.Fatal("menu action should open the diff view")
 	}
@@ -440,6 +457,7 @@ func TestMenuDiffFile_CleanFileFlashes(t *testing.T) {
 	a.openFile(target)
 
 	a.menuDiffFile()
+	pumpDiffLoad(t, a)
 	if diffIsOpen(a) {
 		t.Fatal("clean file should not open a diff")
 	}
@@ -620,5 +638,127 @@ func TestDrawDiffView_NarrowFallsBackToUnified(t *testing.T) {
 	}
 	if !strings.Contains(body, "-old line") || !strings.Contains(body, "+new line") {
 		t.Fatalf("unified body should keep raw prefixes, got:\n%s", body)
+	}
+}
+
+// TestRequestDiff_PostsEventWithoutBlocking is the responsiveness
+// contract shared by both click paths: the git read runs on a goroutine,
+// so the call a mouse click makes returns with nothing open and only the
+// posted event raises the modal. internal/git's read timeout is ten
+// seconds — this is what keeps one click on a gutter marker in a slow or
+// network-mounted repo from freezing the editor for that long. The Fake
+// makes it exact: no subprocess, no repository, one scripted answer.
+func TestRequestDiff_PostsEventWithoutBlocking(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	writeFileT(t, target, "one\ntwo\n")
+	a := newTestApp(t, dir)
+	a.openFile(target)
+
+	fake := &git.Fake{}
+	fake.Script("diff HEAD -- "+target, strings.Join(sampleDiff(), "\n")+"\n", nil)
+	a.gitRunner = fake
+
+	a.menuDiffFile()
+	if diffIsOpen(a) {
+		t.Fatal("the diff must not open inline — that is the ten-second freeze")
+	}
+	if !strings.Contains(a.statusMsg, "Loading") {
+		t.Fatalf("the click needs acknowledging immediately, flash = %q", a.statusMsg)
+	}
+
+	pumpDiffLoad(t, a)
+	if !diffIsOpen(a) {
+		t.Fatal("the posted event should open the diff")
+	}
+	if body := strings.Join(diffOv(t, a).raw, "\n"); !strings.Contains(body, "+new line") {
+		t.Fatalf("scripted diff body missing, got:\n%s", body)
+	}
+	if got := fake.CallCount(); got != 1 {
+		t.Fatalf("one diff request = one git call, got %d", got)
+	}
+}
+
+// TestHandleDiffLoaded_DropsStaleResults pins the three ways a finished
+// load can arrive too late. Each would otherwise throw a modal over
+// whatever the user moved on to in the meantime, which is worse than
+// showing no diff at all. The live case at the end proves the guards
+// aren't simply "never open".
+func TestHandleDiffLoaded_DropsStaleResults(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	writeFileT(t, target, "one\n")
+	other := filepath.Join(dir, "g.txt")
+	writeFileT(t, other, "two\n")
+	a := newTestApp(t, dir)
+	a.openFile(target)
+
+	landed := func(gen int, path string) *diffLoadEvent {
+		return &diffLoadEvent{
+			when:    time.Now(),
+			gen:     gen,
+			kind:    diffLoadHunk,
+			title:   "Git change · f.txt",
+			tabPath: path,
+			lines:   sampleDiff(),
+		}
+	}
+
+	// A newer click bumped the generation while git worked.
+	a.diffLoadGen = 7
+	a.handleDiffLoaded(landed(6, target))
+	if diffIsOpen(a) {
+		t.Fatal("a superseded load must not open")
+	}
+
+	// An overlay went up meanwhile.
+	a.openInfo("Busy", []string{"working"})
+	a.handleDiffLoaded(landed(7, target))
+	if diffIsOpen(a) {
+		t.Fatal("a load landing under an open overlay must not steal it")
+	}
+	a.closeAllModals()
+
+	// The user switched tabs; the diff would describe a file that is no
+	// longer in front of them.
+	a.openFile(other)
+	a.handleDiffLoaded(landed(7, target))
+	if diffIsOpen(a) {
+		t.Fatal("a load for a no-longer-active tab must not open")
+	}
+
+	a.handleDiffLoaded(landed(7, other))
+	if !diffIsOpen(a) {
+		t.Fatal("a current load should open")
+	}
+}
+
+// TestHandleDiffLoaded_EmptyResultExplainsPerSurface pins why the event
+// carries its kind: a menu action that turns up nothing flashes inline,
+// while a gutter-marker click that turns up nothing owes the user a
+// dialog — the marker promised a change, so its absence is surprising.
+func TestHandleDiffLoaded_EmptyResultExplainsPerSurface(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	writeFileT(t, target, "one\n")
+	a := newTestApp(t, dir)
+	a.openFile(target)
+
+	empty := func(kind diffLoadKind) *diffLoadEvent {
+		return &diffLoadEvent{when: time.Now(), gen: a.diffLoadGen, kind: kind, tabPath: target}
+	}
+
+	a.statusMsg = ""
+	a.handleDiffLoaded(empty(diffLoadFile))
+	if infoIsOpen(a) {
+		t.Fatal("the menu action should flash, not open a dialog")
+	}
+	if !strings.Contains(a.statusMsg, "No uncommitted changes") {
+		t.Fatalf("flash = %q, want the no-changes message", a.statusMsg)
+	}
+
+	a.handleDiffLoaded(empty(diffLoadHunk))
+	if !infoIsOpen(a) {
+		t.Fatal("a marker click with no hunk should explain itself in a dialog")
 	}
 }

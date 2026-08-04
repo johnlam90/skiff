@@ -182,13 +182,23 @@ func TestHandleEvent_Resize(t *testing.T) {
 }
 
 // menuItemByLabel finds a menu row by static label for tests that care about
-// one action without hard-coding its row index.
+// one action without hard-coding its row index. Drill-in rows (the git
+// verbs, the file-clipboard actions) are searched too: demoting a row
+// into a submenu doesn't stop it being a menu action, so tests keep
+// asserting on labels rather than on which level a row lives at.
 func menuItemByLabel(t *testing.T, a *App, label string) menuItemDef {
 	t.Helper()
 	items, _, _ := a.menuLayout()
 	for _, item := range items {
 		if item.label == label {
 			return item
+		}
+	}
+	for _, d := range menuDrillIns() {
+		for _, item := range d.items {
+			if item.label == label {
+				return item
+			}
 		}
 	}
 	t.Fatalf("menu item %q not found", label)
@@ -291,5 +301,90 @@ func TestHandleEvent_PasteEscIsContentNotCommand(t *testing.T) {
 	}
 	if got := a.activeTabPtr().Buffer.Lines[0]; got != "q" {
 		t.Fatalf("pasted rune should insert literally, buffer = %q", got)
+	}
+}
+
+// lowColorScreen wraps a SimulationScreen and lies about its colour
+// count. tcell's simulation screen always reports 256, so this is the
+// only way to exercise the degraded-palette path without a real
+// 16-colour terminal.
+type lowColorScreen struct {
+	tcell.SimulationScreen
+	colors int
+}
+
+// Colors reports the fabricated depth applyColorDepth reads.
+func (s *lowColorScreen) Colors() int { return s.colors }
+
+// TestApplyColorDepth_DegradesBelow256 pins the low-colour fallback
+// wiring. theme.Degrade existed but nothing called it, so on a plain
+// TERM=xterm every gray in the palette collapsed onto one ANSI colour
+// and the status bar, the selection, and the active tab stopped being
+// distinguishable. The App has to ask the screen and act on the answer.
+func TestApplyColorDepth_DegradesBelow256(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	sim := a.screen.(tcell.SimulationScreen)
+	authored := a.theme
+
+	a.screen = &lowColorScreen{SimulationScreen: sim, colors: 16}
+	a.applyColorDepth()
+
+	if a.screenColors != 16 {
+		t.Fatalf("screenColors = %d, want 16", a.screenColors)
+	}
+	if !a.theme.LowColor {
+		t.Fatal("a 16-colour terminal should get the degraded palette")
+	}
+	if a.theme.Attrs.StatusBar == 0 || a.theme.Attrs.ActiveTab == 0 {
+		t.Fatalf("degraded palette must carry attribute fallbacks: %+v", a.theme.Attrs)
+	}
+	if a.theme == authored {
+		t.Fatal("palette was left untouched")
+	}
+	if a.theme != theme.Degrade(authored, 16) {
+		t.Fatal("live palette should equal theme.Degrade of the authored one")
+	}
+}
+
+// TestApplyColorDepth_TruecolorIsUntouched is the no-cost half: at 256
+// colours or better the authored palette must survive byte-for-byte,
+// including the zero Attrs that let every draw site skip a branch.
+func TestApplyColorDepth_TruecolorIsUntouched(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	authored := a.theme
+
+	a.applyColorDepth() // SimulationScreen reports 256
+
+	if a.theme != authored {
+		t.Fatal("a 256-colour terminal must render the palette as authored")
+	}
+	if a.theme.LowColor || a.theme.Attrs != (theme.Attrs{}) {
+		t.Fatalf("truecolor palette picked up degrade state: %+v", a.theme.Attrs)
+	}
+}
+
+// TestApplyTheme_KeepsDegradeOnLowColor guards the mid-session path: the
+// registry always hands back the authored 24-bit palette, so a theme
+// switch on a 16-colour terminal would silently undo the startup
+// degrade if applyTheme didn't re-run it.
+func TestApplyTheme_KeepsDegradeOnLowColor(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.screen = &lowColorScreen{SimulationScreen: a.screen.(tcell.SimulationScreen), colors: 8}
+	a.applyColorDepth()
+
+	var other string
+	for _, e := range theme.List() {
+		if e.ID != a.currentThemeID() {
+			other = e.ID
+			break
+		}
+	}
+	if other == "" {
+		t.Skip("theme registry has only one entry")
+	}
+	a.applyTheme(other, false)
+
+	if !a.theme.LowColor {
+		t.Fatalf("switching to %q dropped the low-colour fallback", other)
 	}
 }

@@ -70,7 +70,7 @@ Every action lives in the action menu. Open it three ways:
   />
 </figure>
 
-The menu is keyboard-navigable too — arrow keys to move, Enter to select, Esc to dismiss.
+The menu opens with a filter field focused, so the fastest way to find an action is to type part of its name — "branch" finds **Switch branch…**, "thm" finds **Theme…**. Arrow keys move, `Enter` runs the highlighted row, `Esc` clears the filter and a second `Esc` dismisses the menu. Rows are grouped File / Edit / Go / Git / View / Custom / Quit, and the git verbs and file-clipboard actions sit one row deeper behind **Git…** and **File clipboard…**.
 
 ## Edit and save
 

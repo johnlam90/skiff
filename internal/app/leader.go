@@ -39,6 +39,11 @@ type leaderBinding struct {
 // nothing to grab — the editor's clipboard keys are the only keyboard
 // path. Mouse users get select-to-copy on drag release (handleMouse).
 //
+// b / e / % are borrowed straight from vi's motions (back a word, end of
+// word, jump to the matching bracket) because that is the vocabulary a
+// terminal user already has. Alt+Left / Alt+Right run the same two word
+// motions for people whose terminal sends them; see keys.go.
+//
 // Intentionally not bound:
 //   - rename / delete / revert — destructive enough that we want the
 //     menu's confirm dialog to gate the action as a deliberate gesture.
@@ -64,7 +69,10 @@ func leaderBindings() []leaderBinding {
 		{'F', (*App).menuFindInProject, "find in project"},
 		{'l', (*App).menuGoToLine, "goto line"},
 		{'p', (*App).openFinder, "open file"},
-		{'g', (*App).toggleGitPanel, "git panel"},
+		{'b', (*App).menuMoveWordLeft, "word left"},
+		{'e', (*App).menuMoveWordRight, "word right"},
+		{'%', (*App).menuGoToMatchingBracket, "match bracket"},
+		{'g', (*App).focusGitPanel, "git panel"},
 	}
 }
 

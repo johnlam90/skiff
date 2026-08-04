@@ -108,6 +108,19 @@ type App struct {
 	// themeID is the registry id of the active theme — what the picker
 	// pre-selects and what SetTheme persists. See themepick.go.
 	themeID string
+	// screenColors is what the terminal reported via Screen.Colors()
+	// the last time we resolved the palette. Below
+	// theme.MinTrueColorPalette the live theme is a theme.Degrade of
+	// the authored one — see applyColorDepth.
+	screenColors int
+
+	// diskConflicts remembers, per tab path, the on-disk mtime the
+	// user was warned about when a dirty buffer diverged from the
+	// file. Presence means "unresolved conflict": the status bar keeps
+	// its marker up, and reconcileOpenTabsWithDisk will not re-open
+	// the conflict overlay for that same disk revision. See
+	// conflict.go.
+	diskConflicts map[string]time.Time
 
 	// overlays is the single routing truth for which floating modal is
 	// up: handleKey, handleMouse, draw, and anyModalOpen all consult it
@@ -167,6 +180,13 @@ type App struct {
 
 	menuOpen       bool
 	hoveredMenuRow int // index into menuItems of the row under the mouse, or -1.
+	// menuFilter is the action menu's type-to-filter input, focused
+	// from the moment the menu opens. While it holds text menuLayout
+	// collapses every group into one flat list of matching rows, so a
+	// 40-action menu becomes a command palette instead of a scroll
+	// hunt. Reset by openMenu and closeMenu — it never outlives a
+	// single showing of the menu.
+	menuFilter overlay.Field
 	// menuScroll is how many rows the menu's content region is scrolled
 	// when the natural layout is taller than the terminal (tmux splits,
 	// the 80×24 minimum). 0 whenever everything fits.
@@ -273,6 +293,30 @@ type App struct {
 	// treeRefreshStop signals the background tree-refresh goroutine to exit.
 	treeRefreshStop chan struct{}
 
+	// treeScanInFlight marks a background disk sweep for the 10s tick
+	// currently running; treeScanQueued remembers that another tick (or
+	// a refreshTreeNow call) fired meanwhile, so exactly one follow-up
+	// sweep runs when the in-flight one lands. treeScanGen is bumped by
+	// every main-thread tree mutation, so a sweep that started before a
+	// create/rename/delete is discarded instead of resurrecting the file
+	// the user just removed. All three are main-thread-only state.
+	treeScanInFlight bool
+	treeScanQueued   bool
+	treeScanGen      int
+
+	// diffLoadGen is bumped by every async diff request (a gutter-marker
+	// click, ≡ → Diff this file). A finished load carries the generation
+	// it started at and is dropped unless it still matches, so a diff
+	// the user has already clicked past never yanks itself on screen.
+	// Main-thread-only.
+	diffLoadGen int
+
+	// gitRunner overrides the git process boundary for the async read
+	// paths — nil in production (real git), a *git.Fake in tests that
+	// need to script a diff without a repo or a subprocess. See
+	// App.readRepo.
+	gitRunner git.Runner
+
 	// gitSnap is the last applied repo snapshot — branch, ahead/behind,
 	// and (via the tree) the changed set. gitSnap.IsRepo is the explicit
 	// repo test; nothing infers repo-ness from a non-empty branch name.
@@ -309,6 +353,15 @@ type App struct {
 	gitPanelActive bool
 	gitPanelRows   []gitChangeRow
 	gitPanelScroll int
+
+	// Git panel keyboard mode (gitchanges.go). The panel is mouse-first,
+	// but Button3 and mouse reporting are exactly what macOS Terminal +
+	// tmux swallow, so Esc-g / ≡ → Git changes arm a keyboard focus that
+	// walks the rows and the action row. All three fields are zero-safe:
+	// off, focus on the list, first button.
+	gitPanelKeys   bool
+	gitPanelOnBtns bool
+	gitPanelBtn    int
 
 	// Write-side git state (see gitops.go / gitchanges.go): the
 	// one-at-a-time mutation gate, the commit checkbox set (absent =
@@ -379,6 +432,10 @@ func New(rootDir string) (*App, error) {
 	}
 	a.setActiveFolder(tree.Root.Path)
 	a.loadUserConfig()
+	// The config may have swapped in a different palette, so the
+	// colour-depth fallback is resolved last — it must degrade the
+	// theme the user will actually see, not the default it replaced.
+	a.applyColorDepth()
 	a.refreshGitStatus()
 	a.loadCustomActions()
 	a.flash("Welcome — click a file to open · click  ≡  for the menu")
@@ -450,12 +507,43 @@ func NewSingleFile(filePath string) (*App, error) {
 	}
 	a.setActiveFolder(rootDir)
 	a.loadUserConfig()
+	// Same rationale as New: degrade the resolved palette, not the
+	// default one.
+	a.applyColorDepth()
 	a.loadCustomActions()
 	// openFile loads the file's git gutter markers itself (a file-scoped
 	// `git diff`), so single-file mode shows change bars on open without
 	// the whole-repo status or tree walk that New performs.
 	a.openFile(filePath)
 	return a, nil
+}
+
+// applyColorDepth re-derives the live palette for whatever the terminal
+// says it can render. Every skiff palette is authored in 24-bit RGB;
+// on a 16-colour TERM tcell rounds those onto eight hues and the five
+// grays Tokyo Night uses to separate the status bar, the sidebar, and
+// the selection all land on the same cell. theme.Degrade answers that
+// by spending attributes (reverse, bold, underline) instead of hue.
+//
+// It is idempotent — Degrade of an already-degraded palette is the same
+// palette — so it is safe to call from both constructors and from
+// applyTheme when the user picks a new theme mid-session.
+func (a *App) applyColorDepth() {
+	if a.screen == nil {
+		return
+	}
+	a.screenColors = a.screen.Colors()
+	th := theme.Degrade(a.theme, a.screenColors)
+	if th == a.theme {
+		return // truecolor terminal: the overwhelmingly common case.
+	}
+	a.theme = th
+	a.screen.SetStyle(tcell.StyleDefault.Background(th.BG).Foreground(th.Text))
+	// Highlight styles bake the palette in, so every open tab has to
+	// re-tokenise against the degraded one.
+	for _, t := range a.tabs.Tabs() {
+		t.StyleStale = true
+	}
 }
 
 // Close releases the terminal back to the user. Always call this before exit.
@@ -540,6 +628,10 @@ func (a *App) handleEvent(ev tcell.Event) {
 		}
 	case *gitStatusEvent:
 		a.handleGitStatusEvent(e)
+	case *treeScanEvent:
+		a.handleTreeScan(e)
+	case *diffLoadEvent:
+		a.handleDiffLoaded(e)
 	case *projFindDoneEvent:
 		a.handleProjFindDone(e)
 	case *projFindKickEvent:

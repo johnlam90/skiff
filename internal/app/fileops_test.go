@@ -17,6 +17,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/overlay"
 )
 
 // TestCreateEmptyFile_New writes a brand-new empty file and verifies it
@@ -715,5 +718,222 @@ func TestEmptyTrash_DiscardsStored(t *testing.T) {
 	}
 	if a.hasTrashedEntry() {
 		t.Fatal("emptyTrash should clear the entries")
+	}
+}
+
+// seedDirtyDeleteApp opens path in a tab and dirties it with an edit that
+// is visible in the buffer text, so a test can tell "the unsaved work
+// survived" from "the last saved bytes came back".
+func seedDirtyDeleteApp(t *testing.T, a *App, path string) *editor.Tab {
+	t.Helper()
+	a.openFile(path)
+	tab := a.activeTabPtr()
+	if tab == nil {
+		t.Fatalf("openFile(%s) produced no tab", path)
+	}
+	tab.InsertString("EDITED ")
+	if !tab.Dirty {
+		t.Fatal("setup: tab should be dirty after an edit")
+	}
+	return tab
+}
+
+// TestDoDeletePath_DirtyTabPromptsInsteadOfDiscarding is the data-loss
+// regression. Deleting a file whose buffer had unsaved edits used to trash
+// the file and close the tab through closeTab, which has no dirty check —
+// so the edits were simply gone. Undo delete can't help: the reopen stack
+// stores path and cursor, not buffer text, and the trashed copy holds the
+// last SAVED bytes. Nothing may leave the disk before the user answers.
+func TestDoDeletePath_DirtyTabPromptsInsteadOfDiscarding(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "unsaved.txt")
+	writeFileT(t, target, "saved\n")
+	a := newTestApp(t, dir)
+	seedDirtyDeleteApp(t, a, target)
+
+	a.doDeletePath(target)
+
+	if !dirtyIsOpen(a) {
+		t.Fatalf("expected the unsaved-changes overlay; top = %T", a.overlays.Top())
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("the file must stay put until the user answers: %v", err)
+	}
+	if a.tabs.Len() != 1 {
+		t.Fatalf("the tab must stay open until the user answers; got %d tabs", a.tabs.Len())
+	}
+	if len(a.trashed) != 0 {
+		t.Fatalf("nothing should have entered the trash yet; got %d entries", len(a.trashed))
+	}
+}
+
+// TestDoDeletePath_DirtyCancelAbortsTheDelete pins Cancel as a true abort:
+// the file stays, the tab stays, and the unsaved edits stay unsaved.
+func TestDoDeletePath_DirtyCancelAbortsTheDelete(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "unsaved.txt")
+	writeFileT(t, target, "saved\n")
+	a := newTestApp(t, dir)
+	tab := seedDirtyDeleteApp(t, a, target)
+
+	a.doDeletePath(target)
+	dirtyChoose(t, a, 0) // Cancel
+
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("Cancel must leave the file alone: %v", err)
+	}
+	if a.tabs.Len() != 1 || !tab.Dirty {
+		t.Fatalf("Cancel must leave the dirty tab open: tabs=%d dirty=%v", a.tabs.Len(), tab.Dirty)
+	}
+	if !strings.Contains(tab.Buffer.String(), "EDITED") {
+		t.Fatalf("Cancel must leave the buffer untouched: %q", tab.Buffer.String())
+	}
+}
+
+// TestDoDeletePath_DirtySaveKeepsTheEditsRecoverable is the whole point of
+// the prompt: Save writes the buffer before the file goes to the trash, so
+// Undo delete brings back the work the user actually did rather than the
+// stale bytes that happened to be on disk.
+func TestDoDeletePath_DirtySaveKeepsTheEditsRecoverable(t *testing.T) {
+	useTestTrustFile(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "unsaved.txt")
+	writeFileT(t, target, "saved\n")
+	a := newTestApp(t, dir)
+	seedDirtyDeleteApp(t, a, target)
+
+	a.doDeletePath(target)
+	dirtyChoose(t, a, 2) // Save
+
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("Save then delete must still delete: err=%v", err)
+	}
+	if a.tabs.Len() != 0 {
+		t.Fatalf("the orphaned tab should be closed; got %d tabs", a.tabs.Len())
+	}
+	a.menuUndoDelete()
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("undo delete should restore the file: %v", err)
+	}
+	if !strings.Contains(string(got), "EDITED") {
+		t.Fatalf("the restored file must hold the saved edits, got %q", got)
+	}
+}
+
+// TestDoDeletePath_DirtyDiscardDeletesAnyway keeps the escape hatch: a
+// user who says Discard gets the delete they asked for, unsaved buffer
+// and all.
+func TestDoDeletePath_DirtyDiscardDeletesAnyway(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "unsaved.txt")
+	writeFileT(t, target, "saved\n")
+	a := newTestApp(t, dir)
+	seedDirtyDeleteApp(t, a, target)
+
+	a.doDeletePath(target)
+	dirtyChoose(t, a, 1) // Discard
+
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("Discard must complete the delete: err=%v", err)
+	}
+	if a.tabs.Len() != 0 {
+		t.Fatalf("the orphaned tab should be closed; got %d tabs", a.tabs.Len())
+	}
+	a.menuUndoDelete()
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("undo delete should restore the file: %v", err)
+	}
+	if string(got) != "saved\n" {
+		t.Fatalf("Discard means the unsaved edits are gone, got %q", got)
+	}
+}
+
+// TestDoDeletePath_DirtyFolderNamesEveryUnsavedFile covers the folder
+// case, where one delete can orphan several dirty buffers at once. The
+// prompt has to name them all — "some file somewhere has unsaved changes"
+// is not something a user can act on.
+func TestDoDeletePath_DirtyFolderNamesEveryUnsavedFile(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "pkg")
+	if err := os.Mkdir(sub, 0755); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	first := filepath.Join(sub, "one.txt")
+	second := filepath.Join(sub, "two.txt")
+	writeFileT(t, first, "1\n")
+	writeFileT(t, second, "2\n")
+	a := newTestApp(t, dir)
+	seedDirtyDeleteApp(t, a, first)
+	seedDirtyDeleteApp(t, a, second)
+
+	a.doDeletePath(sub)
+
+	d, ok := a.overlays.Top().(*overlay.Dirty)
+	if !ok {
+		t.Fatalf("expected the unsaved-changes overlay; top = %T", a.overlays.Top())
+	}
+	if !strings.Contains(d.Message, "one.txt") || !strings.Contains(d.Message, "two.txt") {
+		t.Fatalf("the prompt must name every unsaved file, got %q", d.Message)
+	}
+	if _, err := os.Stat(sub); err != nil {
+		t.Fatalf("the folder must stay put until the user answers: %v", err)
+	}
+}
+
+// TestDoDeletePath_CleanTabDeletesWithoutPrompting keeps the common case
+// one click: the guard only fires for buffers with unsaved work.
+func TestDoDeletePath_CleanTabDeletesWithoutPrompting(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "clean.txt")
+	writeFileT(t, target, "saved\n")
+	a := newTestApp(t, dir)
+	a.openFile(target)
+
+	a.doDeletePath(target)
+
+	if dirtyIsOpen(a) {
+		t.Fatal("a clean tab must not raise the unsaved-changes prompt")
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("clean delete should go straight through: err=%v", err)
+	}
+	if a.tabs.Len() != 0 {
+		t.Fatalf("the orphaned tab should be closed; got %d tabs", a.tabs.Len())
+	}
+}
+
+// TestMenuDelete_DirtyTabChainsToTheUnsavedPrompt drives the real user
+// path — ≡ Delete file, Yes, then the unsaved-changes prompt — because
+// chaining one overlay off another's callback is where this could still
+// break: the confirm has to capture its Yes callback before tearing
+// itself down, or the prompt the callback opens is popped by the
+// confirm's own teardown and the delete quietly proceeds anyway.
+func TestMenuDelete_DirtyTabChainsToTheUnsavedPrompt(t *testing.T) {
+	useTestTrustFile(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "unsaved.txt")
+	writeFileT(t, target, "saved\n")
+	a := newTestApp(t, dir)
+	seedDirtyDeleteApp(t, a, target)
+
+	a.menuDelete()
+	confirmYes(a)
+
+	if !dirtyIsOpen(a) {
+		t.Fatalf("expected the unsaved-changes prompt after Yes; top = %T", a.overlays.Top())
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("the file must survive until the second answer: %v", err)
+	}
+
+	dirtyChoose(t, a, 2) // Save
+
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("Save should let the delete finish: err=%v", err)
+	}
+	if a.tabs.Len() != 0 {
+		t.Fatalf("the orphaned tab should be closed; got %d tabs", a.tabs.Len())
 	}
 }

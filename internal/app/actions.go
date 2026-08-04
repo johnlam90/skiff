@@ -30,69 +30,144 @@ import (
 )
 
 // customActionDoneEvent is posted by runCustomAction when its background
-// shell-out finishes. Carries the label and any error so the main loop
-// can flash a sensible status message — running scp / ssh inline would
-// freeze the UI for the duration of the network round-trip.
+// shell-out finishes. Carries the label, any error, and how long the run
+// took so the main loop can pick a proportionate report — running scp /
+// ssh inline would freeze the UI for the duration of the network
+// round-trip.
 type customActionDoneEvent struct {
-	when   time.Time
-	label  string
-	err    error
-	output []byte // combined stdout+stderr from the action's shell run
+	when     time.Time
+	label    string
+	err      error
+	output   []byte // combined stdout+stderr from the action's shell run
+	duration time.Duration
 }
 
 // When satisfies the tcell.Event interface.
 func (e *customActionDoneEvent) When() time.Time { return e.when }
 
+// customActionQuietRun is how long a successful action may take before
+// its completion is worth a modal rather than a flash. Under a second
+// the user is still looking at the key they pressed and a status-bar
+// line lands; past it their attention has moved and a flash that
+// expires unseen is the same as no confirmation at all — which is
+// exactly the "did my scp actually work?" complaint.
+const customActionQuietRun = time.Second
+
 // handleCustomActionDone surfaces the result of an async custom-action
-// run. Success flashes a brief confirmation and forces a sidebar
-// refresh so a freshly-pulled file appears in the file tree without
-// waiting for the 10-second auto-refresh tick. Failure opens an info
-// modal with the captured stderr — the prior 1-line flash truncated
-// scp's actual diagnostics, which is exactly the case where the user
-// most needs to read them.
+// run and forces a sidebar refresh so a freshly-pulled file appears in
+// the file tree without waiting for the 10-second auto-refresh tick.
+//
+// The report scales with how much there is to report. Failure always
+// opens the info modal with the captured stderr — the prior 1-line
+// flash truncated scp's actual diagnostics, which is exactly the case
+// where the user most needs to read them. Success does too when the run
+// printed something or took long enough that the user looked away.
+// A fast, silent action still gets nothing but a flash, because
+// stopping to dismiss a modal after every one-second formatter run is
+// its own kind of hostile.
 func (a *App) handleCustomActionDone(e *customActionDoneEvent) {
 	if e.err != nil {
-		title := "Action failed: " + e.label
-		body := splitErrorOutput(e.err, e.output)
-		a.openInfo(title, body)
+		a.openInfo("Action failed: "+e.label, splitErrorOutput(e.err, e.output))
 		return
 	}
-	a.flash(e.label + " — done")
 	a.refreshTreeNow()
+	body := splitActionOutput(e.output, e.duration)
+	if len(body) == 0 {
+		a.flash(e.label + " — done")
+		return
+	}
+	// refreshTreeNow ran first: openInfo takes the overlay slot, and a
+	// tree tick that reconciles a changed tab must not try to open a
+	// conflict prompt on top of the report we are about to show.
+	a.openInfo("Action done: "+e.label, body)
+}
+
+// splitActionOutput formats a *successful* action's captured output for
+// the info modal, or returns nil when a flash says everything there is
+// to say. Silent runs that finished promptly are the nil case; anything
+// that printed, and anything slow enough that the user's attention
+// wandered, gets the modal.
+func splitActionOutput(out []byte, duration time.Duration) []string {
+	captured := strings.TrimRight(string(out), "\n")
+	slow := duration >= customActionQuietRun
+	if captured == "" && !slow {
+		return nil
+	}
+
+	var body []string
+	if slow {
+		body = append(body, "Completed in "+duration.Round(100*time.Millisecond).String())
+	}
+	if captured != "" {
+		if len(body) > 0 {
+			body = append(body, "")
+		}
+		body = append(body, trimActionLines(captured)...)
+	} else {
+		body = append(body, "", "(no output)")
+	}
+	return append(body, actionLogFooter()...)
+}
+
+// actionOutputMaxLines caps how much captured output either report
+// shows inline. Past it the info modal stops being readable and the
+// actions.log pointer below is the better answer.
+const actionOutputMaxLines = 8
+
+// actionOutputMaxWidth is the widest inline output line, one cell
+// narrower than the info overlay's body so nothing is clipped twice.
+const actionOutputMaxWidth = 78
+
+// trimActionLine clips one body line to the modal's width, rune-safe,
+// spending the final cell on an ellipsis when anything was cut.
+func trimActionLine(ln string) string {
+	if runeLen(ln) <= actionOutputMaxWidth {
+		return ln
+	}
+	return string([]rune(ln)[:actionOutputMaxWidth-1]) + "…"
+}
+
+// trimActionLines splits captured command output into modal-ready body
+// lines: CR stripped, over-long lines ellipsised, and the whole thing
+// capped with a pointer at the full log. Shared by the success and
+// failure reports so the two can't drift apart.
+func trimActionLines(captured string) []string {
+	var body []string
+	for _, ln := range strings.Split(captured, "\n") {
+		body = append(body, trimActionLine(strings.TrimRight(ln, "\r")))
+		if len(body) >= actionOutputMaxLines {
+			body = append(body, "… (truncated; see actions.log)")
+			break
+		}
+	}
+	return body
+}
+
+// actionLogFooter is the closing "where's the full version?" pointer
+// both reports end with, or nil when no log path is configured. It goes
+// through the same width clip as the output above it — a deep
+// XDG_STATE_HOME once pushed this line past the modal's body and it was
+// the only line that escaped truncation.
+func actionLogFooter() []string {
+	logPath := customactions.LogPath()
+	if logPath == "" {
+		return nil
+	}
+	return []string{"", trimActionLine("Full output: " + logPath)}
 }
 
 // splitErrorOutput formats the action's captured output for the info
-// modal: an opening line summarising the exit error, then up to a
-// handful of lines of trimmed stderr, with the actions.log path as
-// the closing line so the user knows where to find the full record.
-// Pulled out so handleCustomActionDone reads as the routing decision
-// it really is.
+// modal: an opening line summarising the exit error, then a handful of
+// lines of trimmed stderr, with the actions.log path as the closing
+// line so the user knows where to find the full record. Pulled out so
+// handleCustomActionDone reads as the routing decision it really is.
 func splitErrorOutput(runErr error, out []byte) []string {
-	const maxLines = 8
-	const maxLineWidth = 78
-
 	body := []string{strings.TrimSpace(runErr.Error())}
-	captured := strings.TrimRight(string(out), "\n")
-	if captured != "" {
+	if captured := strings.TrimRight(string(out), "\n"); captured != "" {
 		body = append(body, "")
-		count := 0
-		for _, ln := range strings.Split(captured, "\n") {
-			ln = strings.TrimRight(ln, "\r")
-			if runeLen(ln) > maxLineWidth {
-				ln = string([]rune(ln)[:maxLineWidth-1]) + "…"
-			}
-			body = append(body, ln)
-			count++
-			if count >= maxLines {
-				body = append(body, "… (truncated; see actions.log)")
-				break
-			}
-		}
+		body = append(body, trimActionLines(captured)...)
 	}
-	if logPath := customactions.LogPath(); logPath != "" {
-		body = append(body, "", "Full output: "+logPath)
-	}
-	return body
+	return append(body, actionLogFooter()...)
 }
 
 // menuUndo rolls the active tab back one undo step.
@@ -202,10 +277,11 @@ func (a *App) execCustomAction(act customactions.Action, promptValues map[string
 		})
 
 		_ = scr.PostEvent(&customActionDoneEvent{
-			when:   time.Now(),
-			label:  act.Label,
-			err:    runErr,
-			output: out,
+			when:     time.Now(),
+			label:    act.Label,
+			err:      runErr,
+			output:   out,
+			duration: duration,
 		})
 	}()
 }
@@ -216,21 +292,22 @@ func (a *App) menuSave() {
 	a.saveActiveTab()
 }
 
-// menuSaveAndClose saves the active tab and then closes it. If the save
-// fails the close is aborted so we don't lose the user's edits.
+// menuSaveAndClose saves the active tab and then closes it. The write
+// goes through saveTab — the one shared save path — so Save & close
+// behaves exactly like Save followed by Close: format-on-save runs, the
+// git status refreshes, and a failure flashes the same message. Calling
+// tab.Save() directly here is what once let this row write an
+// unformatted file while the Save row above it formatted. A failed save
+// aborts the close so we never drop the user's edits.
 func (a *App) menuSaveAndClose() {
 	a.closeMenu()
 	tab := a.activeTabPtr()
 	if tab == nil || tab.Path == "" {
 		return
 	}
-	if err := tab.Save(); err != nil {
-		a.flash(fmt.Sprintf("Save failed: %v", err))
-		return
+	if a.saveTab(tab) {
+		a.closeTab(tab)
 	}
-	a.refreshGitStatusAsync()
-	a.flash(fmt.Sprintf("Saved %s — closed", filepath.Base(tab.Path)))
-	a.closeTab(a.tabs.Active())
 }
 
 // menuClose closes the active tab via the same dirty-tab confirmation flow
@@ -301,10 +378,53 @@ func (a *App) menuDuplicateLine() {
 	}
 }
 
-// menuRefreshTree forces an immediate sidebar reload. Currently unwired
-// from the menu — the 10s background poller covers the common case — but
-// the method is kept so re-adding the menu row (see menuItems) only
-// requires uncommenting one line.
+// menuMoveWordLeft walks the caret to the start of the word on its left.
+// Also on Esc-b and Alt+Left; the menu row exists because that is where a
+// user discovers the gesture in the first place. Boundaries come from
+// editor.IsWordChar — the same predicate double-click selection uses.
+func (a *App) menuMoveWordLeft() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.MoveWordLeft(false)
+	}
+}
+
+// menuMoveWordRight walks the caret to the end of the word on its right.
+// Also on Esc-e and Alt+Right.
+func (a *App) menuMoveWordRight() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.MoveWordRight(false)
+	}
+}
+
+// menuGoToMatchingBracket jumps the caret to the partner of the bracket it
+// is touching. Flashing on failure matters here: the row is reachable with
+// the caret nowhere near a bracket, and a silent no-op would read as a
+// broken menu item.
+func (a *App) menuGoToMatchingBracket() {
+	a.closeMenu()
+	t := a.activeTabPtr()
+	if t == nil {
+		return
+	}
+	if !t.GoToMatchingBracket() {
+		a.flash("No matching bracket at the caret")
+	}
+}
+
+// hasMatchingBracket gates the "Go to matching bracket" row: enabled only
+// when the caret is on (or just after) a bracket whose partner we found,
+// so the row dims rather than promising a jump that won't happen.
+func (a *App) hasMatchingBracket() bool {
+	t := a.activeTabPtr()
+	return t != nil && t.HasMatchingBracket()
+}
+
+// menuRefreshTree forces an immediate sidebar reload. The 10s background
+// poller covers the common case; this is the ≡ → View row for the case
+// it can't win — a network mount where the walk is slow enough that "I
+// know it changed, look again" beats waiting for the next tick.
 func (a *App) menuRefreshTree() {
 	a.closeMenu()
 	a.refreshTree()

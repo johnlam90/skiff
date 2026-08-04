@@ -24,8 +24,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gdamore/tcell/v2"
+
 	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/icons"
+	"github.com/johnlam90/skiff/internal/session"
 )
 
 // TestRefreshTree_PicksUpFileCreatedBehindTheEditor is the whole point of
@@ -221,8 +225,12 @@ func TestReconcileOpenTabsWithDisk_ReloadsCleanTab(t *testing.T) {
 }
 
 // TestReconcileOpenTabsWithDisk_DirtyTabKeepsEdits is the branch that
-// protects unsaved work: a dirty buffer is never overwritten by the disk,
-// the user just gets warned that saving will clobber the other change.
+// protects unsaved work: a dirty buffer is never overwritten by the
+// disk. The one-line "will overwrite on save" flash this used to assert
+// was replaced by the conflict prompt (see conflict.go) — a flash is the
+// wrong instrument for a decision — so what's pinned here is the
+// invariant that survived the change: reconciliation itself never
+// touches the bytes.
 func TestReconcileOpenTabsWithDisk_DirtyTabKeepsEdits(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "f.txt")
@@ -241,15 +249,8 @@ func TestReconcileOpenTabsWithDisk_DirtyTabKeepsEdits(t *testing.T) {
 	if got := tab.Buffer.String(); got != "mine" {
 		t.Fatalf("dirty buffer was overwritten: got %q", got)
 	}
-	if !strings.Contains(a.statusMsg, "will overwrite on save") {
-		t.Fatalf("expected an overwrite warning, got %q", a.statusMsg)
-	}
-
-	// The warning must not repeat every tick for the same disk change.
-	a.statusMsg = ""
-	a.reconcileOpenTabsWithDisk()
-	if a.statusMsg != "" {
-		t.Fatalf("re-flashed for an already-reported change: %q", a.statusMsg)
+	if !a.tabDiskConflict(tab) {
+		t.Fatal("a dirty tab whose file changed should be marked in conflict")
 	}
 }
 
@@ -312,4 +313,203 @@ func writeNewer(t *testing.T, path, body string, base time.Time) {
 	if err := os.Chtimes(path, future, future); err != nil {
 		t.Fatalf("chtimes: %v", err)
 	}
+}
+
+// pumpUntil feeds events off the simulation screen through handleEvent —
+// what the real loop does, minus the loop — until match recognises the
+// one the test is waiting for. Other background events (a git-status
+// collection riding the same tick, a resize from screen setup) are
+// handled on the way past instead of tripping the test, because the
+// order two goroutines post in is not something a test may assume.
+func pumpUntil(t *testing.T, a *App, what string, match func(tcell.Event) bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !a.screen.HasPendingEvent() {
+			time.Sleep(2 * time.Millisecond)
+			continue
+		}
+		ev := a.screen.PollEvent()
+		if ev == nil {
+			break
+		}
+		a.handleEvent(ev)
+		if match(ev) {
+			return
+		}
+	}
+	t.Fatalf("%s never arrived", what)
+}
+
+// pumpTreeScan applies the treeScanEvent a background sweep posted.
+func pumpTreeScan(t *testing.T, a *App) {
+	t.Helper()
+	pumpUntil(t, a, "treeScanEvent", func(ev tcell.Event) bool {
+		_, ok := ev.(*treeScanEvent)
+		return ok
+	})
+}
+
+// reconcileOpenTabsWithDisk runs the open-tab disk sweep synchronously:
+// stat inline, then apply, which is exactly how the tick's two halves
+// compose. It lives in the test file because nothing in production wants
+// it any more — refreshTreeAsync collects the probes on a goroutine and
+// handleTreeScan lands them — but a test that only cares about one
+// reconciliation branch shouldn't have to pump an event to reach it.
+func (a *App) reconcileOpenTabsWithDisk() {
+	a.applyTabProbes(probeOpenTabs(a.openTabDiskPaths()))
+}
+
+// TestRefreshTreeAsync_ScansOffThreadAndAppliesOnEvent is the whole
+// point of the split tick: the ReadDir walk and the per-tab Stat happen
+// on a goroutine, and nothing about the tree or the tab changes until the
+// posted event is handled on the main loop. Before the split, both ran
+// inside the event handler and stuttered every ten seconds on a large
+// tree over NFS.
+func TestRefreshTreeAsync_ScansOffThreadAndAppliesOnEvent(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "watched.txt")
+	if err := os.WriteFile(target, []byte("one"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+
+	// Two external changes at once: a new file for the tree to find and a
+	// newer revision of the open file for the reconcile to reload.
+	if err := os.WriteFile(filepath.Join(dir, "appeared.txt"), []byte("hi"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	writeNewer(t, target, "two", tab.Mtime)
+
+	a.refreshTreeAsync()
+	if !a.treeScanInFlight {
+		t.Fatal("the kick should mark a sweep in flight")
+	}
+	if findTreeChild(a, "appeared.txt") != nil {
+		t.Fatal("the kick must not mutate the tree — that is the event's job")
+	}
+
+	pumpTreeScan(t, a)
+
+	if a.treeScanInFlight {
+		t.Fatal("the event should clear the in-flight flag")
+	}
+	if findTreeChild(a, "appeared.txt") == nil {
+		t.Fatal("the applied sweep should surface the new file")
+	}
+	if got := tab.Buffer.String(); got != "two" {
+		t.Fatalf("the applied sweep should reload the clean tab: got %q", got)
+	}
+}
+
+// TestRefreshTreeAsync_CoalescesTicks pins the burst behaviour, matching
+// refreshGitStatusAsync: kicks arriving while a sweep is in flight queue
+// exactly one follow-up rather than piling up goroutines, and that
+// follow-up starts when the first result lands.
+func TestRefreshTreeAsync_CoalescesTicks(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.treeScanInFlight = true // simulate a sweep mid-flight
+
+	a.refreshTreeAsync()
+	a.refreshTreeAsync()
+	if !a.treeScanQueued {
+		t.Fatal("kicks during flight should queue a follow-up")
+	}
+
+	a.handleTreeScan(&treeScanEvent{when: time.Now(), gen: a.treeScanGen})
+	if a.treeScanQueued {
+		t.Fatal("landing should consume the queued flag")
+	}
+	if !a.treeScanInFlight {
+		t.Fatal("landing with a queued kick should start exactly one follow-up sweep")
+	}
+	pumpTreeScan(t, a)
+}
+
+// TestHandleTreeScan_DropsScanOlderThanATreeMutation is the correctness
+// half of moving the walk off-thread. A sweep reads the disk, then the
+// user deletes a file — which refreshes the tree synchronously. Applying
+// the older listing afterwards would put the deleted file back on screen
+// until the next tick, so the generation bump retires it.
+func TestHandleTreeScan_DropsScanOlderThanATreeMutation(t *testing.T) {
+	dir := t.TempDir()
+	doomed := filepath.Join(dir, "doomed.txt")
+	if err := os.WriteFile(doomed, []byte("x"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	if findTreeChild(a, "doomed.txt") == nil {
+		t.Fatal("seed file should be in the tree")
+	}
+
+	// The sweep sees doomed.txt...
+	stale := &treeScanEvent{
+		when: time.Now(),
+		gen:  a.treeScanGen,
+		dirs: filetree.ScanDirs(a.tree.LoadedDirs()),
+	}
+	// ...and only then does the user delete it, refreshing the tree.
+	if err := os.Remove(doomed); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	a.refreshTree()
+	if findTreeChild(a, "doomed.txt") != nil {
+		t.Fatal("the synchronous refresh should have dropped the file")
+	}
+
+	a.handleTreeScan(stale)
+	if findTreeChild(a, "doomed.txt") != nil {
+		t.Fatal("a scan older than the deletion must not resurrect the file")
+	}
+}
+
+// TestRefreshTreeAsync_WritesSessionOffThread pins the third piece of the
+// tick. The capture stays on the main thread (it reads tabs, cursors and
+// the tree's expanded set); only the temp-file-plus-fsync-plus-rename
+// write crosses over, and it rides the same sweep, so the treeScanEvent
+// arriving means the write is done — nothing is left touching the state
+// directory after the tick lands. The round trip through restoreSession
+// proves the payload survived the hop.
+func TestRefreshTreeAsync_WritesSessionOffThread(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	target := filepath.Join(root, "s.txt")
+	if err := os.WriteFile(target, []byte("one\ntwo\nthree\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, root)
+	a.openFile(target)
+	a.activeTabPtr().Cursor = editor.Position{Line: 2}
+
+	a.refreshTreeAsync()
+	if _, ok := session.Load(root); ok {
+		t.Fatal("the kick must not write inline — that is the fsync on the event thread")
+	}
+	pumpTreeScan(t, a)
+
+	p, ok := session.Load(root)
+	if !ok || len(p.Tabs) != 1 || p.Tabs[0].Line != 2 {
+		t.Fatalf("session did not land with the sweep: found=%v %+v", ok, p.Tabs)
+	}
+
+	b := newTestApp(t, root)
+	b.restoreSession()
+	if b.tabs.Len() != 1 {
+		t.Fatalf("restored %d tabs, want 1", b.tabs.Len())
+	}
+	if got := b.activeTabPtr().Cursor.Line; got != 2 {
+		t.Fatalf("restored cursor line %d, want 2", got)
+	}
+}
+
+// findTreeChild returns the root-level tree node named name, or nil.
+func findTreeChild(a *App, name string) *filetree.Node {
+	for _, c := range a.tree.Root.Children {
+		if c.Name == name {
+			return c
+		}
+	}
+	return nil
 }

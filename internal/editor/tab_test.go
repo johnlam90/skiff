@@ -1520,3 +1520,287 @@ func TestNewTab_KeepsMultibyteTextOpenable(t *testing.T) {
 		t.Fatalf("buffer looks wrong: %d lines", len(tab.Buffer.Lines))
 	}
 }
+
+// TestNewTab_RefusesOversizedFile pins the open size cap. The file is a
+// sparse 33 MiB of NUL bytes, which means the assertion also pins the
+// ORDER of the two gates: had NewTab read the file before checking its
+// size, looksBinary would have won and the error would be
+// ErrBinaryFile. Getting ErrFileTooLarge back is proof the Stat guard
+// fired first and the 33 MiB never entered a buffer. The message must
+// name both sizes — the app surfaces it verbatim as a status flash, and
+// "too large" with no number leaves the user guessing.
+func TestNewTab_RefusesOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "huge.log")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Sparse: no bytes are actually written, so the test costs an inode.
+	if err := f.Truncate(maxOpenBytes + 1<<20); err != nil {
+		f.Close()
+		t.Fatalf("truncate: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	tab, err := NewTab(path)
+	if !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("want ErrFileTooLarge, got %v", err)
+	}
+	if errors.Is(err, ErrBinaryFile) {
+		t.Fatal("size gate must run before the binary probe, i.e. before the read")
+	}
+	if tab != nil {
+		t.Fatal("a refused open must not hand back a tab")
+	}
+	for _, want := range []string{"huge.log", "33.0 MiB", "32.0 MiB"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q should name %q", err, want)
+		}
+	}
+}
+
+// TestNewTab_OpensFileUnderCap guards the other side of the gate: a
+// normal file is nowhere near the cap and must still open with its
+// content and mtime intact — the Stat hoisted above the read is now the
+// only source of Mtime, so a regression there would go unnoticed by the
+// size assertions alone.
+func TestNewTab_OpensFileUnderCap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "small.txt")
+	if err := os.WriteFile(path, []byte("one\ntwo\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	if got := tab.Buffer.Lines[0]; got != "one" {
+		t.Fatalf("first line = %q, want \"one\"", got)
+	}
+	if !tab.Mtime.Equal(info.ModTime()) {
+		t.Fatalf("mtime = %v, want %v", tab.Mtime, info.ModTime())
+	}
+}
+
+// TestMibString pins the size rendering the refusal message depends on:
+// one decimal place, MiB unit, and no rounding surprise at the cap
+// itself (a "32.0 MiB (limit 32.0 MiB)" message would read as a bug).
+func TestMibString(t *testing.T) {
+	cases := []struct {
+		in   int64
+		want string
+	}{
+		{0, "0.0 MiB"},
+		{maxOpenBytes, "32.0 MiB"},
+		{maxOpenBytes + 1<<19, "32.5 MiB"},
+		{512 << 20, "512.0 MiB"},
+	}
+	for _, c := range cases {
+		if got := mibString(c.in); got != c.want {
+			t.Fatalf("mibString(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// newIndentTab writes content to a real file and opens it, so IndentUnit
+// comes from DetectIndent rather than a hand-set field — the point of the
+// auto-indent tests is that Enter follows the FILE's convention.
+func newIndentTab(t *testing.T, name, content string) *Tab {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	return tab
+}
+
+// TestTab_InsertNewline_FollowsDetectedIndentStyle is the headline
+// behavior: Enter carries the current line's indentation onto the new
+// line, in the characters the file itself uses. A tab-indented Go file
+// must never gain spaces, and a space-indented file must never gain tabs.
+func TestTab_InsertNewline_FollowsDetectedIndentStyle(t *testing.T) {
+	tabbed := newIndentTab(t, "main.go", "func f() {\n\tx := 1\n}\n")
+	if tabbed.IndentUnit != "\t" {
+		t.Fatalf("precondition: IndentUnit = %q, want a tab", tabbed.IndentUnit)
+	}
+	tabbed.Cursor = Position{Line: 1, Col: 7} // end of "\tx := 1"
+	tabbed.Anchor = tabbed.Cursor
+	tabbed.InsertNewline()
+	if got := tabbed.Buffer.Lines[2]; got != "\t" {
+		t.Fatalf("tab file: new line = %q, want %q", got, "\t")
+	}
+	if want := (Position{Line: 2, Col: 1}); tabbed.Cursor != want {
+		t.Fatalf("tab file: cursor = %v, want %v", tabbed.Cursor, want)
+	}
+
+	spaced := newIndentTab(t, "app.js", "function f() {\n  let x = 1;\n}\n")
+	if spaced.IndentUnit != "  " {
+		t.Fatalf("precondition: IndentUnit = %q, want two spaces", spaced.IndentUnit)
+	}
+	spaced.Cursor = Position{Line: 1, Col: 12} // end of "  let x = 1;"
+	spaced.Anchor = spaced.Cursor
+	spaced.InsertNewline()
+	if got := spaced.Buffer.Lines[2]; got != "  " {
+		t.Fatalf("space file: new line = %q, want two spaces", got)
+	}
+}
+
+// TestTab_InsertNewline_AddsLevelAfterOpener checks the extra level a
+// block opener earns, end to end and in the file's own unit.
+func TestTab_InsertNewline_AddsLevelAfterOpener(t *testing.T) {
+	tab := newIndentTab(t, "main.go", "func f() {\n\tif x {\n\t}\n}\n")
+	tab.Cursor = Position{Line: 1, Col: 7} // just after "\tif x {"
+	tab.Anchor = tab.Cursor
+	tab.InsertNewline()
+	if got := tab.Buffer.Lines[2]; got != "\t\t" {
+		t.Fatalf("after '{': new line = %q, want two tabs", got)
+	}
+
+	py := newIndentTab(t, "s.py", "def f():\n    if x:\n        pass\n")
+	py.Cursor = Position{Line: 1, Col: 9} // just after "    if x:"
+	py.Anchor = py.Cursor
+	py.InsertNewline()
+	if got := py.Buffer.Lines[2]; got != "        " {
+		t.Fatalf("after ':': new line = %q, want eight spaces", got)
+	}
+}
+
+// TestTab_InsertNewline_IsOneUndoStep pins the undo contract: one Enter is
+// one step, whether or not it carried an indent, and whether or not it
+// replaced a selection. Two entries would strand the user on a
+// half-indented line after a single Undo.
+func TestTab_InsertNewline_IsOneUndoStep(t *testing.T) {
+	tab := newIndentTab(t, "main.go", "func f() {\n\tx := 1\n}\n")
+	before := tab.Buffer.String()
+	depth := len(tab.undoStack)
+
+	tab.Cursor = Position{Line: 1, Col: 7}
+	tab.Anchor = tab.Cursor
+	tab.InsertNewline()
+	if got := len(tab.undoStack) - depth; got != 1 {
+		t.Fatalf("plain Enter pushed %d undo entries, want 1", got)
+	}
+	if !tab.Undo() || tab.Buffer.String() != before {
+		t.Fatalf("one Undo did not restore the buffer:\n%q", tab.Buffer.String())
+	}
+
+	// With a selection: DeleteSelection's step is the only one recorded.
+	depth = len(tab.undoStack)
+	tab.Anchor = Position{Line: 1, Col: 1}
+	tab.Cursor = Position{Line: 1, Col: 6}
+	tab.InsertNewline()
+	if got := len(tab.undoStack) - depth; got != 1 {
+		t.Fatalf("Enter over a selection pushed %d undo entries, want 1", got)
+	}
+	if !tab.Undo() || tab.Buffer.String() != before {
+		t.Fatalf("one Undo after a selection-replacing Enter left:\n%q", tab.Buffer.String())
+	}
+}
+
+// TestTab_InsertNewline_UsesSelectionStartIndent covers the case where the
+// caret is not where the split lands: with a selection, the new line
+// inherits the indentation of the line the selection STARTS on, which is
+// the line that survives the delete.
+func TestTab_InsertNewline_UsesSelectionStartIndent(t *testing.T) {
+	tab := newIndentTab(t, "main.go", "\t\talpha\nbeta\n")
+	tab.Anchor = Position{Line: 0, Col: 6} // inside "\t\talpha"
+	tab.Cursor = Position{Line: 1, Col: 2} // inside "beta"
+	tab.InsertNewline()
+
+	if got := tab.Buffer.Lines[0]; got != "\t\talph" {
+		t.Fatalf("line 0 = %q", got)
+	}
+	if got := tab.Buffer.Lines[1]; got != "\t\tta" {
+		t.Fatalf("line 1 = %q, want the selection-start indent plus the tail", got)
+	}
+}
+
+// TestTab_InsertNewline_SplitInsideIndent keeps a mid-indentation Enter
+// from shifting the code: the text that moves down keeps its own leading
+// whitespace, and the new line only inherits what was actually behind the
+// caret, so the visible column of the code is unchanged.
+func TestTab_InsertNewline_SplitInsideIndent(t *testing.T) {
+	tab := newIndentTab(t, "app.js", "        code();\n")
+	tab.Cursor = Position{Line: 0, Col: 2}
+	tab.Anchor = tab.Cursor
+	tab.InsertNewline()
+
+	if got := tab.Buffer.Lines[0]; got != "  " {
+		t.Fatalf("line 0 = %q", got)
+	}
+	if got := tab.Buffer.Lines[1]; got != "        code();" {
+		t.Fatalf("line 1 = %q — the code moved column", got)
+	}
+}
+
+// TestTab_InsertNewline_NeverInsertsCR guards the CRLF round trip: buffer
+// lines carry no terminator, so an Enter in a CRLF file must add "\n" only
+// and let Save re-join with the recorded ending.
+func TestTab_InsertNewline_NeverInsertsCR(t *testing.T) {
+	tab := newIndentTab(t, "win.txt", "  alpha\r\n  beta\r\n")
+	if tab.LineEnding != LineEndingCRLF {
+		t.Fatalf("precondition: LineEnding = %v, want CRLF", tab.LineEnding)
+	}
+	tab.Cursor = Position{Line: 0, Col: 7}
+	tab.Anchor = tab.Cursor
+	tab.InsertNewline()
+	for i, line := range tab.Buffer.Lines {
+		if strings.ContainsRune(line, '\r') {
+			t.Fatalf("line %d picked up a CR: %q", i, line)
+		}
+	}
+}
+
+// TestTab_InsertNewline_IgnoresImageTabs keeps Enter from mutating a
+// read-only image preview.
+func TestTab_InsertNewline_IgnoresImageTabs(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("x"), Mode: imageMode}
+	tab.InsertNewline()
+	if tab.Buffer.LineCount() != 1 {
+		t.Fatalf("image tab gained a line: %q", tab.Buffer.Lines)
+	}
+}
+
+// TestTab_InsertNewline_UnderSoftWrap checks the interaction the anchor-
+// based wrap design makes easy to get wrong: splitting a line that is
+// currently wrapped must leave the caret on screen and the indent intact.
+// Wrap keeps no cached layout, so there is nothing to invalidate here —
+// this test is what keeps that true.
+func TestTab_InsertNewline_UnderSoftWrap(t *testing.T) {
+	scr := newSimScreen(t, 40, 6)
+	defer scr.Fini()
+
+	long := "\tif x {" + strings.Repeat(" // padding", 12)
+	tab := newIndentTab(t, "main.go", long+"\n\t}\n")
+	tab.Wrap = true
+	tab.Render(scr, theme.Default(), 0, 0, 40, 6)
+
+	// Split right after the opening brace, several visual rows up from
+	// the end of the wrapped line.
+	tab.Cursor = Position{Line: 0, Col: 7}
+	tab.Anchor = tab.Cursor
+	tab.InsertNewline()
+	tab.Render(scr, theme.Default(), 0, 0, 40, 6)
+
+	if got := tab.Buffer.Lines[0]; got != "\tif x {" {
+		t.Fatalf("line 0 = %q", got)
+	}
+	if !strings.HasPrefix(tab.Buffer.Lines[1], "\t\t") {
+		t.Fatalf("line 1 lost its extra indent level: %q", tab.Buffer.Lines[1])
+	}
+	if want := (Position{Line: 1, Col: 2}); tab.Cursor != want {
+		t.Fatalf("cursor = %v, want %v", tab.Cursor, want)
+	}
+	if _, _, vis := scr.GetCursor(); !vis {
+		t.Fatal("caret left the viewport after a wrapped-line split")
+	}
+}
