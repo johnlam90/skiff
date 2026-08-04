@@ -18,28 +18,20 @@
 package app
 
 import (
-	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/johnlam90/skiff/internal/clipboard"
 	"github.com/johnlam90/skiff/internal/customactions"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/git"
-	"github.com/johnlam90/skiff/internal/icons"
 	"github.com/johnlam90/skiff/internal/overlay"
 	"github.com/johnlam90/skiff/internal/search"
 	"github.com/johnlam90/skiff/internal/theme"
-	"github.com/johnlam90/skiff/internal/userconfig"
-	"github.com/johnlam90/skiff/internal/version"
 )
 
 // Layout, behavior, and feel constants. Constants instead of config —
@@ -50,20 +42,30 @@ const (
 	minEditorAfterDrag  = 40
 	minWidth            = 50
 	minHeight           = 24
-	statusFlashFor      = 3 * time.Second
-	doubleClickMs       = 500 * time.Millisecond
-	doubleEscMs         = 500 * time.Millisecond
 
-	// menuEscMs is the double-Esc window for opening the menu — much
-	// wider than the leader's doubleEscMs on purpose. Under tmux's
+	// autoHideSidebarWidth is the terminal width below which the file
+	// explorer collapses on its own. Not a taste number: it is exactly
+	// the width at which the splitter's own clamp gives up — under
+	// minSidebarWidth + minEditorAfterDrag the tree and the editor
+	// cannot both keep their minimum, so resizeSidebar starts starving
+	// the editor instead. A tmux split on a laptop crosses this
+	// constantly, and a 39-column editor behind an 18-column tree is
+	// worth less than no tree at all. See applyResponsiveSidebar.
+	autoHideSidebarWidth = minSidebarWidth + minEditorAfterDrag
+	statusFlashFor       = 3 * time.Second
+	doubleClickWindow    = 500 * time.Millisecond
+	doubleEscWindow      = 500 * time.Millisecond
+
+	// menuEscWindow is the double-Esc window for opening the menu — much
+	// wider than the leader's doubleEscWindow on purpose. Under tmux's
 	// default escape-time, a fast Esc,Esc reaches tcell as ONE munched
 	// Esc event and a slow pair arrives >500ms apart, so a 500ms window
 	// made the double-tap nearly impossible to land. Two Escs inside
 	// 1.2s is always a deliberate "give me the menu" gesture; a wider
 	// window costs nothing because a lone armed Esc is already inert.
-	menuEscMs  = 1200 * time.Millisecond
-	wheelLines = 3
-	wheelCols  = 6 // horizontal step per WheelLeft/WheelRight event
+	menuEscWindow = 1200 * time.Millisecond
+	wheelLines    = 3
+	wheelCols     = 6 // horizontal step per WheelLeft/WheelRight event
 
 	// modifierStickyWindow is how long a previously-seen Shift modifier
 	// state is allowed to persist forward onto the next wheel event.
@@ -109,259 +111,6 @@ const (
 	autoScrollTick = 60 * time.Millisecond
 )
 
-// autoScrollEvent is the custom tcell event our auto-scroll goroutine
-// posts at autoScrollTick intervals while the user is drag-selecting past
-// the top or bottom edge of the editor pane.
-type autoScrollEvent struct {
-	when time.Time
-}
-
-// When satisfies the tcell.Event interface.
-func (e *autoScrollEvent) When() time.Time { return e.when }
-
-// leaderExpiryEvent is posted shortly after an armed Esc's window
-// closes. It carries no action of its own — reaching the event loop is
-// the point, because Run redraws after every event and that repaint
-// removes the status bar's "Esc…" tag.
-type leaderExpiryEvent struct {
-	when time.Time
-}
-
-// When satisfies the tcell.Event interface.
-func (e *leaderExpiryEvent) When() time.Time { return e.when }
-
-// treeRefreshEvent is the custom tcell event the background tree-refresh
-// goroutine posts every treeRefreshInterval. The main loop reacts by
-// asking the file tree to re-read every loaded directory.
-type treeRefreshEvent struct {
-	when time.Time
-}
-
-// When satisfies the tcell.Event interface.
-func (e *treeRefreshEvent) When() time.Time { return e.when }
-
-// customActionDoneEvent is posted by runCustomAction when its background
-// shell-out finishes. Carries the label and any error so the main loop
-// can flash a sensible status message — running scp / ssh inline would
-// freeze the UI for the duration of the network round-trip.
-type customActionDoneEvent struct {
-	when   time.Time
-	label  string
-	err    error
-	output []byte // combined stdout+stderr from the action's shell run
-}
-
-// When satisfies the tcell.Event interface.
-func (e *customActionDoneEvent) When() time.Time { return e.when }
-
-// tabRect remembers where each tab was drawn so click handling can hit-test
-// against the actual rendered geometry rather than re-deriving it.
-type tabRect struct {
-	Index    int
-	X, Width int
-	CloseX   int // Cell column of the × close button.
-}
-
-// clickRecord tracks the last mouse-press location and time so we can
-// detect double-clicks (and select the word under the cursor).
-type clickRecord struct {
-	x, y int
-	when time.Time
-}
-
-// menuItemDef describes one row in the action modal: the label shown to
-// the user, the y-offset it lives at inside the modal, the action it runs
-// when clicked, and a predicate that returns true when the action is
-// applicable in the current context (so we can dim non-applicable rows).
-//
-// labelFor is an optional dynamic-label hook: when non-nil, drawMenu calls
-// it instead of using the static label string. Used by toggle-style rows
-// whose label depends on app state ("Show / Hide file explorer").
-type menuItemDef struct {
-	label    string
-	relY     int
-	shortcut string
-	action   func(*App)
-	enabled  func(*App) bool
-	labelFor func(*App) string
-	// visible, when non-nil, decides whether the item appears in the
-	// menu at all (returning false drops the row entirely — not the
-	// same as enabled, which renders the row greyed out). Used to
-	// hide the sidebar toggle in single-file mode, where there's no
-	// tree to show or hide.
-	visible func(*App) bool
-}
-
-// builtinMenuGroups returns the editor's built-in action groups in
-// display order. Custom actions loaded from
-// ~/.config/skiff/actions.json get prepended as their own group
-// in menuLayout — they're not included here so toggling them on or
-// off doesn't require touching this table.
-//
-// Each group is rendered as a contiguous block; menuLayout interleaves
-// dividers between groups and recomputes every relY. The relY field is
-// left zero here on purpose — it gets stamped at layout time.
-func builtinMenuGroups() [][]menuItemDef {
-	return [][]menuItemDef{
-		// Tab actions
-		{
-			{label: "Save", shortcut: "Esc s", action: (*App).menuSave, enabled: (*App).hasSavableTab},
-			{label: "Save & close tab", action: (*App).menuSaveAndClose, enabled: (*App).hasSavableTab},
-			{label: "Close tab", shortcut: "Esc w", action: (*App).menuClose, enabled: (*App).hasTab},
-			{label: "Reopen closed tab", shortcut: "Esc o", action: (*App).menuReopenTab, enabled: (*App).hasClosedTab},
-		},
-		// History
-		{
-			{label: "Undo", shortcut: "Esc u", action: (*App).menuUndo, enabled: (*App).hasUndo},
-			{label: "Redo", shortcut: "Esc r", action: (*App).menuRedo, enabled: (*App).hasRedo},
-			{label: "Revert file", action: (*App).menuRevert, enabled: (*App).hasRevert},
-		},
-		// Search
-		{
-			{label: "Find in file", shortcut: "Esc f", action: (*App).menuFind, enabled: (*App).hasFindable},
-			{label: "Find in project", shortcut: "Esc F", action: (*App).menuFindInProject, enabled: (*App).hasFinder, visible: (*App).hasTree},
-			{label: "Go to line", shortcut: "Esc l", action: (*App).menuGoToLine, enabled: (*App).hasFindable},
-			{label: "Find file in project", shortcut: "Esc p", action: (*App).menuFindFile, enabled: (*App).hasFinder},
-		},
-		// Git
-		{
-			{label: "Git changes", shortcut: "Esc g", action: (*App).menuGitChanges, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
-			{label: "Diff this file", action: (*App).menuDiffFile, enabled: (*App).hasDiffableTab},
-			{label: "History of this file", action: (*App).menuFileHistory, enabled: (*App).hasFileHistoryTab},
-			{label: "Commit history", action: (*App).menuCommitHistory, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
-			{label: "Commit changes…", action: (*App).menuGitCommit, enabled: (*App).hasGitChanges, visible: (*App).hasTree},
-			{label: "Push", action: (*App).menuGitPush, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
-			{label: "Pull", action: (*App).menuGitPull, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
-			{label: "Switch branch…", action: (*App).menuGitSwitchBranch, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
-			{label: "More git actions…", action: (*App).menuGitExtras, enabled: (*App).hasGitRepo, visible: (*App).hasTree},
-		},
-		// File actions
-		{
-			{shortcut: "Esc n", action: (*App).menuNewFile, enabled: alwaysTrue, labelFor: (*App).newFileLabel},
-			{label: "Rename file", action: (*App).menuRename, enabled: (*App).hasFileTab},
-			{label: "Delete file", action: (*App).menuDelete, enabled: (*App).hasFileTab},
-			{action: (*App).menuRenameFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).renameFolderLabel},
-			{action: (*App).menuDeleteFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).deleteFolderLabel},
-			{action: (*App).menuUndoDelete, enabled: (*App).hasTrashedEntry, labelFor: (*App).undoDeleteLabel},
-			{label: "Cut file", action: (*App).menuCutFile, enabled: (*App).hasFileTab},
-			{label: "Copy file", action: (*App).menuCopyFile, enabled: (*App).hasFileTab},
-			{action: (*App).menuPasteEntry, enabled: (*App).hasFileClip, labelFor: (*App).pasteEntryLabel, visible: (*App).hasFileClip},
-			{label: "Duplicate file", action: (*App).menuDuplicateFile, enabled: (*App).hasFileTab},
-			{label: "Copy relative path", action: (*App).menuCopyRelativePath, enabled: (*App).hasFileTab},
-			{label: "Copy absolute path", action: (*App).menuCopyAbsolutePath, enabled: (*App).hasFileTab},
-		},
-		// Clipboard
-		{
-			{label: "Copy selection", shortcut: "Esc c", action: (*App).menuCopy, enabled: (*App).hasSelection},
-			{label: "Cut selection", shortcut: "Esc x", action: (*App).menuCut, enabled: (*App).hasSelection},
-			{label: "Paste", shortcut: "Esc v", action: (*App).menuPaste, enabled: (*App).hasClipboard},
-			{label: "Toggle line comment", shortcut: "Esc /", action: (*App).menuToggleLineComment, enabled: (*App).hasCommentableTab},
-		},
-		// Line ops
-		{
-			{label: "Move line up", shortcut: "Esc k", action: (*App).menuMoveLineUp, enabled: (*App).hasEditableTab},
-			{label: "Move line down", shortcut: "Esc j", action: (*App).menuMoveLineDown, enabled: (*App).hasEditableTab},
-			{label: "Duplicate line", shortcut: "Esc d", action: (*App).menuDuplicateLine, enabled: (*App).hasEditableTab},
-		},
-		// View toggle
-		{
-			{shortcut: "Esc t", action: (*App).menuToggleSidebar, enabled: alwaysTrue, labelFor: (*App).sidebarToggleLabel, visible: (*App).hasTree},
-			{shortcut: "Esc z", action: (*App).menuToggleWrap, enabled: alwaysTrue, labelFor: (*App).wrapToggleLabel},
-			{label: "Theme…", action: (*App).menuTheme, enabled: alwaysTrue},
-		},
-		// Quit
-		{
-			{label: "Quit editor", shortcut: "Esc q", action: (*App).menuQuit, enabled: alwaysTrue},
-		},
-	}
-}
-
-// alwaysTrue is the default predicate for actions that are always applicable
-// (currently just Quit — which has no preconditions).
-func alwaysTrue(*App) bool { return true }
-
-// menuLayout flattens the visible menu groups into a single ordered
-// slice of items with relY positions assigned, plus the divider rows
-// and the modal's total cell height. Custom actions (when configured)
-// get spliced in as their own group right before the Quit row, so
-// they sit at the bottom of the menu where the user reaches for
-// "what do I do with this file" actions. Recomputed on every call —
-// cheap, and lets the layout react when actions.json is reloaded
-// mid-session.
-func (a *App) menuLayout() (items []menuItemDef, dividers []int, modalHeight int) {
-	groups := append([][]menuItemDef{}, builtinMenuGroups()...)
-	if len(a.customActions) > 0 {
-		ca := make([]menuItemDef, 0, len(a.customActions))
-		for i := range a.customActions {
-			i := i // capture
-			// Custom actions are user-defined shell — we don't try to
-			// guess from the command string whether it needs $FILE.
-			// "Upgrade Skiff" obviously doesn't; "Open on
-			// computer" obviously does. Both should be runnable from
-			// the menu; if a $FILE-dependent command is invoked with
-			// no tab open it'll fail with a real error and our info
-			// modal surfaces it. Better that than getting the
-			// heuristic wrong half the time.
-			ca = append(ca, menuItemDef{
-				label:   a.customActions[i].Label,
-				action:  func(app *App) { app.runCustomAction(i) },
-				enabled: alwaysTrue,
-			})
-		}
-		// Splice in just before the final group (Quit). builtinMenuGroups
-		// guarantees Quit is last; if anyone reorders that, the test
-		// pinning custom-actions placement catches it.
-		quit := groups[len(groups)-1]
-		groups = append(groups[:len(groups)-1], ca, quit)
-	}
-
-	// Drop items whose visibility predicate (if any) says they don't
-	// belong here right now — e.g. single-file mode hides the sidebar
-	// toggle because there's no tree to toggle. A group emptied by
-	// filtering vanishes too, so we don't leave a hanging divider
-	// between two surviving groups.
-	visibleGroups := make([][]menuItemDef, 0, len(groups))
-	for _, g := range groups {
-		kept := make([]menuItemDef, 0, len(g))
-		for _, it := range g {
-			if it.visible != nil && !it.visible(a) {
-				continue
-			}
-			kept = append(kept, it)
-		}
-		if len(kept) > 0 {
-			visibleGroups = append(visibleGroups, kept)
-		}
-	}
-	groups = visibleGroups
-
-	// Title at relY 1, divider under it at relY 2, first item at relY 3.
-	dividers = []int{2}
-	y := 3
-	for gi, g := range groups {
-		for _, it := range g {
-			it.relY = y
-			items = append(items, it)
-			y++
-		}
-		if gi < len(groups)-1 {
-			dividers = append(dividers, y)
-			y++
-		}
-	}
-	// y now points at the bottom border row; height is one beyond.
-	modalHeight = y + 1
-	return items, dividers, modalHeight
-}
-
-// hasTree is the menu visibility predicate for tree-dependent rows.
-// True when the file tree was built at startup; false in single-file
-// mode, where we deliberately skipped tree construction to avoid
-// indexing the working directory.
-func (a *App) hasTree() bool {
-	return a.tree != nil
-}
-
 // App is the editor's top-level state holder and event-loop owner.
 type App struct {
 	screen tcell.Screen
@@ -369,6 +118,19 @@ type App struct {
 	// themeID is the registry id of the active theme — what the picker
 	// pre-selects and what SetTheme persists. See themepick.go.
 	themeID string
+	// screenColors is what the terminal reported via Screen.Colors()
+	// the last time we resolved the palette. Below
+	// theme.MinTrueColorPalette the live theme is a theme.Degrade of
+	// the authored one — see applyColorDepth.
+	screenColors int
+
+	// diskConflicts remembers, per tab path, the on-disk mtime the
+	// user was warned about when a dirty buffer diverged from the
+	// file. Presence means "unresolved conflict": the status bar keeps
+	// its marker up, and reconcileOpenTabsWithDisk will not re-open
+	// the conflict overlay for that same disk revision. See
+	// conflict.go.
+	diskConflicts map[string]time.Time
 
 	// overlays is the single routing truth for which floating modal is
 	// up: handleKey, handleMouse, draw, and anyModalOpen all consult it
@@ -386,6 +148,15 @@ type App struct {
 	// act on the wrong tab.
 	tabs editor.TabList
 
+	// previewCoachShown records that this session already explained
+	// what a preview tab is. Preview tabs replace each other in place,
+	// which reads as "my tabs keep vanishing" until someone says the
+	// word "preview" — so the first one created flashes an
+	// explanation. Once per session, not once per preview: the rule is
+	// learned immediately and the flash would otherwise fire on every
+	// tree click. See notePreviewCreated.
+	previewCoachShown bool
+
 	// activeFolder is the directory the editor is currently "working
 	// in" — the default target for New File from the main menu. It
 	// updates whenever the user clicks a folder in the tree, opens a
@@ -399,6 +170,22 @@ type App struct {
 	// sidebarShown controls whether the file explorer panel is visible.
 	// When false the editor and tab bar fill the whole window.
 	sidebarShown bool
+
+	// sidebarAutoHidden records that applyResponsiveSidebar — not the
+	// user — is what hid the explorer, so widening the terminal may put
+	// it back. An explicit toggle (the ≡ row or Esc t) clears it, which
+	// is the whole point of tracking it apart from sidebarShown: the
+	// automatic behavior must never reopen a panel the user
+	// deliberately closed.
+	sidebarAutoHidden bool
+
+	// sidebarNarrow is the last width verdict applyResponsiveSidebar
+	// acted on, which makes the rule edge-triggered: only a crossing of
+	// autoHideSidebarWidth does anything. A user who reopens the
+	// explorer while the terminal is still narrow therefore keeps it —
+	// every later resize inside the same narrow episode is a no-op
+	// rather than a fight.
+	sidebarNarrow bool
 
 	// wrapOn is the soft-wrap preference stamped onto every tab at
 	// creation and flipped (for all open tabs at once) by the menu
@@ -428,6 +215,13 @@ type App struct {
 
 	menuOpen       bool
 	hoveredMenuRow int // index into menuItems of the row under the mouse, or -1.
+	// menuFilter is the action menu's type-to-filter input, focused
+	// from the moment the menu opens. While it holds text menuLayout
+	// collapses every group into one flat list of matching rows, so a
+	// 40-action menu becomes a command palette instead of a scroll
+	// hunt. Reset by openMenu and closeMenu — it never outlives a
+	// single showing of the menu.
+	menuFilter overlay.Field
 	// menuScroll is how many rows the menu's content region is scrolled
 	// when the natural layout is taller than the terminal (tmux splits,
 	// the 80×24 minimum). 0 whenever everything fits.
@@ -495,12 +289,6 @@ type App struct {
 
 	// The list picker is an overlay.Pick prefab — see listpick.go for
 	// the opener; it carries all its own state.
-	// listPickInputScroll is the filter field's horizontal scroll
-	// window — caret-tracking, like promptScroll for the prompt modal.
-	listPickInputScroll int
-	listPickOnPick      func(*App, int)
-	listPickOnMove      func(*App, int)
-	listPickOnCancel    func(*App)
 
 	// Project-wide content search (see projfind.go).
 	projFindOpen      bool
@@ -540,6 +328,30 @@ type App struct {
 	// treeRefreshStop signals the background tree-refresh goroutine to exit.
 	treeRefreshStop chan struct{}
 
+	// treeScanInFlight marks a background disk sweep for the 10s tick
+	// currently running; treeScanQueued remembers that another tick (or
+	// a refreshTreeNow call) fired meanwhile, so exactly one follow-up
+	// sweep runs when the in-flight one lands. treeScanGen is bumped by
+	// every main-thread tree mutation, so a sweep that started before a
+	// create/rename/delete is discarded instead of resurrecting the file
+	// the user just removed. All three are main-thread-only state.
+	treeScanInFlight bool
+	treeScanQueued   bool
+	treeScanGen      int
+
+	// diffLoadGen is bumped by every async diff request (a gutter-marker
+	// click, ≡ → Diff this file). A finished load carries the generation
+	// it started at and is dropped unless it still matches, so a diff
+	// the user has already clicked past never yanks itself on screen.
+	// Main-thread-only.
+	diffLoadGen int
+
+	// gitRunner overrides the git process boundary for the async read
+	// paths — nil in production (real git), a *git.Fake in tests that
+	// need to script a diff without a repo or a subprocess. See
+	// App.readRepo.
+	gitRunner git.Runner
+
 	// gitSnap is the last applied repo snapshot — branch, ahead/behind,
 	// and (via the tree) the changed set. gitSnap.IsRepo is the explicit
 	// repo test; nothing infers repo-ness from a non-empty branch name.
@@ -551,6 +363,12 @@ type App struct {
 	// in-flight one lands. Both are main-thread-only state.
 	gitRefreshInFlight bool
 	gitRefreshQueued   bool
+
+	// gitMissingSeen records that we have already told the user this
+	// machine has no git binary. The fact never changes within a
+	// process, so the flash is once per session — the 10s status tick
+	// would otherwise reprint it forever.
+	gitMissingSeen bool
 
 	// customActions is the list of user-configured shell-out actions
 	// loaded from ~/.config/skiff/actions.json at startup. When
@@ -577,6 +395,15 @@ type App struct {
 	gitPanelRows   []gitChangeRow
 	gitPanelScroll int
 
+	// Git panel keyboard mode (gitchanges.go). The panel is mouse-first,
+	// but Button3 and mouse reporting are exactly what macOS Terminal +
+	// tmux swallow, so Esc-g / ≡ → Git changes arm a keyboard focus that
+	// walks the rows and the action row. All three fields are zero-safe:
+	// off, focus on the list, first button.
+	gitPanelKeys   bool
+	gitPanelOnBtns bool
+	gitPanelBtn    int
+
 	// Write-side git state (see gitops.go / gitchanges.go): the
 	// one-at-a-time mutation gate, the commit checkbox set (absent =
 	// checked), the panel's keyboard/walk selection, and the panel row
@@ -592,11 +419,6 @@ type App struct {
 	// that owns its transient state. diffBase and diffPanelRow stay here:
 	// the compare base outlives any one diff, and the panel row marker
 	// belongs to the Git panel.
-	// diffRowStyles carries per-rune Chroma styles for context rows
-	// (nil for changed/hunk rows, which keep the git colors); diffMaxLen
-	// is the longest line in the diff, bounding horizontal scroll.
-	diffRowStyles [][]tcell.Style
-	diffMaxLen    int
 
 	// The commit-history list is a bespoke overlay (gitlog.go's
 	// gitLogOverlay) that owns its transient state.
@@ -651,6 +473,10 @@ func New(rootDir string) (*App, error) {
 	}
 	a.setActiveFolder(tree.Root.Path)
 	a.loadUserConfig()
+	// The config may have swapped in a different palette, so the
+	// colour-depth fallback is resolved last — it must degrade the
+	// theme the user will actually see, not the default it replaced.
+	a.applyColorDepth()
 	a.refreshGitStatus()
 	a.loadCustomActions()
 	a.flash("Welcome — click a file to open · click  ≡  for the menu")
@@ -722,6 +548,9 @@ func NewSingleFile(filePath string) (*App, error) {
 	}
 	a.setActiveFolder(rootDir)
 	a.loadUserConfig()
+	// Same rationale as New: degrade the resolved palette, not the
+	// default one.
+	a.applyColorDepth()
 	a.loadCustomActions()
 	// openFile loads the file's git gutter markers itself (a file-scoped
 	// `git diff`), so single-file mode shows change bars on open without
@@ -730,179 +559,31 @@ func NewSingleFile(filePath string) (*App, error) {
 	return a, nil
 }
 
-// loadCustomActions reads the user's actions.json (if any) and stores
-// the parsed list on the App. Failures are surfaced as a status flash
-// so a typo in the config file isn't silently swallowed, but they
-// don't block startup — the editor still opens with no custom actions
-// in the menu.
-func (a *App) loadCustomActions() {
-	path := customactions.DefaultPath()
-	actions, err := customactions.Load(path)
-	if err != nil {
-		a.flash("custom actions: " + err.Error())
+// applyColorDepth re-derives the live palette for whatever the terminal
+// says it can render. Every skiff palette is authored in 24-bit RGB;
+// on a 16-colour TERM tcell rounds those onto eight hues and the five
+// grays Tokyo Night uses to separate the status bar, the sidebar, and
+// the selection all land on the same cell. theme.Degrade answers that
+// by spending attributes (reverse, bold, underline) instead of hue.
+//
+// It is idempotent — Degrade of an already-degraded palette is the same
+// palette — so it is safe to call from both constructors and from
+// applyTheme when the user picks a new theme mid-session.
+func (a *App) applyColorDepth() {
+	if a.screen == nil {
 		return
 	}
-	a.customActions = actions
-}
-
-// loadUserConfig reads ~/.config/skiff/config.json (if any),
-// resolves the Nerd Fonts auto/on/off mode to a concrete bool via
-// icons.Resolve, and stamps the result onto the file tree so the
-// next render starts drawing glyphs (or doesn't). A malformed
-// config flashes a status message but never blocks startup — the
-// editor falls back to Defaults() and keeps going.
-func (a *App) loadUserConfig() {
-	cfg, err := userconfig.Load(userconfig.DefaultPath())
-	if err != nil {
-		a.flash("config: " + err.Error())
+	a.screenColors = a.screen.Colors()
+	th := theme.Degrade(a.theme, a.screenColors)
+	if th == a.theme {
+		return // truecolor terminal: the overwhelmingly common case.
 	}
-	if a.tree != nil {
-		a.tree.IconsEnabled = icons.Resolve(cfg.Icons)
-	}
-	if cfg.Theme != "" {
-		a.applyTheme(cfg.Theme, false)
-	}
-	// Both constructors call this before any tab exists, so stamping
-	// the preference on the App is enough — tab-open paths copy it.
-	a.wrapOn = cfg.Wrap
-}
-
-// refreshTree calls tree.Refresh when the file tree exists, and is a
-// no-op in single-file mode. File operations (create / rename / delete)
-// call this after touching the disk so callers don't have to nil-check
-// every site. The git-status and finder refreshes that usually
-// accompany it already guard themselves internally.
-func (a *App) refreshTree() {
-	if a.tree == nil {
-		return
-	}
-	a.tree.Refresh()
-}
-
-// refreshGitStatus re-runs `git status --porcelain` against the project
-// root and stamps the resulting dirty-paths sets onto the file tree, so
-// changed files render in the Modified color on the next draw. This is
-// the synchronous flavour — it blocks until git answers — used at
-// startup (nothing is interactive yet) and by tests. Interactive code
-// paths use refreshGitStatusAsync so a slow `git status` on a huge or
-// network-mounted repo can never stall typing.
-func (a *App) refreshGitStatus() {
-	a.applyGitStatus(collectGitStatus(a.rootDir, a.diffBase, a.openTabPaths(), a.tree == nil))
-}
-
-// refreshGitStatusAsync collects git status on a background goroutine
-// and posts the result back to the main loop as a gitStatusEvent —
-// the same goroutine → custom event pattern the auto-scroller and the
-// finder indexer use, so no UI state is ever touched off-thread.
-// Kicks while a collection is already in flight coalesce into a single
-// follow-up run, so a burst of file operations costs at most two
-// status calls rather than one each.
-func (a *App) refreshGitStatusAsync() {
-	if a.gitRefreshInFlight {
-		a.gitRefreshQueued = true
-		return
-	}
-	a.gitRefreshInFlight = true
-	rootDir, base, paths, skipStatus := a.rootDir, a.diffBase, a.openTabPaths(), a.tree == nil
-	scr := a.screen
-	go func() {
-		res := collectGitStatus(rootDir, base, paths, skipStatus)
-		_ = scr.PostEvent(&gitStatusEvent{when: time.Now(), res: res})
-	}()
-}
-
-// handleGitStatusEvent applies a finished background collection and
-// launches the follow-up run if more refresh requests arrived while
-// this one was in flight.
-func (a *App) handleGitStatusEvent(e *gitStatusEvent) {
-	a.gitRefreshInFlight = false
-	a.applyGitStatus(e.res)
-	if a.gitRefreshQueued {
-		a.gitRefreshQueued = false
-		a.refreshGitStatusAsync()
-	}
-}
-
-// openTabPaths returns the file paths of every open text tab — the set
-// whose gutter markers a status collection should refresh. Image tabs
-// and untitled buffers have no diff to compute.
-func (a *App) openTabPaths() []string {
-	paths := make([]string, 0, a.tabs.Len())
-	for _, tab := range a.tabs.Tabs() {
-		if tab == nil || tab.Path == "" || tab.IsImage() {
-			continue
-		}
-		paths = append(paths, tab.Path)
-	}
-	return paths
-}
-
-// applyGitStatus stamps a collection result onto the UI: tree tint
-// maps, branch, per-tab gutter markers, and the Git panel rows when the
-// panel is up. Main-thread only — the async path hands results here
-// via gitStatusEvent.
-func (a *App) applyGitStatus(res gitStatusResult) {
-	if a.tree != nil {
-		a.gitSnap = res.st
-		if !res.st.IsRepo {
-			a.tree.DirtyFiles = nil
-			a.tree.DirtyFolders = nil
-			// No repo, no Git panel — fall back to the explorer rather
-			// than strand the user on a view with nothing behind it.
-			a.gitPanelActive = false
-			a.gitPanelRows = nil
-		} else {
-			dirtyFiles := rebaseGitPaths(res.st.Files, a.tree.Root.Path)
-			a.tree.DirtyFiles = dirtyFiles
-			a.tree.DirtyFolders = dirtyFolderSet(dirtyFiles, a.tree.Root.Path)
-		}
-	}
-	// Tabs opened after the collection started aren't in the map and
-	// keep the gutter lines they loaded on open; tabs closed since are
-	// simply skipped by the path lookup.
-	for _, tab := range a.tabs.Tabs() {
-		if tab == nil || tab.Path == "" || tab.IsImage() {
-			continue
-		}
-		if lines, ok := res.tabLines[tab.Path]; ok {
-			tab.GitLines = lines
-		}
-	}
-	// Keep the Git panel live: whatever refreshed the status (the 10s
-	// tick, a save, a file op) also refreshes the visible list.
-	if a.gitPanelActive {
-		a.rebuildGitChangesRows()
-	}
-}
-
-// startTreeRefresh launches a goroutine that posts a treeRefreshEvent every
-// treeRefreshInterval. The main event loop reacts by calling tree.Refresh,
-// which keeps the sidebar in sync with on-disk changes from outside the
-// editor (git, mv, another tmux pane, etc.).
-func (a *App) startTreeRefresh() {
-	a.treeRefreshStop = make(chan struct{})
-	stop := a.treeRefreshStop
-	scr := a.screen
-	go func() {
-		ticker := time.NewTicker(treeRefreshInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case t := <-ticker.C:
-				_ = scr.PostEvent(&treeRefreshEvent{when: t})
-			}
-		}
-	}()
-}
-
-// stopTreeRefresh signals the background tree-refresh goroutine to exit.
-// Safe to call multiple times.
-func (a *App) stopTreeRefresh() {
-	if a.treeRefreshStop != nil {
-		close(a.treeRefreshStop)
-		a.treeRefreshStop = nil
+	a.theme = th
+	a.screen.SetStyle(tcell.StyleDefault.Background(th.BG).Foreground(th.Text))
+	// Highlight styles bake the palette in, so every open tab has to
+	// re-tokenise against the degraded one.
+	for _, t := range a.tabs.Tabs() {
+		t.StyleStale = true
 	}
 }
 
@@ -920,6 +601,11 @@ func (a *App) Close() {
 // each event, redraws, and exits when a.quit is set.
 func (a *App) Run() error {
 	a.width, a.height = a.screen.Size()
+	// Apply the narrow-terminal rule against the size we booted at, not
+	// just against later resizes: starting inside a 55-column tmux pane
+	// is the exact case this exists for, and tcell does not synthesise
+	// an EventResize for the initial size.
+	a.applyResponsiveSidebar()
 	a.draw()
 	a.screen.Show()
 
@@ -960,6 +646,7 @@ func (a *App) handleEvent(ev tcell.Event) {
 		// active tab on screen rather than wherever the old scroll
 		// left it.
 		a.ensureActiveTabVisible()
+		a.applyResponsiveSidebar()
 		a.screen.Sync()
 	case *tcell.EventKey:
 		a.handleKey(e)
@@ -988,6 +675,10 @@ func (a *App) handleEvent(ev tcell.Event) {
 		}
 	case *gitStatusEvent:
 		a.handleGitStatusEvent(e)
+	case *treeScanEvent:
+		a.handleTreeScan(e)
+	case *diffLoadEvent:
+		a.handleDiffLoaded(e)
 	case *projFindDoneEvent:
 		a.handleProjFindDone(e)
 	case *projFindKickEvent:
@@ -1005,1057 +696,48 @@ func (a *App) handleEvent(ev tcell.Event) {
 	}
 }
 
-// refreshTreeNow re-runs the same refresh pipeline the 10s timer
-// fires: rescan the file tree (preserving expansion state), reconcile
-// any open tabs with disk, refresh git status, and invalidate the
-// finder index so a freshly-pulled file shows up everywhere at once.
-// The session store piggybacks on the same tick, so a killed terminal
-// loses at most ten seconds of tab state instead of the whole session.
-// Called from the periodic event and from runCustomAction's success
-// path so a Copy-from-remote action's output is visible immediately
-// instead of after the next tick.
-func (a *App) refreshTreeNow() {
-	a.refreshTree()
-	a.reconcileOpenTabsWithDisk()
-	a.refreshGitStatusAsync()
-	a.invalidateFinder()
-	a.saveSession()
-}
-
-// handleCustomActionDone surfaces the result of an async custom-action
-// run. Success flashes a brief confirmation and forces a sidebar
-// refresh so a freshly-pulled file appears in the file tree without
-// waiting for the 10-second auto-refresh tick. Failure opens an info
-// modal with the captured stderr — the prior 1-line flash truncated
-// scp's actual diagnostics, which is exactly the case where the user
-// most needs to read them.
-func (a *App) handleCustomActionDone(e *customActionDoneEvent) {
-	if e.err != nil {
-		title := "Action failed: " + e.label
-		body := splitErrorOutput(e.err, e.output)
-		a.openInfo(title, body)
-		return
-	}
-	a.flash(e.label + " — done")
-	a.refreshTreeNow()
-}
-
-// splitErrorOutput formats the action's captured output for the info
-// modal: an opening line summarising the exit error, then up to a
-// handful of lines of trimmed stderr, with the actions.log path as
-// the closing line so the user knows where to find the full record.
-// Pulled out so handleCustomActionDone reads as the routing decision
-// it really is.
-func splitErrorOutput(runErr error, out []byte) []string {
-	const maxLines = 8
-	const maxLineWidth = 78
-
-	body := []string{strings.TrimSpace(runErr.Error())}
-	captured := strings.TrimRight(string(out), "\n")
-	if captured != "" {
-		body = append(body, "")
-		count := 0
-		for _, ln := range strings.Split(captured, "\n") {
-			ln = strings.TrimRight(ln, "\r")
-			if runeLen(ln) > maxLineWidth {
-				ln = string([]rune(ln)[:maxLineWidth-1]) + "…"
-			}
-			body = append(body, ln)
-			count++
-			if count >= maxLines {
-				body = append(body, "… (truncated; see actions.log)")
-				break
-			}
-		}
-	}
-	if logPath := customactions.LogPath(); logPath != "" {
-		body = append(body, "", "Full output: "+logPath)
-	}
-	return body
-}
-
-// reconcileOpenTabsWithDisk runs once per background tick. For every
-// open tab with a real path it stats the file, compares the on-disk
-// mtime to what the tab last knew, and reacts:
+// applyResponsiveSidebar collapses the file explorer when the terminal
+// gets too narrow to hold both panels, and puts it back when the
+// terminal grows again. Skiff's habitat is a tmux split on a laptop,
+// where crossing autoHideSidebarWidth is a routine event rather than an
+// exotic one, and an 18-column tree in front of a sliver of code is a
+// worse deal than no tree.
 //
-//   - File missing  → flash once, mark the tab dirty so the user knows.
-//   - Disk newer, tab clean → reload the buffer silently, flash success.
-//   - Disk newer, tab dirty → leave the buffer alone, flash a warning
-//     that saving will overwrite.
+// Two properties are load-bearing and easy to lose:
 //
-// Untitled tabs (Path == "") are skipped because there's no disk file to
-// reconcile against.
-func (a *App) reconcileOpenTabsWithDisk() {
-	for _, tab := range a.tabs.Tabs() {
-		if tab.Path == "" {
-			continue
-		}
-		info, err := os.Stat(tab.Path)
-		if os.IsNotExist(err) {
-			if !tab.DiskGone {
-				tab.DiskGone = true
-				tab.Dirty = true
-				a.flash(fmt.Sprintf("%s deleted on disk", filepath.Base(tab.Path)))
-			}
-			continue
-		}
-		if err != nil {
-			// Permission denied or some other transient stat error — leave
-			// the tab as-is rather than spamming the user with a flash.
-			continue
-		}
-		if tab.DiskGone {
-			// File reappeared. Force the mtime check below to fire so we
-			// either reload or warn about a dirty conflict.
-			tab.DiskGone = false
-			tab.Mtime = time.Time{}
-		}
-		if !info.ModTime().After(tab.Mtime) {
-			continue // unchanged on disk.
-		}
-		if tab.Dirty {
-			a.flash(fmt.Sprintf("%s changed on disk — your edits will overwrite on save",
-				filepath.Base(tab.Path)))
-			// Update Mtime so we don't re-flash every tick for the same change.
-			tab.Mtime = info.ModTime()
-			continue
-		}
-		if err := tab.Reload(); err != nil {
-			a.flash(fmt.Sprintf("%s reload failed: %v", filepath.Base(tab.Path), err))
-			continue
-		}
-		a.flash(fmt.Sprintf("%s reloaded from disk", filepath.Base(tab.Path)))
-	}
-}
-
-// -----------------------------------------------------------------------------
-// Layout helpers
-// -----------------------------------------------------------------------------
-
-// sidebarW is the effective width of the sidebar block (file tree +
-// splitter): zero when hidden, a.sidebarWidth otherwise. Every layout
-// helper and click router goes through this so toggling/resizing the
-// panel reshapes the entire UI in one place.
-func (a *App) sidebarW() int {
-	if !a.sidebarShown {
-		return 0
-	}
-	return a.sidebarWidth
-}
-
-// sidebarRect returns the file tree's render rectangle (one column
-// narrower than the sidebar block — the rightmost column belongs to the
-// resize splitter). Zero width when the sidebar is hidden.
-func (a *App) sidebarRect() (x, y, w, h int) {
-	sw := a.sidebarW()
-	if sw <= 0 {
-		return 0, 0, 0, 0
-	}
-	return 0, 0, sw - 1, a.height - 1
-}
-
-// splitterX returns the x coordinate of the resize splitter column, or -1
-// when the sidebar is hidden (no splitter to draw or click).
-func (a *App) splitterX() int {
-	if !a.sidebarShown {
-		return -1
-	}
-	return a.sidebarWidth - 1
-}
-
-// resizeSidebar applies the user's desired sidebar width while clamping it
-// to a sensible range — the file tree stays wide enough to read names and
-// the editor keeps at least minEditorAfterDrag columns. Tiny windows that
-// can't satisfy both fall back to the minimum and let the editor shrink.
-func (a *App) resizeSidebar(target int) {
-	if target < minSidebarWidth {
-		target = minSidebarWidth
-	}
-	max := a.width - minEditorAfterDrag
-	if max < minSidebarWidth {
-		max = minSidebarWidth
-	}
-	if target > max {
-		target = max
-	}
-	a.sidebarWidth = target
-}
-
-// tabBarRect returns the tab bar's screen rectangle (one row tall).
-func (a *App) tabBarRect() (x, y, w, h int) {
-	sw := a.sidebarW()
-	return sw, 0, a.width - sw, 1
-}
-
-// editorRect returns the editor body's screen rectangle (everything to the
-// right of the sidebar, between the tab bar and the status bar). When the
-// find bar is open, one row is taken out of the bottom — the bar is
-// pinned directly above the status bar.
-func (a *App) editorRect() (x, y, w, h int) {
-	sw := a.sidebarW()
-	h = a.height - 2
-	if a.findOpen || a.projFindOpen {
-		h -= findBarHeight
-	}
-	return sw, 1, a.width - sw, h
-}
-
-// statusRect returns the status bar's screen rectangle (full-width bottom row).
-func (a *App) statusRect() (x, y, w, h int) {
-	return 0, a.height - 1, a.width, 1
-}
-
-// editorSize returns just the (width, height) of the editor body. Used by
-// keyboard handlers that need to compute page-up / page-down deltas.
-func (a *App) editorSize() (int, int) {
-	_, _, w, h := a.editorRect()
-	return w, h
-}
-
-// menuButtonRect returns the on-screen rectangle of the ≡ icon in the tab
-// bar. Click hit-tests in tabBarClick consult this directly. When the
-// sidebar is hidden the icon shifts left to fill the corner.
-func (a *App) menuButtonRect() (x, y, w, h int) {
-	return a.sidebarW(), 0, menuButtonWidth, 1
-}
-
-// menuModalRect returns the on-screen rectangle of the action modal,
-// centered in the window. Height is derived from the current layout
-// so adding custom actions grows the modal automatically — but it is
-// clamped to the screen (one row of margin) so a short terminal can
-// scroll the overflow instead of losing the bottom rows, Quit first.
-func (a *App) menuModalRect() (x, y, w, h int) {
-	w = modalWidth
-	_, _, h = a.menuLayout()
-	if maxH := a.height - 2; h > maxH {
-		h = maxH
-	}
-	x = (a.width - w) / 2
-	y = (a.height - h) / 2
-	if x < 0 {
-		x = 0
-	}
-	if y < 0 {
-		y = 0
-	}
-	return
-}
-
-// menuMaxScroll returns how many rows the menu content can scroll: the
-// overflow between the natural layout height and the clamped modal
-// height. Zero when the whole menu fits on screen.
-func (a *App) menuMaxScroll() int {
-	_, _, natural := a.menuLayout()
-	_, _, _, h := a.menuModalRect()
-	return natural - h
-}
-
-// clampMenuScroll bounds menuScroll to [0, menuMaxScroll] so the content
-// region can never scroll past its first or last row.
-func (a *App) clampMenuScroll() {
-	if maxS := a.menuMaxScroll(); a.menuScroll > maxS {
-		a.menuScroll = maxS
-	}
-	if a.menuScroll < 0 {
-		a.menuScroll = 0
-	}
-}
-
-// ensureMenuRowVisible scrolls the menu so the item at idx sits inside
-// the visible content region — the keyboard analogue of the editor's
-// EnsureVisible, so arrow-key navigation can reach rows a short terminal
-// pushed out of the frame.
-func (a *App) ensureMenuRowVisible(idx int) {
-	items, _, _ := a.menuLayout()
-	if idx < 0 || idx >= len(items) {
-		return
-	}
-	_, _, _, h := a.menuModalRect()
-	relY := items[idx].relY
-	// Visible virtual rows span [3+menuScroll, h-2+menuScroll].
-	if relY < 3+a.menuScroll {
-		a.menuScroll = relY - 3
-	} else if relY > h-2+a.menuScroll {
-		a.menuScroll = relY - (h - 2)
-	}
-	a.clampMenuScroll()
-}
-
-// -----------------------------------------------------------------------------
-// Keyboard
-// -----------------------------------------------------------------------------
-
-// handleKey responds to keyboard events. There are intentionally no Ctrl-
-// based shortcuts: every action lives behind the ≡ menu so the editor never
-// fights the terminal (Ctrl-S/Q flow control) or a tmux/zellij prefix. The
-// only "command" key is Esc, which closes the menu and acts as the leader
-// for the hotkey table in leader.go (Esc s = Save, Esc u = Undo, etc.).
-func (a *App) handleKey(ev *tcell.EventKey) {
-	// During a bracketed paste every key is verbatim content. Raw ESC
-	// bytes inside the paste are stripped — delivering them would close
-	// whatever modal is open or arm the leader — and the leader window
-	// is kept disarmed so pasted text can never fire an action.
-	if a.pasting {
-		a.lastEscape = time.Time{}
-		if ev.Key() == tcell.KeyEsc {
-			return
-		}
-	}
-
-	// The overlay stack owns the whole keyboard while an overlay is up —
-	// each overlay's handler understands Esc (cancel), Enter (submit /
-	// activate), and the keys relevant to its layout. Strips come next:
-	// keyboard-focused but mouse-transparent, and never up at the same
-	// time as an overlay because every opener runs closeAllModals first.
-	if ov := a.overlays.Top(); ov != nil {
-		ov.HandleKey(ev)
-		return
-	}
-	if a.findOpen {
-		a.handleFindKey(ev)
-		return
-	}
-	if a.projFindOpen {
-		a.handleProjFindKey(ev)
-		return
-	}
-
-	// tmux (and other multiplexers) with a non-zero escape-time coalesce
-	// a fast Esc-then-key into one Alt-modified event: Esc,s arrives as
-	// Alt+s and a quick double-Esc as Alt+Esc. Treat both as the gesture
-	// the user actually made. An Alt rune is never inserted — outside a
-	// paste it is always a mangled Esc sequence, not text.
-	if !a.pasting && ev.Modifiers()&tcell.ModAlt != 0 {
-		a.lastEscape = time.Time{}
-		switch ev.Key() {
-		case tcell.KeyEsc:
-			// A key arriving here means no overlay is up (the stack
-			// routes first), so this can only be an open gesture.
-			a.openMenu()
-			return
-		case tcell.KeyRune:
-			if action := leaderActionFor(ev.Rune()); action != nil {
-				action(a)
-			}
-			return
-		}
-	}
-
-	if ev.Key() == tcell.KeyEsc {
-		// Esc is the editor's only command key: it opens the menu on
-		// the SECOND Esc within menuEscMs, while a SINGLE Esc arms the
-		// leader table (see below). The close half of the toggle lives
-		// in handleMenuKey — with the menu up, the overlay stack routes
-		// keys there before this code can run. A lone Esc that isn't
-		// followed by a leader binding within the window is
-		// intentionally a no-op so the key still feels harmless to
-		// mash — and because tmux can munch a fast double-tap into one
-		// Esc, "mash Esc until the menu appears" must always work.
-		now := time.Now()
-		if !a.lastEscape.IsZero() && now.Sub(a.lastEscape) < menuEscMs {
-			a.openMenu()
-			a.lastEscape = time.Time{}
-			return
-		}
-		a.lastEscape = now
-		// Wake the event loop just after the window closes so the
-		// status bar's "Esc…" tag clears itself — the draw cycle only
-		// runs on events, and an abandoned Esc may not be followed by
-		// one.
-		scr := a.screen
-		time.AfterFunc(menuEscMs+50*time.Millisecond, func() {
-			_ = scr.PostEvent(&leaderExpiryEvent{when: time.Now()})
-		})
-		// A second, earlier wake-up right after the leader window shuts
-		// so the cheat-strip disappears on time instead of lingering
-		// until the menu-window expiry above.
-		time.AfterFunc(doubleEscMs+50*time.Millisecond, func() {
-			_ = scr.PostEvent(&leaderExpiryEvent{when: time.Now()})
-		})
-		return
-	}
-	// Esc-leader hotkey windows — shared with handleMenuKey so the
-	// leader table behaves identically whether or not the menu is up.
-	if a.leaderWindowIntercept(ev) {
-		return
-	}
-	// Any other key cancels a pending Esc so a stale half-tap doesn't
-	// surprise the user later.
-	a.lastEscape = time.Time{}
-
-	tab := a.activeTabPtr()
-	if tab == nil {
-		return
-	}
-	// Image-preview tabs are read-only — no cursor, no editing, no
-	// caret movement. Drop every key here so the user can mash arrow
-	// keys without anything mysterious happening behind the splash.
-	if tab.IsImage() {
-		return
-	}
-	extend := ev.Modifiers()&tcell.ModShift != 0
-
-	switch ev.Key() {
-	case tcell.KeyUp:
-		tab.MoveCursor(-1, 0, extend)
-	case tcell.KeyDown:
-		tab.MoveCursor(1, 0, extend)
-	case tcell.KeyLeft:
-		tab.MoveCursor(0, -1, extend)
-	case tcell.KeyRight:
-		tab.MoveCursor(0, 1, extend)
-	case tcell.KeyHome:
-		tab.MoveLineHome(extend)
-	case tcell.KeyEnd:
-		tab.MoveLineEnd(extend)
-	case tcell.KeyPgUp:
-		_, h := a.editorSize()
-		tab.MoveCursor(-h, 0, extend)
-	case tcell.KeyPgDn:
-		_, h := a.editorSize()
-		tab.MoveCursor(h, 0, extend)
-	case tcell.KeyEnter:
-		tab.InsertString("\n")
-	case tcell.KeyBackspace, tcell.KeyBackspace2:
-		tab.Backspace()
-	case tcell.KeyDelete:
-		tab.Delete()
-	case tcell.KeyTab:
-		// A Tab inside a paste is a literal \t from the source text;
-		// expanding it to IndentUnit would rewrite pasted code.
-		if a.pasting {
-			tab.InsertString("\t")
-		} else {
-			tab.InsertString(tab.IndentUnit)
-		}
-	case tcell.KeyRune:
-		tab.InsertRune(ev.Rune())
-	}
-}
-
-// -----------------------------------------------------------------------------
-// Mouse
-// -----------------------------------------------------------------------------
-
-// handleMouse routes a mouse event to whichever panel the cursor is over,
-// tracking drag state so a click-drag inside the editor extends the
-// selection. When the action menu is open it absorbs all mouse events:
-// clicks inside trigger an action, clicks outside dismiss the menu.
-func (a *App) handleMouse(ev *tcell.EventMouse) {
-	x, y := ev.Position()
-	btn := ev.Buttons()
-
-	// Remember when we last saw Shift held down on ANY mouse event.
-	// Zellij + macOS Terminal split shift+wheel into two events: a
-	// ButtonNone+Shift "modifier state" event, then a WheelDown/Up
-	// with no modifier. We bridge them via modifierStickyWindow below.
-	if ev.Modifiers()&tcell.ModShift != 0 {
-		a.lastShiftAt = time.Now()
-	}
-
-	// The overlay on the stack absorbs all mouse input — same routing
-	// truth as the keyboard. The project-find strip comes next: it has
-	// real mouse targets (result rows, fold arrows) unlike the find bar,
-	// which deliberately passes mouse through to the editor (ADR-0001).
-	if ov := a.overlays.Top(); ov != nil {
-		ov.HandleMouse(x, y, btn)
-		return
-	}
-	if a.projFindOpen {
-		a.handleProjFindMouse(x, y, btn)
-		return
-	}
-
-	// Right-click handling. Over a file-tree row it opens a small context
-	// menu with file-management actions for that node; everywhere else
-	// it falls through to the main action menu so users have a redundant
-	// mouse-only path to it. Note: macOS Terminal + tmux often swallows
-	// Button3, which is why every action also lives in the main ≡ menu.
-	if btn&tcell.Button3 != 0 {
-		if a.tryTreeContextClick(x, y) {
-			return
-		}
-		a.openMenu()
-		return
-	}
-
-	// Wheel events take priority — they fire even with no button held.
-	// Shift+wheel rotates the vertical wheel into horizontal scrolling
-	// (the VS Code convention). Most terminals never emit native
-	// WheelLeft/WheelRight, so this is the path that actually fires in
-	// practice; the dedicated horizontal-wheel branch below is a bonus
-	// for terminals that do.
-	//
-	// We accept "shift was just seen" within modifierStickyWindow as
-	// equivalent to shift-on-this-event, because Zellij and friends
-	// strip the modifier from the actual wheel event.
-	// Wheel over the tab bar scrolls the tab strip when it overflows —
-	// the only way narrow tmux panes can browse many tabs without
-	// pecking at the chevrons.
-	if btn&(tcell.WheelUp|tcell.WheelLeft) != 0 && y == 0 && x >= a.sidebarW() && a.maxTabScroll() > 0 {
-		a.scrollTabStrip(-tabScrollStep)
-		return
-	}
-	if btn&(tcell.WheelDown|tcell.WheelRight) != 0 && y == 0 && x >= a.sidebarW() && a.maxTabScroll() > 0 {
-		a.scrollTabStrip(tabScrollStep)
-		return
-	}
-
-	shift := ev.Modifiers()&tcell.ModShift != 0 ||
-		(!a.lastShiftAt.IsZero() && time.Since(a.lastShiftAt) < modifierStickyWindow)
-	if btn&tcell.WheelUp != 0 {
-		if shift {
-			a.scrollAtH(x, y, -wheelCols)
-		} else {
-			a.scrollAt(x, y, -wheelLines)
-		}
-		return
-	}
-	if btn&tcell.WheelDown != 0 {
-		if shift {
-			a.scrollAtH(x, y, wheelCols)
-		} else {
-			a.scrollAt(x, y, wheelLines)
-		}
-		return
-	}
-	if btn&tcell.WheelLeft != 0 {
-		a.scrollAtH(x, y, -wheelCols)
-		return
-	}
-	if btn&tcell.WheelRight != 0 {
-		a.scrollAtH(x, y, wheelCols)
-		return
-	}
-
-	leftDown := btn&tcell.Button1 != 0
-
-	// Drag continuation: while we're mid-drag in the editor, every event
-	// with the button held extends the selection — even if the cursor has
-	// wandered out of the editor pane.
-	if leftDown && a.dragMode == "editor" {
-		a.editorDrag(x, y)
-		return
-	}
-
-	// Sidebar resize drag: keep the splitter glued to the mouse x so the
-	// panel reshapes live as the user drags.
-	if leftDown && a.dragMode == "sidebar" {
-		a.resizeSidebar(x + 1)
-		return
-	}
-
-	// Scrollbar thumb drag: the thumb stays glued to the mouse row even
-	// when the pointer wanders off the bar column.
-	if leftDown && a.dragMode == "scrollbar" {
-		_, ey, _, _ := a.editorRect()
-		a.scrollbarTo(y - ey)
-		return
-	}
-
-	// Initial press dispatch.
-	if leftDown && a.dragMode == "" {
-		sw := a.sidebarW()
-		splitX := a.splitterX()
-		switch {
-		case splitX >= 0 && x == splitX:
-			a.dragMode = "sidebar"
-		case sw > 0 && x < splitX:
-			a.sidebarClick(x, y)
-		case y == 0:
-			a.tabBarClick(x, y)
-		case y == a.height-1:
-			a.statusBarClick(x)
-		case y > 0 && y < a.height-1:
-			if localY, ok := a.scrollbarHit(x, y); ok {
-				a.scrollbarTo(localY)
-				a.dragMode = "scrollbar"
-				return
-			}
-			a.editorPress(x, y)
-			a.dragMode = "editor"
-		}
-		return
-	}
-
-	// Button released — exit any drag mode we were in. Releasing an
-	// editor drag that built a selection copies it (select-to-copy, the
-	// tmux/herdr convention): with mouse reporting on, the terminal and
-	// any multiplexer never see a selection of their own, so Cmd+C at
-	// the terminal level has nothing to grab. A plain click collapses
-	// the selection before release, so caret placement never copies.
-	if a.dragMode == "editor" {
-		if t := a.activeTabPtr(); t != nil && t.HasSelection() {
-			a.copySelection()
-		}
-	}
-	a.dragMode = ""
-	a.stopAutoScroll()
-}
-
-// handleMenuMouse processes mouse events while the action menu is open.
-// Left-click outside the modal closes it; left-click on a row runs that
-// row's action (if it is currently enabled). Wheel events scroll the
-// content when the layout is taller than the terminal.
-func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
-	if btn&tcell.WheelUp != 0 {
-		a.menuScroll--
-		a.clampMenuScroll()
-		// The rows just moved under the stationary pointer — recompute
-		// the hover so the highlight tracks what a click would now hit
-		// instead of going one row stale until the next mouse motion.
-		a.updateMenuHover(x, y)
-		return
-	}
-	if btn&tcell.WheelDown != 0 {
-		a.menuScroll++
-		a.clampMenuScroll()
-		a.updateMenuHover(x, y)
-		return
-	}
-	if btn&tcell.Button1 == 0 {
-		return
-	}
-	mx, my, mw, mh := a.menuModalRect()
-	if x < mx || x >= mx+mw || y < my || y >= my+mh {
-		a.closeMenu()
-		return
-	}
-	// Only the scrollable content region (below the title and its
-	// divider, above the bottom border) can hold items; clicks on the
-	// chrome rows stay inert even when scrolled rows share their
-	// virtual position.
-	if y < my+3 || y > my+mh-2 {
-		return
-	}
-	relY := y - my + a.menuScroll
-	items, _, _ := a.menuLayout()
-	for _, item := range items {
-		if item.relY != relY {
-			continue
-		}
-		if item.enabled(a) {
-			item.action(a)
-		}
-		return
-	}
-}
-
-// scrollAt scrolls whichever panel the (x, y) cursor is over.
-func (a *App) scrollAt(x, y, delta int) {
-	if sw := a.sidebarW(); sw > 0 && x < sw {
-		if a.gitPanelActive {
-			a.scrollGitPanel(delta)
-		} else {
-			a.tree.Scroll(delta)
-		}
-		return
-	}
-	if y > 0 && y < a.height-1 {
-		if t := a.activeTabPtr(); t != nil {
-			t.Scroll(delta)
-		}
-	}
-}
-
-// scrollAtH scrolls the panel under (x, y) horizontally by delta cells.
-// The file tree has no useful horizontal axis (each row is a single label),
-// so we only honor horizontal wheel events when they fall inside the
-// editor pane.
-func (a *App) scrollAtH(x, y, delta int) {
-	if sw := a.sidebarW(); sw > 0 && x < sw {
-		return
-	}
-	if y > 0 && y < a.height-1 {
-		if t := a.activeTabPtr(); t != nil {
-			t.ScrollH(delta)
-		}
-	}
-}
-
-// tryTreeContextClick opens the right-click context menu when (x, y) lands
-// on a tree row. Returns true if it consumed the event so the caller knows
-// not to fall back to the main action menu. Right-clicking a node also
-// counts as "I'm working here" — the active folder updates so the main
-// menu's New File defaults to a sensible target even after the context
-// menu closes.
-func (a *App) tryTreeContextClick(x, y int) bool {
-	sw := a.sidebarW()
-	if sw <= 0 {
-		return false
-	}
-	// The Git panel has no per-row context actions — the tree isn't
-	// what's on screen, so tree.HitTest would map to invisible rows.
-	if a.gitPanelActive {
-		return false
-	}
-	splitX := a.splitterX()
-	if x >= splitX {
-		return false
-	}
-	sx, sy, _, _ := a.sidebarRect()
-	n, ok := a.tree.HitTest(x-sx, y-sy)
-	if !ok {
-		return false
-	}
-	if n.IsDir {
-		a.setActiveFolder(n.Path)
-	} else {
-		a.setActiveFolder(filepath.Dir(n.Path))
-	}
-	a.openTreeContext(n, x, y)
-	return true
-}
-
-// sidebarClick toggles a directory or opens a file when the user clicks a
-// row in the file tree. Either action also updates the editor's "active
-// folder" so the next New File from the main menu defaults to wherever
-// the user is currently focused. Clicking the project-root row only
-// resets the active folder — it never toggles the root's expansion
-// since the root is always shown and there's no useful "collapsed
-// root" state.
-func (a *App) sidebarClick(x, y int) {
-	sx, sy, _, _ := a.sidebarRect()
-	// Header row: the EXPLORER / GIT tabs switch which panel the
-	// sidebar shows. Handled before any panel-specific hit-testing so
-	// the tabs behave identically from either side.
-	if y-sy == 0 {
-		switch a.sidebarHeaderHit(x - sx) {
-		case "explorer":
-			a.showExplorerPanel()
-		case "git":
-			a.showGitPanel()
-		}
-		return
-	}
-	if a.gitPanelActive {
-		a.gitPanelClick(x-sx, y-sy)
-		return
-	}
-	n, ok := a.tree.HitTest(x-sx, y-sy)
-	if !ok {
-		return
-	}
-	if n == a.tree.Root {
-		a.setActiveFolder(a.rootDir)
-		return
-	}
-	if n.IsDir {
-		a.setActiveFolder(n.Path)
-		a.tree.Toggle(n)
-		return
-	}
-	a.setActiveFolder(filepath.Dir(n.Path))
-	a.openFilePreview(n.Path)
-}
-
-// setActiveFolder records path as the editor's current working folder and
-// mirrors it onto the file tree so the matching row renders with the
-// "active" highlight. All writes to a.activeFolder go through here.
-func (a *App) setActiveFolder(path string) {
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
-	}
-	a.activeFolder = path
-	if a.tree != nil {
-		a.tree.ActiveFolder = path
-	}
-}
-
-// tabBarClick dispatches clicks in the tab bar: the leftmost menuButtonWidth
-// cells open the action menu; remaining cells switch or close tabs based on
-// where the click landed within their rendered geometry.
-func (a *App) tabBarClick(x, _ int) {
-	sw := a.sidebarW()
-	if x >= sw && x < sw+menuButtonWidth {
-		a.openMenu()
-		return
-	}
-	// Chevron cells scroll the strip; they sit on top of whatever tab
-	// is clipped beneath them, so they must win the hit-test.
-	stripX, stripW := a.tabStripRegion()
-	if a.tabScroll > 0 && x == stripX {
-		a.scrollTabStrip(-tabScrollStep)
-		return
-	}
-	if a.tabScroll < a.maxTabScroll() && x == stripX+stripW-1 {
-		a.scrollTabStrip(tabScrollStep)
-		return
-	}
-	for _, r := range a.lastTabRects {
-		if x >= r.X && x < r.X+r.Width {
-			if x == r.CloseX {
-				a.requestCloseTab(a.tabs.At(r.Index))
-				return
-			}
-			a.tabs.ActivateAt(r.Index)
-			a.ensureActiveTabVisible()
-			a.syncActiveTreeFile()
-			return
-		}
-	}
-}
-
-// syncActiveTreeFile mirrors the active tab path into the file tree.
-func (a *App) syncActiveTreeFile() {
+// It is EDGE-triggered. Only a crossing of the threshold acts, so
+// reopening the explorer with Esc t inside a still-narrow window sticks
+// instead of being re-hidden by the next stray resize event.
+//
+// It restores only what it hid. sidebarAutoHidden is set here and
+// cleared by menuToggleSidebar, so a panel the user closed on purpose
+// stays closed however wide the terminal gets.
+func (a *App) applyResponsiveSidebar() {
+	// Single-file mode never built a tree, so there is no panel whose
+	// width could be crowding anything.
 	if a.tree == nil {
 		return
 	}
-	tab := a.activeTabPtr()
-	if tab == nil || tab.Path == "" {
-		a.tree.ActiveFile = ""
+	narrow := a.width < autoHideSidebarWidth
+	if narrow == a.sidebarNarrow {
 		return
 	}
-	a.tree.ActiveFile = tab.Path
-}
-
-// editorPress handles the initial mouse press inside the editor — placing
-// the caret, optionally selecting a word on double-click. Image tabs
-// have no caret, so the press is dropped.
-func (a *App) editorPress(x, y int) {
-	tab := a.activeTabPtr()
-	if tab == nil || tab.IsImage() {
-		return
-	}
-	ex, ey, ew, eh := a.editorRect()
-	if a.openGitHunkAt(tab, x-ex, y-ey) {
-		return
-	}
-	pos, ok := tab.HitTest(x-ex, y-ey, ew, eh)
-	if !ok {
-		return
-	}
-
-	now := time.Now()
-	if a.lastClick.x == x && a.lastClick.y == y && now.Sub(a.lastClick.when) < doubleClickMs {
-		a.selectWordAt(tab, pos)
-		a.lastClick = clickRecord{} // prevent triple-click from selecting nothing.
-		return
-	}
-	a.lastClick = clickRecord{x: x, y: y, when: now}
-	tab.MoveCursorTo(pos, false)
-}
-
-// openGitHunkAt opens a diff preview when the user clicks a gutter marker.
-func (a *App) openGitHunkAt(tab *editor.Tab, localX, localY int) bool {
-	if localX != 0 || localY < 0 {
-		return false
-	}
-	line := tab.ScrollY + localY
-	if tab.GitLines[line] == editor.GitLineNone {
-		return false
-	}
-	lines := loadGitHunkPreview(a.rootDir, tab.Path, line)
-	if len(lines) == 0 {
-		a.openInfo("Git change", []string{"No git diff found for this line."})
-		return true
-	}
-	// The file is already open in front of the user, so the diff view
-	// gets no [ Open file ] button — Close is the only way out.
-	a.openDiffView("Git change · "+filepath.Base(tab.Path), lines, "", tab.Path)
-	return true
-}
-
-// editorDrag extends the selection during a click-drag inside the editor.
-// (x, y) is clamped to the editor rect so dragging into another pane still
-// extends the selection sensibly. When the mouse passes above or below the
-// editor we engage auto-scroll so the user can select content that's not
-// yet on screen — same feel as VS Code or any GUI text editor. Image tabs
-// drop the drag entirely.
-func (a *App) editorDrag(x, y int) {
-	tab := a.activeTabPtr()
-	if tab == nil || tab.IsImage() {
-		return
-	}
-	ex, ey, ew, eh := a.editorRect()
-
-	// Remember where the mouse is so the auto-scroll tick can extend the
-	// selection at this column even while the mouse stops moving.
-	a.lastDragX = x
-	a.lastDragY = y
-
-	// Edge detection: outside the editor's vertical bounds turns on
-	// auto-scroll; back inside turns it off.
-	switch {
-	case y < ey:
-		a.startAutoScroll(-1)
-	case y >= ey+eh:
-		a.startAutoScroll(1)
-	default:
-		a.stopAutoScroll()
-	}
-
-	// Clamp the mouse into the editor and extend the selection there.
-	localX := x - ex
-	localY := y - ey
-	if localX < 0 {
-		localX = 0
-	}
-	if localY < 0 {
-		localY = 0
-	}
-	if localX >= ew {
-		localX = ew - 1
-	}
-	if localY >= eh {
-		localY = eh - 1
-	}
-	pos, ok := tab.HitTest(localX, localY, ew, eh)
-	if !ok {
-		return
-	}
-	tab.MoveCursorTo(pos, true)
-}
-
-// startAutoScroll begins a timer goroutine that posts autoScrollEvents at
-// autoScrollTick intervals so the editor keeps scrolling while the user
-// holds the mouse past an edge. dir is -1 (up) or +1 (down). Calling with
-// the same direction is a no-op so we don't restart the timer on every
-// drag motion event.
-func (a *App) startAutoScroll(dir int) {
-	if a.autoScrollDir == dir {
-		return
-	}
-	a.stopAutoScroll()
-	a.autoScrollDir = dir
-	a.autoScrollStop = make(chan struct{})
-	stop := a.autoScrollStop
-	scr := a.screen
-	go func() {
-		ticker := time.NewTicker(autoScrollTick)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case t := <-ticker.C:
-				_ = scr.PostEvent(&autoScrollEvent{when: t})
-			}
+	a.sidebarNarrow = narrow
+	if narrow {
+		if !a.sidebarShown {
+			return
 		}
-	}()
-}
-
-// stopAutoScroll signals the auto-scroll goroutine to exit (idempotent).
-func (a *App) stopAutoScroll() {
-	if a.autoScrollStop != nil {
-		close(a.autoScrollStop)
-		a.autoScrollStop = nil
-	}
-	a.autoScrollDir = 0
-}
-
-// handleAutoScroll runs once per autoScrollEvent: nudge the viewport in the
-// armed direction and extend the selection to the edge row at the user's
-// last known mouse column. Bails out (and stops the timer) if anything
-// suggests the user is no longer drag-selecting (button released, menu
-// opened, no active tab).
-func (a *App) handleAutoScroll() {
-	if a.autoScrollDir == 0 || a.dragMode != "editor" || a.anyModalOpen() {
-		a.stopAutoScroll()
+		a.sidebarShown = false
+		a.sidebarAutoHidden = true
+		a.flash("Narrow window — file explorer hidden (Esc t shows it)")
 		return
 	}
-	tab := a.activeTabPtr()
-	if tab == nil {
-		a.stopAutoScroll()
+	if !a.sidebarAutoHidden {
 		return
 	}
-	tab.Scroll(a.autoScrollDir)
-
-	ex, _, ew, eh := a.editorRect()
-	localX := a.lastDragX - ex
-	if localX < 0 {
-		localX = 0
-	}
-	if localX >= ew {
-		localX = ew - 1
-	}
-	localY := eh - 1
-	if a.autoScrollDir < 0 {
-		localY = 0
-	}
-	pos, ok := tab.HitTest(localX, localY, ew, eh)
-	if !ok {
-		return
-	}
-	tab.MoveCursorTo(pos, true)
-}
-
-// scrollbarHit reports whether (x, y) lands on the active tab's
-// scrollbar column, returning the bar-local row when it does. The
-// geometry must mirror Render's: rightmost editor column, only when the
-// file is taller than the viewport.
-func (a *App) scrollbarHit(x, y int) (int, bool) {
-	tab := a.activeTabPtr()
-	if tab == nil {
-		return 0, false
-	}
-	ex, ey, ew, eh := a.editorRect()
-	if ew <= 2 || !tab.ScrollbarVisible(eh) {
-		return 0, false
-	}
-	if x != ex+ew-1 || y < ey || y >= ey+eh {
-		return 0, false
-	}
-	return y - ey, true
-}
-
-// scrollbarTo scrolls the active tab so the thumb centers on the
-// bar-local row — shared by the initial press and the drag. Clamping
-// lives in the editor's ScrollTargetForClick.
-func (a *App) scrollbarTo(localY int) {
-	tab := a.activeTabPtr()
-	if tab == nil {
-		return
-	}
-	_, _, _, eh := a.editorRect()
-	tab.ScrollY = tab.ScrollTargetForClick(eh, localY)
-	// The thumb maps to a buffer line; land at its first visual row so a
-	// stale wrap segment from the previous anchor can't offset the jump.
-	tab.ScrollSeg = 0
-}
-
-// selectWordAt selects the word under the buffer position p (or does
-// nothing if p sits in whitespace / punctuation).
-func (a *App) selectWordAt(tab *editor.Tab, p editor.Position) {
-	line := tab.Buffer.LineRunes(p.Line)
-	if len(line) == 0 {
-		return
-	}
-	start := p.Col
-	if start > len(line) {
-		start = len(line)
-	}
-	for start > 0 && isWordChar(line[start-1]) {
-		start--
-	}
-	end := p.Col
-	for end < len(line) && isWordChar(line[end]) {
-		end++
-	}
-	if start == end {
-		return
-	}
-	tab.Anchor = editor.Position{Line: p.Line, Col: start}
-	tab.Cursor = editor.Position{Line: p.Line, Col: end}
-}
-
-// isWordChar reports whether r is part of a "word" for double-click select.
-// Intentionally simple ASCII-ish definition; covers the common cases.
-func isWordChar(r rune) bool {
-	return r == '_' ||
-		(r >= 'a' && r <= 'z') ||
-		(r >= 'A' && r <= 'Z') ||
-		(r >= '0' && r <= '9')
-}
-
-// -----------------------------------------------------------------------------
-// Tab + clipboard actions
-// -----------------------------------------------------------------------------
-
-// activeTabPtr returns the currently active *editor.Tab, or nil when there
-// are no tabs open.
-func (a *App) activeTabPtr() *editor.Tab {
-	return a.tabs.Active()
+	a.sidebarShown = true
+	a.sidebarAutoHidden = false
+	a.flash("File explorer restored")
 }
 
 // flash sets a transient status message that displays for statusFlashFor
@@ -2063,1364 +745,4 @@ func (a *App) activeTabPtr() *editor.Tab {
 func (a *App) flash(msg string) {
 	a.statusMsg = msg
 	a.statusUntil = time.Now().Add(statusFlashFor)
-}
-
-// OpenFile opens the file at path in a new tab — or switches to it if
-// it is already open. Exported so main.go can seed the editor with the
-// file the user named on the command line ("skiff foo.go"). Thin
-// wrapper around openFile so internal callers keep using the lowercase
-// name and the public surface stays small.
-func (a *App) OpenFile(path string) { a.openFile(path) }
-
-// openFile opens the file at path in a new permanent tab — or switches
-// to it if it is already open (pinning a preview it lands on). Errors
-// surface as a flash message. Whatever the path resolves to, its parent
-// becomes the active folder so the next New File from the main menu
-// lands next to it. The shared implementation lives in preview.go.
-func (a *App) openFile(path string) {
-	a.openFileMode(path, false)
-}
-
-// saveActiveTab writes the active tab's buffer to disk.
-func (a *App) saveActiveTab() {
-	a.saveTab(a.tabs.Active())
-}
-
-// saveTab saves tab. Returns true on success, false on any kind of
-// failure (no tab, untitled, IO error). Failures flash a status message
-// so the caller doesn't have to. Pulled out from saveActiveTab so the
-// dirty-close modal can save a specific tab and branch on success —
-// saving and then closing must not eat the user's work when the save
-// itself failed.
-func (a *App) saveTab(tab *editor.Tab) bool {
-	if tab == nil {
-		return false
-	}
-	if tab.Path == "" {
-		a.flash("Saving untitled tabs is not supported yet")
-		return false
-	}
-	if err := tab.Save(); err != nil {
-		a.flash(fmt.Sprintf("Save failed: %v", err))
-		return false
-	}
-	a.refreshGitStatusAsync()
-	a.flash(fmt.Sprintf("Saved %s", filepath.Base(tab.Path)))
-	// Format-on-save runs after the disk write succeeds, so a broken
-	// formatter never blocks the user's save from landing. The
-	// formatter (when configured + trusted) reloads the buffer
-	// asynchronously via formatDoneEvent — see format.go.
-	a.runFormatOnSave(tab)
-	return true
-}
-
-// saveAllDirty walks every open tab and saves each dirty one. Returns
-// true when every dirty tab saved successfully — used by the quit flow
-// to decide whether it's safe to actually exit. The first failure
-// short-circuits because there's no point cascading more failed saves
-// past one we've already flashed about, and the user needs to react to
-// the first error before deciding what to do with the rest.
-func (a *App) saveAllDirty() bool {
-	for _, tab := range a.tabs.Tabs() {
-		if !tab.Dirty {
-			continue
-		}
-		if !a.saveTab(tab) {
-			return false
-		}
-	}
-	return true
-}
-
-// dirtyTabCount returns the number of tabs with unsaved changes.
-// Used by the quit flow to decide whether to skip the modal entirely.
-func (a *App) dirtyTabCount() int {
-	n := 0
-	for _, tab := range a.tabs.Tabs() {
-		if tab.Dirty {
-			n++
-		}
-	}
-	return n
-}
-
-// requestCloseTab closes tab. A clean tab closes immediately; a dirty
-// tab opens the unsaved-changes modal so the user can pick Save /
-// Discard / Cancel. The Save path saves the buffer first and only
-// closes the tab on success — a save error would otherwise silently
-// lose the user's work. The callbacks capture the tab itself, so any
-// list mutation between the modal opening and the user's click (a
-// preview replacement, another close) can never redirect them onto the
-// wrong tab.
-func (a *App) requestCloseTab(tab *editor.Tab) {
-	if tab == nil || a.tabs.IndexOf(tab) < 0 {
-		return
-	}
-	if !tab.Dirty {
-		a.closeTab(tab)
-		return
-	}
-	name := filepath.Base(tab.Path)
-	if name == "" || name == "." {
-		name = "untitled"
-	}
-	a.openDirtyClose(
-		"Unsaved changes",
-		name+" has unsaved changes.",
-		func(app *App) {
-			// Save → close. saveTab flashes its own error, in which
-			// case we keep the tab around so the user can react.
-			if app.saveTab(tab) {
-				app.closeTab(tab)
-			}
-		},
-		func(app *App) { app.closeTab(tab) },
-	)
-}
-
-// closeTab removes tab without any dirty-check. The tab is recorded on
-// the reopen stack first so Esc-o can bring it back; a tab that is no
-// longer in the list (already closed by another path) is a no-op.
-func (a *App) closeTab(tab *editor.Tab) {
-	if tab == nil || a.tabs.IndexOf(tab) < 0 {
-		return
-	}
-	a.recordClosedTab(tab)
-	a.tabs.Remove(tab)
-	defer a.saveSession()
-	a.ensureActiveTabVisible()
-	a.syncActiveTreeFile()
-}
-
-// copySelection puts the active tab's selection on the system clipboard
-// (via OSC 52) and into the editor's internal clipboard.
-func (a *App) copySelection() {
-	tab := a.activeTabPtr()
-	if tab == nil || !tab.HasSelection() {
-		return
-	}
-	txt := tab.SelectionText()
-	a.clipBuf = txt
-	if err := clipboard.CopyToSystem(txt); err != nil {
-		a.flash("Copied (system clipboard unavailable)")
-		return
-	}
-	a.flash("Copied")
-}
-
-// cutSelection copies the selection then deletes it.
-func (a *App) cutSelection() {
-	tab := a.activeTabPtr()
-	if tab == nil || !tab.HasSelection() {
-		return
-	}
-	a.copySelection()
-	tab.DeleteSelection()
-}
-
-// pasteClipboard inserts the editor's internal clipboard at the cursor.
-// We can't read the system clipboard from a TUI, so external pastes have
-// to come in through the user's terminal paste (Cmd-V / right-click paste).
-func (a *App) pasteClipboard() {
-	tab := a.activeTabPtr()
-	if tab == nil {
-		return
-	}
-	if a.clipBuf == "" {
-		a.flash("Internal clipboard empty — paste from your terminal (Cmd-V)")
-		return
-	}
-	tab.InsertString(a.clipBuf)
-}
-
-// -----------------------------------------------------------------------------
-// Action menu
-// -----------------------------------------------------------------------------
-
-// openMenu shows the action modal. While it is up, the editor doesn't
-// receive typed keys, and clicks outside the modal dismiss it. We pre-
-// select the first enabled row so Down/Up/Enter keyboard navigation has
-// somewhere sensible to start.
-func (a *App) openMenu() {
-	a.closeAllModals()
-	a.menuOpen = true
-	a.overlays.Open(menuOverlay{a})
-	a.menuScroll = 0
-	a.menuMoveSelection(1)
-}
-
-// menuMoveSelection advances hoveredMenuRow to the next (dir=+1) or
-// previous (dir=-1) enabled menu item, wrapping around at the ends so the
-// list feels continuous. Disabled items and dividers are skipped. If no
-// item is currently enabled hoveredMenuRow stays -1.
-func (a *App) menuMoveSelection(dir int) {
-	items, _, _ := a.menuLayout()
-	n := len(items)
-	if n == 0 {
-		return
-	}
-	start := a.hoveredMenuRow
-	if start < 0 {
-		// No current selection — start one step before the first row (for
-		// Down) or one past the last (for Up) so the loop lands on the
-		// first/last enabled item.
-		if dir > 0 {
-			start = -1
-		} else {
-			start = n
-		}
-	}
-	for i := 1; i <= n; i++ {
-		idx := ((start+dir*i)%n + n) % n
-		if items[idx].enabled(a) {
-			a.hoveredMenuRow = idx
-			a.ensureMenuRowVisible(idx)
-			return
-		}
-	}
-	a.hoveredMenuRow = -1
-}
-
-// menuActivate runs the currently-highlighted menu item, if any. It's the
-// keyboard-Enter equivalent of clicking a row.
-// leaderWindowIntercept applies the Esc-leader windows to one key event.
-// Within doubleEscMs a bound rune fires its action; within the longer
-// menuEscMs grace window a bound rune is swallowed with a hint instead —
-// a slow "Esc s" over a laggy link is almost always a save attempt, not
-// typing, and the old behavior silently inserted the rune. Returns true
-// when the key was consumed either way.
-func (a *App) leaderWindowIntercept(ev *tcell.EventKey) bool {
-	if !a.lastEscape.IsZero() && time.Since(a.lastEscape) < doubleEscMs {
-		if ev.Key() == tcell.KeyRune {
-			if action := leaderActionFor(ev.Rune()); action != nil {
-				a.lastEscape = time.Time{}
-				action(a)
-				return true
-			}
-		}
-	}
-	if !a.lastEscape.IsZero() && time.Since(a.lastEscape) < menuEscMs {
-		if ev.Key() == tcell.KeyRune && leaderActionFor(ev.Rune()) != nil {
-			a.lastEscape = time.Time{}
-			r := ev.Rune()
-			a.flash(fmt.Sprintf("Esc %c timed out — tap Esc, then %c right after", r, r))
-			return true
-		}
-	}
-	return false
-}
-
-// handleMenuKey owns the keyboard while the action menu is up. Only the
-// navigation keys do anything — editing keys are blocked — but leader
-// runes still fire their actions (the menu doubles as the shortcut
-// cheat-sheet, so the shortcuts must work while it shows). Pasted
-// content is ignored outright: with no text focus behind the menu,
-// dispatching pasted runes as leader shortcuts would fire arbitrary
-// actions. Esc and Alt+Esc close the menu — the same keys that open it.
-func (a *App) handleMenuKey(ev *tcell.EventKey) {
-	if a.pasting {
-		return
-	}
-	if ev.Modifiers()&tcell.ModAlt != 0 {
-		a.lastEscape = time.Time{}
-		switch ev.Key() {
-		case tcell.KeyEsc:
-			a.closeMenu()
-			return
-		case tcell.KeyRune:
-			if action := leaderActionFor(ev.Rune()); action != nil {
-				action(a)
-			}
-			return
-		}
-	}
-	if ev.Key() == tcell.KeyEsc {
-		a.closeMenu()
-		a.lastEscape = time.Time{}
-		return
-	}
-	if a.leaderWindowIntercept(ev) {
-		return
-	}
-	a.lastEscape = time.Time{}
-	if ev.Key() == tcell.KeyRune {
-		if action := leaderActionFor(ev.Rune()); action != nil {
-			action(a)
-			return
-		}
-	}
-	switch ev.Key() {
-	case tcell.KeyDown:
-		a.menuMoveSelection(1)
-	case tcell.KeyUp:
-		a.menuMoveSelection(-1)
-	case tcell.KeyEnter:
-		a.menuActivate()
-	}
-}
-
-func (a *App) menuActivate() {
-	items, _, _ := a.menuLayout()
-	if a.hoveredMenuRow < 0 || a.hoveredMenuRow >= len(items) {
-		return
-	}
-	item := items[a.hoveredMenuRow]
-	if !item.enabled(a) {
-		return
-	}
-	item.action(a)
-}
-
-// closeMenu hides the action modal without running any action.
-func (a *App) closeMenu() {
-	a.menuOpen = false
-	a.dropOverlay(menuOverlay{a})
-	a.hoveredMenuRow = -1
-	a.menuScroll = 0
-}
-
-// updateMenuHover sets hoveredMenuRow to the index of the enabled menu row
-// at (x, y), or to -1 when the mouse is over a disabled row, a divider, the
-// title, or anywhere outside the modal.
-func (a *App) updateMenuHover(x, y int) {
-	a.hoveredMenuRow = -1
-	mx, my, mw, mh := a.menuModalRect()
-	if x < mx || x >= mx+mw || y < my || y >= my+mh {
-		return
-	}
-	// Chrome rows (title, divider, borders) never hover; the content
-	// region maps through the scroll offset like the click hit-test.
-	if y < my+3 || y > my+mh-2 {
-		return
-	}
-	relY := y - my + a.menuScroll
-	items, _, _ := a.menuLayout()
-	for i, item := range items {
-		if item.relY == relY && item.enabled(a) {
-			a.hoveredMenuRow = i
-			return
-		}
-	}
-}
-
-// hasTab reports whether there is an active tab to act on.
-func (a *App) hasTab() bool { return a.activeTabPtr() != nil }
-
-// hasSavableTab reports whether the active tab is one we can persist —
-// it must exist, have a path on disk, and not be a read-only image
-// preview. Used by Save and Save & Close.
-func (a *App) hasSavableTab() bool {
-	t := a.activeTabPtr()
-	return t != nil && t.Path != "" && !t.IsImage()
-}
-
-// hasFileTab reports whether the active tab is backed by a real file
-// (text or image). Used by Rename / Delete which act on the file
-// regardless of how the tab is rendered.
-func (a *App) hasFileTab() bool {
-	t := a.activeTabPtr()
-	return t != nil && t.Path != ""
-}
-
-// hasSelection reports whether the active tab has a non-empty selection.
-func (a *App) hasSelection() bool {
-	t := a.activeTabPtr()
-	return t != nil && t.HasSelection()
-}
-
-// hasCommentableTab reports whether the active tab is editable text with a
-// known single-line comment marker.
-func (a *App) hasCommentableTab() bool {
-	t := a.activeTabPtr()
-	if t == nil || t.IsImage() {
-		return false
-	}
-	_, ok := editor.LineCommentPrefix(t.Path)
-	return ok
-}
-
-// hasClipboard reports whether the editor's internal clipboard has content
-// to paste.
-func (a *App) hasClipboard() bool { return a.clipBuf != "" }
-
-// hasUndo reports whether the active tab has anything to undo. Used to
-// enable / disable the Undo row in the action menu.
-func (a *App) hasUndo() bool {
-	t := a.activeTabPtr()
-	return t != nil && t.CanUndo()
-}
-
-// hasRedo reports whether the active tab has anything to redo.
-func (a *App) hasRedo() bool {
-	t := a.activeTabPtr()
-	return t != nil && t.CanRedo()
-}
-
-// hasRevert reports whether the active tab differs from its on-open
-// (or last-reload) baseline — i.e. there is something to revert.
-func (a *App) hasRevert() bool {
-	t := a.activeTabPtr()
-	return t != nil && t.CanRevert()
-}
-
-// menuUndo rolls the active tab back one undo step.
-func (a *App) menuUndo() {
-	a.closeMenu()
-	t := a.activeTabPtr()
-	if t == nil {
-		return
-	}
-	if !t.Undo() {
-		a.flash("Nothing to undo")
-	}
-}
-
-// menuRedo re-applies the most recently undone step.
-func (a *App) menuRedo() {
-	a.closeMenu()
-	t := a.activeTabPtr()
-	if t == nil {
-		return
-	}
-	if !t.Redo() {
-		a.flash("Nothing to redo")
-	}
-}
-
-// menuRevert rewinds the active tab all the way back to the buffer
-// state we captured the moment the file was opened (or last reloaded).
-// The pre-revert state goes onto the undo stack so an accidental click
-// is recoverable with one Undo.
-func (a *App) menuRevert() {
-	a.closeMenu()
-	t := a.activeTabPtr()
-	if t == nil {
-		return
-	}
-	if !t.RevertFile() {
-		a.flash("File matches its on-open state — nothing to revert")
-		return
-	}
-	a.flash("Reverted to on-open state — Undo to recover")
-}
-
-// runCustomAction executes the custom action at idx. When the action
-// declares prompts, the form modal opens first and the shell command
-// runs only after the user submits — values are exported as KEY=VALUE
-// env vars named after each prompt's Key. When prompts is empty the
-// command runs immediately (the historical behaviour) and the action
-// requires an open tab so $FILE / $FILENAME aren't blank.
-//
-// Either path runs in a goroutine so a slow scp / ssh can't freeze
-// the UI; completion fires a customActionDoneEvent the main loop
-// turns into a flash on success or an info modal on failure.
-func (a *App) runCustomAction(idx int) {
-	a.closeMenu()
-	if idx < 0 || idx >= len(a.customActions) {
-		return
-	}
-	act := a.customActions[idx]
-
-	// No "is a file open?" guard: custom actions are user-defined
-	// shell, and we don't second-guess what their command line
-	// needs. A $FILE-dependent command run without a tab open will
-	// fail with a real error and route through the info modal,
-	// which is more honest than disabling actions like
-	// "brew upgrade ..." that don't touch FILE at all.
-	if len(act.Prompts) == 0 {
-		a.execCustomAction(act, nil)
-		return
-	}
-
-	a.openForm(act.Label, act.Prompts, func(app *App, values map[string]string) {
-		app.execCustomAction(act, values)
-	})
-}
-
-// execCustomAction is the actual shell-out. Pulled out of
-// runCustomAction so both the prompt-less and prompted paths share
-// the env-var, logging, and event-posting wiring without diverging.
-func (a *App) execCustomAction(act customactions.Action, promptValues map[string]string) {
-	vars := a.captureActionVars()
-	env := append(os.Environ(), vars.envSlice()...)
-	env = append(env, promptValuesEnv(act.Prompts, promptValues)...)
-
-	a.flash(act.Label + "…")
-	scr := a.screen
-	go func() {
-		started := time.Now()
-		cmd := exec.Command("sh", "-c", act.Command)
-		cmd.Env = env
-		out, runErr := cmd.CombinedOutput()
-		duration := time.Since(started)
-
-		// Always log — success or failure — so the user can scroll
-		// back through actions.log when something goes sideways.
-		// Best-effort: a log-write failure must not eat the action's
-		// real error.
-		_ = customactions.AppendLog(customactions.LogPath(), customactions.RunRecord{
-			Time:     started,
-			Duration: duration,
-			Label:    act.Label,
-			Command:  act.Command,
-			File:     vars.File,
-			Filename: vars.Filename,
-			ExitErr:  runErr,
-			Output:   out,
-		})
-
-		_ = scr.PostEvent(&customActionDoneEvent{
-			when:   time.Now(),
-			label:  act.Label,
-			err:    runErr,
-			output: out,
-		})
-	}()
-}
-
-// menuSave runs the Save action and dismisses the menu.
-func (a *App) menuSave() {
-	a.closeMenu()
-	a.saveActiveTab()
-}
-
-// menuSaveAndClose saves the active tab and then closes it. If the save
-// fails the close is aborted so we don't lose the user's edits.
-func (a *App) menuSaveAndClose() {
-	a.closeMenu()
-	tab := a.activeTabPtr()
-	if tab == nil || tab.Path == "" {
-		return
-	}
-	if err := tab.Save(); err != nil {
-		a.flash(fmt.Sprintf("Save failed: %v", err))
-		return
-	}
-	a.refreshGitStatusAsync()
-	a.flash(fmt.Sprintf("Saved %s — closed", filepath.Base(tab.Path)))
-	a.closeTab(a.tabs.Active())
-}
-
-// menuClose closes the active tab via the same dirty-tab confirmation flow
-// used by clicking the × on the tab.
-func (a *App) menuClose() {
-	a.closeMenu()
-	a.requestCloseTab(a.tabs.Active())
-}
-
-// menuCopy copies the current selection.
-func (a *App) menuCopy() {
-	a.closeMenu()
-	a.copySelection()
-}
-
-// menuCut cuts the current selection.
-func (a *App) menuCut() {
-	a.closeMenu()
-	a.cutSelection()
-}
-
-// menuPaste pastes the editor's internal clipboard at the cursor.
-func (a *App) menuPaste() {
-	a.closeMenu()
-	a.pasteClipboard()
-}
-
-// menuToggleLineComment comments or uncomments the active line selection.
-func (a *App) menuToggleLineComment() {
-	a.closeMenu()
-	tab := a.activeTabPtr()
-	if tab == nil || tab.IsImage() {
-		return
-	}
-	changed, ok := tab.ToggleLineComment()
-	if !ok {
-		a.flash("No line comment syntax for this file")
-		return
-	}
-	if !changed {
-		a.flash("No non-blank lines to comment")
-		return
-	}
-	a.flash("Toggled line comment")
-}
-
-// hasEditableTab reports whether the active tab accepts text edits —
-// the gate for the line-op menu rows (image tabs and no-tab both fail).
-func (a *App) hasEditableTab() bool {
-	t := a.activeTabPtr()
-	return t != nil && !t.IsImage()
-}
-
-// menuMoveLineUp nudges the cursor line / selected block up one line.
-func (a *App) menuMoveLineUp() {
-	a.closeMenu()
-	if t := a.activeTabPtr(); t != nil {
-		t.MoveLinesUp()
-	}
-}
-
-// menuMoveLineDown nudges the cursor line / selected block down one line.
-func (a *App) menuMoveLineDown() {
-	a.closeMenu()
-	if t := a.activeTabPtr(); t != nil {
-		t.MoveLinesDown()
-	}
-}
-
-// menuDuplicateLine copies the cursor line / selected block below itself.
-func (a *App) menuDuplicateLine() {
-	a.closeMenu()
-	if t := a.activeTabPtr(); t != nil {
-		t.DuplicateLines()
-	}
-}
-
-// menuRefreshTree forces an immediate sidebar reload. Currently unwired
-// from the menu — the 10s background poller covers the common case — but
-// the method is kept so re-adding the menu row (see menuItems) only
-// requires uncommenting one line.
-func (a *App) menuRefreshTree() {
-	a.closeMenu()
-	a.refreshTree()
-	a.flash("File tree refreshed")
-}
-
-// menuToggleSidebar shows or hides the file explorer panel. The editor and
-// tab bar reflow to fill the freed cells when the panel is hidden, and
-// snap back when it returns.
-func (a *App) menuToggleSidebar() {
-	a.closeMenu()
-	// Single-file mode has no file tree, so there's nothing to show or
-	// hide. The menu row is hidden (hasTree), but the Esc-t leader reaches
-	// here directly — guard it so the toggle can't flip sidebarShown true
-	// and send draw() into a.tree.Render on a nil tree.
-	if a.tree == nil {
-		a.flash("No file explorer in single-file mode")
-		return
-	}
-	a.sidebarShown = !a.sidebarShown
-}
-
-// sidebarToggleLabel returns the label the toggle row should display given
-// the current sidebar state. Drawn dynamically by drawMenu.
-func (a *App) sidebarToggleLabel() string {
-	if a.sidebarShown {
-		return "Hide file explorer"
-	}
-	return "Show file explorer"
-}
-
-// menuToggleWrap flips soft wrap for every open tab and persists the
-// preference, so it holds for future tabs and future sessions alike.
-// A persistence failure still applies the toggle in-memory — the user
-// asked for a view change first, a config write second.
-func (a *App) menuToggleWrap() {
-	a.closeMenu()
-	a.wrapOn = !a.wrapOn
-	for _, t := range a.tabs.Tabs() {
-		t.SetWrap(a.wrapOn)
-	}
-	if err := userconfig.SetWrap(userconfig.DefaultPath(), a.wrapOn); err != nil {
-		a.flash("config: " + err.Error())
-		return
-	}
-	if a.wrapOn {
-		a.flash("Long lines now wrap")
-	} else {
-		a.flash("Long lines now scroll sideways")
-	}
-}
-
-// wrapToggleLabel returns the wrap row's label for the current state.
-// Drawn dynamically by drawMenu, same pattern as the sidebar toggle.
-func (a *App) wrapToggleLabel() string {
-	if a.wrapOn {
-		return "Unwrap long lines"
-	}
-	return "Wrap long lines"
-}
-
-// menuQuit exits the editor. When any tab has unsaved changes, opens the
-// dirty-close modal so the user can pick Save (save all then quit),
-// Discard (quit anyway), or Cancel. With no dirty tabs we exit straight
-// away.
-func (a *App) menuQuit() {
-	a.closeMenu()
-	dirty := a.dirtyTabCount()
-	if dirty == 0 {
-		a.quit = true
-		return
-	}
-	var message string
-	if dirty == 1 {
-		// Find the one dirty tab so we can name it in the modal.
-		for _, tab := range a.tabs.Tabs() {
-			if tab.Dirty {
-				name := filepath.Base(tab.Path)
-				if name == "" || name == "." {
-					name = "untitled"
-				}
-				message = name + " has unsaved changes. Save before quitting?"
-				break
-			}
-		}
-	} else {
-		message = fmt.Sprintf("%d files have unsaved changes. Save all before quitting?", dirty)
-	}
-	a.openDirtyClose(
-		"Unsaved changes",
-		message,
-		func(app *App) {
-			// Only quit if every save succeeded — a half-saved exit
-			// would silently lose work on whichever tab failed.
-			if app.saveAllDirty() {
-				app.quit = true
-			}
-		},
-		func(app *App) { app.quit = true },
-	)
-}
-
-// -----------------------------------------------------------------------------
-// Drawing
-// -----------------------------------------------------------------------------
-
-// draw paints the entire screen. Called once per event in the main loop.
-// The action modal — if open — is drawn last so it sits on top of everything.
-func (a *App) draw() {
-	a.screen.Clear()
-
-	if a.width < minWidth || a.height < minHeight {
-		a.drawTooSmall()
-		return
-	}
-
-	if a.sidebarShown {
-		sx, sy, sw, sh := a.sidebarRect()
-		if a.gitPanelActive {
-			a.drawGitPanel(sx, sy, sw, sh)
-		} else {
-			a.tree.Render(a.screen, a.theme, sx, sy, sw, sh)
-			// Overdraw the tree's plain header with the EXPLORER / GIT
-			// tab row — the tree keeps rendering its own header so its
-			// geometry (and tests) stay untouched.
-			a.drawSidebarHeader(sx, sy, sw)
-		}
-		a.drawSplitter()
-	}
-
-	a.drawTabBar()
-
-	if tab := a.activeTabPtr(); tab != nil {
-		ex, ey, ew, eh := a.editorRect()
-		tab.Render(a.screen, a.theme, ex, ey, ew, eh)
-	} else {
-		a.drawEmptyEditor()
-	}
-
-	if a.findOpen {
-		a.drawFindBar()
-	}
-	a.drawStatusBar()
-	if a.projFindOpen {
-		a.drawProjFind()
-	}
-	a.drawLeaderStrip()
-
-	// The overlay stack paints last so the open overlay sits above
-	// everything — at most one is ever up (Open replaces), so there is
-	// no layering order left to maintain.
-	a.overlays.Draw(a.screen)
-}
-
-// iconsOn reports whether Nerd Font glyphs should render in places
-// outside the file tree (e.g. the tab bar). The single source of
-// truth is the file tree — App.loadUserConfig stamped the resolved
-// auto/on/off decision onto t.IconsEnabled there, so consulting the
-// tree keeps tabs and tree perfectly in sync (turning icons off via
-// config.json hides them everywhere at once).
-func (a *App) iconsOn() bool {
-	return a.tree != nil && a.tree.IconsEnabled
-}
-
-// tabStripRegion returns the screen x and width of the area tabs may
-// occupy: everything in the tab bar right of the ≡ button.
-func (a *App) tabStripRegion() (x, w int) {
-	tx, _, tw, _ := a.tabBarRect()
-	x = a.sidebarW() + menuButtonWidth
-	w = tx + tw - x
-	if w < 0 {
-		w = 0
-	}
-	return
-}
-
-// maxTabScroll returns how far the tab strip can scroll: the overflow
-// between the laid-out tab widths and the strip. Zero when every tab
-// fits.
-func (a *App) maxTabScroll() int {
-	rects := a.layoutTabs()
-	if len(rects) == 0 {
-		return 0
-	}
-	stripX, stripW := a.tabStripRegion()
-	last := rects[len(rects)-1]
-	over := (last.X + last.Width) - (stripX + stripW)
-	if over < 0 {
-		return 0
-	}
-	return over
-}
-
-// clampTabScroll bounds tabScroll to [0, maxTabScroll] so the strip can
-// never scroll past its first or last tab.
-func (a *App) clampTabScroll() {
-	if maxS := a.maxTabScroll(); a.tabScroll > maxS {
-		a.tabScroll = maxS
-	}
-	if a.tabScroll < 0 {
-		a.tabScroll = 0
-	}
-}
-
-// ensureActiveTabVisible scrolls the tab strip so the active tab's full
-// rect sits inside the visible window — the tab-bar analogue of the
-// editor's EnsureVisible. Called from activation sites (open, click,
-// close, resize), never from the draw path, so manual strip scrolling
-// isn't fought by the renderer.
-func (a *App) ensureActiveTabVisible() {
-	rects := a.layoutTabs()
-	if a.tabs.ActiveIndex() < 0 || a.tabs.ActiveIndex() >= len(rects) {
-		a.tabScroll = 0
-		return
-	}
-	stripX, stripW := a.tabStripRegion()
-	if stripW <= 0 {
-		return
-	}
-	r := rects[a.tabs.ActiveIndex()]
-	left := stripX + a.tabScroll
-	if r.X < left {
-		a.tabScroll = r.X - stripX
-	} else if r.X+r.Width > left+stripW {
-		a.tabScroll = r.X + r.Width - stripX - stripW
-	}
-	a.clampTabScroll()
-}
-
-// scrollTabStrip moves the strip by delta cells (negative = toward the
-// first tab), clamped. Fired by the ‹ › chevron clicks and by wheel
-// events over the tab bar.
-func (a *App) scrollTabStrip(delta int) {
-	a.tabScroll += delta
-	a.clampTabScroll()
-}
-
-// tabScrollStep is how many cells one chevron click or wheel tick moves
-// the tab strip — enough to reveal most of a typical tab without
-// disorienting jumps.
-const tabScrollStep = 8
-
-// layoutTabs computes the tabRect geometry for every tab. Tabs are rendered
-// to the right of the menu button, in the format:
-//
-//	" <dirty><icon? ><name> × " — a single space pad, two-cell dirty slot
-//	(dot+space, or two spaces), an optional Nerd Font glyph + 1-space
-//	separator (only when icons are enabled), the file name, a separator
-//	space, the close ×, and a trailing space.
-//
-// The X coordinates are virtual (as if the strip never scrolled);
-// drawTabBar subtracts tabScroll before painting and stores the
-// shifted rects, so click hit-testing always works in screen space.
-func (a *App) layoutTabs() []tabRect {
-	out := make([]tabRect, 0, a.tabs.Len())
-	cursor := a.sidebarW() + menuButtonWidth
-	iconW := 0
-	if a.iconsOn() {
-		iconW = 2 // glyph + space
-	}
-	for i, t := range a.tabs.Tabs() {
-		nameLen := len([]rune(t.DisplayName()))
-		w := 1 + 2 + iconW + nameLen + 1 + 1 + 1 // pad+dirty+icon?+name+space+×+pad
-		out = append(out, tabRect{
-			Index:  i,
-			X:      cursor,
-			Width:  w,
-			CloseX: cursor + 1 + 2 + iconW + nameLen + 1,
-		})
-		cursor += w
-	}
-	return out
-}
-
-// drawTabBar paints the tab bar across the top of the editor area: first
-// the menu button (≡), then any open tabs.
-func (a *App) drawTabBar() {
-	tx, ty, tw, _ := a.tabBarRect()
-	barStyle := tcell.StyleDefault.Background(a.theme.SidebarBG).Foreground(a.theme.Muted)
-	for cx := tx; cx < tx+tw; cx++ {
-		a.screen.SetContent(cx, ty, ' ', nil, barStyle)
-	}
-
-	a.drawMenuButton()
-
-	// Shift the virtual layout by the strip scroll and remember the
-	// shifted rects — hit-testing then stays in screen coordinates.
-	stripX, _ := a.tabStripRegion()
-	rects := a.layoutTabs()
-	for i := range rects {
-		rects[i].X -= a.tabScroll
-		rects[i].CloseX -= a.tabScroll
-	}
-	a.lastTabRects = rects
-	for _, r := range rects {
-		active := r.Index == a.tabs.ActiveIndex()
-		bg := a.theme.SidebarBG
-		fg := a.theme.Muted
-		if active {
-			bg = a.theme.BG
-			fg = a.theme.Text
-		}
-		st := tcell.StyleDefault.Background(bg).Foreground(fg)
-		if active {
-			st = st.Bold(true)
-		}
-		// Preview tabs render in italics — the visual promise that the
-		// next tree click will replace this tab rather than add one.
-		if a.tabs.At(r.Index).IsPreview() {
-			st = st.Italic(true)
-		}
-		// Background. Cells scrolled off either edge of the strip are
-		// skipped; the chevrons painted below mark what's hidden.
-		for cx := r.X; cx < r.X+r.Width; cx++ {
-			if cx < stripX {
-				continue
-			}
-			if cx >= tx+tw {
-				break
-			}
-			a.screen.SetContent(cx, ty, ' ', nil, st)
-		}
-		tab := a.tabs.At(r.Index)
-		col := r.X + 1
-		if tab.Dirty && col >= stripX && col < tx+tw {
-			a.screen.SetContent(col, ty, '●', nil, st.Foreground(a.theme.Modified))
-		}
-		col += 2 // skip dirty slot.
-		// Per-language Nerd Font glyph between the dirty dot and the
-		// filename — only when icons are enabled. Coloured the same
-		// way the file tree glyphs are (icons.ColorFor) so the eye
-		// connects "this tab" to "that row in the tree" instantly.
-		if a.iconsOn() {
-			name := tab.DisplayName()
-			glyph := icons.For(name, false, false)
-			gfg := icons.ColorFor(name, false, fg)
-			gst := tcell.StyleDefault.Background(bg).Foreground(gfg)
-			if active {
-				gst = gst.Bold(true)
-			}
-			for _, gr := range glyph {
-				if col >= tx+tw {
-					break
-				}
-				if col >= stripX {
-					a.screen.SetContent(col, ty, gr, nil, gst)
-				}
-				col++
-			}
-			col++ // separator space after glyph
-		}
-		for _, ru := range tab.DisplayName() {
-			if col >= tx+tw {
-				break
-			}
-			if col >= stripX {
-				a.screen.SetContent(col, ty, ru, nil, st)
-			}
-			col++
-		}
-		col++ // separator space before ×
-		if col >= stripX && col < tx+tw {
-			// Emphasis tracks likelihood of use: the active tab's × is
-			// the likeliest close target, so it gets the brighter Muted;
-			// inactive tabs recede to Subtle so their × can't outshine
-			// the active tab's controls.
-			closeStyle := st.Foreground(a.theme.Subtle)
-			if active {
-				closeStyle = st.Foreground(a.theme.Muted)
-			}
-			a.screen.SetContent(col, ty, '×', nil, closeStyle)
-		}
-	}
-
-	// Overflow chevrons — the same ‹ › affordance the editor uses for
-	// clipped lines, painted over the strip's extreme cells in Accent.
-	// Each is also a click target that scrolls the strip (tabBarClick).
-	chevStyle := tcell.StyleDefault.Background(a.theme.SidebarBG).Foreground(a.theme.Accent)
-	if a.tabScroll > 0 {
-		a.screen.SetContent(stripX, ty, '‹', nil, chevStyle)
-	}
-	if a.tabScroll < a.maxTabScroll() {
-		a.screen.SetContent(tx+tw-1, ty, '›', nil, chevStyle)
-	}
-}
-
-// drawSplitter paints a 1-column vertical line at the right edge of the
-// sidebar. Idle it sits in Subtle grey; while the user is dragging it
-// brightens to Accent so the active grab handle is unmistakable.
-func (a *App) drawSplitter() {
-	x := a.splitterX()
-	if x < 0 {
-		return
-	}
-	fg := a.theme.Subtle
-	if a.dragMode == "sidebar" {
-		fg = a.theme.Accent
-	}
-	style := tcell.StyleDefault.Background(a.theme.SidebarBG).Foreground(fg)
-	for y := 0; y < a.height-1; y++ {
-		a.screen.SetContent(x, y, '│', nil, style)
-	}
-}
-
-// drawMenuButton paints the ≡ icon in the leftmost cells of the tab bar.
-// It's deliberately big and accent-coloured so it reads as a button.
-func (a *App) drawMenuButton() {
-	mx, my, mw, _ := a.menuButtonRect()
-	bg := a.theme.SidebarBG
-	fg := a.theme.Accent
-	if a.menuOpen {
-		// Visually press the button while the menu is up.
-		bg = a.theme.Accent
-		fg = a.theme.BG
-	}
-	style := tcell.StyleDefault.Background(bg).Foreground(fg).Bold(true)
-	for cx := mx; cx < mx+mw; cx++ {
-		a.screen.SetContent(cx, my, ' ', nil, style)
-	}
-	// Center the ≡ glyph in the button's mw cells.
-	a.screen.SetContent(mx+mw/2, my, '≡', nil, style)
-}
-
-// drawEmptyEditor paints the placeholder shown when no tabs are open.
-// Both hint lines are trimmed to the editor's width before centering —
-// on a narrow pane the untrimmed 45-rune hint used to start left of the
-// editor rect and overwrite file-tree rows and the splitter.
-func (a *App) drawEmptyEditor() {
-	ex, ey, ew, eh := a.editorRect()
-	bg := a.theme.BG
-	muted := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
-	bold := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text).Bold(true)
-	for cy := ey; cy < ey+eh; cy++ {
-		for cx := ex; cx < ex+ew; cx++ {
-			a.screen.SetContent(cx, cy, ' ', nil, muted)
-		}
-	}
-	cy := ey + eh/2
-	msg1 := trimRunes("No file open", ew)
-	msg2 := trimRunes("Click a file in the tree, or  ≡  for the menu", ew)
-	cx1 := ex + (ew-runeLen(msg1))/2
-	for i, r := range msg1 {
-		a.screen.SetContent(cx1+i, cy-1, r, nil, bold)
-	}
-	cx2 := ex + (ew-runeLen(msg2))/2
-	for i, r := range msg2 {
-		a.screen.SetContent(cx2+i, cy+1, r, nil, muted)
-	}
-	a.screen.HideCursor()
-}
-
-// drawStatusBar paints the bottom status bar.
-func (a *App) drawStatusBar() {
-	sx, sy, sw, _ := a.statusRect()
-	bg := a.theme.StatusBG
-	// StatusFg is paired with StatusBG per palette — hardcoding BG here
-	// broke ported themes whose status bar isn't an accent color.
-	fg := a.theme.StatusFg
-	style := tcell.StyleDefault.Background(bg).Foreground(fg).Bold(true)
-	for cx := sx; cx < sx+sw; cx++ {
-		a.screen.SetContent(cx, sy, ' ', nil, style)
-	}
-
-	// Right-side text: current git branch (plus a changed-path count when
-	// there is one) when we're inside a repo. Drawn first so the left-side
-	// text can be clipped against it and the two pieces never overlap on a
-	// narrow window. The segment doubles as the click target that opens
-	// the Git changes modal — see statusBarClick.
-	var rightWidth int
-	if right := a.statusGitSegment(); right != "" {
-		rw := len([]rune(right))
-		if rw < sw {
-			drawAt(a.screen, sx+sw-rw, sy, right, style)
-			rightWidth = rw
-		}
-	}
-
-	// Pending-gesture tag: while an Esc is armed (leader or double-tap
-	// window still open) show "Esc…" beside the git segment — vim's
-	// showcmd idea sized for a status bar. The editor's only modifier
-	// must not have invisible state: without this, a slow second
-	// keystroke fails with no cue that the gesture died. A
-	// leaderExpiryEvent posted at arming time repaints the bar so the
-	// tag also clears when the user simply abandons the Esc.
-	if !a.lastEscape.IsZero() && time.Since(a.lastEscape) < menuEscMs {
-		tag := "Esc… "
-		tw := len([]rune(tag))
-		if tw+rightWidth < sw {
-			drawAt(a.screen, sx+sw-rightWidth-tw, sy, tag, style)
-			rightWidth += tw
-		}
-	}
-
-	// Left-side text: status flash, file info, or root dir.
-	var left string
-	if time.Now().Before(a.statusUntil) && a.statusMsg != "" {
-		left = " " + a.statusMsg
-	} else if tab := a.activeTabPtr(); tab != nil {
-		if tab.IsImage() && tab.Image != nil {
-			b := tab.Image.Bounds()
-			left = fmt.Sprintf(" %s · %d×%d · %s",
-				strings.ToUpper(tab.ImageFmt), b.Dx(), b.Dy(), filepath.Base(tab.Path))
-		} else {
-			lang := detectLangLabel(tab.Path)
-			dirty := ""
-			if tab.Dirty {
-				dirty = " · ●"
-			}
-			left = fmt.Sprintf(" %s · Ln %d, Col %d · %d lines%s",
-				lang, tab.Cursor.Line+1, tab.Cursor.Col+1, tab.Buffer.LineCount(), dirty)
-		}
-	} else {
-		left = " " + filepath.Base(a.rootDir)
-	}
-	// One cell of breathing room between left and right text so they
-	// don't visually butt up against each other on a tight terminal.
-	leftMax := sw - rightWidth
-	if rightWidth > 0 {
-		leftMax--
-	}
-	if leftMax < 0 {
-		leftMax = 0
-	}
-	drawStatusText(a.screen, sx, sy, leftMax, left, style)
-}
-
-// drawTooSmall paints a centred error message when the terminal window is
-// smaller than the editor's minimum supported size.
-func (a *App) drawTooSmall() {
-	style := tcell.StyleDefault.Background(a.theme.BG).Foreground(a.theme.Error).Bold(true)
-	for cy := 0; cy < a.height; cy++ {
-		for cx := 0; cx < a.width; cx++ {
-			a.screen.SetContent(cx, cy, ' ', nil,
-				tcell.StyleDefault.Background(a.theme.BG))
-		}
-	}
-	msg := "Window too small — please resize"
-	cy := a.height / 2
-	cx := (a.width - len([]rune(msg))) / 2
-	if cx < 0 {
-		cx = 0
-	}
-	for i, r := range msg {
-		if cx+i >= a.width {
-			break
-		}
-		a.screen.SetContent(cx+i, cy, r, nil, style)
-	}
-	a.screen.HideCursor()
-}
-
-// drawMenu renders the action modal centered in the window. The
-// item / divider / height layout comes from menuLayout so adding
-// custom actions or new built-in groups doesn't require touching this
-// function.
-func (a *App) drawMenu() {
-	mx, my, mw, mh := a.menuModalRect()
-	items, dividers, _ := a.menuLayout()
-
-	bg := a.theme.LineHL
-	bgStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
-	borderStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Subtle)
-	titleStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true)
-	mutedStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
-	chevronStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.AccentSoft)
-
-	// Fill the entire modal rect with the modal bg.
-	for cy := my; cy < my+mh; cy++ {
-		for cx := mx; cx < mx+mw; cx++ {
-			a.screen.SetContent(cx, cy, ' ', nil, bgStyle)
-		}
-	}
-
-	// Outer border.
-	a.screen.SetContent(mx, my, '┌', nil, borderStyle)
-	a.screen.SetContent(mx+mw-1, my, '┐', nil, borderStyle)
-	a.screen.SetContent(mx, my+mh-1, '└', nil, borderStyle)
-	a.screen.SetContent(mx+mw-1, my+mh-1, '┘', nil, borderStyle)
-	for cx := mx + 1; cx < mx+mw-1; cx++ {
-		a.screen.SetContent(cx, my, '─', nil, borderStyle)
-		a.screen.SetContent(cx, my+mh-1, '─', nil, borderStyle)
-	}
-	for cy := my + 1; cy < my+mh-1; cy++ {
-		a.screen.SetContent(mx, cy, '│', nil, borderStyle)
-		a.screen.SetContent(mx+mw-1, cy, '│', nil, borderStyle)
-	}
-
-	// Horizontal dividers between action groups. The dy list comes from
-	// menuLayout — including the always-on row under the title — so it
-	// stays in sync with whatever rows are actually being drawn. The
-	// title divider (relY 2) is fixed chrome; the rest live in the
-	// scrollable content region and map through menuScroll, dropping
-	// out when they leave the visible window.
-	for _, dy := range dividers {
-		cy := my + dy
-		if dy > 2 {
-			cy -= a.menuScroll
-			if cy < my+3 || cy > my+mh-2 {
-				continue
-			}
-		}
-		a.screen.SetContent(mx, cy, '├', nil, borderStyle)
-		a.screen.SetContent(mx+mw-1, cy, '┤', nil, borderStyle)
-		for cx := mx + 1; cx < mx+mw-1; cx++ {
-			a.screen.SetContent(cx, cy, '─', nil, borderStyle)
-		}
-	}
-
-	// Title row: " Menu" on the left, "esc " on the right.
-	drawAt(a.screen, mx+1, my+1, " Menu", titleStyle)
-	hint := "esc "
-	drawAt(a.screen, mx+mw-1-len([]rune(hint)), my+1, hint, mutedStyle)
-
-	// Version stamp baked into the bottom border, right-aligned. A small
-	// pad of dashes is left between the version text and the corner so it
-	// reads as part of the frame rather than a label awkwardly butted up
-	// against the border.
-	verLabel := " v" + version.Version + " "
-	verLen := len([]rune(verLabel))
-	verX := mx + mw - 2 - verLen
-	if verX > mx+1 {
-		drawAt(a.screen, verX, my+mh-1, verLabel, mutedStyle)
-	}
-
-	// Action rows. Hovered (enabled) rows get a tinted full-width
-	// background so they read like a hovered button in a GUI menu.
-	hoverBg := a.theme.Selection
-	hoverStyle := tcell.StyleDefault.Background(hoverBg).Foreground(a.theme.Text).Bold(true)
-	hoverChevStyle := tcell.StyleDefault.Background(hoverBg).Foreground(a.theme.AccentSoft).Bold(true)
-	for i, item := range items {
-		cy := my + item.relY - a.menuScroll
-		// Rows scrolled out of the content window aren't drawn; the
-		// ▲/▼ chrome markers below tell the user they exist.
-		if cy < my+3 || cy > my+mh-2 {
-			continue
-		}
-		enabled := item.enabled(a)
-		hovered := enabled && i == a.hoveredMenuRow
-
-		var labelStyle, chevStyle, shortcutStyle tcell.Style
-		switch {
-		case hovered:
-			// Paint the row's interior with the hover background first.
-			for cx := mx + 1; cx < mx+mw-1; cx++ {
-				a.screen.SetContent(cx, cy, ' ', nil, hoverStyle)
-			}
-			labelStyle = hoverStyle
-			chevStyle = hoverChevStyle
-			// Text, not Muted: Muted lands around 2.6:1 on the Selection
-			// hover bg — the one row the user is actively reading is the
-			// last place the shortcut hint should go dim.
-			shortcutStyle = tcell.StyleDefault.Background(hoverBg).Foreground(a.theme.Text).Bold(true)
-		case enabled:
-			labelStyle = bgStyle
-			chevStyle = chevronStyle
-			shortcutStyle = mutedStyle
-		default:
-			labelStyle = mutedStyle
-			chevStyle = mutedStyle
-			shortcutStyle = mutedStyle
-		}
-		// Dynamic label (e.g. the file-explorer toggle row) takes precedence
-		// over the static one when present.
-		label := item.label
-		if item.labelFor != nil {
-			label = item.labelFor(a)
-		}
-		drawAt(a.screen, mx+2, cy, "▸", chevStyle)
-		if item.shortcut == "" {
-			drawAt(a.screen, mx+4, cy, label, labelStyle)
-			continue
-		}
-		shortcutX := mx + mw - 2 - runeLen(item.shortcut)
-		label = trimRunes(label, shortcutX-(mx+4)-2)
-		drawAt(a.screen, mx+4, cy, label, labelStyle)
-		drawAt(a.screen, shortcutX, cy, item.shortcut, shortcutStyle)
-	}
-
-	// Overflow markers, drawn into the fixed chrome (the title divider
-	// and the bottom border) so they cost no content rows: ▲ when rows
-	// are hidden above, ▼ when rows are hidden below. Accent-colored —
-	// they're the only hint that more actions exist off-frame.
-	moreStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent)
-	if a.menuScroll > 0 {
-		drawAt(a.screen, mx+2, my+2, " ▲ ", moreStyle)
-	}
-	if a.menuScroll < a.menuMaxScroll() {
-		drawAt(a.screen, mx+2, my+mh-1, " ▼ ", moreStyle)
-	}
-
-	a.screen.HideCursor()
-}
-
-// drawStatusText writes s left-aligned into the status bar at (x, y) with a
-// max width of maxW cells. Truncates rather than wraps.
-func drawStatusText(scr tcell.Screen, x, y, maxW int, s string, st tcell.Style) {
-	col := 0
-	for _, r := range s {
-		if col >= maxW {
-			return
-		}
-		scr.SetContent(x+col, y, r, nil, st)
-		col++
-	}
-}
-
-// drawAt writes s starting at (x, y) without bounds checking. Callers are
-// expected to keep the string within the rectangle they're drawing into.
-func drawAt(scr tcell.Screen, x, y int, s string, st tcell.Style) {
-	col := 0
-	for _, r := range s {
-		scr.SetContent(x+col, y, r, nil, st)
-		col++
-	}
-}
-
-// trimRunes shortens s to max visible cells, reserving the final cell for an
-// ellipsis when truncation is needed.
-func trimRunes(s string, max int) string {
-	if max <= 0 {
-		return ""
-	}
-	if runeLen(s) <= max {
-		return s
-	}
-	if max == 1 {
-		return "…"
-	}
-	rs := []rune(s)
-	return string(rs[:max-1]) + "…"
-}
-
-// detectLangLabel returns a short label for the active file's language —
-// just the file extension, or "text" when there is no path or extension.
-func detectLangLabel(path string) string {
-	if path == "" {
-		return "text"
-	}
-	ext := strings.TrimPrefix(filepath.Ext(path), ".")
-	if ext == "" {
-		return "text"
-	}
-	return ext
 }

@@ -182,3 +182,41 @@ func TestDefaultsPath_Override(t *testing.T) {
 		t.Fatalf("override ignored: got %q", got)
 	}
 }
+
+// TestDefaultsPath_LegacyEnvStillHonoured mirrors the trust-file
+// rename: SPICEEDIT_DEFAULTS_FILE keeps working so an existing
+// harness doesn't fall through to the user's real config dir, and
+// the SKIFF_ name takes precedence when both are present.
+func TestDefaultsPath_LegacyEnvStillHonoured(t *testing.T) {
+	t.Setenv(defaultsPathEnv, "")
+	t.Setenv(legacyDefaultsPathEnv, "/tmp/skiff-legacy-defaults.json")
+	if got := DefaultsPath(); got != "/tmp/skiff-legacy-defaults.json" {
+		t.Fatalf("legacy override ignored: got %q", got)
+	}
+	t.Setenv(defaultsPathEnv, "/tmp/skiff-new-defaults.json")
+	if got := DefaultsPath(); got != "/tmp/skiff-new-defaults.json" {
+		t.Fatalf("SKIFF_DEFAULTS_FILE should win over the deprecated name: got %q", got)
+	}
+}
+
+// TestInstallCommandIntoProject_LeavesNoTempFile guards the atomic
+// write: a stray .skiff/format.json.tmp-* would get committed by an
+// unsuspecting user and, worse, is the shape of file the trust hash
+// can't account for.
+func TestInstallCommandIntoProject_LeavesNoTempFile(t *testing.T) {
+	root := t.TempDir()
+	if _, err := InstallCommandIntoProject(root, "go", []string{"gofmt", "-w", "$FILE"}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, ConfigDir))
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != ConfigFile {
+		names := []string{}
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("expected only %s, got %v", ConfigFile, names)
+	}
+}

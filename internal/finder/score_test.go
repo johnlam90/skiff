@@ -7,7 +7,11 @@
 
 package finder
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode"
+)
 
 // TestScore_NoMatchReturnsZero pins the "every query rune must
 // appear in order" contract. Without it, a query like "xyz" could
@@ -164,4 +168,96 @@ func TestScore_BasenameRetryHighlightsBasename(t *testing.T) {
 			t.Fatalf("matched indexes = %v, want %v", idx, want)
 		}
 	}
+}
+
+// FuzzScore pins the matcher's alignment contract. The finder UI paints
+// MatchedIndexes as highlights over the path, so a returned index that is
+// out of range, out of order, or points at a rune the query never asked
+// for would either underline the wrong characters or index-panic the
+// renderer. The other half is the subsequence rule itself: a positive
+// score must be backed by a real in-order, case-insensitive match, and a
+// zero score must carry no highlight at all.
+func FuzzScore(f *testing.F) {
+	seeds := []struct {
+		query string
+		path  string
+	}{
+		{"", ""},
+		{"", "internal/app/app.go"},
+		{"tab", "internal/editor/tab.go"},
+		{"xyz", "internal/app/app.go"},
+		{"go", "a_b-c.d/go"},
+		{"日本", "docs/日本語.md"},
+		{"AB", "ab/AB.go"},
+		{"i", "İstanbul.txt"},
+		{"////", "////"},
+		{"a", strings.Repeat("a", 8192)},
+		{strings.Repeat("a", 512), strings.Repeat("a", 512)},
+		{"e\u0301", "cafe\u0301.go"},
+		{"\\", "windows\\style\\path.go"},
+	}
+	for _, s := range seeds {
+		f.Add(s.query, s.path)
+	}
+
+	f.Fuzz(func(t *testing.T, query, path string) {
+		score, idx := Score(query, path)
+
+		if score < 0 {
+			t.Fatalf("score must never go negative, got %d", score)
+		}
+		if query == "" {
+			if score != 1 || idx != nil {
+				t.Fatalf("empty query must score 1 with no highlight, got %d / %v", score, idx)
+			}
+			return
+		}
+		if score == 0 {
+			if idx != nil {
+				t.Fatalf("no-match score carried highlight indexes %v", idx)
+			}
+			// A zero score claims the query is not a subsequence of the
+			// path; verify that independently so the matcher can't quietly
+			// start dropping real hits.
+			if isSubsequenceFold(query, path) {
+				t.Fatalf("scored 0 but %q IS an in-order match inside %q", query, path)
+			}
+			return
+		}
+
+		pathRunes := []rune(path)
+		queryRunes := []rune(query)
+		if len(idx) != len(queryRunes) {
+			t.Fatalf("got %d highlight indexes for a %d-rune query", len(idx), len(queryRunes))
+		}
+		prev := -1
+		for i, at := range idx {
+			if at <= prev {
+				t.Fatalf("highlight indexes not strictly ascending: %v", idx)
+			}
+			if at < 0 || at >= len(pathRunes) {
+				t.Fatalf("highlight index %d escapes the %d-rune path", at, len(pathRunes))
+			}
+			if unicode.ToLower(pathRunes[at]) != unicode.ToLower(queryRunes[i]) {
+				t.Fatalf("highlight %d points at %q, query rune %d is %q",
+					at, string(pathRunes[at]), i, string(queryRunes[i]))
+			}
+			prev = at
+		}
+	})
+}
+
+// isSubsequenceFold reports whether query's runes appear inside path in
+// order under simple case folding — the same rule Score's greedy walk
+// enforces, reimplemented here so the fuzz target checks the matcher
+// against an independent definition rather than against itself.
+func isSubsequenceFold(query, path string) bool {
+	q := []rune(query)
+	qi := 0
+	for _, r := range path {
+		if qi < len(q) && unicode.ToLower(r) == unicode.ToLower(q[qi]) {
+			qi++
+		}
+	}
+	return qi == len(q)
 }

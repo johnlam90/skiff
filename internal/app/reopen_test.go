@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/johnlam90/skiff/internal/editor"
@@ -67,8 +68,8 @@ func TestReopenRestoresCursor(t *testing.T) {
 }
 
 // TestReopenSkipsDeletedFile: a recorded file deleted from disk between
-// close and reopen is dropped with a flash, never opened as an empty
-// ghost buffer.
+// close and reopen is dropped with a flash naming it, never opened as
+// an empty ghost buffer and never dropped in silence.
 func TestReopenSkipsDeletedFile(t *testing.T) {
 	dir := t.TempDir()
 	path := seedFile(t, dir, "gone.txt")
@@ -79,12 +80,16 @@ func TestReopenSkipsDeletedFile(t *testing.T) {
 		t.Fatalf("remove: %v", err)
 	}
 
+	a.statusMsg = ""
 	a.menuReopenTab()
 	if a.tabs.Len() != 0 {
 		t.Fatalf("deleted file must not reopen, got %d tabs", a.tabs.Len())
 	}
 	if a.hasClosedTab() {
 		t.Fatal("the dead entry should be consumed")
+	}
+	if !strings.Contains(a.statusMsg, "gone.txt") {
+		t.Fatalf("the drop must flash the missing file's name, got %q", a.statusMsg)
 	}
 }
 

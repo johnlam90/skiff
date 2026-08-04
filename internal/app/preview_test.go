@@ -151,3 +151,88 @@ func TestOpenFile_BinaryFlashesInsteadOfFreezing(t *testing.T) {
 		t.Fatalf("flash should name the problem, got %q", a.statusMsg)
 	}
 }
+
+// TestOpenFile_OversizedFileFlashesSizeAndOpensNoTab is the app end of
+// editor's open size cap. A click on a several-hundred-megabyte log used
+// to read the whole thing into a buffer on the event thread; now the
+// open path refuses it the same way it refuses a binary — no tab, and a
+// status flash that names the file's size and the limit, so the refusal
+// reads as deliberate rather than as the editor losing the file. The
+// file is sparse, so the test costs an inode rather than 33 MiB.
+func TestOpenFile_OversizedFileFlashesSizeAndOpensNoTab(t *testing.T) {
+	dir := t.TempDir()
+	huge := filepath.Join(dir, "huge.log")
+	f, err := os.Create(huge)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := f.Truncate(33 << 20); err != nil {
+		f.Close()
+		t.Fatalf("truncate: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	a := newTestApp(t, dir)
+
+	a.openFile(huge)
+
+	if a.tabs.Len() != 0 {
+		t.Fatalf("a refused open must not leave a tab behind, got %d", a.tabs.Len())
+	}
+	for _, want := range []string{"huge.log", "33.0 MiB", "32.0 MiB"} {
+		if !strings.Contains(a.statusMsg, want) {
+			t.Fatalf("flash %q should name %q", a.statusMsg, want)
+		}
+	}
+}
+
+// TestPreviewCoachMark_FiresOnceThenStaysQuiet pins the whole point of
+// the coach mark: preview tabs replace each other silently, which reads
+// as "my tabs keep vanishing" until someone names the behavior — so the
+// first preview of the session explains it. The second must not, or
+// browsing a tree turns into a status bar that shouts the same sentence
+// on every click.
+func TestPreviewCoachMark_FiresOnceThenStaysQuiet(t *testing.T) {
+	dir := t.TempDir()
+	p1, p2 := seedTwo(t, dir)
+	a := newTestApp(t, dir)
+
+	a.openFilePreview(p1)
+	if !strings.Contains(a.statusMsg, "Preview tab") {
+		t.Fatalf("first preview should explain itself, flash was %q", a.statusMsg)
+	}
+	if !a.previewCoachShown {
+		t.Error("the once-per-session flag was never set")
+	}
+
+	a.statusMsg = ""
+	a.openFilePreview(p2)
+	if a.statusMsg != "" {
+		t.Errorf("second preview re-explained itself: %q", a.statusMsg)
+	}
+}
+
+// TestPreviewCoachMark_SilentForPermanentOpens keeps the hint attached
+// to the behavior it describes. A finder / menu / CLI open pins its tab
+// and has nothing surprising to explain, so it must announce the file
+// the way it always did and leave the coach mark armed for the first
+// real preview.
+func TestPreviewCoachMark_SilentForPermanentOpens(t *testing.T) {
+	dir := t.TempDir()
+	p1, p2 := seedTwo(t, dir)
+	a := newTestApp(t, dir)
+
+	a.openFile(p1)
+	if a.previewCoachShown {
+		t.Fatal("a permanent open must not spend the session's one coach mark")
+	}
+	if strings.Contains(a.statusMsg, "Preview tab") {
+		t.Errorf("permanent open flashed the preview hint: %q", a.statusMsg)
+	}
+
+	a.openFilePreview(p2)
+	if !strings.Contains(a.statusMsg, "Preview tab") {
+		t.Errorf("the first real preview should still explain itself, got %q", a.statusMsg)
+	}
+}

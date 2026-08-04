@@ -19,7 +19,6 @@ import (
 // 80×30 screen with an ordered call log.
 func testForm() (*Form, *[]string) {
 	var log []string
-	var got map[string]string
 	f := &Form{
 		Title: "T",
 		Theme: theme.Default(),
@@ -32,10 +31,8 @@ func testForm() (*Form, *[]string) {
 	f.Rows[0].Field.SetText("dflt")
 	f.Close = func() { log = append(log, "close") }
 	f.OnSubmit = func(v map[string]string) {
-		got = v
 		log = append(log, "submit:"+v["NAME"]+"/"+v["MODE"])
 	}
-	_ = got
 	return f, &log
 }
 

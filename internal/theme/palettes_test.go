@@ -68,12 +68,68 @@ func TestEveryThemeReadable(t *testing.T) {
 		if th.Text == th.BG || th.Text == th.Selection {
 			t.Errorf("%s: text would vanish on its surfaces", e.ID)
 		}
-		// Status bar: ≥ 1.8 only. Two upstream palettes (ayu-light,
-		// everforest-light) intentionally use white-on-color chips at
-		// ~1.9-2.2:1 — bold bar text, ayu's own UI does the same — so
-		// the fence just catches genuinely broken pairings.
-		if r := ContrastRatio(th.StatusFg, th.StatusBG); r < 1.8 {
-			t.Errorf("%s: status bar contrast %.2f < 1.8", e.ID, r)
+		// Status bar: >= minStatusContrast. Ayu Light and Everforest
+		// Light ship white-on-color chips at ~1.9-2.2:1 upstream —
+		// fine on a calibrated laptop panel, unreadable over SSH on a
+		// dim screen, which is skiff's habitat. The registry
+		// accessors run readable() over every palette, so what the
+		// picker hands the app has already been corrected; this
+		// asserts the post-correction floor rather than the ports'
+		// raw values.
+		if r := ContrastRatio(th.StatusFg, th.StatusBG); r < minStatusContrast {
+			t.Errorf("%s: status bar contrast %.2f < %.1f", e.ID, r, minStatusContrast)
+		}
+	}
+}
+
+// TestPortedPalettesAreCorrectedNotHandEdited pins the mechanism, not
+// just the outcome: at least one registry palette must actually be
+// failing the floor before correction, otherwise readable() has
+// quietly become dead code and the next low-contrast port would ship
+// unnoticed. It also checks the correction is minimal — a corrected
+// StatusFg must land near the floor, not snap to black or white and
+// throw the palette's character away.
+func TestPortedPalettesAreCorrectedNotHandEdited(t *testing.T) {
+	corrected := 0
+	for _, e := range registry { // raw registry: pre-correction values
+		raw := e.Build()
+		before := ContrastRatio(raw.StatusFg, raw.StatusBG)
+		if before >= minStatusContrast {
+			continue
+		}
+		corrected++
+		fixed := readable(raw)
+		if fixed.StatusFg == raw.StatusFg {
+			t.Errorf("%s: status contrast %.2f left uncorrected", e.ID, before)
+			continue
+		}
+		after := ContrastRatio(fixed.StatusFg, fixed.StatusBG)
+		if after < minStatusContrast {
+			t.Errorf("%s: correction landed at %.2f, still under the floor", e.ID, after)
+		}
+		// Generous ceiling: the walk steps in twentieths, so one step
+		// past the floor is expected, a jump to 21:1 is not.
+		if after > minStatusContrast+2.0 {
+			t.Errorf("%s: correction overshot to %.2f — hue thrown away", e.ID, after)
+		}
+	}
+	if corrected == 0 {
+		t.Fatal("no palette needed correcting; readable() is no longer load-bearing")
+	}
+}
+
+// TestRegistryAccessorsAgree: List() and ByID() must hand out the same
+// palette for the same id. The picker previews through List and the
+// app applies through ByID, so a divergence would make the theme
+// change the moment you pressed Enter on it.
+func TestRegistryAccessorsAgree(t *testing.T) {
+	for _, e := range List() {
+		viaID, ok := ByID(e.ID)
+		if !ok {
+			t.Fatalf("ByID(%q) missed", e.ID)
+		}
+		if viaID != e.Build() {
+			t.Errorf("%s: List() and ByID() disagree", e.ID)
 		}
 	}
 }

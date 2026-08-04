@@ -15,6 +15,9 @@
 package editor
 
 import (
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -342,6 +345,160 @@ func TestUndoStack_CapsAtMaxEntries(t *testing.T) {
 	}
 	if got := len(tab.undoStack); got != maxUndoEntries {
 		t.Fatalf("undo stack length = %d, want capped at %d", got, maxUndoEntries)
+	}
+}
+
+// TestUndoStack_CapsAtMaxBytes proves depth is not the only bound. Every
+// entry is a whole-buffer snapshot, so 500 entries of a big file is
+// gigabytes of history behind a session that never felt heavy — the byte
+// budget has to evict oldest-first long before the depth cap fires.
+func TestUndoStack_CapsAtMaxBytes(t *testing.T) {
+	big := strings.Repeat("x", 4<<20) // 4MiB, shared by every snapshot
+	tab := &Tab{Buffer: &Buffer{Lines: []string{big, "v"}}}
+	tab.initUndo()
+
+	const pushes = 12 // 48MiB of counted history against a 32MiB budget
+	for i := range pushes {
+		tab.Buffer.Lines[1] = "v" + strconv.Itoa(i)
+		tab.pushUndo(undoGroupStructural)
+	}
+
+	if len(tab.undoStack) >= pushes {
+		t.Fatalf("byte budget never fired: %d entries held", len(tab.undoStack))
+	}
+	if len(tab.undoStack) < minUndoEntries {
+		t.Fatalf("trimmed below the floor: %d entries", len(tab.undoStack))
+	}
+	if tab.undoBytes > maxUndoBytes {
+		t.Fatalf("stack holds %d bytes, over the %d budget", tab.undoBytes, maxUndoBytes)
+	}
+	// Eviction is oldest-first, so the most recent push must survive.
+	newest := tab.undoStack[len(tab.undoStack)-1]
+	if want := "v" + strconv.Itoa(pushes-1); newest.Lines[1] != want {
+		t.Fatalf("newest entry is %q, want %q", newest.Lines[1], want)
+	}
+	// And the running total has to agree with what is actually held,
+	// otherwise the budget drifts and stops bounding anything.
+	sum := 0
+	for _, s := range tab.undoStack {
+		sum += s.size()
+	}
+	if sum != tab.undoBytes {
+		t.Fatalf("undoBytes = %d, stack actually holds %d", tab.undoBytes, sum)
+	}
+}
+
+// TestUndoStack_ByteBudgetKeepsFloor pins the escape hatch: when single
+// snapshots are each bigger than a fair share of the budget, the stack
+// keeps minUndoEntries anyway. Undoing the paste that just went wrong has
+// to work even when that one snapshot blows the budget on its own.
+func TestUndoStack_ByteBudgetKeepsFloor(t *testing.T) {
+	huge := strings.Repeat("y", 12<<20) // 12MiB each — 3 already overflow
+	tab := &Tab{Buffer: &Buffer{Lines: []string{huge}}}
+	tab.initUndo()
+	for range 6 {
+		tab.pushUndo(undoGroupStructural)
+	}
+	if got := len(tab.undoStack); got != minUndoEntries {
+		t.Fatalf("stack holds %d entries, want the %d floor", got, minUndoEntries)
+	}
+}
+
+// TestUndo_DirtyMeasuredAgainstDisk is the regression for deriving Dirty
+// from CanRevert. CanRevert compares against the ON-OPEN snapshot, so
+// after a save an undo would report a clean buffer while disk held the
+// newer text — and the tab would then close with no prompt, dropping the
+// edit. Dirty has to track the last write, not the open.
+func TestUndo_DirtyMeasuredAgainstDisk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f.txt")
+	if err := os.WriteFile(path, []byte("original"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+
+	tab.MoveCursorTo(Position{Line: 0, Col: 8}, false)
+	tab.InsertString(" edited")
+	if !tab.Dirty {
+		t.Fatal("an edit must mark the tab dirty")
+	}
+	if err := tab.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if tab.Dirty {
+		t.Fatal("save must clear dirty")
+	}
+
+	// Undo now walks BACK past the saved state: the buffer says
+	// "original" while disk says "original edited".
+	if !tab.Undo() {
+		t.Fatal("expected an undo step")
+	}
+	if got := tab.Buffer.String(); got != "original" {
+		t.Fatalf("after undo buffer = %q", got)
+	}
+	if !tab.Dirty {
+		t.Fatal("undoing past a save leaves the buffer different from disk — must be dirty")
+	}
+
+	// Redo returns to the saved bytes, so the tab is clean again.
+	if !tab.Redo() {
+		t.Fatal("expected a redo step")
+	}
+	if tab.Dirty {
+		t.Fatal("redo back to the saved text must clear dirty")
+	}
+}
+
+// TestUndo_DirtyClearsBackAtOpenedState covers the unsaved half: undo all
+// the way to what was read from disk and the tab is clean, so closing it
+// doesn't nag about changes the user already took back.
+func TestUndo_DirtyClearsBackAtOpenedState(t *testing.T) {
+	tab := newScratchTab("original")
+	tab.MoveCursorTo(Position{Line: 0, Col: 8}, false)
+	tab.InsertString(" edited")
+	if !tab.Dirty {
+		t.Fatal("an edit must mark the tab dirty")
+	}
+	if !tab.Undo() {
+		t.Fatal("expected an undo step")
+	}
+	if got := tab.Buffer.String(); got != "original" {
+		t.Fatalf("after undo buffer = %q", got)
+	}
+	if tab.Dirty {
+		t.Fatal("back at the opened text the tab must be clean")
+	}
+}
+
+// TestRevertFile_DirtyMeasuredAgainstDisk mirrors the Undo case for the
+// revert hatch: rewinding to the on-open text after a save leaves the
+// buffer different from disk, which is exactly when the user needs the
+// unsaved-changes prompt.
+func TestRevertFile_DirtyMeasuredAgainstDisk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f.txt")
+	if err := os.WriteFile(path, []byte("original"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.MoveCursorTo(Position{Line: 0, Col: 8}, false)
+	tab.InsertString(" edited")
+	if err := tab.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if !tab.RevertFile() {
+		t.Fatal("expected RevertFile to rewind")
+	}
+	if got := tab.Buffer.String(); got != "original" {
+		t.Fatalf("after revert buffer = %q", got)
+	}
+	if !tab.Dirty {
+		t.Fatal("reverting past a save must leave the tab dirty")
 	}
 }
 

@@ -295,3 +295,234 @@ func TestApplyReplaceRegexGroups(t *testing.T) {
 		t.Fatalf("expanded write: %q", data)
 	}
 }
+
+// TestReplaceLineZeroWidthMatchAtEnd is the regression for the crash
+// FuzzReplaceLine found: a regex that can match empty (`a*`) fires once
+// more at end-of-line after consuming the whole string, and the
+// force-progress step pushed the tail offset one byte past the line. The
+// unconditional tail write then sliced out of range and took the whole
+// editor down mid-replace.
+func TestReplaceLineZeroWidthMatchAtEnd(t *testing.T) {
+	opts := DefaultOptions()
+	opts.Regex = true
+
+	got, n := ReplaceLine("aaa", "a*", "-", opts)
+	if n < 1 {
+		t.Fatalf("expected at least one replacement, got %d", n)
+	}
+	if strings.Contains(got, "a") {
+		t.Fatalf("greedy a* should have consumed every 'a', got %q", got)
+	}
+
+	// The empty line is the same shape with nothing to consume at all.
+	if _, n := ReplaceLine("", "a*", "-", opts); n < 0 {
+		t.Fatalf("empty line replace returned %d", n)
+	}
+}
+
+// TestFoldLineIsByteAligned pins the invariant every literal probe leans
+// on: the folded haystack is the same length as the line and shares its
+// byte offsets, so an index found in one names the same position in the
+// other. That is what lets the fold be computed once per line instead of
+// once per probe. Runes whose lowercase encodes to a different width are
+// deliberately left unfolded — folding them would slide every later
+// offset and let a replacement cut the original line mid-rune.
+func TestFoldLineIsByteAligned(t *testing.T) {
+	cases := []string{
+		"",
+		"Plain ASCII Line",
+		"ÄÖÜ mixed Ünicode",
+		"\u212Aelvin",   // KELVIN SIGN: its lowercase 'k' is narrower
+		"\u0130stanbul", // dotted capital I
+		"invalid \xff byte",
+		strings.Repeat("AbC", 100),
+	}
+	for _, line := range cases {
+		folded := foldLine(line)
+		if len(folded) != len(line) {
+			t.Fatalf("foldLine(%q) changed length %d -> %d", line, len(line), len(folded))
+		}
+	}
+
+	// Where the fold is width-safe it must agree with strings.ToLower,
+	// or case-insensitive matching would quietly stop finding things.
+	for _, line := range []string{"Plain ASCII Line", "ÄÖÜ mixed Ünicode", ""} {
+		if got, want := foldLine(line), strings.ToLower(line); got != want {
+			t.Fatalf("foldLine(%q) = %q, want %q", line, got, want)
+		}
+	}
+
+	// Case-sensitive and regex modes want the untouched line.
+	if got := matchHaystack("MiXeD", true, nil); got != "MiXeD" {
+		t.Fatalf("case-sensitive haystack = %q", got)
+	}
+	if got := matchHaystack("MiXeD", false, nil); got != "mixed" {
+		t.Fatalf("case-insensitive haystack = %q", got)
+	}
+}
+
+// TestReplaceLineCaseInsensitiveScan walks one line through the matcher
+// many times — the loop that used to re-lowercase the whole remaining
+// tail on every probe, making a long line quadratic. Folding once up
+// front must not change which occurrences are found or where they sit.
+func TestReplaceLineCaseInsensitiveScan(t *testing.T) {
+	got, n := ReplaceLine("Foo mid FOO tail foO", "foo", "bar", DefaultOptions())
+	if n != 3 || got != "bar mid bar tail bar" {
+		t.Fatalf("case-insensitive scan = %q (%d)", got, n)
+	}
+
+	// Multi-byte folds keep their offsets aligned with the original.
+	got, n = ReplaceLine("ÄÖÜ and äöü", "äöü", "x", DefaultOptions())
+	if n != 2 || got != "x and x" {
+		t.Fatalf("unicode fold = %q (%d)", got, n)
+	}
+
+	// Whole-word rejects candidates and re-probes from the next byte, so
+	// it hits the shared haystack at several offsets per line.
+	opts := DefaultOptions()
+	opts.WholeWord = true
+	got, n = ReplaceLine("Food FOO foodie foo", "foo", "bar", opts)
+	if n != 2 || got != "Food bar foodie bar" {
+		t.Fatalf("whole-word scan = %q (%d)", got, n)
+	}
+}
+
+// FuzzCompileQuery pins the contract ReplaceLine and the sweep both read
+// off CompileQuery: the smart-case decision is exactly "MatchCase or the
+// query carries an uppercase rune", the returned needle is pre-lowered
+// precisely when matching is case-insensitive (matchHaystack lowers the
+// line and the probe compares raw, so a needle that isn't lowered would
+// silently never match), and a failed compile hands back zero values
+// rather than a half-built matcher a caller could mistake for a working
+// one.
+func FuzzCompileQuery(f *testing.F) {
+	seeds := []struct {
+		query   string
+		regex   bool
+		matchCS bool
+	}{
+		{"", false, false},
+		{"skiff", false, false},
+		{"Skiff", false, false},
+		{"日本語", false, false},
+		{"a(b", true, false},
+		{"(a+)+", true, false},
+		{"^$", true, false},
+		{"[", true, true},
+		{"\r", false, false},
+		{"ünïcödé", false, false},
+		{"İ", false, false},
+		{strings.Repeat("x", 4096), false, false},
+	}
+	for _, s := range seeds {
+		f.Add(s.query, s.regex, s.matchCS)
+	}
+
+	f.Fuzz(func(t *testing.T, query string, regex, matchCase bool) {
+		opts := DefaultOptions()
+		opts.Regex = regex
+		opts.MatchCase = matchCase
+
+		needle, caseSensitive, re, ok := CompileQuery(query, opts)
+
+		if !ok {
+			if !regex {
+				t.Fatalf("literal query %q must always compile", query)
+			}
+			if needle != "" || re != nil || caseSensitive {
+				t.Fatalf("failed compile leaked state: needle=%q re=%v cs=%v", needle, re, caseSensitive)
+			}
+			return
+		}
+
+		if want := matchCase || hasUpper(query); caseSensitive != want {
+			t.Fatalf("caseSensitive=%v, want %v for query %q (MatchCase=%v)", caseSensitive, want, query, matchCase)
+		}
+		if caseSensitive {
+			if needle != query {
+				t.Fatalf("case-sensitive needle %q, want the query verbatim %q", needle, query)
+			}
+		} else if needle != strings.ToLower(query) {
+			t.Fatalf("case-insensitive needle %q, want it pre-lowered to %q", needle, strings.ToLower(query))
+		}
+		if regex != (re != nil) {
+			t.Fatalf("Regex=%v but re==nil is %v", regex, re == nil)
+		}
+		if re != nil {
+			// The compiled pattern must agree with the case decision, or
+			// the sweep and the highlighter disagree about what matched.
+			if !caseSensitive && !strings.HasPrefix(re.String(), "(?i)") {
+				t.Fatalf("case-insensitive regex %q lacks the (?i) flag", re.String())
+			}
+			re.MatchString("probe")
+		}
+	})
+}
+
+// FuzzReplaceLine pins project replace against adversarial lines. In
+// literal, case-sensitive mode the function must be indistinguishable from
+// strings.ReplaceAll — that is the whole promise the replace preview makes
+// to the user, and getting it wrong rewrites source files. The regex and
+// smart-case arms get the weaker but still real invariants: a zero count
+// must leave the line untouched, and a non-zero count must correspond to
+// a matcher that actually fires.
+func FuzzReplaceLine(f *testing.F) {
+	seeds := []struct {
+		line  string
+		query string
+		repl  string
+		regex bool
+	}{
+		{"", "", "", false},
+		{"skiff is skiff", "skiff", "boat", false},
+		{"aaaa", "aa", "b", false},
+		{"日本語のテキスト", "テキスト", "text", false},
+		{"MiXeD", "mixed", "x", false},
+		{"trailing\r", "\r", "", false},
+		{"          ", " ", "_", false},
+		{strings.Repeat("ab", 4096), "aba", "z", false},
+		{"key = value", `(\w+) = (\w+)`, "$2 = $1", true},
+		{"aaa", "a*", "-", true},
+		{"abc", "", "x", true},
+		{"e\u0301e\u0301", "e\u0301", "e", false},
+	}
+	for _, s := range seeds {
+		f.Add(s.line, s.query, s.repl, s.regex)
+	}
+
+	f.Fuzz(func(t *testing.T, line, query, repl string, regex bool) {
+		if regex {
+			opts := DefaultOptions()
+			opts.Regex = true
+			got, n := ReplaceLine(line, query, repl, opts)
+			if n < 0 {
+				t.Fatalf("negative replacement count %d", n)
+			}
+			if n == 0 && got != line {
+				t.Fatalf("zero replacements but line changed:\n got %q\nwant %q", got, line)
+			}
+			if _, _, re, ok := CompileQuery(query, opts); n > 0 && (!ok || re == nil || !re.MatchString(line)) {
+				t.Fatalf("reported %d replacements for a pattern that does not match %q", n, line)
+			}
+			return
+		}
+
+		// Literal + forced exact case: ReplaceLine must be ReplaceAll.
+		opts := DefaultOptions()
+		opts.MatchCase = true
+		got, n := ReplaceLine(line, query, repl, opts)
+
+		if query == "" {
+			if got != line || n != 0 {
+				t.Fatalf("empty query must be a no-op, got %q / %d", got, n)
+			}
+			return
+		}
+		if want := strings.Count(line, query); n != want {
+			t.Fatalf("replaced %d occurrences of %q in %q, want %d", n, query, line, want)
+		}
+		if want := strings.ReplaceAll(line, query, repl); got != want {
+			t.Fatalf("literal replace diverged from ReplaceAll:\n got %q\nwant %q", got, want)
+		}
+	})
+}

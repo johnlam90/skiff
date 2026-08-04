@@ -178,7 +178,7 @@ func TestGitSwitchCmds_Tracking(t *testing.T) {
 	gitRun(t, dir, "branch", "-q", "-D", "feature")
 
 	cmds := gitSwitchCmds(dir, "origin/feature")
-	if got := strings.Join(cmds[0], " "); got != "checkout -b feature --track origin/feature" {
+	if got := strings.Join(cmds[0], " "); got != "checkout -b feature --track origin/feature --" {
 		t.Fatalf("first switch: %q", got)
 	}
 	if out, err := execGitSequence(dir, cmds); err != nil {
@@ -186,8 +186,68 @@ func TestGitSwitchCmds_Tracking(t *testing.T) {
 	}
 	gitRun(t, dir, "checkout", "-q", "main")
 	cmds = gitSwitchCmds(dir, "origin/feature")
-	if got := strings.Join(cmds[0], " "); got != "checkout feature" {
+	if got := strings.Join(cmds[0], " "); got != "checkout feature --" {
 		t.Fatalf("second switch: %q", got)
+	}
+}
+
+// TestGitSwitchCmds_HardensRefArgv is the regression test for the
+// flag-injection hole: a clone can ship a branch named --output=/tmp/x,
+// and `git checkout <that>` turns a branch switch into an arbitrary
+// file write. Every ref the builder emits is followed by the `--`
+// separator, and a name git's option parser would claim yields no
+// command at all — including one hiding behind a remote prefix, where
+// the local name is what lands in the option position.
+func TestGitSwitchCmds_HardensRefArgv(t *testing.T) {
+	dir := t.TempDir()
+	cmds := gitSwitchCmds(dir, "feature")
+	if got := strings.Join(cmds[0], " "); got != "checkout feature --" {
+		t.Fatalf("local switch: %q, want a trailing -- separator", got)
+	}
+	for _, bad := range []string{"--output=/tmp/x", "-b", "", "origin/--output=/tmp/x"} {
+		if got := gitSwitchCmds(dir, bad); got != nil {
+			t.Fatalf("gitSwitchCmds(%q) = %v, want nil", bad, got)
+		}
+	}
+}
+
+// TestGitPushCmds_UnsafeBranchDropsThePositional pins the push
+// hardening: push takes no `--` separator, so a branch name git would
+// read as an option is dropped instead of passed. Plain `push` then
+// fails with git's own "no upstream" message — an honest error beats
+// running an option we didn't write.
+func TestGitPushCmds_UnsafeBranchDropsThePositional(t *testing.T) {
+	requireGit(t)
+	dir := initRepo(t)
+	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
+	commitAll(t, dir, "seed")
+	bareOrigin(t, dir)
+
+	cmds := gitPushCmds(dir, "--upload-pack=touch /tmp/pwn")
+	if got := strings.Join(cmds[0], " "); got != "push" {
+		t.Fatalf("unsafe branch: %q, want a bare push", got)
+	}
+}
+
+// TestSetDiffBase_RejectsUnsafeRef pins where the compare base gets
+// validated. Once set it is pasted onto the argv of every diff the
+// editor runs — tree tint, gutter, panel, diff view — and stays there
+// until cleared, so a hostile ref has to be refused at the door rather
+// than at four call sites that would each have to remember.
+func TestSetDiffBase_RejectsUnsafeRef(t *testing.T) {
+	requireGit(t)
+	dir := initRepo(t)
+	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
+	commitAll(t, dir, "seed")
+	a := newTestApp(t, dir)
+
+	a.setDiffBase("--output=/tmp/x")
+	if a.diffBase != "" {
+		t.Fatalf("unsafe base was accepted: %q", a.diffBase)
+	}
+	a.setDiffBase("HEAD~1")
+	if a.diffBase != "HEAD~1" {
+		t.Fatalf("legitimate base rejected: %q", a.diffBase)
 	}
 }
 

@@ -87,5 +87,12 @@ brews:
       email: 41898282+github-actions[bot]@users.noreply.github.com
     install: |
       bin.install "skiff"
+    # `brew test` must actually execute the binary. Asserting the file
+    # exists passes for a zero-byte file, a wrong-arch build, or a binary
+    # that dies on start — every failure mode a bottle test is for. Both
+    # flag paths print and exit before tcell touches a terminal, so they
+    # are safe in Homebrew's non-tty sandbox, and shell_output already
+    # fails the test on a non-zero exit.
     test: |
-      assert_path_exists bin/"skiff"
+      assert_match "skiff #{version}", shell_output("#{bin}/skiff --version")
+      assert_match "action menu", shell_output("#{bin}/skiff --help")

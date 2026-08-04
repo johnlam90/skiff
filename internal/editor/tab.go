@@ -55,6 +55,29 @@ const (
 	GitLineDeleted
 )
 
+// LineEnding is the newline convention a file uses on disk. Buffers are
+// normalised to bare LF-separated lines on load (see NewBuffer) and the
+// recorded ending is written back on save, so editing one line of a
+// CRLF file doesn't turn the whole file into a diff.
+type LineEnding int
+
+const (
+	// LineEndingLF is "\n". It is the zero value, so a Tab built by hand
+	// (tests, scratch buffers) writes POSIX-style.
+	LineEndingLF LineEnding = iota
+	// LineEndingCRLF is "\r\n" — the convention Windows-authored files
+	// arrive with.
+	LineEndingCRLF
+)
+
+// Newline returns the bytes this ending writes between lines.
+func (e LineEnding) Newline() string {
+	if e == LineEndingCRLF {
+		return "\r\n"
+	}
+	return "\n"
+}
+
 // Tab is a single open file. It owns the on-disk path, the in-memory buffer,
 // the per-tab view state (scroll position, cursor, selection anchor), the
 // cached syntax-highlight styles, and a dirty flag.
@@ -66,6 +89,11 @@ type Tab struct {
 	ScrollY int      // Index of the first visible line.
 	ScrollX int      // Index of the first visible column (rune-indexed). Always 0 with Wrap on.
 	Dirty   bool
+
+	// LineEnding is the convention the file had on disk. The buffer
+	// holds unterminated lines, so this is the only record of how the
+	// file wants to be written back; Save re-joins with it.
+	LineEnding LineEnding
 
 	// Wrap turns on soft wrap: long lines flow onto continuation rows
 	// instead of panning horizontally. Stamped by the app from the user
@@ -110,11 +138,18 @@ type Tab struct {
 	cursorMoved bool
 
 	// Undo / redo stacks plus the original on-open snapshot used by
-	// RevertFile. See undo.go for the push / coalescing rules and the
-	// public Undo / Redo / RevertFile entry points.
+	// RevertFile and the baseline the dirty flag is measured against.
+	// savedBaseline tracks the LAST WRITE, not the open — after a save,
+	// "does this differ from disk" is a different question from "does
+	// this differ from what was opened". undoBytes is the running size
+	// of undoStack that trimUndoStack enforces the budget against. See
+	// undo.go for the push / coalescing rules and the public
+	// Undo / Redo / RevertFile entry points.
 	undoStack     []snapshot
 	redoStack     []snapshot
 	undoOriginal  snapshot
+	savedBaseline snapshot
+	undoBytes     int
 	lastUndoGroup undoGroup
 	lastUndoAt    time.Time
 
@@ -136,6 +171,13 @@ type Tab struct {
 	FindMatches []Match
 	FindIndex   int // -1 = no current match; otherwise an index into FindMatches.
 
+	// findRows indexes FindMatches by buffer line so the renderer's
+	// per-cell lookup stays sub-linear; findRowsFor is the match count
+	// it was built from, which is how a direct write to the exported
+	// FindMatches gets caught. See find.go's matchAtRune.
+	findRows    map[int]findRowSpan
+	findRowsFor int
+
 	// Preview marks a tab opened by single-clicking the file tree: the
 	// next single-click preview replaces it in place instead of piling
 	// up tabs (VS Code / druk behavior). Editing or an explicit open
@@ -149,17 +191,44 @@ type Tab struct {
 	// real tab; a 2-space-indented file gets two spaces. Mixed-style
 	// files take the dominant signal.
 	IndentUnit string
+
+	// Bracket-match cache. bracket holds the pair the caret is touching
+	// (see bracket.go), bracketFor is the cursor it was computed for,
+	// and bracketCached distinguishes "computed, and the answer was no
+	// bracket" from "never computed" — Position{} is a legitimate
+	// cursor, so the zero value can't carry that on its own.
+	bracket       BracketMatch
+	bracketFor    Position
+	bracketCached bool
 }
 
-// NewTab opens path and returns a Tab. If the file does not exist, the tab
-// is created with an empty buffer that will be written on first save —
-// matching what most editors do when you "open" a brand-new file path.
-// When path looks like an image we recognise (PNG / JPEG / GIF), the tab
-// is opened in read-only image-preview mode instead of as text.
 // ErrBinaryFile marks a refusal to open non-text content into a text
 // buffer. Callers surface it as a flash; image formats never hit it —
 // they take the image-tab path first.
 var ErrBinaryFile = errors.New("looks like a binary file")
+
+// maxOpenBytes is the largest file NewTab will pull into a text buffer.
+// Opening costs the file's bytes several times over — the []byte from
+// ReadFile, the buffer's per-line strings, and the on-open undo
+// snapshot — and every later stage (Chroma lexing, per-rune style
+// grids, soft-wrap math) walks all of it. The binary probe only reads
+// the first 8KB, so a NUL-free multi-hundred-megabyte log sails past it
+// and used to load synchronously on a single click. 32 MiB is far past
+// any real source file while making that case impossible.
+const maxOpenBytes = 32 << 20
+
+// ErrFileTooLarge marks a refusal to open a file above maxOpenBytes.
+// Callers surface it as a flash exactly the way they surface
+// ErrBinaryFile; the wrapped message names the file's size and the cap
+// so the user can tell "seen and declined" from "missing".
+var ErrFileTooLarge = errors.New("file is too large to open")
+
+// mibString renders a byte count as MiB for the too-large message.
+// Sizes that trip the cap are only ever discussed in MiB, so a full
+// unit ladder would be dead code.
+func mibString(n int64) string {
+	return strconv.FormatFloat(float64(n)/(1<<20), 'f', 1, 64) + " MiB"
+}
 
 // looksBinary applies git's own heuristic: a NUL byte in the first 8KB
 // means binary. UTF-8 text of any language never contains NUL, so
@@ -173,6 +242,35 @@ func looksBinary(data []byte) bool {
 	return bytes.IndexByte(probe, 0) >= 0
 }
 
+// detectLineEnding picks the ending a freshly-read file should be saved
+// with: whichever convention most of its newlines already use. A tie —
+// including a file with no newline at all — goes to LF, which is what
+// the editor writes for brand-new files. A mixed file is normalised to
+// its dominant ending on the next save, which is the same call every
+// other editor makes.
+func detectLineEnding(data []byte) LineEnding {
+	crlf, lf := 0, 0
+	for i, b := range data {
+		if b != '\n' {
+			continue
+		}
+		if i > 0 && data[i-1] == '\r' {
+			crlf++
+			continue
+		}
+		lf++
+	}
+	if crlf > lf {
+		return LineEndingCRLF
+	}
+	return LineEndingLF
+}
+
+// NewTab opens path and returns a Tab. If the file does not exist, the tab
+// is created with an empty buffer that will be written on first save —
+// matching what most editors do when you "open" a brand-new file path.
+// When path looks like an image we recognise (PNG / JPEG / GIF), the tab
+// is opened in read-only image-preview mode instead of as text.
 func NewTab(path string) (*Tab, error) {
 	if path != "" && isImageExt(path) {
 		return newImageTab(path)
@@ -180,6 +278,19 @@ func NewTab(path string) (*Tab, error) {
 	var data []byte
 	var mtime time.Time
 	if path != "" {
+		// Stat first: the size guard exists to avoid reading the file,
+		// so it cannot be paid for by reading it. The same call supplies
+		// the on-disk mtime the app compares against to detect external
+		// edits — a missing file leaves it as the zero value, which the
+		// reconcile loop handles explicitly.
+		if info, statErr := os.Stat(path); statErr == nil {
+			if info.Size() > maxOpenBytes {
+				return nil, fmt.Errorf("%s is %s (limit %s): %w",
+					filepath.Base(path), mibString(info.Size()), mibString(maxOpenBytes),
+					ErrFileTooLarge)
+			}
+			mtime = info.ModTime()
+		}
 		b, err := os.ReadFile(path)
 		if err != nil && !os.IsNotExist(err) {
 			return nil, err
@@ -193,18 +304,13 @@ func NewTab(path string) (*Tab, error) {
 			return nil, fmt.Errorf("%s: %w", filepath.Base(path), ErrBinaryFile)
 		}
 		data = b
-		// Record the on-disk mtime so the app can detect external edits
-		// later. A missing file leaves mtime as the zero value, which is
-		// fine — the reconcile loop handles that case explicitly.
-		if info, statErr := os.Stat(path); statErr == nil {
-			mtime = info.ModTime()
-		}
 	}
 	t := &Tab{
 		Path:       path,
 		Buffer:     NewBuffer(string(data)),
 		StyleStale: true,
 		Mtime:      mtime,
+		LineEnding: detectLineEnding(data),
 	}
 	t.IndentUnit = DetectIndent(t.Buffer.Lines, path)
 	// Record the on-open buffer state so RevertFile has somewhere to
@@ -281,11 +387,15 @@ func (t *Tab) Save() error {
 	if t.Path == "" {
 		return fmt.Errorf("no path set for tab")
 	}
-	if err := os.WriteFile(t.Path, []byte(t.Buffer.String()), 0644); err != nil {
+	if err := os.WriteFile(t.Path, []byte(t.Buffer.TextWith(t.LineEnding.Newline())), 0644); err != nil {
 		return err
 	}
 	t.Dirty = false
 	t.DiskGone = false
+	// Disk now holds exactly this buffer, so re-baseline the dirty
+	// comparison: after a save, "differs from what was opened" is the
+	// wrong question and only "differs from what was written" matters.
+	t.markSaved()
 	if info, err := os.Stat(t.Path); err == nil {
 		t.Mtime = info.ModTime()
 	}
@@ -330,6 +440,7 @@ func (t *Tab) Reload() error {
 		return err
 	}
 	t.Buffer = NewBuffer(string(data))
+	t.LineEnding = detectLineEnding(data)
 	t.Cursor = t.Buffer.Clamp(t.Cursor)
 	t.Anchor = t.Cursor // drop any selection — line indices may have shifted.
 	t.Dirty = false
@@ -401,6 +512,39 @@ func (t *Tab) InsertString(s string) {
 	t.cursorMoved = true
 }
 
+// InsertNewline is what Enter does: split the line at the caret and open
+// the new line with the same indentation the old one had, plus one level
+// when the caret was sitting after an opening brace / bracket / paren (or,
+// in Python and YAML, a colon). Without this, every line in an indented
+// block starts at column 0 and the user re-types the leading whitespace by
+// hand, which is the single most-noticed thing a terminal editor can get
+// wrong.
+//
+// The whole press is one InsertString call and therefore exactly one undo
+// step: Enter-then-undo returns the buffer to where it was, rather than
+// stranding the user on a half-indented line.
+//
+// The indent is read from the text BEFORE the caret at the point the split
+// will happen — the start of the selection, when there is one. Deleting a
+// selection never touches the runes ahead of its start, so reading the
+// prefix up front gives the same answer as reading it after the delete,
+// and avoids splitting the operation into two undo entries.
+//
+// Only "\n" is ever inserted; the file's own ending is restored by Save
+// (see Tab.LineEnding), so a CRLF file must not get a CR spliced into the
+// middle of a line here.
+func (t *Tab) InsertNewline() {
+	if t.IsImage() {
+		return
+	}
+	at, _ := PosOrdered(t.Anchor, t.Cursor)
+	prefix := t.Buffer.LineRunes(at.Line)
+	if at.Col < len(prefix) {
+		prefix = prefix[:at.Col]
+	}
+	t.InsertString("\n" + autoIndentFor(prefix, t.IndentUnit, t.Path))
+}
+
 // InsertRune inserts a single typed character at the cursor. Coalesces
 // with adjacent runes inside the undo window so a typed word collapses
 // into a single undo step rather than one entry per keystroke. No-op
@@ -424,6 +568,9 @@ func (t *Tab) InsertRune(r rune) {
 }
 
 // Backspace deletes the character before the cursor (or the selection if any).
+// "Character" means grapheme cluster, not rune: backspacing over "é" takes
+// the accent with the e rather than stranding a combining mark on the
+// letter in front of it, and one press removes one thing the user can see.
 // Coalesces with adjacent backspaces inside the undo window. No-op on
 // image tabs.
 func (t *Tab) Backspace() {
@@ -438,23 +585,17 @@ func (t *Tab) Backspace() {
 		return
 	}
 	t.pushUndo(undoGroupBackspace)
-	var prev Position
-	if t.Cursor.Col == 0 {
-		prev.Line = t.Cursor.Line - 1
-		prev.Col = len([]rune(t.Buffer.Lines[prev.Line]))
-	} else {
-		prev = Position{Line: t.Cursor.Line, Col: t.Cursor.Col - 1}
-	}
-	t.Cursor = t.Buffer.DeleteRange(prev, t.Cursor)
+	t.Cursor = t.Buffer.DeleteRange(t.clusterLeftOf(t.Cursor), t.Cursor)
 	t.Anchor = t.Cursor
 	t.Dirty = true
 	t.StyleStale = true
 	t.cursorMoved = true
 }
 
-// Delete removes the character after the cursor (or the selection if any).
-// Coalesces with adjacent forward-deletes inside the undo window. No-op
-// on image tabs.
+// Delete removes the character after the cursor (or the selection if any),
+// again a whole grapheme cluster so a forward delete can't behead a
+// character and leave its marks behind. Coalesces with adjacent
+// forward-deletes inside the undo window. No-op on image tabs.
 func (t *Tab) Delete() {
 	if t.IsImage() {
 		return
@@ -463,27 +604,57 @@ func (t *Tab) Delete() {
 		t.DeleteSelection()
 		return
 	}
-	end := t.Buffer.EndPos()
-	if t.Cursor == end {
+	if t.Cursor == t.Buffer.EndPos() {
 		return
 	}
 	t.pushUndo(undoGroupDelete)
-	var next Position
-	line := []rune(t.Buffer.Lines[t.Cursor.Line])
-	if t.Cursor.Col >= len(line) {
-		next = Position{Line: t.Cursor.Line + 1, Col: 0}
-	} else {
-		next = Position{Line: t.Cursor.Line, Col: t.Cursor.Col + 1}
-	}
-	t.Cursor = t.Buffer.DeleteRange(t.Cursor, next)
+	t.Cursor = t.Buffer.DeleteRange(t.Cursor, t.clusterRightOf(t.Cursor))
 	t.Anchor = t.Cursor
 	t.Dirty = true
 	t.StyleStale = true
 	t.cursorMoved = true
 }
 
-// MoveCursor shifts the cursor by (dLine, dCol). When extend is true the
-// anchor is left in place so the user is extending a selection.
+// clusterLeftOf returns the position one grapheme cluster before p,
+// wrapping to the end of the previous line at column 0 and stopping at the
+// start of the buffer. Shared by Backspace and leftward caret motion so
+// the two can never disagree about what "one character" is.
+func (t *Tab) clusterLeftOf(p Position) Position {
+	if p.Col <= 0 {
+		if p.Line <= 0 {
+			return Position{}
+		}
+		prev := p.Line - 1
+		return Position{Line: prev, Col: len(t.Buffer.LineRunes(prev))}
+	}
+	return Position{Line: p.Line, Col: PrevCluster(t.Buffer.LineRunes(p.Line), p.Col)}
+}
+
+// clusterRightOf returns the position one grapheme cluster after p,
+// wrapping to column 0 of the next line past the last rune and stopping at
+// the end of the buffer. The mirror of clusterLeftOf, shared by Delete and
+// rightward caret motion.
+func (t *Tab) clusterRightOf(p Position) Position {
+	runes := t.Buffer.LineRunes(p.Line)
+	if p.Col >= len(runes) {
+		if p.Line >= t.Buffer.LineCount()-1 {
+			return Position{Line: p.Line, Col: len(runes)}
+		}
+		return Position{Line: p.Line + 1}
+	}
+	return Position{Line: p.Line, Col: NextCluster(runes, p.Col)}
+}
+
+// MoveCursor shifts the cursor by dLine lines and dCol characters. When
+// extend is true the anchor is left in place so the user is extending a
+// selection.
+//
+// dCol counts grapheme clusters, taken one step at a time: an arrow key
+// walks past "é" or an emoji in a single press, and a multi-column delta
+// that runs off the end of a line keeps stepping onto the next line
+// instead of losing the overshoot. Vertical motion keeps the rune column
+// (the historical behaviour — it is not a "sticky visual column") but
+// snaps it onto a cluster boundary in the new line.
 func (t *Tab) MoveCursor(dLine, dCol int, extend bool) {
 	cur := t.Cursor
 	if dLine != 0 {
@@ -494,32 +665,17 @@ func (t *Tab) MoveCursor(dLine, dCol int, extend bool) {
 		if cur.Line >= t.Buffer.LineCount() {
 			cur.Line = t.Buffer.LineCount() - 1
 		}
-		runes := []rune(t.Buffer.Lines[cur.Line])
+		runes := t.Buffer.LineRunes(cur.Line)
 		if cur.Col > len(runes) {
 			cur.Col = len(runes)
 		}
+		cur.Col = ClusterStart(runes, cur.Col)
 	}
-	if dCol != 0 {
-		cur.Col += dCol
-		if cur.Col < 0 {
-			// Wrap to the end of the previous line.
-			if cur.Line > 0 {
-				cur.Line--
-				cur.Col = len([]rune(t.Buffer.Lines[cur.Line]))
-			} else {
-				cur.Col = 0
-			}
-		} else {
-			runes := []rune(t.Buffer.Lines[cur.Line])
-			if cur.Col > len(runes) {
-				if cur.Line < t.Buffer.LineCount()-1 {
-					cur.Line++
-					cur.Col = 0
-				} else {
-					cur.Col = len(runes)
-				}
-			}
-		}
+	for n := dCol; n > 0; n-- {
+		cur = t.clusterRightOf(cur)
+	}
+	for n := dCol; n < 0; n++ {
+		cur = t.clusterLeftOf(cur)
 	}
 	t.Cursor = cur
 	if !extend {
@@ -532,9 +688,13 @@ func (t *Tab) MoveCursor(dLine, dCol int, extend bool) {
 }
 
 // MoveCursorTo sets the cursor to a specific buffer position. Position is
-// clamped within the buffer; extend=true preserves the selection anchor.
+// clamped within the buffer and snapped back to a grapheme boundary — a
+// caret parked between a base rune and its accent would render a cell to
+// the left of where it edits — and extend=true preserves the selection
+// anchor.
 func (t *Tab) MoveCursorTo(p Position, extend bool) {
 	p = t.Buffer.Clamp(p)
+	p.Col = ClusterStart(t.Buffer.LineRunes(p.Line), p.Col)
 	t.Cursor = p
 	if !extend {
 		t.Anchor = p
@@ -653,11 +813,25 @@ func (t *Tab) EnsureVisible(viewW, viewH int) {
 	if t.Cursor.Line >= t.ScrollY+viewH {
 		t.ScrollY = t.Cursor.Line - viewH + 1
 	}
-	if t.Cursor.Col < t.ScrollX {
-		t.ScrollX = t.Cursor.Col
-	}
-	if t.Cursor.Col >= t.ScrollX+contentW {
-		t.ScrollX = t.Cursor.Col - contentW + 1
+	// Horizontal scrolling is measured in cells, not runes: ScrollX is a
+	// rune index, but "is the caret off the right edge" is a question
+	// about the cells between them, and a line of CJK answers it very
+	// differently from a line of ASCII. RuneColAtVisual turns the target
+	// cell back into a rune index, which lands on a cluster boundary by
+	// construction so the pan never starts mid-character.
+	runes := t.Buffer.LineRunes(t.Cursor.Line)
+	cursorVisual := LineVisualCol(runes, t.Cursor.Col)
+	scrollVisual := LineVisualCol(runes, t.ScrollX)
+	if cursorVisual < scrollVisual {
+		t.ScrollX = RuneColAtVisual(runes, cursorVisual)
+	} else if cursorVisual >= scrollVisual+contentW {
+		sx := RuneColAtVisual(runes, cursorVisual-contentW+1)
+		// A wide glyph straddling the new left edge would leave the caret
+		// one cell past the right edge; start at the next cluster instead.
+		if LineVisualCol(runes, sx)+contentW <= cursorVisual {
+			sx = NextCluster(runes, sx)
+		}
+		t.ScrollX = sx
 	}
 	if t.ScrollY < 0 {
 		t.ScrollY = 0
@@ -705,6 +879,11 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		}
 		t.clampScroll(h)
 	}
+	// Resolve the caret's bracket pair before the highlight block below
+	// clears StyleStale — that flag is how the cache learns the buffer
+	// changed. One scan per frame at most; cellStyle then just compares
+	// positions.
+	t.refreshBracketMatch()
 	// Re-tokenise only when the cached highlight window no longer
 	// covers the viewport (content edit, resize, or the view scrolled
 	// near the window's edge). Inside the window, scrolling reuses the
@@ -788,26 +967,26 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		// Line content, with syntax styles, selection bg, and line bg.
 		// We walk from the start of the line so tab stops anchor to col 0
 		// — a tab one cell into the line still expands to the next stop,
-		// not the next-stop-from-the-scroll-offset. ScrollX skips runes;
-		// the visual column we paint at is rune-walked from there.
-		runes := []rune(t.Buffer.Lines[lineIdx])
+		// not the next-stop-from-the-scroll-offset — and we walk by
+		// grapheme cluster so a combining mark rides in its base's cell
+		// instead of claiming one of its own. Clipping is done in visual
+		// cells rather than rune indices, which is what stops a wide glyph
+		// straddling the left edge from painting its right half as a
+		// half-character: cell 0 falls off, cell 1 paints a blank.
+		runes := t.Buffer.LineRunes(lineIdx)
 		var styles []tcell.Style
 		if lineIdx < len(t.Styles) {
 			styles = t.Styles[lineIdx]
 		}
 		scrollVisual := LineVisualCol(runes, t.ScrollX)
 		visualCol := 0 // visual cell offset from the start of the LINE
-		for runeIdx, r := range runes {
-			width := RuneVisualWidth(r, visualCol)
-			if runeIdx >= t.ScrollX {
-				// Once we're past ScrollX, paint each cell of this rune.
-				// The rune's first cell shows the actual glyph (or ' '
-				// for tabs); padding cells for a multi-cell tab show a
-				// space so the trailing tab area still gets the right bg.
+		for runeIdx := 0; runeIdx < len(runes); {
+			next, width := ClusterAt(runes, runeIdx, visualCol)
+			if visualCol+width > scrollVisual {
 				st := t.cellStyle(th, styles, lineIdx, runeIdx, lineBg, hasSel, selStart, selEnd)
-				glyph := r
-				if r == '\t' {
-					glyph = ' '
+				glyph, comb := runes[runeIdx], runes[runeIdx+1:next]
+				if glyph == '\t' {
+					glyph, comb = ' ', nil
 				}
 				for cell := 0; cell < width; cell++ {
 					sc := visualCol - scrollVisual + cell
@@ -817,14 +996,19 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 					if sc >= contentW {
 						break
 					}
-					ch := glyph
+					// The cluster's first cell carries the glyph and its
+					// combining marks; padding cells carry a space so the
+					// area under a wide glyph or a tab still gets the row
+					// background.
 					if cell > 0 {
-						ch = ' '
+						scr.SetContent(contentX+sc, cy, ' ', nil, st)
+						continue
 					}
-					scr.SetContent(contentX+sc, cy, ch, nil, st)
+					scr.SetContent(contentX+sc, cy, glyph, comb, st)
 				}
 			}
 			visualCol += width
+			runeIdx = next
 		}
 
 		// Overflow affordance: paint a muted '‹' / '›' over the leftmost /
@@ -864,8 +1048,13 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 
 // cellStyle resolves the final style for the rune at (lineIdx, runeIdx):
 // the cached syntax style re-based onto the row background, then the
-// selection tint, then the find-match tint on top. Shared by the line
-// and wrap render paths so the two can't drift on styling rules.
+// selection tint, then the bracket-pair marker, then the find-match tint
+// on top. Shared by the line and wrap render paths so the two can't drift
+// on styling rules.
+//
+// Find wins over the bracket marker on purpose: a find sweep is a
+// deliberate, transient mode, and its amber background would fight an
+// accent-colored bracket sitting inside a hit.
 func (t *Tab) cellStyle(th theme.Theme, styles []tcell.Style, lineIdx, runeIdx int, lineBg tcell.Color, hasSel bool, selStart, selEnd Position) tcell.Style {
 	st := tcell.StyleDefault.Background(th.BG).Foreground(th.Text)
 	if runeIdx < len(styles) {
@@ -882,6 +1071,14 @@ func (t *Tab) cellStyle(th theme.Theme, styles []tcell.Style, lineIdx, runeIdx i
 			// keeps the ones that stay readable.
 			fg, _, _ := st.Decompose()
 			st = st.Foreground(th.SelectionFg(fg))
+		}
+	}
+	if t.bracket.Found {
+		p := Position{Line: lineIdx, Col: runeIdx}
+		if p == t.bracket.At {
+			st = bracketCellStyle(th, st, t.bracket.Matched)
+		} else if t.bracket.Matched && p == t.bracket.Match {
+			st = bracketCellStyle(th, st, true)
 		}
 	}
 	if mIdx := t.matchAtRune(lineIdx, runeIdx); mIdx >= 0 {

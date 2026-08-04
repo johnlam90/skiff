@@ -68,6 +68,16 @@ type Theme struct {
 	SynOperator tcell.Color
 	SynPunct    tcell.Color
 	SynConstant tcell.Color
+
+	// --- Low-color degradation (see degrade.go) ---
+	//
+	// Both are zero on every compiled-in palette: a truecolor terminal
+	// gets pure hue and no attributes. Degrade fills them in when the
+	// terminal can't render the palette, so the renderer keeps its
+	// semantic distinctions in bold/underline/reverse instead of hues
+	// the terminal would round into mush.
+	LowColor bool
+	Attrs    Attrs
 }
 
 // relativeLuminance implements the WCAG 2.x luminance formula for a
@@ -107,6 +117,73 @@ func (t Theme) SelectionFg(fg tcell.Color) tcell.Color {
 		return fg
 	}
 	return t.Text
+}
+
+// minStatusContrast is the readability floor for status-bar text.
+// Below WCAG AA (4.5) on purpose — the bar is short, bold, and
+// upstream palettes ship deliberately tinted chips — but 3.0 is where
+// a colored chip stops being legible over SSH on a dim laptop screen,
+// which is skiff's whole habitat. Several ported palettes (ayu-light,
+// everforest-light) land under it, so ports are corrected at load
+// rather than hand-edited away from their upstream character.
+const minStatusContrast = 3.0
+
+// readable returns t with the pairings that fall under the editor's
+// floor nudged back over it. Applied by the registry accessors, so
+// every palette the picker can hand the app has already been
+// corrected — no draw site has to think about it.
+//
+// Only StatusFg is corrected today: it's the one pairing where the
+// ports genuinely fail, and it's the surface a user cannot avoid
+// looking at. Body text is fenced by the tests instead, because
+// silently repainting someone's Solarized would be worse than the
+// 4.13:1 it ships with.
+func readable(t Theme) Theme {
+	t.StatusFg = ensureContrast(t.StatusFg, t.StatusBG, minStatusContrast)
+	return t
+}
+
+// ensureContrast returns fg unchanged when it already clears want
+// against bg, otherwise the closest color along the line from fg to
+// whichever pole (black or white) contrasts more with bg that does.
+//
+// Walking toward a pole instead of snapping straight to it keeps as
+// much of the palette's hue as the floor allows — ayu-light's status
+// text stays recognisably ayu, just dark enough to read. The pole is
+// picked by contrast rather than by "is bg light?" so a mid-luminance
+// chip lands on the side that actually gains. A pole always clears
+// 3.0: the worst possible bg still reaches 4.58 against its better
+// pole, so the loop can't fall through without improving.
+func ensureContrast(fg, bg tcell.Color, want float64) tcell.Color {
+	if ContrastRatio(fg, bg) >= want {
+		return fg
+	}
+	pole := tcell.NewRGBColor(0, 0, 0)
+	if ContrastRatio(tcell.ColorWhite, bg) > ContrastRatio(pole, bg) {
+		pole = tcell.NewRGBColor(255, 255, 255)
+	}
+	fr, fg8, fb := fg.RGB()
+	pr, pg, pb := pole.RGB()
+	// 20 fixed steps: fine enough that the hue shift is invisible,
+	// cheap enough to run on every theme load.
+	for i := 1; i <= 20; i++ {
+		mix := float64(i) / 20
+		c := tcell.NewRGBColor(
+			lerpChannel(fr, pr, mix),
+			lerpChannel(fg8, pg, mix),
+			lerpChannel(fb, pb, mix),
+		)
+		if ContrastRatio(c, bg) >= want {
+			return c
+		}
+	}
+	return pole
+}
+
+// lerpChannel blends one 0-255 channel from a toward b by mix,
+// rounding to the nearest value so a full mix lands exactly on b.
+func lerpChannel(a, b int32, mix float64) int32 {
+	return int32(math.Round(float64(a) + (float64(b)-float64(a))*mix))
 }
 
 // Default returns the editor's hand-tuned Tokyo Night theme — the

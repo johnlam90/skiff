@@ -41,6 +41,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+
+	"github.com/johnlam90/skiff/internal/atomicfile"
 )
 
 // TrustFile is the JSON-on-disk shape of the trust store. We wrap the
@@ -92,7 +94,30 @@ const (
 
 // trustFileEnv lets tests redirect the trust file location. Empty
 // outside of tests; production code uses DefaultTrustPath.
-var trustFileEnv = "SPICEEDIT_TRUST_FILE"
+//
+// legacyTrustFileEnv is the pre-rename name, still honoured so an
+// existing shell profile or test harness doesn't silently start
+// writing to the user's real trust store.
+var (
+	trustFileEnv       = "SKIFF_TRUST_FILE"
+	legacyTrustFileEnv = "SPICEEDIT_TRUST_FILE"
+)
+
+// envOverride returns the first non-empty value among name and any
+// deprecated aliases. Skiff was once called spiceedit; the old
+// SPICEEDIT_* variables keep working so a rename doesn't quietly
+// redirect somebody's trust store back to the real ~/.config path.
+func envOverride(name string, legacy ...string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	for _, alias := range legacy {
+		if v := os.Getenv(alias); v != "" {
+			return v
+		}
+	}
+	return ""
+}
 
 // DefaultTrustPath returns the canonical trust-file location:
 // $XDG_CONFIG_HOME/skiff/format-trust.json, falling back to
@@ -100,9 +125,10 @@ var trustFileEnv = "SPICEEDIT_TRUST_FILE"
 // resolves — callers treat that as "no persistent trust available"
 // (every save will re-prompt, which is annoying but safe).
 //
-// Tests can override the location by setting SPICEEDIT_TRUST_FILE.
+// Tests can override the location by setting SKIFF_TRUST_FILE (or the
+// deprecated SPICEEDIT_TRUST_FILE).
 func DefaultTrustPath() string {
-	if override := os.Getenv(trustFileEnv); override != "" {
+	if override := envOverride(trustFileEnv, legacyTrustFileEnv); override != "" {
 		return override
 	}
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
@@ -148,18 +174,11 @@ func SaveTrust(path string, tf *TrustFile) error {
 	if path == "" {
 		return errors.New("no trust path")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(tf, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicfile.Write(path, data, 0644)
 }
 
 // CheckTrust looks up the stored decision for (rootDir, configHash).

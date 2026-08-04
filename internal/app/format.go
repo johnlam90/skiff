@@ -24,16 +24,20 @@ package app
 // dispatch.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/format"
+	"github.com/johnlam90/skiff/internal/overlay"
 )
 
 // formatDoneEvent is posted by runFormatter when the goroutine
@@ -90,6 +94,14 @@ func (a *App) runFormatOnSave(tab *editor.Tab) {
 // the previous monolithic version exactly — denied stays silent,
 // unknown opens the prompt, allowed runs.
 func (a *App) runWithTrust(tab *editor.Tab, cfg *format.Config, argv []string) {
+	// Validate the whole config before anything else. Trust is granted
+	// per config hash, so a file declaring even one executable we
+	// refuse to run must not reach the prompt — the user would be
+	// approving a list containing an entry we'd silently drop.
+	if err := validateFormatterConfig(cfg); err != nil {
+		a.flash("format: refused — " + err.Error())
+		return
+	}
 	trust, err := format.LoadTrust(format.DefaultTrustPath())
 	if err != nil {
 		a.flash("format trust: " + err.Error())
@@ -139,6 +151,14 @@ func (a *App) maybeOfferInstall(tab *editor.Tab, tabPath string) {
 	if len(template) == 0 {
 		return
 	}
+	// A defaults entry that names a path instead of a PATH program is
+	// unrunnable under the same rule the project path enforces, so
+	// don't offer to install it. Silent: this is the user's own global
+	// file, and flashing on every save of the extension would nag
+	// rather than inform.
+	if validateFormatterArgv(template) != nil {
+		return
+	}
 
 	tf, err := format.LoadTrust(format.DefaultTrustPath())
 	if err != nil {
@@ -179,18 +199,154 @@ func (a *App) openFormatTrustPrompt(tab *editor.Tab, cfg *format.Config, argv []
 	root := a.rootDir
 	hash := cfg.Hash()
 
-	msg := fmt.Sprintf("Allow %s to run formatters on save?", filepath.Join(format.ConfigDir, format.ConfigFile))
+	// Message stays a one-line summary; Body carries the commands,
+	// which is what the answer actually hinges on.
+	msg := fmt.Sprintf("Allow %s to run these commands on save?",
+		filepath.Join(format.ConfigDir, format.ConfigFile))
 	c := a.openConfirm("Trust this project's formatter?", msg, func(app *App) {
 		// Yes — record allow, persist, and run.
 		app.persistTrust(root, hash, true)
 		app.execFormatter(tabPath, argv)
 	})
+	// Show the argv. Without this the prompt cannot distinguish
+	// "gofmt -w" from "bash -c curl … | sh", and a Yes is consent to
+	// something the user was never shown.
+	c.Body = formatTrustPromptBody(cfg)
 	// Cancel/No path: persist a denial so we don't re-prompt every
 	// save. The hook lives on the confirm prefab itself, so an
 	// unrelated future confirm can never inherit the side effect.
 	c.OnCancel = func() {
 		a.persistTrust(root, hash, false)
 	}
+}
+
+// formatTrustPromptBody renders the multi-line confirm body for the
+// trust prompt: the stakes in plain English, then one row per declared
+// extension with its full argv. The argv is shown as written in
+// format.json ($FILE unexpanded) because that is exactly the text the
+// trust hash covers — showing a substituted absolute path would imply
+// the approval is scoped to this one file, which it is not.
+func formatTrustPromptBody(cfg *format.Config) []string {
+	body := []string{
+		filepath.Join(format.ConfigDir, format.ConfigFile) + " asks to run these commands",
+		"automatically every time you save a matching file.",
+		"",
+		"They run as you, with your permissions. Yes trusts every",
+		"command below until the file changes.",
+		"",
+	}
+	for _, ext := range sortedFormatExts(cfg) {
+		body = append(body, wrapIndented(
+			fmt.Sprintf("  .%s  ", ext),
+			renderArgv(cfg.Commands[ext]),
+			overlay.ConfirmBodyTextWidth)...)
+	}
+	return body
+}
+
+// sortedFormatExts returns the extensions a config declares that carry
+// a non-empty argv, alphabetically. Stable order matters: Go's map
+// iteration would reshuffle the command list on every prompt, making a
+// newly added hostile entry easy to miss when a teammate's change
+// re-triggers the prompt.
+func sortedFormatExts(cfg *format.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	exts := make([]string, 0, len(cfg.Commands))
+	for ext, argv := range cfg.Commands {
+		if len(argv) == 0 {
+			continue
+		}
+		exts = append(exts, ext)
+	}
+	sort.Strings(exts)
+	return exts
+}
+
+// renderArgv formats an argv for display: space-joined, with any
+// argument containing whitespace, quotes or control characters shown
+// quoted. The quoting is the point — it keeps a single hostile argument
+// like `curl -fsSL https://x | sh` from reading as three innocent
+// flags of the command in front of it.
+func renderArgv(argv []string) string {
+	parts := make([]string, len(argv))
+	for i, arg := range argv {
+		if arg == "" || strings.ContainsAny(arg, " \t\n\r\"'\\") {
+			parts[i] = strconv.Quote(arg)
+			continue
+		}
+		parts[i] = arg
+	}
+	return strings.Join(parts, " ")
+}
+
+// wrapIndented breaks text into rows at most width cells wide, giving
+// the first row prefix and every continuation row a blank indent of the
+// same width. We wrap instead of letting the overlay ellipsis-truncate
+// because a command whose tail is hidden is precisely how a hostile
+// format.json would smuggle a payload past the prompt. Breaks prefer
+// the last space in the window but never drop a rune.
+func wrapIndented(prefix, text string, width int) []string {
+	runes := []rune(text)
+	avail := width - len([]rune(prefix))
+	if avail < 8 {
+		avail = 8
+	}
+	indent := strings.Repeat(" ", len([]rune(prefix)))
+	head := prefix
+	var out []string
+	for len(runes) > avail {
+		cut := avail
+		for i := avail; i > avail/2; i-- {
+			if runes[i-1] == ' ' {
+				cut = i
+				break
+			}
+		}
+		out = append(out, head+string(runes[:cut]))
+		runes = runes[cut:]
+		head = indent
+	}
+	return append(out, head+string(runes))
+}
+
+// validateFormatterArgv rejects an argv Skiff refuses to execute. A
+// formatter must be a bare program name resolved on PATH ("gofmt",
+// "prettier"). An argv[0] carrying a path separator means the
+// repository is asking us to run a binary it shipped, which quietly
+// turns "trust the commands you just read" into "trust every byte in
+// this clone" — the prompt shows a path, not the code behind it.
+// Absolute paths are refused for the same reason: /opt/x/fmt is just
+// as opaque, and no legitimate project config needs to hardcode a
+// machine-specific location.
+func validateFormatterArgv(argv []string) error {
+	if len(argv) == 0 || argv[0] == "" {
+		return errors.New("empty command")
+	}
+	exe := argv[0]
+	if filepath.IsAbs(exe) {
+		return fmt.Errorf("%q must be a program on PATH, not an absolute path", exe)
+	}
+	// Both slashes, unconditionally: a backslash is not a separator on
+	// POSIX, but no legitimate formatter is named with one either, and
+	// refusing it keeps the rule identical on every platform.
+	if strings.ContainsAny(exe, `/\`) {
+		return fmt.Errorf("%q must be a program on PATH, not a path", exe)
+	}
+	return nil
+}
+
+// validateFormatterConfig checks every command a config declares, not
+// only the one about to run. Trust covers the whole file, so one
+// path-rooted executable anywhere in it refuses the config wholesale.
+func validateFormatterConfig(cfg *format.Config) error {
+	for _, ext := range sortedFormatExts(cfg) {
+		if err := validateFormatterArgv(cfg.Commands[ext]); err != nil {
+			return fmt.Errorf(".%s: %w", ext, err)
+		}
+	}
+	return nil
 }
 
 // openFormatInstallPrompt asks whether to install the user's global
@@ -301,33 +457,73 @@ func (a *App) persistTrust(root, hash string, trusted bool) {
 	}
 }
 
+// formatTimeoutDefault is the wall-clock budget for one formatter run.
+// Generous for any real formatter; the point is that a wedged process
+// can't leave the tab permanently un-reloaded with a "gofmt…" flash
+// stuck on screen.
+const formatTimeoutDefault = 30 * time.Second
+
+// formatWaitDelay bounds how long we wait for a killed formatter's
+// output pipes to close. Without it a formatter that spawned a child
+// holding stdout would keep CombinedOutput blocked long past the
+// deadline, defeating the timeout it was supposed to enforce.
+const formatWaitDelay = 2 * time.Second
+
+// formatTimeout is the deadline execFormatter enforces. A var only so
+// tests can shorten it — production never reassigns it, and the value
+// is read on the event loop before the goroutine starts so a test
+// restoring it can't race an in-flight run.
+var formatTimeout = formatTimeoutDefault
+
 // execFormatter shells out to argv with the file path already
 // substituted in. Runs in a goroutine and posts a formatDoneEvent on
 // completion so the main loop can reload the buffer and flash a
 // status — exactly the same pattern runCustomAction uses.
 //
-// We deliberately use exec.Command (not sh -c) with an explicit argv
-// so a shell-injection vector via a malicious format.json is just
+// We deliberately use exec.CommandContext (not sh -c) with an explicit
+// argv so a shell-injection vector via a malicious format.json is just
 // not available: each arg is passed as-is to execve, no shell
-// interpretation, no globbing, no command chaining.
+// interpretation, no globbing, no command chaining. That says nothing
+// about *which* program runs, so validateFormatterArgv gates that
+// separately — here as a last line of defense, since the install path
+// reaches this function without going through runWithTrust.
+//
+// cmd.Dir is the project root, not skiff's launch directory: a
+// formatter resolving config files (.prettierrc, .editorconfig)
+// relative to the wrong tree silently formats against the wrong rules.
 func (a *App) execFormatter(tabPath string, argv []string) {
-	if len(argv) == 0 {
+	if err := validateFormatterArgv(argv); err != nil {
+		if len(argv) > 0 {
+			a.flash("format: refused — " + err.Error())
+		}
 		return
 	}
 	scr := a.screen
+	root := a.rootDir
 	label := argv[0]
+	deadline := formatTimeout
+	// Copy the argv: the caller's slice may be reused or mutated on
+	// the event loop while the goroutine still reads it.
+	args := append([]string(nil), argv...)
 	a.flash(label + "…")
 	go func() {
-		cmd := exec.Command(argv[0], argv[1:]...)
+		ctx, cancel := context.WithTimeout(context.Background(), deadline)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+		cmd.Dir = root
+		cmd.WaitDelay = formatWaitDelay
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			// Distinguish "binary not installed" from "formatter ran
 			// but failed" — the first is a silent skip (per the spec),
 			// the second is a status flash so the user sees breakage.
 			var pathErr *exec.Error
-			if errors.As(err, &pathErr) && errors.Is(pathErr.Err, exec.ErrNotFound) {
+			switch {
+			case errors.Is(ctx.Err(), context.DeadlineExceeded):
+				err = fmt.Errorf("timed out after %s", deadline)
+			case errors.As(err, &pathErr) && errors.Is(pathErr.Err, exec.ErrNotFound):
 				err = nil
-			} else if len(out) > 0 {
+			case len(out) > 0:
 				preview := string(out)
 				if i := indexNewline(preview); i >= 0 {
 					preview = preview[:i]
@@ -388,15 +584,6 @@ func (a *App) handleFormatDone(e *formatDoneEvent) {
 		return
 	}
 	// Tab was closed before the formatter finished — silent no-op.
-}
-
-// formatHash exposes the current project's format.json hash for tests
-// and is otherwise unused. It returns "" when no config is loaded —
-// the same signal as "no formatting configured". Pulled into a
-// method so tests don't have to re-implement the load path.
-func (a *App) formatHash() string {
-	cfg, _ := format.Load(a.rootDir)
-	return cfg.Hash()
 }
 
 // Compile-time check that formatDoneEvent really is a tcell.Event.

@@ -36,13 +36,101 @@ func TestRuneVisualWidth_Tab(t *testing.T) {
 	}
 }
 
-// TestRuneVisualWidth_Other always returns 1 for non-tabs. Wide-char
-// support (CJK, emoji) is intentionally not implemented yet — pinning
-// 1 here makes that gap explicit.
+// TestRuneVisualWidth_Other pins the non-tab widths: a rune reports the
+// cells a terminal gives it, which is 2 for east-asian wide glyphs and
+// emoji, 0 for combining marks and joiners that ride inside another
+// character's cell, and 1 for everything else. Text-presentation
+// pictographs like ✓ and ☃ stay at 1 — they are drawn from the text font,
+// and calling them wide would shift every character after them by a cell.
 func TestRuneVisualWidth_Other(t *testing.T) {
-	for _, r := range []rune{'a', '✓', '☃'} {
-		if got := RuneVisualWidth(r, 0); got != 1 {
-			t.Errorf("RuneVisualWidth(%q) = %d, want 1", r, got)
+	cases := []struct {
+		r    rune
+		want int
+	}{
+		{'a', 1},
+		{'✓', 1},
+		{'☃', 1},
+		{'你', 2},
+		{'😀', 2},
+		{'\u0301', 0},
+		{'\u200d', 0},
+	}
+	for _, c := range cases {
+		if got := RuneVisualWidth(c.r, 0); got != c.want {
+			t.Errorf("RuneVisualWidth(%q) = %d, want %d", c.r, got, c.want)
+		}
+	}
+}
+
+// TestLineVisualCol_WideGlyphs is the CJK version of the tab-stop math:
+// every ideograph advances the visual column by two, so the caret after
+// three of them sits at cell 6 even though it is at rune 3. A one-cell
+// answer here is the bug where the caret drifts left of the glyph it is
+// editing, one cell per wide character on the line.
+func TestLineVisualCol_WideGlyphs(t *testing.T) {
+	runes := []rune("日本語x")
+	cases := []struct {
+		runeCol, want int
+	}{
+		{0, 0},
+		{1, 2},
+		{2, 4},
+		{3, 6},
+		{4, 7}, // past the trailing ASCII 'x'
+	}
+	for _, c := range cases {
+		if got := LineVisualCol(runes, c.runeCol); got != c.want {
+			t.Errorf("LineVisualCol(runeCol=%d) = %d, want %d", c.runeCol, got, c.want)
+		}
+	}
+}
+
+// TestLineVisualCol_ClusterInteriorReportsItsStart keeps the caret out of
+// the middle of a character. "e" plus a combining acute is two runes in
+// one cell, so the interior column has no cell of its own to report and
+// must answer with the cell the cluster starts in.
+func TestLineVisualCol_ClusterInteriorReportsItsStart(t *testing.T) {
+	runes := []rune("xe\u0301y") // x, e, combining acute, y
+	if got := LineVisualCol(runes, 2); got != 1 {
+		t.Errorf("interior of the é cluster = %d, want 1", got)
+	}
+	if got := LineVisualCol(runes, 3); got != 2 {
+		t.Errorf("after the é cluster = %d, want 2", got)
+	}
+}
+
+// TestRuneColAtVisual_WideGlyphs is the click side of the same math: both
+// cells of an ideograph belong to it, and a click past a run of them has
+// to count cells rather than runes or it lands on the wrong character.
+func TestRuneColAtVisual_WideGlyphs(t *testing.T) {
+	runes := []rune("日本語x")
+	cases := []struct {
+		visCol, want int
+	}{
+		{0, 0}, // left half of 日
+		{1, 0}, // right half of 日 snaps back to it
+		{2, 1}, // left half of 本
+		{3, 1},
+		{4, 2},
+		{6, 3}, // the 'x' after three wide glyphs
+		{7, 4}, // end-of-line
+	}
+	for _, c := range cases {
+		if got := RuneColAtVisual(runes, c.visCol); got != c.want {
+			t.Errorf("RuneColAtVisual(visCol=%d) = %d, want %d", c.visCol, got, c.want)
+		}
+	}
+}
+
+// TestRuneColAtVisual_NeverLandsInsideACluster checks the click contract
+// for combining marks: whatever cell is hit, the answer is a rune index a
+// caret may legally occupy.
+func TestRuneColAtVisual_NeverLandsInsideACluster(t *testing.T) {
+	runes := []rune("e\u0301😀\u0301") // é then an emoji wearing a mark
+	for visCol := range 8 {
+		got := RuneColAtVisual(runes, visCol)
+		if got != ClusterStart(runes, got) {
+			t.Errorf("visCol %d resolved to %d, which is inside a cluster", visCol, got)
 		}
 	}
 }
@@ -195,5 +283,84 @@ func TestDetectIndent_MixedFavorsMajority(t *testing.T) {
 	}
 	if got := DetectIndent(lines, "x.txt"); got != "\t" {
 		t.Fatalf("expected tab from majority, got %q", got)
+	}
+}
+
+// TestAutoIndentFor_CopiesLeadingWhitespace covers the base rule: the new
+// line opens with whatever whitespace the old one opened with, in the same
+// characters. Mixing tabs into a space-indented file is the bug this whole
+// mechanism exists to avoid, so the copy is verbatim rather than
+// re-derived from the indent unit.
+func TestAutoIndentFor_CopiesLeadingWhitespace(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		unit   string
+		path   string
+		want   string
+	}{
+		{"no indent", "foo", "    ", "a.txt", ""},
+		{"spaces", "    foo", "    ", "a.txt", "    "},
+		{"tabs", "\t\tfoo", "\t", "a.go", "\t\t"},
+		{"odd width is preserved", "   foo", "  ", "a.txt", "   "},
+		{"mixed leading run", "\t  foo", "\t", "a.go", "\t  "},
+		{"whitespace-only line", "      ", "    ", "a.txt", "      "},
+		{"empty line", "", "    ", "a.txt", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := autoIndentFor([]rune(tc.prefix), tc.unit, tc.path); got != tc.want {
+				t.Errorf("autoIndentFor(%q) = %q, want %q", tc.prefix, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAutoIndentFor_AddsLevelAfterOpener checks the one piece of cleverness
+// the rule allows: a line that opens a block gets its successor pushed one
+// unit deeper, in the file's own unit rather than a hardcoded width.
+func TestAutoIndentFor_AddsLevelAfterOpener(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		unit   string
+		path   string
+		want   string
+	}{
+		{"brace with tabs", "\tif x {", "\t", "a.go", "\t\t"},
+		{"brace with spaces", "  if x {", "  ", "a.js", "    "},
+		{"bracket", "list = [", "    ", "a.txt", "    "},
+		{"paren", "call(", "    ", "a.txt", "    "},
+		{"trailing space after opener", "\tif x {  ", "\t", "a.go", "\t\t"},
+		{"closer does not add", "\t}", "\t", "a.go", "\t"},
+		{"plain statement", "\tx := 1", "\t", "a.go", "\t"},
+		{"python colon", "  if x:", "  ", "a.py", "    "},
+		{"yaml colon", "  key:", "  ", "conf.yaml", "    "},
+		{"go label colon does not add", "loop:", "\t", "a.go", ""},
+		{"empty unit falls back", "if x {", "", "a.txt", defaultSpaceIndent},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := autoIndentFor([]rune(tc.prefix), tc.unit, tc.path); got != tc.want {
+				t.Errorf("autoIndentFor(%q, unit=%q, %s) = %q, want %q",
+					tc.prefix, tc.unit, tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestColonOpensBlock keeps the colon rule scoped to the languages where a
+// trailing colon really does introduce a block. Everywhere else it is a
+// label or a map value and indenting after it would be actively wrong.
+func TestColonOpensBlock(t *testing.T) {
+	for _, path := range []string{"a.py", "a.pyi", "stubs.PYW", "c.yml", "c.yaml"} {
+		if !colonOpensBlock(path) {
+			t.Errorf("%s: colon should open a block", path)
+		}
+	}
+	for _, path := range []string{"a.go", "a.c", "a.js", "a.txt", "Makefile", ""} {
+		if colonOpensBlock(path) {
+			t.Errorf("%s: colon should not open a block", path)
+		}
 	}
 }

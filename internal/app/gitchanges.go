@@ -21,9 +21,20 @@ package app
 // left to open); untracked directories flip back to the explorer and
 // reveal themselves.
 //
-// The panel is reachable three ways, all mouse-first: the GIT header
-// tab, the branch segment in the status bar, and ≡ → Git changes (or
-// Esc-g), which toggle between the two sidebar views.
+// The panel is reachable four ways: the GIT header tab, the branch
+// segment in the status bar, ≡ → Git… → Git changes, and Esc-g. The
+// first two are pure mouse routes and leave the keyboard with the
+// editor; the last two go through focusGitPanel, which also arms
+// keyboard mode — ↑↓ walk the rows, Space stages, Enter opens the
+// diff, Tab/←→ reach the action row and Esc hands the keys back. That
+// mode is not a nicety: Button3 and mouse reporting are exactly what
+// macOS Terminal + tmux swallow, so a mouse-first panel with no
+// keyboard route strands the SSH user it was built for. While it is
+// armed a hint strip docks at the bottom of the panel listing the
+// bindings (a strip, not an overlay — see
+// docs/adr/0001-strips-are-not-overlays.md) and naming the focused
+// action button, which is the only thing that makes the narrow
+// [✓][↑][↓][⋯] ladder decodable. There are no Ctrl bindings.
 //
 // The write side lives here too: a branch line (click to switch), a
 // button row ([ Commit ] [ Push ] [ Pull ] [ ⋯ ]), and a commit
@@ -85,7 +96,7 @@ func (a *App) toggleGitPanel() {
 	// every 10-second tick) so the toggle never blocks on git; the async
 	// kick below brings the rows fully up to date a beat later.
 	if a.gitSnap.Branch == "" {
-		a.flash("Not a git repository")
+		a.flash(a.gitUnavailableMsg())
 		return
 	}
 	a.sidebarShown = true
@@ -103,7 +114,7 @@ func (a *App) showGitPanel() {
 		return
 	}
 	if a.gitSnap.Branch == "" {
-		a.flash("Not a git repository")
+		a.flash(a.gitUnavailableMsg())
 		return
 	}
 	a.gitPanelActive = true
@@ -112,15 +123,220 @@ func (a *App) showGitPanel() {
 }
 
 // showExplorerPanel switches the sidebar back to the file tree (the
-// EXPLORER header tab's click action).
+// EXPLORER header tab's click action). Keyboard mode goes with it —
+// the tree has its own navigation and the panel's key capture would
+// otherwise linger over a view that no longer exists.
 func (a *App) showExplorerPanel() {
 	a.gitPanelActive = false
+	a.exitGitPanelKeys()
 }
 
-// menuGitChanges is the ≡ menu entry for the Git panel.
+// menuGitChanges is the ≡ menu entry for the Git panel. It routes
+// through focusGitPanel rather than toggleGitPanel because the menu is
+// the keyboard user's primary surface (CLAUDE.md: everything must be
+// reachable there), so reaching the panel from it has to hand over the
+// keyboard too — otherwise the ≡ route opens a view you can't move in.
 func (a *App) menuGitChanges() {
 	a.closeMenu()
+	a.focusGitPanel()
+}
+
+// focusGitPanel is the keyboard route into the Git panel (Esc-g and
+// ≡ → Git changes). The panel is mouse-first by design, but Button3
+// and mouse reporting are exactly what macOS Terminal + tmux swallow,
+// so the command gestures arm a keyboard focus that can walk the rows
+// and the action row. A panel already up from a mouse route is grabbed
+// rather than closed — "take me there" is what the gesture means when
+// you aren't there yet — and pressing it again from inside toggles
+// back to the explorer, the original toggle contract.
+func (a *App) focusGitPanel() {
+	if a.gitPanelActive && a.sidebarShown && !a.gitPanelKeys {
+		a.enterGitPanelKeys()
+		return
+	}
+	wasOpen := a.gitPanelActive && a.sidebarShown
 	a.toggleGitPanel()
+	if !wasOpen && a.gitPanelActive {
+		a.enterGitPanelKeys()
+	}
+}
+
+// enterGitPanelKeys arms keyboard mode on an open panel: focus starts
+// on the change list with a selection that is guaranteed in range and
+// scrolled into view, so the very first ↑/↓ lands somewhere visible.
+func (a *App) enterGitPanelKeys() {
+	a.gitPanelKeys = true
+	a.gitPanelOnBtns = false
+	a.gitPanelBtn = 0
+	if a.gitPanelSelected < 0 || a.gitPanelSelected >= len(a.gitPanelRows) {
+		a.gitPanelSelected = 0
+	}
+	a.ensureGitRowVisible(a.gitPanelSelected)
+}
+
+// exitGitPanelKeys hands the keyboard back to the editor. Called by Esc
+// and by any press that lands outside the sidebar; a no-op when the
+// mode was never armed, so callers never need to check first.
+func (a *App) exitGitPanelKeys() {
+	a.gitPanelKeys = false
+	a.gitPanelOnBtns = false
+}
+
+// gitPanelKeysOn reports whether the Git panel currently owns the
+// keyboard. Derived from the panel's visibility rather than trusted on
+// its own, so every route that hides the panel — the EXPLORER tab, the
+// sidebar toggle, the repo disappearing under a status refresh — drops
+// the key capture without having to remember to.
+func (a *App) gitPanelKeysOn() bool {
+	return a.gitPanelKeys && a.gitPanelActive && a.sidebarShown
+}
+
+// gitPanelRowFocus reports whether keyboard focus sits on the change
+// list rather than the action row — the condition for painting a row's
+// focus marker.
+func (a *App) gitPanelRowFocus() bool {
+	return a.gitPanelKeysOn() && !a.gitPanelOnBtns
+}
+
+// handleGitPanelKey applies one key to the focused Git panel and
+// reports whether it was consumed. Only arrows, Space, Enter, Tab and
+// Esc are claimed; everything else (runes included) falls through to
+// the editor so typing is never swallowed. There is deliberately no
+// Ctrl binding — Ctrl fights tmux, which is the whole reason a
+// keyboard mode had to be invented instead of reusing one.
+func (a *App) handleGitPanelKey(ev *tcell.EventKey) bool {
+	if !a.gitPanelKeysOn() {
+		return false
+	}
+	switch ev.Key() {
+	case tcell.KeyEsc:
+		// Deliberately not consumed: Esc drops the panel's capture on
+		// the way through, then still arms the leader window, so
+		// "mash Esc until the menu appears" keeps working from here.
+		a.exitGitPanelKeys()
+		return false
+	case tcell.KeyUp:
+		if a.gitPanelOnBtns {
+			a.gitPanelOnBtns = false
+			return true
+		}
+		a.moveGitPanelSel(-1)
+		return true
+	case tcell.KeyDown:
+		if a.gitPanelOnBtns {
+			a.gitPanelOnBtns = false
+			return true
+		}
+		a.moveGitPanelSel(1)
+		return true
+	case tcell.KeyRight, tcell.KeyTab:
+		a.moveGitPanelFocus(1)
+		return true
+	case tcell.KeyLeft, tcell.KeyBacktab:
+		a.moveGitPanelFocus(-1)
+		return true
+	case tcell.KeyEnter:
+		a.activateGitPanelFocus(false)
+		return true
+	case tcell.KeyRune:
+		if ev.Rune() == ' ' {
+			a.activateGitPanelFocus(true)
+			return true
+		}
+	}
+	return false
+}
+
+// moveGitPanelSel walks the change list by delta rows, clamped at both
+// ends (no wrap — a list you can fall off the end of loses your place)
+// and scrolled back into view.
+func (a *App) moveGitPanelSel(delta int) {
+	if len(a.gitPanelRows) == 0 {
+		return
+	}
+	idx := a.gitPanelSelected + delta
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(a.gitPanelRows) {
+		idx = len(a.gitPanelRows) - 1
+	}
+	a.gitPanelSelected = idx
+	a.ensureGitRowVisible(idx)
+}
+
+// moveGitPanelFocus moves keyboard focus between the change list and
+// the action row: Tab / → step forward, Shift-Tab / ← step back, and
+// stepping off either end of the button row lands back on the list, so
+// the cycle closes without a wrap that would skip past the rows. While
+// a mutation is running the row renders "git is working…" instead of
+// buttons, so there is nothing to focus.
+func (a *App) moveGitPanelFocus(delta int) {
+	if a.gitOpBusy {
+		return
+	}
+	_, _, sw, _ := a.sidebarRect()
+	n := len(a.gitPanelButtons(sw))
+	if n == 0 {
+		return
+	}
+	if !a.gitPanelOnBtns {
+		a.gitPanelOnBtns = true
+		if delta < 0 {
+			a.gitPanelBtn = n - 1
+		} else {
+			a.gitPanelBtn = 0
+		}
+		return
+	}
+	idx := a.gitPanelBtn + delta
+	if idx < 0 || idx >= n {
+		a.gitPanelOnBtns = false
+		return
+	}
+	a.gitPanelBtn = idx
+}
+
+// activateGitPanelFocus runs whatever keyboard focus points at. On the
+// list, Enter opens the row's diff and Space toggles its commit
+// checkbox — Space is the checkbox key everywhere else, and Enter has
+// to stay "show me the change". On the action row both keys run the
+// button, which is what every button anywhere does.
+func (a *App) activateGitPanelFocus(space bool) {
+	if a.gitPanelOnBtns {
+		if a.gitOpBusy {
+			a.flash("Another git operation is still running")
+			return
+		}
+		sx, sy, sw, _ := a.sidebarRect()
+		btns := a.gitPanelButtons(sw)
+		if a.gitPanelBtn < 0 || a.gitPanelBtn >= len(btns) {
+			return
+		}
+		b := btns[a.gitPanelBtn]
+		// Same anchor the click path passes, so the ⋯ popup opens
+		// under the button whether it was clicked or keyed.
+		b.action(a, sx+b.x0, sy+3)
+		return
+	}
+	if a.gitPanelSelected < 0 || a.gitPanelSelected >= len(a.gitPanelRows) {
+		return
+	}
+	row := a.gitPanelRows[a.gitPanelSelected]
+	if space {
+		// Directories are collapsed untracked entries — they commit
+		// file by file once expanded, so they carry no checkbox.
+		if !row.IsDir {
+			a.toggleCommitCheck(row.Abs)
+		}
+		return
+	}
+	a.activateGitChangeRow(row)
+	if !row.IsDir {
+		// Recorded after activation — openDiffView's closeAllModals
+		// resets the index, and this write is what arms ↑↓ walking.
+		a.diffPanelRow = a.gitPanelSelected
+	}
 }
 
 // hasGitRepo is the menu enabled-predicate for git-scoped rows: we need
@@ -198,17 +414,24 @@ func (a *App) gitPanelClick(x, y int) {
 	}
 	if y == 2 {
 		_, _, sw, _ := a.sidebarRect()
-		for _, b := range a.gitPanelButtons(sw) {
+		for i, b := range a.gitPanelButtons(sw) {
 			if x >= b.x0 && x < b.x1 {
 				sx, sy, _, _ := a.sidebarRect()
+				// A mouse user in keyboard mode gets the focus ring
+				// moved to what they clicked, so the two input paths
+				// never disagree about where "here" is.
+				if a.gitPanelKeysOn() && !a.gitOpBusy {
+					a.gitPanelOnBtns, a.gitPanelBtn = true, i
+				}
 				b.action(a, sx+b.x0, sy+3)
 				return
 			}
 		}
 		return
 	}
+	listH, _ := a.gitPanelBody()
 	idx := a.gitPanelScroll + y - gitPanelListTop
-	if y < gitPanelListTop || idx < 0 || idx >= len(a.gitPanelRows) {
+	if y < gitPanelListTop || y-gitPanelListTop >= listH || idx < 0 || idx >= len(a.gitPanelRows) {
 		return
 	}
 	row := a.gitPanelRows[idx]
@@ -219,6 +442,7 @@ func (a *App) gitPanelClick(x, y int) {
 		return
 	}
 	a.gitPanelSelected = idx
+	a.gitPanelOnBtns = false
 	a.activateGitChangeRow(row)
 	if !row.IsDir {
 		// Recorded after activation — openDiffView's closeAllModals
@@ -232,9 +456,13 @@ func (a *App) gitPanelClick(x, y int) {
 const gitPanelListTop = 3
 
 // gitPanelBtn is one clickable action on the panel's button row, with
-// its x-range in sidebar-local cells.
+// its x-range in sidebar-local cells. verb is the button's full name,
+// which the ladder's compact tiers ([✓][↑][↓][⋯]) drop entirely — the
+// keyboard hint strip renders it so a focused glyph is still decodable
+// on a minimum-width sidebar.
 type gitPanelBtn struct {
 	label  string
+	verb   string
 	x0, x1 int
 	action func(a *App, anchorX, anchorY int)
 }
@@ -296,11 +524,12 @@ func (a *App) gitPanelButtons(sw int) []gitPanelBtn {
 		func(app *App, _, _ int) { app.menuGitPull() },
 		func(app *App, x, y int) { app.openGitExtras(x, y) },
 	}
+	verbs := []string{"Commit", "Push", "Pull", "More actions"}
 	out := make([]gitPanelBtn, 0, len(labels))
 	x := 1
 	for i, l := range labels {
 		w := runeLen(l)
-		out = append(out, gitPanelBtn{label: l, x0: x, x1: x + w, action: actions[i]})
+		out = append(out, gitPanelBtn{label: l, verb: verbs[i], x0: x, x1: x + w, action: actions[i]})
 		x += w + gap
 	}
 	return out
@@ -333,8 +562,7 @@ func (a *App) toggleCommitCheck(abs string) {
 
 // ensureGitRowVisible scrolls the panel list so row idx is on screen.
 func (a *App) ensureGitRowVisible(idx int) {
-	_, _, _, sh := a.sidebarRect()
-	listH := sh - gitPanelListTop
+	listH, _ := a.gitPanelBody()
 	if listH < 1 {
 		return
 	}
@@ -426,8 +654,8 @@ func (a *App) openFileAtFirstChange(path string) {
 // list can't scroll past its own ends. Delta 0 is a pure re-clamp,
 // used after the row list shrinks under an existing scroll offset.
 func (a *App) scrollGitPanel(delta int) {
-	_, _, _, sh := a.sidebarRect()
-	max := len(a.gitPanelRows) - (sh - gitPanelListTop)
+	listH, _ := a.gitPanelBody()
+	max := len(a.gitPanelRows) - listH
 	if max < 0 {
 		max = 0
 	}
@@ -437,6 +665,111 @@ func (a *App) scrollGitPanel(delta int) {
 	}
 	if a.gitPanelScroll < 0 {
 		a.gitPanelScroll = 0
+	}
+}
+
+// gitPanelHintMaxRows caps the keyboard hint strip. Four rows is what
+// the full binding list needs at the minimum sidebar width — the cap
+// is generous on purpose, because a strip that silently drops its tail
+// drops "esc exit", which is the one binding a stuck user needs. Short
+// terminals are handled by gitPanelBody yielding rows back to the list
+// instead.
+const gitPanelHintMaxRows = 4
+
+// gitPanelBody splits the panel's vertical space between the change
+// list and the keyboard hint strip. One function so the renderer, the
+// scroll clamp and the click hit-test can never disagree about where
+// the list ends — and the hint gives its rows back one at a time
+// rather than starve the list it exists to explain.
+func (a *App) gitPanelBody() (listH int, hint []string) {
+	_, _, sw, sh := a.sidebarRect()
+	avail := sh - gitPanelListTop
+	if avail < 0 {
+		avail = 0
+	}
+	hint = a.gitPanelHint(sw)
+	for len(hint) > 0 && avail-len(hint) < 1 {
+		hint = hint[:len(hint)-1]
+	}
+	return avail - len(hint), hint
+}
+
+// gitPanelHint wraps the keyboard cheat text for a sw-wide sidebar, or
+// returns nil when the panel doesn't own the keyboard. It is a strip,
+// not an overlay (see docs/adr/0001-strips-are-not-overlays.md): it
+// docks, reflows the list above it, and captures nothing.
+func (a *App) gitPanelHint(sw int) []string {
+	if !a.gitPanelKeysOn() {
+		return nil
+	}
+	return wrapHintSegments(a.gitPanelHintSegs(), sw-1, gitPanelHintMaxRows)
+}
+
+// gitPanelHintSegs is the hint's key/meaning pairs for the current
+// focus. On the action row the first segment names the focused
+// button — that is what makes the compact [✓][↑][↓][⋯] ladder
+// decodable at minimum sidebar width, where the verbs are gone.
+func (a *App) gitPanelHintSegs() []string {
+	if a.gitPanelOnBtns {
+		return []string{"⏎ " + a.gitPanelBtnVerb(), "←→ button", "⇥ list", "esc exit"}
+	}
+	return []string{"↑↓ move", "␣ stage", "⏎ diff", "⇥ buttons", "esc exit"}
+}
+
+// gitPanelBtnVerb names the focused action-row button, or "" when the
+// focus index has fallen outside a re-laid-out row.
+func (a *App) gitPanelBtnVerb() string {
+	_, _, sw, _ := a.sidebarRect()
+	btns := a.gitPanelButtons(sw)
+	if a.gitPanelBtn < 0 || a.gitPanelBtn >= len(btns) {
+		return ""
+	}
+	return btns[a.gitPanelBtn].verb
+}
+
+// wrapHintSegments greedily packs segments into rows at most w cells
+// wide, never splitting a segment (half a binding is worse than none)
+// and stopping at maxRows. A segment wider than the whole row still
+// gets its own row and is clipped at paint time.
+func wrapHintSegments(segs []string, w, maxRows int) []string {
+	if w <= 0 || maxRows <= 0 {
+		return nil
+	}
+	var rows []string
+	cur := ""
+	for _, s := range segs {
+		cand := s
+		if cur != "" {
+			cand = cur + "  " + s
+		}
+		if cur == "" || runeLen(cand) <= w {
+			cur = cand
+			continue
+		}
+		rows = append(rows, cur)
+		if len(rows) == maxRows {
+			return rows
+		}
+		cur = s
+	}
+	if cur != "" {
+		rows = append(rows, cur)
+	}
+	return rows
+}
+
+// drawGitPanelHint paints the keyboard strip docked at the bottom of
+// the panel. Muted on the highlight background: it is a standing
+// reminder, not the leader strip's half-second flash, so it stays
+// quieter than everything it sits under.
+func (a *App) drawGitPanelHint(sx, sy, sw, sh int, rows []string) {
+	st := tcell.StyleDefault.Background(a.theme.LineHL).Foreground(a.theme.Muted)
+	top := sy + sh - len(rows)
+	for i, r := range rows {
+		for cx := sx; cx < sx+sw; cx++ {
+			a.screen.SetContent(cx, top+i, ' ', nil, st)
+		}
+		drawClipped(a.screen, sx+1, top+i, sw-1, r, st)
 	}
 }
 
@@ -543,31 +876,34 @@ func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 		muted := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
 		drawClipped(a.screen, sx+1, sy+2, sw-1, "git is working…", muted)
 	} else {
-		for _, b := range a.gitPanelButtons(sw) {
+		onBtns := a.gitPanelKeysOn() && a.gitPanelOnBtns
+		for i, b := range a.gitPanelButtons(sw) {
 			if b.x1 > sw {
 				break // belt: never paint past the splitter
 			}
-			drawButton(a.screen, sx+b.x0, sy+2, b.label, bg, a.theme.Accent, false)
+			drawButton(a.screen, sx+b.x0, sy+2, b.label, bg, a.theme.Accent, onBtns && i == a.gitPanelBtn)
 		}
 	}
 
-	listH := sh - gitPanelListTop
-	if listH < 0 {
-		listH = 0
-	}
+	listH, hint := a.gitPanelBody()
 	a.scrollGitPanel(0)
 
 	if len(a.gitPanelRows) == 0 {
 		muted := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
-		drawClipped(a.screen, sx+1, sy+gitPanelListTop, sw-1, "No uncommitted changes", muted)
-		return
-	}
-	for i := 0; i < listH; i++ {
-		idx := a.gitPanelScroll + i
-		if idx >= len(a.gitPanelRows) {
-			break
+		drawClipped(a.screen, sx+1, sy+gitPanelListTop, sw-1, a.gitPanelEmptyLabel(), muted)
+	} else {
+		rowFocus := a.gitPanelRowFocus()
+		for i := range listH {
+			idx := a.gitPanelScroll + i
+			if idx >= len(a.gitPanelRows) {
+				break
+			}
+			sel := idx == a.gitPanelSelected
+			a.drawGitPanelRow(sx, sy+gitPanelListTop+i, sw, a.gitPanelRows[idx], sel, sel && rowFocus)
 		}
-		a.drawGitPanelRow(sx, sy+gitPanelListTop+i, sw, a.gitPanelRows[idx], idx == a.gitPanelSelected)
+	}
+	if len(hint) > 0 {
+		a.drawGitPanelHint(sx, sy, sw, sh, hint)
 	}
 }
 
@@ -576,7 +912,14 @@ func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 // dimmed — basename first because the sidebar is narrow and the file
 // name is what the user scans for (the same reason VS Code's SCM list
 // leads with it).
-func (a *App) drawGitPanelRow(sx, ry, sw int, row gitChangeRow, selected bool) {
+//
+// selected is the panel's current row (highlight background, set by a
+// click or the diff walk); keyFocused additionally means the keyboard
+// is on it, and borrows the file tree's active-row language — Accent
+// bold — plus a leading caret. The caret is the part that matters on a
+// monochrome or low-color terminal, where the theme's focus hue
+// degrades to nothing and a color-only cue would vanish.
+func (a *App) drawGitPanelRow(sx, ry, sw int, row gitChangeRow, selected, keyFocused bool) {
 	bg := a.theme.SidebarBG
 	if selected {
 		bg = a.theme.LineHL
@@ -587,7 +930,7 @@ func (a *App) drawGitPanelRow(sx, ry, sw int, row gitChangeRow, selected bool) {
 	}
 	letterStyle := tcell.StyleDefault.Background(bg).Foreground(gitKindColor(a.theme, row.Kind)).Bold(true)
 	nameStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
-	if a.tree != nil && row.Abs == a.tree.ActiveFile {
+	if keyFocused || (a.tree != nil && row.Abs == a.tree.ActiveFile) {
 		nameStyle = tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true)
 	}
 	mutedStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
@@ -608,6 +951,10 @@ func (a *App) drawGitPanelRow(sx, ry, sw int, row gitChangeRow, selected bool) {
 			check, style = '○', mutedStyle
 		}
 		a.screen.SetContent(sx+1, ry, check, nil, style)
+	}
+	if keyFocused {
+		a.screen.SetContent(sx, ry, '›', nil,
+			tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true))
 	}
 	drawAt(a.screen, sx+3, ry, gitKindLetter(row.Kind), letterStyle)
 	x := sx + 5

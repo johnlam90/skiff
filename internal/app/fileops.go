@@ -273,13 +273,108 @@ func (a *App) doRenameFile(oldPath, newName string) {
 // the menu predicates already gate root-targeting rows out, but this
 // is the last line before filesystem damage, so it re-checks.
 //
-// For a folder delete we have to close not just an exact-path tab but
+// Unsaved buffers get their own gate before anything moves. The trash
+// only ever holds what was on disk, and the reopen stack remembers a
+// path and a cursor — not buffer text — so a delete that silently
+// closed a dirty tab destroyed work that Undo delete could not bring
+// back. When any doomed tab is dirty the delete pauses on the
+// unsaved-changes prompt instead.
+func (a *App) doDeletePath(path string) {
+	if a.isProjectRoot(path) {
+		a.flash("Refusing to delete the project root")
+		return
+	}
+	if _, err := os.Lstat(path); err != nil {
+		a.flash(fmt.Sprintf("Delete failed: %v", err))
+		return
+	}
+	if dirty := a.dirtyOrphanedTabs(path); len(dirty) > 0 {
+		a.confirmDeleteWithUnsaved(path, dirty)
+		return
+	}
+	a.deletePathNow(path)
+}
+
+// orphanedTabs returns every open tab whose file disappears when path
+// is deleted. For a folder delete that's not just an exact-path tab but
 // every tab living *inside* the folder — otherwise the editor would
 // keep showing buffers backed by files that no longer exist, and the
 // next save would silently re-create them. tabPathRemoved encodes that
 // "is this tab orphaned?" check so the loop reads as the rule it's
 // enforcing rather than path arithmetic.
-func (a *App) doDeletePath(path string) {
+func (a *App) orphanedTabs(path string) []*editor.Tab {
+	var doomed []*editor.Tab
+	for _, t := range a.tabs.Tabs() {
+		if tabPathRemoved(t.Path, path) {
+			doomed = append(doomed, t)
+		}
+	}
+	return doomed
+}
+
+// dirtyOrphanedTabs narrows orphanedTabs to the buffers that would lose
+// unsaved work. A folder delete can hit several at once, which is why
+// the prompt is built from a list rather than a single name.
+func (a *App) dirtyOrphanedTabs(path string) []*editor.Tab {
+	var dirty []*editor.Tab
+	for _, t := range a.orphanedTabs(path) {
+		if t.Dirty {
+			dirty = append(dirty, t)
+		}
+	}
+	return dirty
+}
+
+// confirmDeleteWithUnsaved raises the unsaved-changes prompt in front of
+// a delete that would discard buffer content, naming every file at risk
+// — "something has unsaved changes" is not something a user can act on.
+//
+// Save writes the buffers first, so the copy that lands in the trash is
+// the work the user actually did and Undo delete restores it; a save
+// that fails aborts the delete (saveTab flashes the reason) rather than
+// destroying the file it could not preserve. Discard proceeds as the
+// old unguarded path did. Cancel abandons the delete entirely.
+//
+// The tabs are captured by pointer and re-checked on activation: the
+// prompt is modal, but a callback that fires against a tab some other
+// path already closed must be a no-op, not a save into a stale buffer.
+func (a *App) confirmDeleteWithUnsaved(path string, dirty []*editor.Tab) {
+	names := make([]string, 0, len(dirty))
+	for _, t := range dirty {
+		names = append(names, t.DisplayName())
+	}
+	msg := fmt.Sprintf("%s has unsaved changes.", names[0])
+	if len(names) > 1 {
+		msg = fmt.Sprintf("%d open files have unsaved changes: %s.",
+			len(names), strings.Join(names, ", "))
+	}
+	msg += fmt.Sprintf(" Deleting %s discards them unless you save first.",
+		filepath.Base(path))
+	doomed := append([]*editor.Tab(nil), dirty...)
+	a.openDirtyClose(
+		"Unsaved changes",
+		msg,
+		func(app *App) {
+			for _, t := range doomed {
+				if app.tabs.IndexOf(t) < 0 {
+					continue
+				}
+				if !app.saveTab(t) {
+					return
+				}
+			}
+			app.deletePathNow(path)
+		},
+		func(app *App) { app.deletePathNow(path) },
+	)
+}
+
+// deletePathNow is the delete itself, past every guard. It re-runs the
+// root and existence checks because the unsaved-changes prompt opens a
+// window in which the world can change — a save can replace the file, a
+// background refresh can remove it — and the checks are cheap next to
+// what they prevent.
+func (a *App) deletePathNow(path string) {
 	if a.isProjectRoot(path) {
 		a.flash("Refusing to delete the project root")
 		return
@@ -292,13 +387,7 @@ func (a *App) doDeletePath(path string) {
 		a.flash(fmt.Sprintf("Delete failed: %v", err))
 		return
 	}
-	var doomed []*editor.Tab
-	for _, t := range a.tabs.Tabs() {
-		if tabPathRemoved(t.Path, path) {
-			doomed = append(doomed, t)
-		}
-	}
-	for _, t := range doomed {
+	for _, t := range a.orphanedTabs(path) {
 		a.closeTab(t)
 	}
 	a.refreshTree()

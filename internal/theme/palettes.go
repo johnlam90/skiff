@@ -60,22 +60,31 @@ var registry = []Entry{
 // DefaultID is the id of the built-in default theme.
 const DefaultID = "tokyo-night"
 
-// List returns the selectable themes in picker order.
+// List returns the selectable themes in picker order. Each entry's
+// Build is wrapped so the picker (and its live preview) hands out the
+// same contrast-corrected palette ByID does — a theme must never look
+// different depending on which door it came through.
 func List() []Entry {
 	out := make([]Entry, len(registry))
-	copy(out, registry)
+	for i, e := range registry {
+		build := e.Build
+		e.Build = func() Theme { return readable(build()) }
+		out[i] = e
+	}
 	return out
 }
 
 // ByID returns the theme with the given id, or the default plus false
 // when the id is unknown (a stale config.json must never break startup).
+// The palette comes back contrast-corrected: ports keep their upstream
+// character but can't ship a status bar the user can't read.
 func ByID(id string) (Theme, bool) {
 	for _, e := range registry {
 		if e.ID == id {
-			return e.Build(), true
+			return readable(e.Build()), true
 		}
 	}
-	return Default(), false
+	return readable(Default()), false
 }
 
 // themeAyuDark is the Ayu Dark palette, ported from druk.

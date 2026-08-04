@@ -14,13 +14,17 @@ Top-level editor preferences. Optional — without it, every field uses its defa
 
 ```json
 {
-  "icons": "auto"
+  "icons": "auto",
+  "theme": "tokyo-night",
+  "wrap": "on"
 }
 ```
 
 | Key     | Values                            | Default  | What it does |
 | ------- | --------------------------------- | -------- | ------------ |
 | `icons` | `"auto"` / `"on"` / `"off"`       | `"auto"` | Toggles the Nerd Font glyphs in the file tree. `auto` checks whether a Nerd Font is installed (via `fc-list` or by walking `~/Library/Fonts` / `~/.local/share/fonts`) and turns icons on iff one is found. Pick `on` if detection misses your install; pick `off` if the glyphs render as boxes in your terminal. |
+| `theme` | any registry id (`"dracula"`, `"gruvbox-dark"`, `"nord"`, …) | `"tokyo-night"` | The active palette. Written by the `≡` → **Theme…** picker, which is the intended way to change it — pick a theme there and this key updates itself. An unknown id falls back to the default. |
+| `wrap`  | `"on"` / `"off"`                  | `"on"`   | Soft wrap for long lines. Written by `≡` → **Wrap / Unwrap long lines** (`Esc z`). With wrap off, Shift+wheel scrolls sideways. |
 
 The detector can only see whether the OS knows about the font — it can't tell whether your *terminal* is configured to render it. If icons turn on but show as "tofu" boxes, set `"icons": "off"` and either point your terminal at a Nerd Font or live without them.
 
@@ -114,6 +118,10 @@ Commit it to share with your team, or add `.skiff/` to `.gitignore` to keep it p
 
 State, not config. Append-only log of every custom-action invocation. See [Custom actions](/docs/custom-actions/).
 
+## `~/.local/state/skiff/sessions/`
+
+State, not config. One JSON file per project — open tabs with cursor and scroll, expanded folders, sidebar width — keyed by a hash of the project root. Managed by Skiff; delete a file to forget one project, delete the directory to forget them all. An older single `sessions.json` is migrated on first run and renamed to `sessions.json.migrated` rather than deleted.
+
 ## XDG awareness
 
 All paths above respect the XDG environment variables when set:
@@ -125,7 +133,7 @@ All paths above respect the XDG environment variables when set:
 
 This is intentional. Don't ask for it.
 
-- **Theme.** Tokyo Night-inspired palette, baked in. The whole editor is one colorway.
+- **Themes beyond the registry.** 26 palettes ship in the binary and the `≡` → **Theme…** picker switches between them live; there's no way to define a 27th. One colorway per theme, no per-token overrides.
 - **Keymap.** Esc-leader is the keymap. Adding a config file for it would defeat the entire point.
 - **Plugins.** None. Skiff is opinionated — that's the product.
 - **Tab width / line endings.** Detected from the file's own contents on open.

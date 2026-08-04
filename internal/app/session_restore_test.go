@@ -21,12 +21,17 @@ import (
 
 // TestCaptureSessionContents pins what gets remembered: project-
 // relative tab paths with cursor/scroll, the active-tab mapping that
-// skips untitled tabs, expanded folders, and the sidebar.
+// skips untitled tabs, the expanded folders (recorded project-relative
+// like the tab paths, root excluded), and the sidebar geometry.
 func TestCaptureSessionContents(t *testing.T) {
 	root := t.TempDir()
 	p1 := mkFile(t, root, "one.go", "package x\nvar A = 1\n")
 	mkFile(t, root, "sub/two.go", "package sub\n")
 	a := newTestApp(t, root)
+	// Expand a folder before capturing: the open directories are part
+	// of the sidebar state the session promises to bring back, and
+	// nothing else in this fixture would expand one.
+	a.tree.ExpandDirs([]string{"sub"})
 	a.openFile(p1)
 	a.activeTabPtr().Cursor = editor.Position{Line: 1, Col: 4}
 	a.activeTabPtr().ScrollY = 1
@@ -55,8 +60,47 @@ func TestCaptureSessionContents(t *testing.T) {
 	if got.Active != 1 {
 		t.Fatalf("active: got %d, want 1 (untitled skipped)", got.Active)
 	}
+	if got.ActivePath != filepath.Join("sub", "two.go") {
+		t.Fatalf("activePath: got %q", got.ActivePath)
+	}
+	if len(got.Expanded) != 1 || got.Expanded[0] != "sub" {
+		t.Fatalf("expanded: got %v, want [sub]", got.Expanded)
+	}
 	if got.SidebarWidth != 31 || got.SidebarShown {
 		t.Fatalf("sidebar: %+v", got)
+	}
+}
+
+// TestRestoreActiveTabByPath: the active tab is remembered by path, so
+// a vanished earlier file (which shifts every later index) still lands
+// focus on the tab the user left it on.
+func TestRestoreActiveTabByPath(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	mkFile(t, root, "target.go", "l1\n")
+	mkFile(t, root, "other.go", "l1\n")
+	if err := session.Save(root, session.Project{
+		Tabs: []session.TabState{
+			{Path: "gone.go"},
+			{Path: "target.go"},
+			{Path: "other.go"},
+		},
+		Active:       1,
+		ActivePath:   "target.go",
+		SidebarShown: true,
+		SavedAt:      time.Now(),
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	a := newTestApp(t, root)
+	a.restoreSession()
+	if a.tabs.Len() != 2 {
+		t.Fatalf("tabs: got %d, want 2", a.tabs.Len())
+	}
+	tab := a.activeTabPtr()
+	if tab == nil || filepath.Base(tab.Path) != "target.go" {
+		t.Fatalf("active tab: %+v", tab)
 	}
 }
 

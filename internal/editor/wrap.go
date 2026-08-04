@@ -42,6 +42,13 @@ func isWrapSpace(r rune) bool {
 // progress even for pathological widths. Whitespace never triggers a
 // break — a run of spaces or tabs hangs past the right edge (painting
 // clips it) so continuation rows never start with the wrapping space.
+//
+// The walk steps by grapheme cluster, so a break can never land between a
+// base rune and its combining mark, and a two-cell glyph that would
+// straddle the right edge moves down whole rather than being sliced in
+// half. Every returned index is therefore a cluster boundary, which is
+// what lets callers hand a segment's rune subslice to the visual-column
+// helpers as if it were a line of its own.
 func WrapSegments(runes []rune, width int) []int {
 	segs := []int{0}
 	if width <= 0 {
@@ -49,30 +56,34 @@ func WrapSegments(runes []rune, width int) []int {
 	}
 	segStart := 0
 	visualCol := 0
-	lastWS := -1 // index of the last whitespace rune in the current segment
+	// wsEnd is the boundary just past the current segment's last
+	// whitespace, not the whitespace rune's own index: a space can carry a
+	// combining mark, and breaking between the two would strand the mark
+	// at the head of the next row.
+	wsEnd := -1
 	for i := 0; i < len(runes); {
 		r := runes[i]
-		w := RuneVisualWidth(r, visualCol)
+		end, w := ClusterAt(runes, i, visualCol)
 		if visualCol+w > width && i > segStart && !isWrapSpace(r) {
 			brk := i
 			// Breaking here would split a word if the previous rune is
 			// also part of it — back up to just after the segment's last
 			// whitespace when that gives a word-boundary break instead.
-			if !isWrapSpace(runes[i-1]) && lastWS >= segStart && lastWS+1 > segStart {
-				brk = lastWS + 1
+			if !isWrapSpace(runes[i-1]) && wsEnd > segStart {
+				brk = wsEnd
 			}
 			segs = append(segs, brk)
 			segStart = brk
 			visualCol = 0
-			lastWS = -1
+			wsEnd = -1
 			i = brk // re-measure the moved-down runes with fresh tab stops
 			continue
 		}
 		visualCol += w
 		if isWrapSpace(r) {
-			lastWS = i
+			wsEnd = end
 		}
-		i++
+		i = end
 	}
 	return segs
 }
@@ -377,27 +388,31 @@ func (t *Tab) renderWrappedBody(scr tcell.Screen, th theme.Theme, x, y, w, h int
 			}
 
 			start, end := wrapSegBounds(segs, seg, len(runes))
+			segRunes := runes[start:end]
 			visualCol := 0 // segment-local; tab stops reset per row
-			for j := start; j < end; j++ {
-				r := runes[j]
-				width := RuneVisualWidth(r, visualCol)
-				st := t.cellStyle(th, styles, line, j, lineBg, hasSel, selStart, selEnd)
-				glyph := r
-				if r == '\t' {
-					glyph = ' '
+			for j := 0; j < len(segRunes); {
+				next, width := ClusterAt(segRunes, j, visualCol)
+				st := t.cellStyle(th, styles, line, start+j, lineBg, hasSel, selStart, selEnd)
+				glyph, comb := segRunes[j], segRunes[j+1:next]
+				if glyph == '\t' {
+					glyph, comb = ' ', nil
 				}
 				for cell := 0; cell < width; cell++ {
 					sc := visualCol + cell
 					if sc >= contentW {
 						break
 					}
-					ch := glyph
+					// The glyph (with any combining marks) goes in the
+					// cluster's first cell; the rest are blanks that carry
+					// the row background under a wide glyph's second half.
 					if cell > 0 {
-						ch = ' '
+						scr.SetContent(contentX+sc, cy, ' ', nil, st)
+						continue
 					}
-					scr.SetContent(contentX+sc, cy, ch, nil, st)
+					scr.SetContent(contentX+sc, cy, glyph, comb, st)
 				}
 				visualCol += width
+				j = next
 			}
 
 			if isCursorLine && WrapRowOfCol(segs, t.Cursor.Col) == seg {

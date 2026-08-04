@@ -8,7 +8,15 @@
 BINARY := skiff
 SITE_DIR := website
 
-.PHONY: run build install build-linux test test-short coverage tidy clean help \
+# Shipped-binary build flags, kept in one place so `make build`,
+# `make build-linux`, and .goreleaser.yml cannot drift: a binary you build
+# locally is the same shape as the one users download. CGO stays off
+# (the whole point is one static binary) and the symbol table is stripped.
+# Note this is NOT exported globally — `go test -race` needs cgo.
+GO_LDFLAGS := -s -w
+GO_BUILD := CGO_ENABLED=0 go build -ldflags='$(GO_LDFLAGS)'
+
+.PHONY: run build install build-linux test test-short lint coverage tidy clean help \
         site-install site-dev site-build site-clean
 
 # help is the default target so `make` with no args prints what's available.
@@ -20,7 +28,8 @@ help:
 	@echo "  make build        Build the binary into ./bin/$(BINARY)."
 	@echo "  make install      Install ./bin/$(BINARY) into /usr/local/bin."
 	@echo "  make build-linux  Cross-compile a static linux/amd64 binary."
-	@echo "  make test         Run the full test suite with -race."
+	@echo "  make test         Run the full suite with -race."
+	@echo "  make lint         gofmt + go vet + staticcheck, same as CI."
 	@echo "  make test-short   Skip slow tests (-short) — quick iteration loop."
 	@echo "  make coverage     Generate coverage.out + an HTML report at coverage.html."
 	@echo "  make tidy         Run 'go mod tidy'."
@@ -37,10 +46,11 @@ help:
 run:
 	go run .
 
-# build produces a single binary at ./bin/$(BINARY).
+# build produces a single binary at ./bin/$(BINARY), using the exact flags
+# the release ships with (see GO_BUILD above).
 build:
 	mkdir -p bin
-	go build -o bin/$(BINARY) .
+	$(GO_BUILD) -o bin/$(BINARY) .
 
 # install copies the binary into /usr/local/bin so you can launch it as `skiff`.
 install: build
@@ -51,7 +61,7 @@ install: build
 # tmux/zellij — no runtime, no libc, just one file.
 build-linux:
 	mkdir -p bin
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags='-s -w' -o bin/$(BINARY)-linux-amd64 .
+	GOOS=linux GOARCH=amd64 $(GO_BUILD) -o bin/$(BINARY)-linux-amd64 .
 
 # test runs the full suite with the race detector. The same command
 # CI runs (.github/workflows/test.yml) — keep them in lockstep so a
@@ -63,6 +73,18 @@ test:
 # slow with -short, no race detector. Use this while writing tests.
 test-short:
 	go test -short ./...
+
+# lint runs the same three gates CI enforces, in the same order, so a
+# clean local run means a clean pipeline. STATICCHECK_VERSION is pinned to
+# the tag .github/workflows/test.yml installs — bump both together.
+STATICCHECK_VERSION := v0.6.1
+lint:
+	@unformatted="$$(gofmt -l . | grep -v '^website/' || true)"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "not gofmt-clean:"; echo "$$unformatted"; exit 1; \
+	fi
+	go vet ./...
+	go run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) ./...
 
 # coverage produces a coverage profile across every package and a
 # rendered HTML report you can open in a browser.

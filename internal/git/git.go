@@ -7,15 +7,17 @@
 
 // Package git owns skiff's git process boundary: every git invocation
 // in the editor goes through one Repo handle, so environment hardening
-// (no credential prompts, no editor spawns) and read timeouts exist
-// exactly once instead of per call site. The Runner seam has two
-// adapters — the exec-backed runner and the in-memory Fake — so states
-// real git can't produce on demand (credential hangs, scripted
+// (no credential prompts, no editor spawns), argv hygiene (SafeRef) and
+// timeouts exist exactly once instead of per call site. The Runner seam
+// has two adapters — the exec-backed runner and the in-memory Fake — so
+// states real git can't produce on demand (credential hangs, scripted
 // failures) are testable.
 package git
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -27,14 +29,31 @@ import (
 // freezing the editor's refresh goroutine forever.
 const readTimeout = 10 * time.Second
 
+// writeTimeout bounds every write command. It is deliberately generous:
+// a push of a big repo over a slow link must be allowed to finish, and
+// a false timeout mid-push is worse than a slow one. It exists at all
+// because GIT_TERMINAL_PROMPT=0 only silences git's *own* prompt — a
+// wedged credential helper or askpass binary blocks on its own stdin
+// forever, and since writes run one at a time behind a single busy
+// gate, that one hang would retire the editor's git verbs for the rest
+// of the session.
+const writeTimeout = 5 * time.Minute
+
+// ErrGitMissing marks the one failure that isn't about this repository:
+// there is no git binary on PATH at all. Every other error means "git
+// ran and said no"; this one means we never got to ask, and a caller
+// that wants to explain the difference (no badges anywhere, forever,
+// on every project) can test for it with errors.Is.
+var ErrGitMissing = errors.New("git executable not found in PATH")
+
 // Runner executes one git invocation in a working directory. Output
 // returns stdout only (reads); Combined returns interleaved
-// stdout+stderr with no timeout (writes — a slow push must be allowed
-// to finish, and GIT_TERMINAL_PROMPT=0 already prevents hangs on
-// credential prompts).
+// stdout+stderr for the error report (writes). Both take their deadline
+// from the caller so the Repo owns the policy in one place and tests
+// can shorten it.
 type Runner interface {
 	Output(root string, timeout time.Duration, args ...string) ([]byte, error)
-	Combined(root string, args ...string) ([]byte, error)
+	Combined(root string, timeout time.Duration, args ...string) ([]byte, error)
 }
 
 // execRunner is the production adapter: real git with the hardened
@@ -49,47 +68,65 @@ func hardenedEnv() []string {
 	return append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_EDITOR=true")
 }
 
-// Output runs a read command with the timeout applied. WaitDelay
-// matters: killing git on timeout can orphan a child (a smudge filter,
-// an aliased shell) that keeps the stdout pipe open — without the
-// delay, Output would wait on that pipe and the timeout would be
-// decorative.
-func (execRunner) Output(root string, timeout time.Duration, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+// command builds the one shape of git process this package ever spawns:
+// bound to ctx, hardened env, WaitDelay set. WaitDelay matters — killing
+// git on timeout can orphan a child (a smudge filter, an aliased shell)
+// that keeps the output pipe open, and without the delay the wait would
+// block on that pipe and the timeout would be decorative.
+func command(ctx context.Context, root string, args []string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", root}, args...)...)
 	cmd.Env = hardenedEnv()
 	cmd.WaitDelay = time.Second
-	return cmd.Output()
+	return cmd
 }
 
-// Combined runs a write command without a timeout, capturing everything
-// git says for the error report.
-func (execRunner) Combined(root string, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
-	cmd.Env = hardenedEnv()
-	return cmd.CombinedOutput()
+// Output runs a read command with the read deadline applied.
+func (execRunner) Output(root string, timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out, err := command(ctx, root, args).Output()
+	return out, classify(err)
+}
+
+// Combined runs a write command with the (generous) write deadline
+// applied, capturing everything git says for the error report.
+func (execRunner) Combined(root string, timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out, err := command(ctx, root, args).CombinedOutput()
+	return out, classify(err)
+}
+
+// classify maps exec's "no such binary" onto ErrGitMissing so callers
+// can tell a machine without git from a repository that said no.
+// Everything else passes through untouched.
+func classify(err error) error {
+	if err != nil && errors.Is(err, exec.ErrNotFound) {
+		return fmt.Errorf("%w: %v", ErrGitMissing, err)
+	}
+	return err
 }
 
 // Repo is the handle to one working tree's git. The zero value is not
 // usable — construct with Open (production) or OpenWith (tests).
 type Repo struct {
-	root    string
-	run     Runner
-	timeout time.Duration
+	root         string
+	run          Runner
+	timeout      time.Duration
+	writeTimeout time.Duration
 }
 
 // Open returns a Repo backed by real git. It does not verify that root
 // is a repository — commands against a non-repo fail per call, exactly
 // as the raw invocations did.
 func Open(root string) *Repo {
-	return &Repo{root: root, run: execRunner{}, timeout: readTimeout}
+	return &Repo{root: root, run: execRunner{}, timeout: readTimeout, writeTimeout: writeTimeout}
 }
 
 // OpenWith returns a Repo backed by a custom Runner — the injection
 // point for the Fake.
 func OpenWith(root string, r Runner) *Repo {
-	return &Repo{root: root, run: r, timeout: readTimeout}
+	return &Repo{root: root, run: r, timeout: readTimeout, writeTimeout: writeTimeout}
 }
 
 // Root returns the working-tree path the handle is bound to.
@@ -107,7 +144,7 @@ func (r *Repo) Output(args ...string) ([]byte, error) {
 func (r *Repo) RunSequence(cmds [][]string) (string, error) {
 	var out strings.Builder
 	for _, args := range cmds {
-		b, err := r.run.Combined(r.root, args...)
+		b, err := r.run.Combined(r.root, r.writeTimeout, args...)
 		out.Write(b)
 		if err != nil {
 			return out.String(), err

@@ -63,6 +63,140 @@ func TestNewTab_ExistingFile(t *testing.T) {
 	}
 }
 
+// TestTab_LineEndingRoundTrip is the CRLF regression. Opening a
+// Windows-authored file and saving it back untouched must produce the
+// same bytes: before the ending was tracked, every line kept its \r in
+// the buffer and the save wrote it back inside the line, so a one-line
+// edit turned the whole file into a diff.
+func TestTab_LineEndingRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string // bytes on disk after an untouched save
+	}{
+		{"crlf", "alpha\r\nbeta\r\n", "alpha\r\nbeta\r\n"},
+		{"lf", "alpha\nbeta\n", "alpha\nbeta\n"},
+		{"crlf without trailing newline", "alpha\r\nbeta", "alpha\r\nbeta"},
+		{"single line no newline", "alpha", "alpha"},
+		// A mixed file normalises to whichever ending dominates — the
+		// same call every other editor makes.
+		{"mostly crlf", "a\r\nb\r\nc\nd\r\n", "a\r\nb\r\nc\r\nd\r\n"},
+		{"mostly lf", "a\nb\nc\r\nd\n", "a\nb\nc\nd\n"},
+		{"tie favours lf", "a\r\nb\n", "a\nb\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "f.txt")
+			if err := os.WriteFile(path, []byte(tc.src), 0644); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			tab, err := NewTab(path)
+			if err != nil {
+				t.Fatalf("NewTab: %v", err)
+			}
+			for i, ln := range tab.Buffer.Lines {
+				if strings.Contains(ln, "\r") {
+					t.Fatalf("line %d kept a carriage return: %q", i, ln)
+				}
+			}
+			if err := tab.Save(); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read back: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Fatalf("round trip = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTab_SaveKeepsCRLFAfterEdit proves the ending survives real editing
+// and not just an untouched save — the point of tracking it is that
+// changing one line of a CRLF file leaves every other line alone.
+func TestTab_SaveKeepsCRLFAfterEdit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f.txt")
+	if err := os.WriteFile(path, []byte("one\r\ntwo\r\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.MoveCursorTo(Position{Line: 1, Col: 3}, false)
+	tab.InsertString("!")
+	if err := tab.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != "one\r\ntwo!\r\n" {
+		t.Fatalf("after edit = %q, want CRLF preserved", got)
+	}
+}
+
+// TestTab_ReloadRedetectsLineEnding covers a file whose convention
+// changed on disk under an open tab. Reload takes the disk version as
+// the new truth, so the recorded ending has to move with it or the next
+// save undoes whatever converted the file.
+func TestTab_ReloadRedetectsLineEnding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f.txt")
+	if err := os.WriteFile(path, []byte("one\ntwo\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	if tab.LineEnding != LineEndingLF {
+		t.Fatalf("LF file detected as %v", tab.LineEnding)
+	}
+	if err := os.WriteFile(path, []byte("one\r\ntwo\r\n"), 0644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if err := tab.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if tab.LineEnding != LineEndingCRLF {
+		t.Fatalf("after reload ending = %v, want CRLF", tab.LineEnding)
+	}
+}
+
+// TestDetectLineEnding exercises the dominance counter directly,
+// including the tie that has to fall to LF (what the editor writes for a
+// brand-new file) and the no-newline case.
+func TestDetectLineEnding(t *testing.T) {
+	cases := []struct {
+		src  string
+		want LineEnding
+	}{
+		{"", LineEndingLF},
+		{"no newline at all", LineEndingLF},
+		{"a\nb\n", LineEndingLF},
+		{"a\r\nb\r\n", LineEndingCRLF},
+		{"a\r\nb\nc\r\n", LineEndingCRLF},
+		{"a\r\nb\n", LineEndingLF},
+		{"\n", LineEndingLF},
+		{"\r\n", LineEndingCRLF},
+		{"lone\rcarriage", LineEndingLF},
+	}
+	for _, tc := range cases {
+		if got := detectLineEnding([]byte(tc.src)); got != tc.want {
+			t.Fatalf("detectLineEnding(%q) = %v, want %v", tc.src, got, tc.want)
+		}
+	}
+	if got := LineEndingLF.Newline(); got != "\n" {
+		t.Fatalf("LF newline = %q", got)
+	}
+	if got := LineEndingCRLF.Newline(); got != "\r\n" {
+		t.Fatalf("CRLF newline = %q", got)
+	}
+}
+
 // TestNewTab_MissingFile creates a tab for a nonexistent path with an empty
 // buffer — matches editor convention of "open" creating on first save.
 func TestNewTab_MissingFile(t *testing.T) {
@@ -701,19 +835,36 @@ func TestTab_Render_DrawsLineNumbersAndContent(t *testing.T) {
 	}
 }
 
-// TestTab_Render_HighlightsSelection draws a selection and confirms Render
-// completes cleanly with mid-line cursor visibility — selection bg is theme
-// dependent so we just ensure no panic and the cursor lands at col 5.
+// TestTab_Render_HighlightsSelection pins that the selection is actually
+// painted, not merely survived: every cell inside the selected span
+// carries the theme's Selection background and the first cell outside it
+// does not. The cursor's landing column is checked alongside because the
+// two are computed from the same visual-column walk.
 func TestTab_Render_HighlightsSelection(t *testing.T) {
 	scr := newSimScreen(t, 40, 10)
 	defer scr.Fini()
+	th := theme.Default()
 
 	tab, _ := NewTab("")
 	tab.Buffer = NewBuffer("hello world")
 	tab.Anchor = Position{Line: 0, Col: 0}
 	tab.Cursor = Position{Line: 0, Col: 5}
 
-	tab.Render(scr, theme.Default(), 0, 0, 40, 10)
+	tab.Render(scr, th, 0, 0, 40, 10)
+	scr.Show()
+
+	cells, w, _ := scr.GetContents()
+	contentX := gutterWidthFor(tab.Buffer.LineCount()) + 1
+	for off := range 5 {
+		_, bg, _ := cells[0*w+contentX+off].Style.Decompose()
+		if bg != th.Selection {
+			t.Errorf("cell %d of the selection has bg %v, want Selection %v", off, bg, th.Selection)
+		}
+	}
+	if _, bg, _ := cells[0*w+contentX+5].Style.Decompose(); bg == th.Selection {
+		t.Error("the space after the selection was painted as selected")
+	}
+
 	cx, _, vis := scr.GetCursor()
 	if !vis {
 		t.Fatal("cursor hidden")
@@ -805,6 +956,222 @@ func TestTab_HitTest_ClampsColumnAtLineEnd(t *testing.T) {
 	}
 	if pos.Col != 2 {
 		t.Fatalf("col = %d, want 2", pos.Col)
+	}
+}
+
+// TestTab_HitTest_WideGlyphs is the click half of wide-character support:
+// a cell offset has to be converted through cell widths, not rune counts,
+// or every click past a CJK run lands one rune left per ideograph. Both
+// cells of a glyph belong to it, so clicking either half selects it.
+func TestTab_HitTest_WideGlyphs(t *testing.T) {
+	tab, _ := NewTab("")
+	tab.Buffer = NewBuffer("日本x")
+	contentX := defaultGutterWidth + 1
+
+	cases := []struct{ cell, want int }{
+		{0, 0}, // left half of 日
+		{1, 0}, // right half of 日 snaps back onto it
+		{2, 1}, // left half of 本
+		{3, 1},
+		{4, 2}, // the 'x' sits at cell 4, not cell 2
+		{5, 3}, // past the end
+	}
+	for _, c := range cases {
+		pos, ok := tab.HitTest(contentX+c.cell, 0, 40, 10)
+		if !ok {
+			t.Fatalf("cell %d: expected ok", c.cell)
+		}
+		if pos.Col != c.want {
+			t.Errorf("click at cell %d = col %d, want %d", c.cell, pos.Col, c.want)
+		}
+	}
+}
+
+// TestTab_Render_WideGlyphOwnsTwoCells checks the paint side. A width-2
+// glyph goes in the first of its two cells and the second is left as a
+// blank the screen owns — tcell reports it with no runes at all — so the
+// next character starts two cells along and the hardware cursor lands on
+// the same grid the text was painted into.
+func TestTab_Render_WideGlyphOwnsTwoCells(t *testing.T) {
+	scr := newSimScreen(t, 40, 4)
+	defer scr.Fini()
+
+	tab, _ := NewTab("")
+	tab.Buffer = NewBuffer("日本x")
+	tab.Cursor = Position{Line: 0, Col: 2} // after both ideographs
+	tab.Anchor = tab.Cursor
+
+	tab.Render(scr, theme.Default(), 0, 0, 40, 4)
+	scr.Show()
+
+	cells, _, _ := scr.GetContents()
+	contentX := gutterWidthFor(tab.Buffer.LineCount()) + 1
+	for _, want := range []struct {
+		off int
+		r   rune
+	}{{0, '日'}, {2, '本'}, {4, 'x'}} {
+		got := cells[contentX+want.off].Runes
+		if len(got) == 0 || got[0] != want.r {
+			t.Errorf("cell %d holds %q, want %q", want.off, string(got), string(want.r))
+		}
+	}
+	for _, off := range []int{1, 3} {
+		if got := cells[contentX+off].Runes; len(got) != 0 {
+			t.Errorf("cell %d should be the second half of a wide glyph, got %q", off, string(got))
+		}
+	}
+
+	cx, _, vis := scr.GetCursor()
+	if !vis {
+		t.Fatal("cursor hidden")
+	}
+	if cx != contentX+4 {
+		t.Errorf("cursor x = %d, want %d (two ideographs = four cells)", cx, contentX+4)
+	}
+}
+
+// TestTab_Render_CombiningMarkRidesItsBase pins the other half of the
+// cluster paint: a mark is not given a cell of its own (tcell would render
+// it as a blank, dropping the accent) but travels as a combining rune in
+// its base's cell, and the character after it starts one cell along.
+func TestTab_Render_CombiningMarkRidesItsBase(t *testing.T) {
+	scr := newSimScreen(t, 40, 4)
+	defer scr.Fini()
+
+	tab, _ := NewTab("")
+	tab.Buffer = NewBuffer("e\u0301x")
+
+	tab.Render(scr, theme.Default(), 0, 0, 40, 4)
+	scr.Show()
+
+	cells, _, _ := scr.GetContents()
+	contentX := gutterWidthFor(tab.Buffer.LineCount()) + 1
+	if got := cells[contentX].Runes; len(got) != 2 || got[0] != 'e' || got[1] != '\u0301' {
+		t.Errorf("first cell holds %q, want the e and its combining acute", string(got))
+	}
+	if got := cells[contentX+1].Runes; len(got) == 0 || got[0] != 'x' {
+		t.Errorf("second cell holds %q, want the x one cell along", string(got))
+	}
+}
+
+// TestTab_Render_PanKeepsWideGlyphsWhole pins horizontal panning over
+// wide text: the pan starts at a cluster boundary, so the leftmost column
+// can never show the tail half of a glyph whose head scrolled off. Cell 0
+// carries the '‹' overflow hint (it always covers the first content cell,
+// wide or not); everything after it must be the untouched remainder of the
+// line at its true cell offsets.
+func TestTab_Render_PanKeepsWideGlyphsWhole(t *testing.T) {
+	scr := newSimScreen(t, 20, 3)
+	defer scr.Fini()
+
+	tab, _ := NewTab("")
+	tab.Buffer = NewBuffer("日本語x")
+	tab.ScrollX = 1 // pan 日 off the left edge
+	tab.cursorMoved = false
+
+	tab.Render(scr, theme.Default(), 0, 0, 20, 3)
+	scr.Show()
+
+	cells, _, _ := scr.GetContents()
+	contentX := gutterWidthFor(tab.Buffer.LineCount()) + 1
+	want := []string{"‹", " ", "語", "", "x"}
+	for off, w := range want {
+		got := string(cells[contentX+off].Runes)
+		if got != w {
+			t.Errorf("cell %d holds %q, want %q", off, got, w)
+		}
+	}
+}
+
+// TestTab_Backspace_RemovesWholeCluster is the deletion contract: one
+// press removes one character as a person counts them, never a fragment
+// that leaves a combining mark orphaned onto the letter in front of it.
+func TestTab_Backspace_RemovesWholeCluster(t *testing.T) {
+	cases := []struct{ name, text, want string }{
+		{"emoji wearing a combining mark", "x😀\u0301", "x"},
+		{"letter with a combining acute", "xe\u0301", "x"},
+		{"zwj family", "x👨\u200d👩\u200d👦", "x"},
+		{"regional indicator pair", "x🇯🇵", "x"},
+		{"plain ascii still deletes one rune", "xy", "x"},
+	}
+	for _, c := range cases {
+		tab := &Tab{Buffer: NewBuffer(c.text)}
+		tab.Cursor = tab.Buffer.EndPos()
+		tab.Anchor = tab.Cursor
+		tab.Backspace()
+		if got := tab.Buffer.String(); got != c.want {
+			t.Errorf("%s: buffer %q, want %q", c.name, got, c.want)
+		}
+		if tab.Cursor.Col != len([]rune(c.want)) {
+			t.Errorf("%s: cursor col %d, want %d", c.name, tab.Cursor.Col, len([]rune(c.want)))
+		}
+	}
+}
+
+// TestTab_Delete_RemovesWholeCluster mirrors Backspace forwards: a delete
+// may not behead a character and leave its marks behind.
+func TestTab_Delete_RemovesWholeCluster(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("e\u0301😀x")}
+	tab.Cursor = Position{Line: 0, Col: 0}
+	tab.Anchor = tab.Cursor
+
+	tab.Delete()
+	if got := tab.Buffer.String(); got != "😀x" {
+		t.Fatalf("after deleting the é cluster: %q", got)
+	}
+	tab.Delete()
+	if got := tab.Buffer.String(); got != "x" {
+		t.Fatalf("after deleting the emoji: %q", got)
+	}
+}
+
+// TestTab_MoveCursor_StepsByCluster walks an arrow key across text whose
+// characters are several runes long. Each press must cross exactly one
+// character in each direction, and the two directions must retrace the
+// same stops.
+func TestTab_MoveCursor_StepsByCluster(t *testing.T) {
+	// é (runes 0-1), 日 (2), family (3-7), z (8) — nine runes, four
+	// characters, five caret stops.
+	tab := &Tab{Buffer: NewBuffer("e\u0301日👨\u200d👩\u200d👦z")}
+	tab.Cursor = Position{Line: 0, Col: 0}
+	tab.Anchor = tab.Cursor
+
+	for _, want := range []int{2, 3, 8, 9, 9} {
+		tab.MoveCursor(0, 1, false)
+		if tab.Cursor.Col != want {
+			t.Fatalf("right landed on col %d, want %d", tab.Cursor.Col, want)
+		}
+	}
+	for _, want := range []int{8, 3, 2, 0, 0} {
+		tab.MoveCursor(0, -1, false)
+		if tab.Cursor.Col != want {
+			t.Fatalf("left landed on col %d, want %d", tab.Cursor.Col, want)
+		}
+	}
+}
+
+// TestTab_EnsureVisible_PansByCells pins the horizontal scroll fix: with
+// wide text, "the caret is off the right edge" is a question about cells.
+// Counting runes instead under-scrolls and hides the caret entirely — a
+// cursor the renderer then refuses to show.
+func TestTab_EnsureVisible_PansByCells(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer(strings.Repeat("日", 40))}
+	tab.Cursor = Position{Line: 0, Col: 30}
+	tab.Anchor = tab.Cursor
+
+	const viewW = 26 // gutter 6 + 1 → 19 content cells
+	tab.EnsureVisible(viewW, 10)
+
+	runes := tab.Buffer.LineRunes(0)
+	contentW := viewW - gutterWidthFor(tab.Buffer.LineCount()) - 1
+	cursorVisual := LineVisualCol(runes, tab.Cursor.Col)
+	scrollVisual := LineVisualCol(runes, tab.ScrollX)
+	if cursorVisual < scrollVisual || cursorVisual >= scrollVisual+contentW {
+		t.Fatalf("caret at cell %d is outside the panned window [%d,%d)",
+			cursorVisual, scrollVisual, scrollVisual+contentW)
+	}
+	if got := ClusterStart(runes, tab.ScrollX); got != tab.ScrollX {
+		t.Errorf("ScrollX %d is inside a cluster starting at %d", tab.ScrollX, got)
 	}
 }
 
@@ -1384,5 +1751,289 @@ func TestNewTab_KeepsMultibyteTextOpenable(t *testing.T) {
 	}
 	if len(tab.Buffer.Lines) < 2 {
 		t.Fatalf("buffer looks wrong: %d lines", len(tab.Buffer.Lines))
+	}
+}
+
+// TestNewTab_RefusesOversizedFile pins the open size cap. The file is a
+// sparse 33 MiB of NUL bytes, which means the assertion also pins the
+// ORDER of the two gates: had NewTab read the file before checking its
+// size, looksBinary would have won and the error would be
+// ErrBinaryFile. Getting ErrFileTooLarge back is proof the Stat guard
+// fired first and the 33 MiB never entered a buffer. The message must
+// name both sizes — the app surfaces it verbatim as a status flash, and
+// "too large" with no number leaves the user guessing.
+func TestNewTab_RefusesOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "huge.log")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Sparse: no bytes are actually written, so the test costs an inode.
+	if err := f.Truncate(maxOpenBytes + 1<<20); err != nil {
+		f.Close()
+		t.Fatalf("truncate: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	tab, err := NewTab(path)
+	if !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("want ErrFileTooLarge, got %v", err)
+	}
+	if errors.Is(err, ErrBinaryFile) {
+		t.Fatal("size gate must run before the binary probe, i.e. before the read")
+	}
+	if tab != nil {
+		t.Fatal("a refused open must not hand back a tab")
+	}
+	for _, want := range []string{"huge.log", "33.0 MiB", "32.0 MiB"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q should name %q", err, want)
+		}
+	}
+}
+
+// TestNewTab_OpensFileUnderCap guards the other side of the gate: a
+// normal file is nowhere near the cap and must still open with its
+// content and mtime intact — the Stat hoisted above the read is now the
+// only source of Mtime, so a regression there would go unnoticed by the
+// size assertions alone.
+func TestNewTab_OpensFileUnderCap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "small.txt")
+	if err := os.WriteFile(path, []byte("one\ntwo\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	if got := tab.Buffer.Lines[0]; got != "one" {
+		t.Fatalf("first line = %q, want \"one\"", got)
+	}
+	if !tab.Mtime.Equal(info.ModTime()) {
+		t.Fatalf("mtime = %v, want %v", tab.Mtime, info.ModTime())
+	}
+}
+
+// TestMibString pins the size rendering the refusal message depends on:
+// one decimal place, MiB unit, and no rounding surprise at the cap
+// itself (a "32.0 MiB (limit 32.0 MiB)" message would read as a bug).
+func TestMibString(t *testing.T) {
+	cases := []struct {
+		in   int64
+		want string
+	}{
+		{0, "0.0 MiB"},
+		{maxOpenBytes, "32.0 MiB"},
+		{maxOpenBytes + 1<<19, "32.5 MiB"},
+		{512 << 20, "512.0 MiB"},
+	}
+	for _, c := range cases {
+		if got := mibString(c.in); got != c.want {
+			t.Fatalf("mibString(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// newIndentTab writes content to a real file and opens it, so IndentUnit
+// comes from DetectIndent rather than a hand-set field — the point of the
+// auto-indent tests is that Enter follows the FILE's convention.
+func newIndentTab(t *testing.T, name, content string) *Tab {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	return tab
+}
+
+// TestTab_InsertNewline_FollowsDetectedIndentStyle is the headline
+// behavior: Enter carries the current line's indentation onto the new
+// line, in the characters the file itself uses. A tab-indented Go file
+// must never gain spaces, and a space-indented file must never gain tabs.
+func TestTab_InsertNewline_FollowsDetectedIndentStyle(t *testing.T) {
+	tabbed := newIndentTab(t, "main.go", "func f() {\n\tx := 1\n}\n")
+	if tabbed.IndentUnit != "\t" {
+		t.Fatalf("precondition: IndentUnit = %q, want a tab", tabbed.IndentUnit)
+	}
+	tabbed.Cursor = Position{Line: 1, Col: 7} // end of "\tx := 1"
+	tabbed.Anchor = tabbed.Cursor
+	tabbed.InsertNewline()
+	if got := tabbed.Buffer.Lines[2]; got != "\t" {
+		t.Fatalf("tab file: new line = %q, want %q", got, "\t")
+	}
+	if want := (Position{Line: 2, Col: 1}); tabbed.Cursor != want {
+		t.Fatalf("tab file: cursor = %v, want %v", tabbed.Cursor, want)
+	}
+
+	spaced := newIndentTab(t, "app.js", "function f() {\n  let x = 1;\n}\n")
+	if spaced.IndentUnit != "  " {
+		t.Fatalf("precondition: IndentUnit = %q, want two spaces", spaced.IndentUnit)
+	}
+	spaced.Cursor = Position{Line: 1, Col: 12} // end of "  let x = 1;"
+	spaced.Anchor = spaced.Cursor
+	spaced.InsertNewline()
+	if got := spaced.Buffer.Lines[2]; got != "  " {
+		t.Fatalf("space file: new line = %q, want two spaces", got)
+	}
+}
+
+// TestTab_InsertNewline_AddsLevelAfterOpener checks the extra level a
+// block opener earns, end to end and in the file's own unit.
+func TestTab_InsertNewline_AddsLevelAfterOpener(t *testing.T) {
+	tab := newIndentTab(t, "main.go", "func f() {\n\tif x {\n\t}\n}\n")
+	tab.Cursor = Position{Line: 1, Col: 7} // just after "\tif x {"
+	tab.Anchor = tab.Cursor
+	tab.InsertNewline()
+	if got := tab.Buffer.Lines[2]; got != "\t\t" {
+		t.Fatalf("after '{': new line = %q, want two tabs", got)
+	}
+
+	py := newIndentTab(t, "s.py", "def f():\n    if x:\n        pass\n")
+	py.Cursor = Position{Line: 1, Col: 9} // just after "    if x:"
+	py.Anchor = py.Cursor
+	py.InsertNewline()
+	if got := py.Buffer.Lines[2]; got != "        " {
+		t.Fatalf("after ':': new line = %q, want eight spaces", got)
+	}
+}
+
+// TestTab_InsertNewline_IsOneUndoStep pins the undo contract: one Enter is
+// one step, whether or not it carried an indent, and whether or not it
+// replaced a selection. Two entries would strand the user on a
+// half-indented line after a single Undo.
+func TestTab_InsertNewline_IsOneUndoStep(t *testing.T) {
+	tab := newIndentTab(t, "main.go", "func f() {\n\tx := 1\n}\n")
+	before := tab.Buffer.String()
+	depth := len(tab.undoStack)
+
+	tab.Cursor = Position{Line: 1, Col: 7}
+	tab.Anchor = tab.Cursor
+	tab.InsertNewline()
+	if got := len(tab.undoStack) - depth; got != 1 {
+		t.Fatalf("plain Enter pushed %d undo entries, want 1", got)
+	}
+	if !tab.Undo() || tab.Buffer.String() != before {
+		t.Fatalf("one Undo did not restore the buffer:\n%q", tab.Buffer.String())
+	}
+
+	// With a selection: DeleteSelection's step is the only one recorded.
+	depth = len(tab.undoStack)
+	tab.Anchor = Position{Line: 1, Col: 1}
+	tab.Cursor = Position{Line: 1, Col: 6}
+	tab.InsertNewline()
+	if got := len(tab.undoStack) - depth; got != 1 {
+		t.Fatalf("Enter over a selection pushed %d undo entries, want 1", got)
+	}
+	if !tab.Undo() || tab.Buffer.String() != before {
+		t.Fatalf("one Undo after a selection-replacing Enter left:\n%q", tab.Buffer.String())
+	}
+}
+
+// TestTab_InsertNewline_UsesSelectionStartIndent covers the case where the
+// caret is not where the split lands: with a selection, the new line
+// inherits the indentation of the line the selection STARTS on, which is
+// the line that survives the delete.
+func TestTab_InsertNewline_UsesSelectionStartIndent(t *testing.T) {
+	tab := newIndentTab(t, "main.go", "\t\talpha\nbeta\n")
+	tab.Anchor = Position{Line: 0, Col: 6} // inside "\t\talpha"
+	tab.Cursor = Position{Line: 1, Col: 2} // inside "beta"
+	tab.InsertNewline()
+
+	if got := tab.Buffer.Lines[0]; got != "\t\talph" {
+		t.Fatalf("line 0 = %q", got)
+	}
+	if got := tab.Buffer.Lines[1]; got != "\t\tta" {
+		t.Fatalf("line 1 = %q, want the selection-start indent plus the tail", got)
+	}
+}
+
+// TestTab_InsertNewline_SplitInsideIndent keeps a mid-indentation Enter
+// from shifting the code: the text that moves down keeps its own leading
+// whitespace, and the new line only inherits what was actually behind the
+// caret, so the visible column of the code is unchanged.
+func TestTab_InsertNewline_SplitInsideIndent(t *testing.T) {
+	tab := newIndentTab(t, "app.js", "        code();\n")
+	tab.Cursor = Position{Line: 0, Col: 2}
+	tab.Anchor = tab.Cursor
+	tab.InsertNewline()
+
+	if got := tab.Buffer.Lines[0]; got != "  " {
+		t.Fatalf("line 0 = %q", got)
+	}
+	if got := tab.Buffer.Lines[1]; got != "        code();" {
+		t.Fatalf("line 1 = %q — the code moved column", got)
+	}
+}
+
+// TestTab_InsertNewline_NeverInsertsCR guards the CRLF round trip: buffer
+// lines carry no terminator, so an Enter in a CRLF file must add "\n" only
+// and let Save re-join with the recorded ending.
+func TestTab_InsertNewline_NeverInsertsCR(t *testing.T) {
+	tab := newIndentTab(t, "win.txt", "  alpha\r\n  beta\r\n")
+	if tab.LineEnding != LineEndingCRLF {
+		t.Fatalf("precondition: LineEnding = %v, want CRLF", tab.LineEnding)
+	}
+	tab.Cursor = Position{Line: 0, Col: 7}
+	tab.Anchor = tab.Cursor
+	tab.InsertNewline()
+	for i, line := range tab.Buffer.Lines {
+		if strings.ContainsRune(line, '\r') {
+			t.Fatalf("line %d picked up a CR: %q", i, line)
+		}
+	}
+}
+
+// TestTab_InsertNewline_IgnoresImageTabs keeps Enter from mutating a
+// read-only image preview.
+func TestTab_InsertNewline_IgnoresImageTabs(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("x"), Mode: imageMode}
+	tab.InsertNewline()
+	if tab.Buffer.LineCount() != 1 {
+		t.Fatalf("image tab gained a line: %q", tab.Buffer.Lines)
+	}
+}
+
+// TestTab_InsertNewline_UnderSoftWrap checks the interaction the anchor-
+// based wrap design makes easy to get wrong: splitting a line that is
+// currently wrapped must leave the caret on screen and the indent intact.
+// Wrap keeps no cached layout, so there is nothing to invalidate here —
+// this test is what keeps that true.
+func TestTab_InsertNewline_UnderSoftWrap(t *testing.T) {
+	scr := newSimScreen(t, 40, 6)
+	defer scr.Fini()
+
+	long := "\tif x {" + strings.Repeat(" // padding", 12)
+	tab := newIndentTab(t, "main.go", long+"\n\t}\n")
+	tab.Wrap = true
+	tab.Render(scr, theme.Default(), 0, 0, 40, 6)
+
+	// Split right after the opening brace, several visual rows up from
+	// the end of the wrapped line.
+	tab.Cursor = Position{Line: 0, Col: 7}
+	tab.Anchor = tab.Cursor
+	tab.InsertNewline()
+	tab.Render(scr, theme.Default(), 0, 0, 40, 6)
+
+	if got := tab.Buffer.Lines[0]; got != "\tif x {" {
+		t.Fatalf("line 0 = %q", got)
+	}
+	if !strings.HasPrefix(tab.Buffer.Lines[1], "\t\t") {
+		t.Fatalf("line 1 lost its extra indent level: %q", tab.Buffer.Lines[1])
+	}
+	if want := (Position{Line: 1, Col: 2}); tab.Cursor != want {
+		t.Fatalf("cursor = %v, want %v", tab.Cursor, want)
+	}
+	if _, _, vis := scr.GetCursor(); !vis {
+		t.Fatal("caret left the viewport after a wrapped-line split")
 	}
 }

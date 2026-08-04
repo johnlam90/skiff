@@ -5,40 +5,29 @@
 // Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 // =============================================================================
 
-// Tests for the clipboard package. CopyToSystem is monolithic — the
-// OSC 52 encoding lives inline alongside the /dev/tty write, so we can't
-// import a pure helper. Instead we lock down the encoding contract with
-// table-driven cases that compute the exact bytes a correct implementation
-// must produce, and we exercise CopyToSystem itself when /dev/tty is
-// available (skipping in CI containers that lack a TTY).
+// Tests for the clipboard package. The OSC 52 encoding is exercised
+// through osc52Sequence with literal expected bytes, so a "tidy up" of
+// the escape format shows as a diff here rather than as a silent
+// clipboard regression. The write half is exercised by pointing ttyPath
+// at a temp file — the only way to prove what actually reached the wire
+// — plus an end-to-end run against a real /dev/tty when the host has
+// one (CI containers usually don't).
 
 package clipboard
 
 import (
-	"encoding/base64"
-	"fmt"
+	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
-// expectedOSC52 reproduces the byte sequence CopyToSystem is contractually
-// required to emit for a given input and TMUX state. Keeping this in the
-// test file (rather than the production code) lets us catch a regression
-// where someone "tidies up" the encoding and accidentally changes it.
-func expectedOSC52(text string, tmux bool) string {
-	encoded := base64.StdEncoding.EncodeToString([]byte(text))
-	seq := fmt.Sprintf("\x1b]52;c;%s\x07", encoded)
-	if tmux {
-		seq = fmt.Sprintf("\x1bPtmux;\x1b%s\x1b\\", seq)
-	}
-	return seq
-}
-
-// TestExpectedOSC52_Encoding pins the OSC 52 byte format with table-driven
-// cases. If anyone changes the production encoding (or the helper above),
-// the diff will show up here. This is the closest we can get to unit-
-// testing CopyToSystem's interesting logic without a TTY.
-func TestExpectedOSC52_Encoding(t *testing.T) {
+// TestOSC52Sequence_Encoding pins the OSC 52 byte format with
+// table-driven cases carrying literal expectations. The escape sequence
+// is a wire format: every byte is load-bearing, and a terminal that
+// disagrees fails silently rather than erroring.
+func TestOSC52Sequence_Encoding(t *testing.T) {
 	cases := []struct {
 		name string
 		text string
@@ -73,7 +62,10 @@ func TestExpectedOSC52_Encoding(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := expectedOSC52(c.text, c.tmux)
+			got, err := osc52Sequence(c.text, c.tmux)
+			if err != nil {
+				t.Fatalf("osc52Sequence: %v", err)
+			}
 			if got != c.want {
 				t.Fatalf("encoding mismatch\n got: %q\nwant: %q", got, c.want)
 			}
@@ -81,38 +73,95 @@ func TestExpectedOSC52_Encoding(t *testing.T) {
 	}
 }
 
-// TestCopyToSystem_NoTTY exercises CopyToSystem on a host that has a
-// writable /dev/tty. Most CI sandboxes don't, so we skip cleanly when
-// the device is unavailable; on a developer machine this gives us at
-// least one positive end-to-end run.
-func TestCopyToSystem_NoTMUX(t *testing.T) {
+// TestOSC52Sequence_AtLimit keeps the cap an inclusive bound: a payload
+// of exactly MaxPayloadBytes is the largest thing we still try to send,
+// so an off-by-one here would refuse copies that fit.
+func TestOSC52Sequence_AtLimit(t *testing.T) {
+	seq, err := osc52Sequence(strings.Repeat("x", MaxPayloadBytes), false)
+	if err != nil {
+		t.Fatalf("exactly MaxPayloadBytes must be accepted: %v", err)
+	}
+	if !strings.HasPrefix(seq, "\x1b]52;c;") {
+		t.Fatalf("sequence lost its OSC 52 prefix: %.16q", seq)
+	}
+}
+
+// TestCopyToSystem_OversizedRefusesAndWritesNothing is the whole point
+// of the cap. tmux discards an over-long OSC string without a word, so
+// the old code returned nil on a copy that never happened. The contract
+// now: an ErrTooLarge that names the size, and not one byte of a doomed
+// escape sequence on the terminal — a half-written OSC 52 leaves the
+// parser swallowing everything skiff draws next as clipboard data.
+func TestCopyToSystem_OversizedRefusesAndWritesNothing(t *testing.T) {
+	tty := filepath.Join(t.TempDir(), "tty")
+	if err := os.WriteFile(tty, nil, 0o600); err != nil {
+		t.Fatalf("seed tty: %v", err)
+	}
+	swapTTY(t, tty)
+	t.Setenv("TMUX", "")
+
+	err := CopyToSystem(strings.Repeat("x", MaxPayloadBytes+1))
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("oversized copy must report ErrTooLarge, got %v", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "524289") {
+		t.Errorf("error must name the offending size, got %q", msg)
+	}
+
+	written, readErr := os.ReadFile(tty)
+	if readErr != nil {
+		t.Fatalf("read tty: %v", readErr)
+	}
+	if len(written) != 0 {
+		t.Fatalf("refused copy wrote %d bytes to the tty: %.32q", len(written), written)
+	}
+}
+
+// TestCopyToSystem_WritesSequence proves the accepted path actually
+// emits the bytes osc52Sequence produced, wrapper and all — the encoder
+// being correct is worth nothing if the writer drops or mangles it.
+func TestCopyToSystem_WritesSequence(t *testing.T) {
+	tty := filepath.Join(t.TempDir(), "tty")
+	if err := os.WriteFile(tty, nil, 0o600); err != nil {
+		t.Fatalf("seed tty: %v", err)
+	}
+	swapTTY(t, tty)
+	t.Setenv("TMUX", "/tmp/fake-tmux,1234,0")
+
+	if err := CopyToSystem("hello"); err != nil {
+		t.Fatalf("CopyToSystem: %v", err)
+	}
+	written, err := os.ReadFile(tty)
+	if err != nil {
+		t.Fatalf("read tty: %v", err)
+	}
+	want := "\x1bPtmux;\x1b\x1b]52;c;aGVsbG8=\x07\x1b\\"
+	if string(written) != want {
+		t.Fatalf("tty bytes mismatch\n got: %q\nwant: %q", written, want)
+	}
+}
+
+// TestCopyToSystem_RealTTY keeps one end-to-end run against an actual
+// terminal device on a developer machine; CI sandboxes have no
+// /dev/tty, so it skips there rather than failing on the environment.
+func TestCopyToSystem_RealTTY(t *testing.T) {
 	if _, err := os.Stat("/dev/tty"); err != nil {
 		t.Skipf("/dev/tty not available: %v", err)
 	}
-	// Ensure TMUX wrapping is not in play for this case.
 	t.Setenv("TMUX", "")
 
-	// We can't capture what was written to /dev/tty without taking it
-	// over, so we settle for "doesn't error". The encoding contract is
-	// covered by TestExpectedOSC52_Encoding.
 	if err := CopyToSystem("hello"); err != nil {
-		// If the file exists but isn't writable from this process (e.g.
-		// detached test harness), treat that as a skip rather than a
-		// failure — it's an environment issue, not a code defect.
+		// The device existing but not being writable from a detached
+		// harness is an environment issue, not a code defect.
 		t.Skipf("CopyToSystem on /dev/tty failed: %v", err)
 	}
 }
 
-// TestCopyToSystem_TMUXWrapped runs the same path with TMUX set so the
-// production code takes the passthrough branch. Same skip semantics as
-// the no-TMUX case — without /dev/tty we can't validate the syscall.
-func TestCopyToSystem_TMUXWrapped(t *testing.T) {
-	if _, err := os.Stat("/dev/tty"); err != nil {
-		t.Skipf("/dev/tty not available: %v", err)
-	}
-	t.Setenv("TMUX", "/tmp/fake-tmux,1234,0")
-
-	if err := CopyToSystem("hello"); err != nil {
-		t.Skipf("CopyToSystem on /dev/tty failed: %v", err)
-	}
+// swapTTY points CopyToSystem at path for the duration of one test and
+// restores the real device afterwards.
+func swapTTY(t *testing.T, path string) {
+	t.Helper()
+	prev := ttyPath
+	ttyPath = path
+	t.Cleanup(func() { ttyPath = prev })
 }

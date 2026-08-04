@@ -36,6 +36,8 @@ The layout is what you'd expect: a file tree on the left, a tab bar across the t
 
 Single-click any file in the tree to open it. Single-click a folder to expand it. The active folder — the one New File and Rename Folder will target — bolds in the sidebar so you always know where the next file lands.
 
+That first click opens a *preview* tab: its label is italic, and the next single click reuses the same slot instead of stacking another tab, so reading your way through a directory doesn't leave a dozen tabs behind. Click the same file again — or just start editing it — and the tab is pinned for good. Opening a file from the finder, the menu, or the command line always opens a permanent tab. Skiff explains this once, the first time a session makes a preview: "Preview tab — edit it or click again to keep it open".
+
 <figure class="screenshot-figure">
   <img
     src="/img/screenshots/clicking-a-file.png"
@@ -70,7 +72,9 @@ Every action lives in the action menu. Open it three ways:
   />
 </figure>
 
-The menu is keyboard-navigable too — arrow keys to move, Enter to select, Esc to dismiss.
+The menu opens with a filter field focused, so the fastest way to find an action is to type part of its name — "branch" finds **Switch branch…**, "thm" finds **Theme…**. Arrow keys move, `Enter` runs the highlighted row, `Esc` clears the filter and a second `Esc` dismisses the menu. Rows are grouped File / Edit / Go / Git / View / Custom / Quit, and the git verbs and file-clipboard actions sit one row deeper behind **Git…** and **File clipboard…**.
+
+Every action worth a shortcut has one, and you don't have to memorize them: `Esc ?` (or `≡` → **Keyboard shortcuts…**) opens the whole list, grouped the same way the menu is.
 
 ## Edit and save
 
@@ -92,6 +96,8 @@ To save: open the menu and pick **Save**, or press `Esc s`.
 ## Resize the sidebar
 
 Drag the column between the tree and the editor. Minimum sidebar width is 18 columns; the editor won't shrink below 40.
+
+Below 58 columns total there isn't room for both, so Skiff hides the explorer itself and tells you ("Narrow window — file explorer hidden (Esc t shows it)"). Widen the window and it comes back. `Esc t` toggles it by hand at any width, and a panel you closed on purpose stays closed — the auto-hide only puts back what it took away.
 
 ## Quit
 

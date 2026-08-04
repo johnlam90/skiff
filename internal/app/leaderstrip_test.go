@@ -54,7 +54,7 @@ func TestLeaderStripVisibility(t *testing.T) {
 		t.Fatal("strip must hide under the find bar")
 	}
 	a.findOpen = false
-	a.lastEscape = time.Now().Add(-doubleEscMs - time.Millisecond)
+	a.lastEscape = time.Now().Add(-doubleEscWindow - time.Millisecond)
 	if a.leaderStripVisible() {
 		t.Fatal("strip should expire with the leader window")
 	}

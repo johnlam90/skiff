@@ -21,6 +21,14 @@ visual-row Up/Down cursor movement (arrows keep moving buffer lines),
 visual-row Home/End, wide-rune (CJK) width support (the editor treats one
 rune as one cell everywhere; unchanged).
 
+> **Note, 2026-08-03:** the last of those is superseded. Wide-rune width
+> support shipped — `internal/editor/cluster.go` derives cell widths and
+> grapheme-cluster boundaries from `github.com/rivo/uniseg`, and wrap
+> segments now break only on cluster boundaries so a wide glyph is never
+> split across rows. The rest of this record stands as written; it is
+> kept unedited as the design rationale for the anchor-based wrap, which
+> the change did not alter.
+
 ## Approaches considered
 
 1. **Whole-file visual-row layout cache** — map every buffer line to its

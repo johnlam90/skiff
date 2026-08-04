@@ -53,6 +53,8 @@ The mechanism is OSC 52, a terminal escape sequence every modern emulator honors
 
 Skiff writes OSC 52 to `/dev/tty` directly (not stdout — that would race tcell's renderer). When `$TMUX` is set, the sequence is wrapped in tmux's passthrough escape so it reaches the outer terminal even with `set-clipboard off`.
 
+One escape sequence can only carry so much, so a selection over 512 KiB is refused rather than half-written — tmux discards an OSC string past 1 MiB without a word, and a truncated sequence leaves your terminal's parser eating whatever Skiff draws next. The editor's own clipboard still takes the text, so `Esc v` pastes it inside Skiff; only the hop to your laptop is skipped.
+
 If your laptop's clipboard isn't picking up copies, check your terminal's "Allow apps to read/write clipboard" setting — most terminals require an opt-in for OSC 52 writes. iTerm2 calls it "Applications in terminal may access clipboard." kitty has a `clipboard_control` directive. Check [troubleshooting](/docs/troubleshooting/) for specifics.
 
 ## Paste

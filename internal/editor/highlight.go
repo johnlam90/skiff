@@ -124,6 +124,14 @@ func HighlightVisible(filename string, lines []string, startLine, height int, t 
 // stays inside the window, so scrolling costs nothing until the view
 // nears an edge; re-lexing on every wheel tick is what made scrolling
 // crawl over remote links.
+//
+// The grid is indexed by ABSOLUTE buffer line, not by window offset;
+// rows outside [start, end) come back nil. Both render paths keep it as
+// Tab.Styles and read t.Styles[lineIdx] directly (tab.go, wrap.go), so
+// a window-relative grid would push a "- start" correction into every
+// consumer, including the cursor and hit-test paths where an off-by-one
+// mis-colours silently. The price is one nil slice header per file
+// line, paid only when the window is actually re-tokenised.
 func HighlightWindow(filename string, lines []string, startLine, height int, t theme.Theme) ([][]tcell.Style, int, int) {
 	styles := make([][]tcell.Style, len(lines))
 	if height <= 0 || len(lines) == 0 {
@@ -147,7 +155,11 @@ func HighlightWindow(filename string, lines []string, startLine, height int, t t
 	if winEnd > len(lines) {
 		winEnd = len(lines)
 	}
-	src := strings.Join(lines[winStart:winEnd], "\n")
+	// Cap pathological lines exactly as HighlightVisible does. Render
+	// only ever calls HighlightWindow, so skipping the cap here left the
+	// "one minified line must not cost seconds per keystroke" guard off
+	// the live path entirely.
+	src := strings.Join(capLongLines(lines[winStart:winEnd]), "\n")
 	winStyles := highlightSource(filename, src, t)
 	for i := winStart; i < winEnd; i++ {
 		idx := i - winStart

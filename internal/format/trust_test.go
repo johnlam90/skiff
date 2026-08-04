@@ -10,6 +10,7 @@ package format
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -134,6 +135,59 @@ func TestDefaultTrustPath_Override(t *testing.T) {
 	t.Setenv(trustFileEnv, "/tmp/skiff-test/trust.json")
 	if got := DefaultTrustPath(); got != "/tmp/skiff-test/trust.json" {
 		t.Fatalf("override ignored: got %q", got)
+	}
+}
+
+// TestDefaultTrustPath_LegacyEnvStillHonoured: the override was called
+// SPICEEDIT_TRUST_FILE before the rename. Dropping it would point an
+// existing harness (or a user's shell profile) at the real
+// ~/.config/skiff store, which is exactly the state we don't want a
+// test run mutating. The new name wins when both are set.
+func TestDefaultTrustPath_LegacyEnvStillHonoured(t *testing.T) {
+	t.Setenv(trustFileEnv, "")
+	t.Setenv(legacyTrustFileEnv, "/tmp/skiff-legacy/trust.json")
+	if got := DefaultTrustPath(); got != "/tmp/skiff-legacy/trust.json" {
+		t.Fatalf("legacy override ignored: got %q", got)
+	}
+	t.Setenv(trustFileEnv, "/tmp/skiff-new/trust.json")
+	if got := DefaultTrustPath(); got != "/tmp/skiff-new/trust.json" {
+		t.Fatalf("SKIFF_TRUST_FILE should win over the deprecated name: got %q", got)
+	}
+}
+
+// TestSaveTrust_ReplaceIsCleanAndLeavesNoTemp pins the atomic-write
+// contract the trust store depends on: shrinking the file must not
+// leave trailing bytes from the longer previous version (that would
+// make the next LoadTrust throw the whole store away), and the temp
+// file must not survive next to it.
+func TestSaveTrust_ReplaceIsCleanAndLeavesNoTemp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trust.json")
+
+	big := &TrustFile{Projects: map[string]TrustEntry{}}
+	for _, p := range []string{"/a/very/long/project/path/one", "/another/long/project/path/two"} {
+		big.Projects[p] = TrustEntry{Hash: strings.Repeat("f", 64), Trusted: true}
+	}
+	if err := SaveTrust(path, big); err != nil {
+		t.Fatalf("seed save: %v", err)
+	}
+	if err := SaveTrust(path, &TrustFile{Projects: map[string]TrustEntry{}}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	tf, err := LoadTrust(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(tf.Projects) != 0 {
+		t.Fatalf("expected the shrunk store, got %d entries", len(tf.Projects))
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected only trust.json in the config dir, got %d entries", len(entries))
 	}
 }
 

@@ -650,3 +650,40 @@ func TestAnyModalOpen_FindStripIsNotOverlay(t *testing.T) {
 		t.Fatal("the find bar is a strip, not an overlay; it must not suppress editor input")
 	}
 }
+
+// TestCloseAllModals_TearsDownProjectFindThroughOnePath pins the forked
+// teardown bug: closeAllModals hand-cleared a subset of the project-find
+// fields, so opening any overlay over the panel left projReplaceOpen
+// armed, projFindTruncated stale, and the in-flight sweep generation live
+// — the next results event could then paint into a closed panel. There is
+// exactly one project-find teardown (closeProjFind), the same way the find
+// bar has exactly one (closeFind), and closeAllModals must use it.
+func TestCloseAllModals_TearsDownProjectFindThroughOnePath(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.projFindOpen = true
+	a.projFindValue = []rune("query")
+	a.projFindCursor = 5
+	a.projFindTruncated = true
+	a.projFindFolded = map[string]bool{"a.go": true}
+	a.projReplaceOpen = true
+	a.projReplaceValue = []rune("repl")
+	a.projReplaceCursor = 4
+	a.projFocusReplace = true
+	gen := a.projFindGen
+
+	a.closeAllModals()
+
+	if a.projFindOpen || a.projFindValue != nil || a.projFindCursor != 0 ||
+		a.projFindTruncated || a.projFindFolded != nil {
+		t.Fatalf("panel state survived: open=%v value=%q cursor=%d truncated=%v folded=%v",
+			a.projFindOpen, string(a.projFindValue), a.projFindCursor,
+			a.projFindTruncated, a.projFindFolded)
+	}
+	if a.projReplaceOpen || a.projReplaceValue != nil || a.projReplaceCursor != 0 || a.projFocusReplace {
+		t.Fatalf("replace state survived: open=%v value=%q cursor=%d focus=%v",
+			a.projReplaceOpen, string(a.projReplaceValue), a.projReplaceCursor, a.projFocusReplace)
+	}
+	if a.projFindGen == gen {
+		t.Fatalf("closeAllModals must invalidate the in-flight sweep; gen still %d", gen)
+	}
+}

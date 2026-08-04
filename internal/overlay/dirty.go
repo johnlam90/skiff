@@ -15,6 +15,9 @@ import (
 
 // Dirty geometry. Wider than the confirm so the three buttons sit
 // comfortably on one row; the columns center the trio in the modal.
+// The per-button columns are hand-tuned for the default captions and
+// are used verbatim whenever Labels is empty, so the stock
+// unsaved-changes modal renders exactly as it always has.
 const (
 	dirtyWidth  = 60
 	dirtyHeight = 9
@@ -25,7 +28,15 @@ const (
 	dirtyBtnDiscardW = 11 // "[ Discard ]"
 	dirtyBtnSaveX    = 42
 	dirtyBtnSaveW    = 8 // "[ Save ]"
+
+	// dirtyBtnMargin is the smallest gap left at each end of the button
+	// row when custom Labels force a computed layout.
+	dirtyBtnMargin = 3
 )
+
+// dirtyDefaultLabels are the captions the unsaved-changes flow uses.
+// A caller that leaves Labels zero gets these plus the pinned columns.
+var dirtyDefaultLabels = [3]string{"[ Cancel ]", "[ Discard ]", "[ Save ]"}
 
 // Dirty is the unsaved-changes overlay: Cancel / Discard / Save on one
 // row. Default focus is Cancel so a stray Enter is non-destructive —
@@ -36,6 +47,13 @@ const (
 type Dirty struct {
 	Title   string
 	Message string
+	// Labels optionally replaces the three button captions, left to
+	// right, for flows that reuse this three-way shape with a
+	// different vocabulary — the disk-conflict prompt's Keep mine /
+	// Reload / Diff, say. Leave it zero for Cancel / Discard / Save.
+	// Callers pass captions complete with their brackets, exactly as
+	// the defaults do, because the bracket style is part of the label.
+	Labels [3]string
 	// Hover is the focused button: 0 = Cancel, 1 = Discard, 2 = Save.
 	Hover int
 	Theme theme.Theme
@@ -44,9 +62,54 @@ type Dirty struct {
 	Close func()
 	// OnSave runs after Close when the user picks Save (typically:
 	// save the tab(s), then proceed); OnDiscard when they pick Discard
-	// (skip saving, proceed anyway). Cancel just dismisses.
+	// (skip saving, proceed anyway). Cancel just dismisses — pass
+	// OnCancel when the dismissal itself has to be recorded.
 	OnSave    func()
 	OnDiscard func()
+	OnCancel  func()
+}
+
+// labels returns the captions to draw, falling back to the stock trio.
+// Individual empty entries fall back too, so a caller can rename one
+// button without restating the other two.
+func (d *Dirty) labels() [3]string {
+	out := d.Labels
+	for i := range out {
+		if out[i] == "" {
+			out[i] = dirtyDefaultLabels[i]
+		}
+	}
+	return out
+}
+
+// columns returns each button's x offset within the modal and its
+// width. The default captions keep their pinned, hand-tuned columns;
+// anything else is laid out by centering the trio with even gaps,
+// which is the only rule that stays correct for captions we have not
+// seen.
+func (d *Dirty) columns() (xs, ws [3]int) {
+	labels := d.labels()
+	for i, l := range labels {
+		ws[i] = runeLen(l)
+	}
+	if labels == dirtyDefaultLabels {
+		return [3]int{dirtyBtnCancelX, dirtyBtnDiscardX, dirtyBtnSaveX},
+			[3]int{dirtyBtnCancelW, dirtyBtnDiscardW, dirtyBtnSaveW}
+	}
+	total := ws[0] + ws[1] + ws[2]
+	gap := (dirtyWidth - 2*dirtyBtnMargin - total) / 2
+	if gap < 1 {
+		gap = 1
+	}
+	x := (dirtyWidth - (total + 2*gap)) / 2
+	if x < 0 {
+		x = 0
+	}
+	for i := range xs {
+		xs[i] = x
+		x += ws[i] + gap
+	}
+	return xs, ws
 }
 
 // rect computes the dirty modal's centered rectangle.
@@ -60,7 +123,7 @@ func (d *Dirty) rect() Rect {
 func (d *Dirty) HandleKey(ev *tcell.EventKey) {
 	switch ev.Key() {
 	case tcell.KeyEsc:
-		d.Close()
+		d.cancel()
 	case tcell.KeyEnter:
 		d.activate(d.Hover)
 	case tcell.KeyLeft:
@@ -81,7 +144,7 @@ func (d *Dirty) HandleKey(ev *tcell.EventKey) {
 func (d *Dirty) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	r := d.rect()
 	if x >= r.X && x < r.X+r.W && y == r.Y+5 {
-		if idx := dirtyButtonAtRelX(x - r.X); idx >= 0 {
+		if idx := d.buttonAtRelX(x - r.X); idx >= 0 {
 			d.Hover = idx
 		}
 	}
@@ -89,19 +152,21 @@ func (d *Dirty) HandleMouse(x, y int, btn tcell.ButtonMask) {
 		return
 	}
 	if !r.Contains(x, y) {
-		d.Close()
+		d.cancel()
 		return
 	}
 	if y == r.Y+5 {
-		if idx := dirtyButtonAtRelX(x - r.X); idx >= 0 {
+		if idx := d.buttonAtRelX(x - r.X); idx >= 0 {
 			d.activate(idx)
 		}
 	}
 }
 
 // Draw renders the modal: frame, centered rune-safe message, and the
-// button trio — Cancel neutral, Discard red (destructive), Save in the
-// accent so it reads as the productive default.
+// button trio. The colors encode intent rather than position — the
+// left button is neutral, the middle one destructive (red), the right
+// one the productive default (accent) — so a relabelled trio still
+// reads correctly.
 func (d *Dirty) Draw(scr tcell.Screen) {
 	r := d.rect()
 	th := d.Theme
@@ -112,10 +177,24 @@ func (d *Dirty) Draw(scr tcell.Screen) {
 	msg := trimRunes(d.Message, r.W-4)
 	drawText(scr, r.X+(r.W-runeLen(msg))/2, r.Y+4, msg, bodyStyle)
 
-	DrawButton(scr, r.X+dirtyBtnCancelX, r.Y+5, "[ Cancel ]", bg, th.Text, d.Hover == 0)
-	DrawButton(scr, r.X+dirtyBtnDiscardX, r.Y+5, "[ Discard ]", bg, th.Error, d.Hover == 1)
-	DrawButton(scr, r.X+dirtyBtnSaveX, r.Y+5, "[ Save ]", bg, th.Accent, d.Hover == 2)
+	labels := d.labels()
+	xs, _ := d.columns()
+	fgs := [3]tcell.Color{th.Text, th.Error, th.Accent}
+	for i, l := range labels {
+		DrawButton(scr, r.X+xs[i], r.Y+5, l, bg, fgs[i], d.Hover == i)
+	}
 	scr.HideCursor()
+}
+
+// cancel dismisses without choosing either action, firing OnCancel for
+// flows where "the user backed out" is itself a decision worth
+// recording. Capture-then-close, like activate.
+func (d *Dirty) cancel() {
+	cb := d.OnCancel
+	d.Close()
+	if cb != nil {
+		cb()
+	}
 }
 
 // activate runs one button: 0 Cancel, 1 Discard, 2 Save — always
@@ -123,7 +202,7 @@ func (d *Dirty) Draw(scr tcell.Screen) {
 func (d *Dirty) activate(idx int) {
 	switch idx {
 	case 0:
-		d.Close()
+		d.cancel()
 	case 1:
 		cb := d.OnDiscard
 		d.Close()
@@ -139,17 +218,21 @@ func (d *Dirty) activate(idx int) {
 	}
 }
 
-// dirtyButtonAtRelX maps an x offset within the modal to a button index
-// (0=Cancel, 1=Discard, 2=Save) or -1 when the offset misses every
-// button — one geometry source for hover and click.
-func dirtyButtonAtRelX(rx int) int {
-	switch {
-	case rx >= dirtyBtnCancelX && rx < dirtyBtnCancelX+dirtyBtnCancelW:
-		return 0
-	case rx >= dirtyBtnDiscardX && rx < dirtyBtnDiscardX+dirtyBtnDiscardW:
-		return 1
-	case rx >= dirtyBtnSaveX && rx < dirtyBtnSaveX+dirtyBtnSaveW:
-		return 2
+// buttonAtRelX maps an x offset within the modal to a button index
+// (0/1/2) or -1 when the offset misses every button — one geometry
+// source for hover, click, and draw, whatever the captions are.
+func (d *Dirty) buttonAtRelX(rx int) int {
+	xs, ws := d.columns()
+	for i := range xs {
+		if rx >= xs[i] && rx < xs[i]+ws[i] {
+			return i
+		}
 	}
 	return -1
+}
+
+// dirtyButtonAtRelX is the hit test for the stock Cancel / Discard /
+// Save captions and their pinned columns.
+func dirtyButtonAtRelX(rx int) int {
+	return (&Dirty{}).buttonAtRelX(rx)
 }

@@ -81,6 +81,56 @@ func loadGitStatus(rootDir, base string) gitStatus {
 	return git.Open(rootDir).Status(base)
 }
 
+// gitUnavailableMsg explains why there is nothing git-shaped to show.
+// "Not a git repository" is a lie on a machine with no git binary:
+// every directory would say it, forever, and the user would go looking
+// for a .git that was never the problem. internal/git already draws the
+// distinction (ErrGitMissing → Snapshot.GitMissing); this is the caller
+// the sentinel was added for.
+func (a *App) gitUnavailableMsg() string {
+	if a.gitSnap.GitMissing {
+		return "git was not found on PATH"
+	}
+	return "Not a git repository"
+}
+
+// gitPanelEmptyLabel is the line the Git panel draws when it has no
+// rows. An empty list means "clean tree" only when git actually ran —
+// claiming it on a machine without the binary invents a fact, and
+// leaves the user with no way to learn why the whole git surface is
+// inert.
+func (a *App) gitPanelEmptyLabel() string {
+	if a.gitSnap.GitMissing {
+		return a.gitUnavailableMsg()
+	}
+	return "No uncommitted changes"
+}
+
+// noteGitMissing tells the user once — and only once — that this
+// machine has no git binary. The fact is static for the process
+// lifetime, so the 10-second status tick would otherwise reprint it
+// forever and bury every other flash under it.
+func (a *App) noteGitMissing(st gitStatus) {
+	if !st.GitMissing || a.gitMissingSeen {
+		return
+	}
+	a.gitMissingSeen = true
+	a.flash("git was not found on PATH — branch and change badges are off")
+}
+
+// readRepo returns the handle the app's asynchronous git reads go
+// through: real git in production, or the injected Runner when a test
+// installed one. Call it on the main thread and hand the result to the
+// goroutine — a *git.Repo is immutable after construction, so passing
+// it across is the safe alternative to letting background work reach
+// back into App for a.rootDir.
+func (a *App) readRepo() *git.Repo {
+	if a.gitRunner != nil {
+		return git.OpenWith(a.rootDir, a.gitRunner)
+	}
+	return git.Open(a.rootDir)
+}
+
 // rebaseGitPaths rewrites dirty paths to match the file tree root casing.
 func rebaseGitPaths(paths map[string]filetree.GitChangeKind, treeRoot string) map[string]filetree.GitChangeKind {
 	if len(paths) == 0 || treeRoot == "" {
@@ -177,13 +227,24 @@ func loadGitLineChanges(rootDir, base, path string) map[int]editor.GitLineChange
 // contract as every other loader here: nil on any failure and the
 // caller shows a friendly placeholder instead.
 func loadGitFileDiff(rootDir, base, path string, untracked bool) []string {
+	return repoFileDiff(git.Open(rootDir), base, path, untracked)
+}
+
+// repoFileDiff is loadGitFileDiff's body over an explicit Repo handle.
+// The handle is the seam the async diff path needs: a *git.Repo is
+// immutable once opened, so the main loop can capture one and hand it to
+// a goroutine without sharing App state — and a test can hand over one
+// backed by git.Fake instead of paying for a subprocess and a repo in
+// exactly the right state.
+func repoFileDiff(repo *git.Repo, base, path string, untracked bool) []string {
+	rootDir := repo.Root()
 	if rootDir == "" || path == "" {
 		return nil
 	}
 	if base == "" {
 		base = "HEAD"
 	}
-	out, err := git.Output(rootDir, "diff", base, "--", path)
+	out, err := repo.Output("diff", base, "--", path)
 	if err != nil || len(out) == 0 {
 		if !untracked {
 			return nil
@@ -196,7 +257,7 @@ func loadGitFileDiff(rootDir, base, path string, untracked bool) []string {
 		}
 		// --no-index exits 1 whenever the files differ, so the error is
 		// expected; the output being non-empty is the success signal.
-		out, _ = git.Output(rootDir, "diff", "--no-index", "--", os.DevNull, path)
+		out, _ = repo.Output("diff", "--no-index", "--", os.DevNull, path)
 		if len(out) == 0 {
 			return nil
 		}
@@ -204,12 +265,19 @@ func loadGitFileDiff(rootDir, base, path string, untracked bool) []string {
 	return strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 }
 
-// loadGitHunkPreview returns the unified diff hunk covering zero-based line.
-func loadGitHunkPreview(rootDir, path string, line int) []string {
-	if rootDir == "" || path == "" || line < 0 {
+// repoHunkPreview returns the unified diff hunk covering zero-based line.
+// It takes a Repo handle rather than a root path because its only caller
+// is the asynchronous gutter-click path: a *git.Repo is immutable once
+// opened, so the main loop can capture one and hand it to a goroutine
+// without sharing App state — and a test can hand over one backed by
+// git.Fake instead of paying for a subprocess and a repo in exactly the
+// right state. See repoFileDiff, whose rootDir-taking wrapper survives
+// for the Git panel's synchronous callers.
+func repoHunkPreview(repo *git.Repo, path string, line int) []string {
+	if repo.Root() == "" || path == "" || line < 0 {
 		return nil
 	}
-	out, err := git.Output(rootDir, "diff", "--unified=3", "HEAD", "--", path)
+	out, err := repo.Output("diff", "--unified=3", "HEAD", "--", path)
 	if err != nil || len(out) == 0 {
 		return nil
 	}
@@ -336,4 +404,101 @@ func pathInside(candidate, root string) bool {
 		return true
 	}
 	return !strings.HasPrefix(rel, "..")
+}
+
+// refreshGitStatus re-runs `git status --porcelain` against the project
+// root and stamps the resulting dirty-paths sets onto the file tree, so
+// changed files render in the Modified color on the next draw. This is
+// the synchronous flavour — it blocks until git answers — used at
+// startup (nothing is interactive yet) and by tests. Interactive code
+// paths use refreshGitStatusAsync so a slow `git status` on a huge or
+// network-mounted repo can never stall typing.
+func (a *App) refreshGitStatus() {
+	a.applyGitStatus(collectGitStatus(a.rootDir, a.diffBase, a.openTabPaths(), a.tree == nil))
+}
+
+// refreshGitStatusAsync collects git status on a background goroutine
+// and posts the result back to the main loop as a gitStatusEvent —
+// the same goroutine → custom event pattern the auto-scroller and the
+// finder indexer use, so no UI state is ever touched off-thread.
+// Kicks while a collection is already in flight coalesce into a single
+// follow-up run, so a burst of file operations costs at most two
+// status calls rather than one each.
+func (a *App) refreshGitStatusAsync() {
+	if a.gitRefreshInFlight {
+		a.gitRefreshQueued = true
+		return
+	}
+	a.gitRefreshInFlight = true
+	rootDir, base, paths, skipStatus := a.rootDir, a.diffBase, a.openTabPaths(), a.tree == nil
+	scr := a.screen
+	go func() {
+		res := collectGitStatus(rootDir, base, paths, skipStatus)
+		_ = scr.PostEvent(&gitStatusEvent{when: time.Now(), res: res})
+	}()
+}
+
+// handleGitStatusEvent applies a finished background collection and
+// launches the follow-up run if more refresh requests arrived while
+// this one was in flight.
+func (a *App) handleGitStatusEvent(e *gitStatusEvent) {
+	a.gitRefreshInFlight = false
+	a.applyGitStatus(e.res)
+	if a.gitRefreshQueued {
+		a.gitRefreshQueued = false
+		a.refreshGitStatusAsync()
+	}
+}
+
+// openTabPaths returns the file paths of every open text tab — the set
+// whose gutter markers a status collection should refresh. Image tabs
+// and untitled buffers have no diff to compute.
+func (a *App) openTabPaths() []string {
+	paths := make([]string, 0, a.tabs.Len())
+	for _, tab := range a.tabs.Tabs() {
+		if tab == nil || tab.Path == "" || tab.IsImage() {
+			continue
+		}
+		paths = append(paths, tab.Path)
+	}
+	return paths
+}
+
+// applyGitStatus stamps a collection result onto the UI: tree tint
+// maps, branch, per-tab gutter markers, and the Git panel rows when the
+// panel is up. Main-thread only — the async path hands results here
+// via gitStatusEvent.
+func (a *App) applyGitStatus(res gitStatusResult) {
+	a.noteGitMissing(res.st)
+	if a.tree != nil {
+		a.gitSnap = res.st
+		if !res.st.IsRepo {
+			a.tree.DirtyFiles = nil
+			a.tree.DirtyFolders = nil
+			// No repo, no Git panel — fall back to the explorer rather
+			// than strand the user on a view with nothing behind it.
+			a.gitPanelActive = false
+			a.gitPanelRows = nil
+		} else {
+			dirtyFiles := rebaseGitPaths(res.st.Files, a.tree.Root.Path)
+			a.tree.DirtyFiles = dirtyFiles
+			a.tree.DirtyFolders = dirtyFolderSet(dirtyFiles, a.tree.Root.Path)
+		}
+	}
+	// Tabs opened after the collection started aren't in the map and
+	// keep the gutter lines they loaded on open; tabs closed since are
+	// simply skipped by the path lookup.
+	for _, tab := range a.tabs.Tabs() {
+		if tab == nil || tab.Path == "" || tab.IsImage() {
+			continue
+		}
+		if lines, ok := res.tabLines[tab.Path]; ok {
+			tab.GitLines = lines
+		}
+	}
+	// Keep the Git panel live: whatever refreshed the status (the 10s
+	// tick, a save, a file op) also refreshes the visible list.
+	if a.gitPanelActive {
+		a.rebuildGitChangesRows()
+	}
 }

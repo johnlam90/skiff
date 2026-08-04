@@ -14,6 +14,8 @@
 package editor
 
 import (
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -65,6 +67,47 @@ func TestBuffer_String_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestNewBuffer_StripsCRLF pins the load half of line-ending handling: a
+// Windows-authored file must land in the buffer as clean lines. Leaving
+// the CR on would put an invisible column at the end of every line, so
+// every rune count, every cursor clamp, and every save would carry it.
+func TestNewBuffer_StripsCRLF(t *testing.T) {
+	b := NewBuffer("alpha\r\nbeta\r\n")
+	want := []string{"alpha", "beta", ""}
+	if len(b.Lines) != len(want) {
+		t.Fatalf("lines = %#v, want %#v", b.Lines, want)
+	}
+	for i, ln := range want {
+		if b.Lines[i] != ln {
+			t.Fatalf("line %d = %q, want %q", i, b.Lines[i], ln)
+		}
+	}
+}
+
+// TestNewBuffer_KeepsLoneCarriageReturn guards the other side of the CRLF
+// strip: a \r that is not followed by \n is data, not a line ending, and
+// dropping it would silently corrupt the file on the next save.
+func TestNewBuffer_KeepsLoneCarriageReturn(t *testing.T) {
+	for _, src := range []string{"lone\rcarriage", "trailing\r", "mid\rline\nnext"} {
+		if got := NewBuffer(src).String(); got != src {
+			t.Fatalf("lone CR was eaten: %q -> %q", src, got)
+		}
+	}
+}
+
+// TestBuffer_TextWith_JoinsWithGivenEnding proves the save half: the
+// buffer holds unterminated lines, so the separator alone decides the
+// file's line ending. Tab.Save passes the ending detected at open.
+func TestBuffer_TextWith_JoinsWithGivenEnding(t *testing.T) {
+	b := NewBuffer("alpha\r\nbeta")
+	if got := b.TextWith("\r\n"); got != "alpha\r\nbeta" {
+		t.Fatalf("CRLF join = %q", got)
+	}
+	if got := b.TextWith("\n"); got != "alpha\nbeta" {
+		t.Fatalf("LF join = %q", got)
+	}
+}
+
 // TestBuffer_LineRunes_OutOfRange returns nil for negative or past-end
 // indices so callers can branch on a nil slice without panicking.
 func TestBuffer_LineRunes_OutOfRange(t *testing.T) {
@@ -84,6 +127,98 @@ func TestBuffer_LineRunes_Multibyte(t *testing.T) {
 	got := b.LineRunes(0)
 	if len(got) != 5 {
 		t.Fatalf("expected 5 runes, got %d (%v)", len(got), got)
+	}
+}
+
+// TestBuffer_LineRunes_CacheFollowsMutations is the regression guard for
+// the decode cache behind LineRunes. The cache validates against the
+// source string rather than being invalidated by hand, so every way a
+// line can change — an in-place write, an edit through the buffer API,
+// and a splice that shifts every later index — has to be reflected
+// immediately. A stale hit here would paint deleted text on screen.
+func TestBuffer_LineRunes_CacheFollowsMutations(t *testing.T) {
+	b := NewBuffer("one\ntwo\nthree")
+
+	// Warm every line so each has a live cache entry.
+	for i := range b.Lines {
+		_ = b.LineRunes(i)
+	}
+
+	// (a) Direct write to the exported field.
+	b.Lines[1] = "TWO!"
+	if got := string(b.LineRunes(1)); got != "TWO!" {
+		t.Fatalf("direct write served stale runes: %q", got)
+	}
+
+	// (b) Edit through the buffer API.
+	b.InsertString(Position{Line: 0, Col: 3}, "X")
+	if got := string(b.LineRunes(0)); got != "oneX" {
+		t.Fatalf("insert served stale runes: %q", got)
+	}
+
+	// (c) A splice that shifts the lines below it: line 1's cached entry
+	// now names different content at the same index.
+	b.InsertString(Position{Line: 0, Col: 0}, "zero\n")
+	if got := string(b.LineRunes(1)); got != "oneX" {
+		t.Fatalf("index shift served stale runes: %q", got)
+	}
+	if got := string(b.LineRunes(2)); got != "TWO!" {
+		t.Fatalf("index shift served stale runes at 2: %q", got)
+	}
+
+	// (d) Deleting a line shifts them back the other way.
+	b.DeleteRange(Position{Line: 0, Col: 0}, Position{Line: 1, Col: 0})
+	if got := string(b.LineRunes(0)); got != "oneX" {
+		t.Fatalf("delete served stale runes: %q", got)
+	}
+}
+
+// TestBuffer_LineRunes_MemoisesDecode pins the point of the cache, not
+// just its freshness: asking for the same unchanged line twice must hand
+// back the same slice instead of decoding again. One wrap-mode frame
+// walks the viewport three times — EnsureVisible, the clamp, then the
+// paint — so a decode per call costs O(viewport x lineLen) allocations
+// on every repaint, including idle ones.
+func TestBuffer_LineRunes_MemoisesDecode(t *testing.T) {
+	b := NewBuffer("some line of text\nanother line")
+	first := b.LineRunes(0)
+	if len(first) == 0 {
+		t.Fatal("expected a decoded line")
+	}
+	if second := b.LineRunes(0); &second[0] != &first[0] {
+		t.Fatal("repeat read re-decoded the line instead of reusing the cache")
+	}
+
+	// A neighbouring line lands in its own slot and evicts nothing.
+	_ = b.LineRunes(1)
+	if third := b.LineRunes(0); &third[0] != &first[0] {
+		t.Fatal("reading a neighbouring line dropped the cached decode")
+	}
+
+	// An edit replaces the source string, so the next read must decode.
+	b.Lines[0] = "some line of text!"
+	if after := b.LineRunes(0); &after[0] == &first[0] {
+		t.Fatal("edited line was served the stale cached decode")
+	}
+}
+
+// TestBuffer_LineRunes_CacheSurvivesIndexAliasing pins the direct-mapped
+// cache's collision behaviour: two lines exactly runeCacheSlots apart
+// share a slot, and reading them alternately must never hand one line's
+// runes back for the other.
+func TestBuffer_LineRunes_CacheSurvivesIndexAliasing(t *testing.T) {
+	lines := make([]string, runeCacheSlots+1)
+	for i := range lines {
+		lines[i] = "line-" + strconv.Itoa(i)
+	}
+	b := &Buffer{Lines: lines}
+	for range 3 {
+		if got := string(b.LineRunes(0)); got != "line-0" {
+			t.Fatalf("slot collision returned %q for line 0", got)
+		}
+		if got := string(b.LineRunes(runeCacheSlots)); got != "line-"+strconv.Itoa(runeCacheSlots) {
+			t.Fatalf("slot collision returned %q for the aliasing line", got)
+		}
 	}
 }
 
@@ -326,4 +461,85 @@ func TestPosLess_AndOrdered(t *testing.T) {
 	if x != a || y != b {
 		t.Fatalf("PosOrdered should be stable for already-ordered: %+v %+v", x, y)
 	}
+}
+
+// FuzzBufferInsertDelete pins the primitive every editing gesture is built
+// from: an insert followed by a delete of exactly the span the insert
+// reported must leave the buffer bit-identical to where it started. Undo,
+// paste, replace, and the multi-line splice path all lean on
+// InsertString's returned end position being the true end of what it
+// wrote, so the target also checks that Substring over that span reads
+// back the inserted text and that the buffer never loses its "always at
+// least one line" invariant.
+func FuzzBufferInsertDelete(f *testing.F) {
+	seeds := []struct {
+		text string
+		ins  string
+		line int
+		col  int
+	}{
+		{"", "", 0, 0},
+		{"hello", " world", 0, 5},
+		{"one\ntwo\nthree", "\n", 1, 1},
+		{"one\ntwo\nthree", "a\nb\nc", 2, 0},
+		{"日本語", "テキスト", 0, 1},
+		{"e\u0301", "\u0301", 0, 1},
+		{"trailing\n", "x", 1, 0},
+		{"a", strings.Repeat("z", 5000), 0, 1},
+		{"        ", "\t", 0, 4},
+		{"lone\rcarriage\r", "\r", 0, 4},
+		{"👨\u200d👩\u200d👦", "\u200d👦", 0, 5},
+		{"🇯🇵", "🇺🇸", 0, 1},
+		{"a\u0301", "\u0302", 0, 2},
+		{"日本語", "\t", 0, 2},
+		{"❤\ufe0f", "\ufe0e", 0, 1},
+		{"clamp me", "x", 999, 999},
+		{"clamp me", "x", -5, -5},
+	}
+	for _, s := range seeds {
+		f.Add(s.text, s.ins, s.line, s.col)
+	}
+
+	f.Fuzz(func(t *testing.T, text, ins string, line, col int) {
+		// Buffer positions are rune-indexed by design (Position.Col counts
+		// runes), so every edit re-decodes its line through []rune and
+		// invalid UTF-8 collapses to RuneError on the way. That lossiness
+		// is a standing property of the buffer, not the behaviour this
+		// target pins — normalise the inputs into the buffer's own domain
+		// so the round trip below is an exact equality rather than a
+		// re-statement of the encoding.
+		text = string([]rune(text))
+		ins = string([]rune(ins))
+
+		buf := NewBuffer(text)
+		before := buf.String()
+		// The buffer is deliberately LF-normalised on load — the CR of a
+		// CRLF pair is stripped and Tab.Save puts it back — so the round
+		// trip is against the normalised text, not the raw input. Every
+		// other byte, including a lone CR, must survive untouched.
+		if want := strings.ReplaceAll(text, "\r\n", "\n"); before != want {
+			t.Fatalf("NewBuffer/String is not a round trip: %q != %q", before, want)
+		}
+
+		start := buf.Clamp(Position{Line: line, Col: col})
+		end := buf.InsertString(Position{Line: line, Col: col}, ins)
+
+		if buf.LineCount() < 1 {
+			t.Fatal("buffer must always hold at least one line")
+		}
+		if got := buf.Substring(start, end); got != ins {
+			t.Fatalf("inserted span reads back %q, want %q", got, ins)
+		}
+		if clamped := buf.Clamp(end); clamped != end {
+			t.Fatalf("insert returned out-of-buffer position %+v (clamps to %+v)", end, clamped)
+		}
+
+		got := buf.DeleteRange(start, end)
+		if got != start {
+			t.Fatalf("DeleteRange returned %+v, want the span start %+v", got, start)
+		}
+		if after := buf.String(); after != before {
+			t.Fatalf("insert+delete did not round trip:\n got %q\nwant %q", after, before)
+		}
+	})
 }

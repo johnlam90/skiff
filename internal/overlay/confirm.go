@@ -24,16 +24,46 @@ const (
 	confirmBtnYesW = 7 // "[ Yes ]"
 )
 
-// Confirm is the Yes/No overlay: a centered box with a title, a
-// one-line message, and a No / Yes button row. Default focus is No so
-// an accidental Enter is harmless — important for destructive actions
-// like Delete. Esc, a No click, or a click outside runs OnCancel.
+// ConfirmBodyWidth is the frame width a Confirm uses when it carries a
+// multi-line Body. Wider than the one-line form on purpose: the flows
+// that need several rows are exactly the ones whose content must not be
+// abbreviated. The formatter-trust prompt lists the argv it is asking
+// permission to execute, and an elided argv is worthless consent.
+const ConfirmBodyWidth = 84
+
+// ConfirmBodyTextWidth is the usable text width inside a Body-mode
+// confirm: the frame minus a border cell and a padding cell on each
+// side. Exported so callers can wrap their own lines to fit instead of
+// discovering the truncation at draw time.
+const ConfirmBodyTextWidth = ConfirmBodyWidth - 4
+
+// confirmMaxBodyRows caps the visible body so a config declaring dozens
+// of commands cannot push the buttons off a small screen. Rows past the
+// cap stay reachable by scrolling — hiding them outright would be the
+// same consent hole as truncating an argv.
+const confirmMaxBodyRows = 14
+
+// confirmChromeRows is the non-body height: border, title, divider,
+// blank, the button row, two blanks, and the bottom border. Body rows
+// are added on top, so a one-row body reproduces confirmHeight exactly.
+const confirmChromeRows = confirmHeight - 1
+
+// Confirm is the Yes/No overlay: a centered box with a title, a body,
+// and a No / Yes button row. Default focus is No so an accidental Enter
+// is harmless — important for destructive actions like Delete. Esc, a No
+// click, or a click outside runs OnCancel.
 //
-// Rows (relY): 0 border · 1 title · 2 divider · 3 blank · 4 message ·
-// 5 buttons · 6–7 blank · 8 border.
+// Rows (relY), one-line form: 0 border · 1 title · 2 divider · 3 blank ·
+// 4 message · 5 buttons · 6–7 blank · 8 border. A multi-line Body grows
+// rows 4..4+n-1 and pushes the button row down with it.
 type Confirm struct {
 	Title   string
 	Message string
+	// Body, when non-empty, replaces the single centered Message with
+	// left-aligned, scrollable rows in a wider frame. Reach for it when
+	// one line cannot carry informed consent — the formatter-trust
+	// prompt has to show every command it would run.
+	Body []string
 	// Hover is the highlighted button: 0 = No (the safe default),
 	// 1 = Yes.
 	Hover int
@@ -49,16 +79,82 @@ type Confirm struct {
 	// trust prompt — set it right after opening; it can never leak to
 	// another confirm because it dies with this value.
 	OnCancel func()
+
+	// scroll is the index of the first visible Body row.
+	scroll int
 }
 
-// rect computes the confirm's centered rectangle.
+// frameWidth returns the frame width: the wide form for a multi-line
+// Body, the classic 54-cell box otherwise.
+func (c *Confirm) frameWidth() int {
+	if len(c.Body) == 0 {
+		return confirmWidth
+	}
+	return ConfirmBodyWidth
+}
+
+// bodyRows returns how many body rows are visible: one for the Message
+// form, otherwise the Body length clamped by the row cap and by what
+// the screen can fit above the button row.
+func (c *Confirm) bodyRows() int {
+	n := len(c.Body)
+	if n == 0 {
+		return 1
+	}
+	if n > confirmMaxBodyRows {
+		n = confirmMaxBodyRows
+	}
+	if _, h := c.Size(); n > h-confirmChromeRows {
+		n = h - confirmChromeRows
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// buttonRow returns the body-relative row the No / Yes pair is painted
+// on. Draw and hit-test both derive it here so they cannot drift.
+func (c *Confirm) buttonRow() int { return 4 + c.bodyRows() }
+
+// buttonOffset shifts the button columns when the frame is wider than
+// the classic box, keeping the pair in the same relative position
+// instead of hugging the left edge. Zero for the 54-cell form, so the
+// one-line confirm's geometry is byte-identical to before Body existed.
+func (c *Confirm) buttonOffset() int { return (c.frameWidth() - confirmWidth) / 2 }
+
+// Scroll exposes the first visible body row for tests.
+func (c *Confirm) Scroll() int { return c.scroll }
+
+// ScrollBy moves the Body window by delta rows, clamped to the content.
+// A body that fits entirely pins to zero, so the one-line Message form
+// can never scroll its text out of view.
+func (c *Confirm) ScrollBy(delta int) {
+	maxScroll := len(c.Body) - c.bodyRows()
+	if maxScroll <= 0 {
+		c.scroll = 0
+		return
+	}
+	c.scroll += delta
+	if c.scroll < 0 {
+		c.scroll = 0
+	}
+	if c.scroll > maxScroll {
+		c.scroll = maxScroll
+	}
+}
+
+// rect computes the confirm's centered rectangle. Height tracks the
+// body so the button row never lands on top of the content.
 func (c *Confirm) rect() Rect {
 	w, h := c.Size()
-	return Centered(w, h, confirmWidth, confirmHeight)
+	return Centered(w, h, c.frameWidth(), confirmChromeRows+c.bodyRows())
 }
 
 // HandleKey: Left/Right/Tab move focus between No and Yes, Enter
-// activates the focused button, Esc cancels.
+// activates the focused button, Esc cancels. Up/Down and PgUp/PgDn
+// scroll a multi-line Body — those keys are unused by the button row,
+// so a long body stays readable without stealing focus movement.
 func (c *Confirm) HandleKey(ev *tcell.EventKey) {
 	switch ev.Key() {
 	case tcell.KeyEsc:
@@ -78,19 +174,38 @@ func (c *Confirm) HandleKey(ev *tcell.EventKey) {
 		}
 	case tcell.KeyRight:
 		c.Hover = 1
+	case tcell.KeyUp:
+		c.ScrollBy(-1)
+	case tcell.KeyDown:
+		c.ScrollBy(1)
+	case tcell.KeyPgUp:
+		c.ScrollBy(-c.bodyRows())
+	case tcell.KeyPgDn:
+		c.ScrollBy(c.bodyRows())
 	}
 }
 
-// HandleMouse: hovering a button highlights it; clicking activates;
-// clicks outside cancel.
+// HandleMouse: the wheel scrolls a multi-line body, hovering a button
+// highlights it, clicking activates, and clicks outside cancel.
 func (c *Confirm) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	r := c.rect()
-	if x >= r.X && x < r.X+r.W && y == r.Y+5 {
+	if btn&tcell.WheelUp != 0 {
+		c.ScrollBy(-3)
+		return
+	}
+	if btn&tcell.WheelDown != 0 {
+		c.ScrollBy(3)
+		return
+	}
+	btnY := r.Y + c.buttonRow()
+	noX := c.buttonOffset() + confirmBtnNoX
+	yesX := c.buttonOffset() + confirmBtnYesX
+	if x >= r.X && x < r.X+r.W && y == btnY {
 		relX := x - r.X
 		switch {
-		case relX >= confirmBtnNoX && relX < confirmBtnNoX+confirmBtnNoW:
+		case relX >= noX && relX < noX+confirmBtnNoW:
 			c.Hover = 0
-		case relX >= confirmBtnYesX && relX < confirmBtnYesX+confirmBtnYesW:
+		case relX >= yesX && relX < yesX+confirmBtnYesW:
 			c.Hover = 1
 		}
 	}
@@ -101,20 +216,21 @@ func (c *Confirm) HandleMouse(x, y int, btn tcell.ButtonMask) {
 		c.cancel()
 		return
 	}
-	if y == r.Y+5 {
+	if y == btnY {
 		relX := x - r.X
 		switch {
-		case relX >= confirmBtnNoX && relX < confirmBtnNoX+confirmBtnNoW:
+		case relX >= noX && relX < noX+confirmBtnNoW:
 			c.cancel()
-		case relX >= confirmBtnYesX && relX < confirmBtnYesX+confirmBtnYesW:
+		case relX >= yesX && relX < yesX+confirmBtnYesW:
 			c.yes()
 		}
 	}
 }
 
-// Draw renders the confirm: frame, centered rune-safe message, and the
-// No / Yes buttons — Yes in the error color because every Yes in the
-// editor is destructive.
+// Draw renders the confirm: frame, the body (a centered rune-safe
+// message, or the visible slice of a left-aligned multi-line Body —
+// commands and paths read poorly centered), and the No / Yes buttons,
+// Yes in the error color because every Yes in the editor is destructive.
 func (c *Confirm) Draw(scr tcell.Screen) {
 	r := c.rect()
 	th := c.Theme
@@ -122,11 +238,18 @@ func (c *Confirm) Draw(scr tcell.Screen) {
 
 	bg := th.LineHL
 	bodyStyle := tcell.StyleDefault.Background(bg).Foreground(th.Text)
-	msg := trimRunes(c.Message, r.W-4)
-	drawText(scr, r.X+(r.W-runeLen(msg))/2, r.Y+4, msg, bodyStyle)
+	if len(c.Body) == 0 {
+		msg := trimRunes(c.Message, r.W-4)
+		drawText(scr, r.X+(r.W-runeLen(msg))/2, r.Y+4, msg, bodyStyle)
+	} else {
+		for i, rows := 0, c.bodyRows(); i < rows && c.scroll+i < len(c.Body); i++ {
+			drawText(scr, r.X+2, r.Y+4+i, trimRunes(c.Body[c.scroll+i], r.W-4), bodyStyle)
+		}
+	}
 
-	DrawButton(scr, r.X+confirmBtnNoX, r.Y+5, "[  No  ]", bg, th.Text, c.Hover == 0)
-	DrawButton(scr, r.X+confirmBtnYesX, r.Y+5, "[ Yes ]", bg, th.Error, c.Hover == 1)
+	btnY := r.Y + c.buttonRow()
+	DrawButton(scr, r.X+c.buttonOffset()+confirmBtnNoX, btnY, "[  No  ]", bg, th.Text, c.Hover == 0)
+	DrawButton(scr, r.X+c.buttonOffset()+confirmBtnYesX, btnY, "[ Yes ]", bg, th.Error, c.Hover == 1)
 	scr.HideCursor()
 }
 

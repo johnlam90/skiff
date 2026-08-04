@@ -11,6 +11,9 @@
 // browsing a project never piles up tabs. Editing the buffer, clicking
 // the same file again, or opening it through a permanent path (finder,
 // menu, CLI) pins the tab. The flag itself lives on editor.Tab.
+//
+// None of that is visible on screen, so the first preview of a session
+// says it out loud once — see notePreviewCreated.
 
 package app
 
@@ -78,6 +81,9 @@ func (a *App) openFileMode(path string, preview bool) {
 		a.tabs.Append(t)
 	}
 	a.finishOpen(t, path)
+	if preview {
+		a.notePreviewCreated()
+	}
 }
 
 // newTab constructs a tab for path with the app-wide settings applied —
@@ -103,4 +109,19 @@ func (a *App) finishOpen(t *editor.Tab, path string) {
 	if !t.IsPreview() {
 		a.flash(fmt.Sprintf("Opened %s", filepath.Base(path)))
 	}
+}
+
+// notePreviewCreated explains preview tabs the first time this session
+// makes one. The behavior is good and completely silent: the label goes
+// italic and the next single tree click reuses the slot, which reads as
+// "my tabs keep vanishing" to anyone who has never heard the word
+// preview. One flash per session, not per preview — the rule lands the
+// moment it is read, and repeating it on every tree click would be
+// exactly the browsing noise finishOpen stays quiet to avoid.
+func (a *App) notePreviewCreated() {
+	if a.previewCoachShown {
+		return
+	}
+	a.previewCoachShown = true
+	a.flash("Preview tab — edit it or click again to keep it open")
 }

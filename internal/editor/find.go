@@ -6,15 +6,18 @@
 // =============================================================================
 
 // find.go implements the editor's in-file search primitives. Matching is
-// case-insensitive substring on rune-decoded lines so multi-byte characters
-// behave as one column each (consistent with how the cursor / selection
-// already treat columns elsewhere). Regex, whole-word, and case-sensitive
-// toggles are intentionally out of scope for v1 — the 80/20 here is the
-// VS-Code-style "type and jump" loop, not power-user search.
+// smart-case substring on rune-decoded lines: an all-lowercase query
+// matches any case, a single uppercase letter makes it exact — the same
+// rule internal/search applies to the project-wide panel, so the two
+// search surfaces never disagree about what a query means. Decoding to
+// runes keeps multi-byte characters at one column each (consistent with
+// how the cursor / selection already treat columns elsewhere). Regex and
+// whole-word toggles are intentionally out of scope for v1 — the 80/20
+// here is the VS-Code-style "type and jump" loop, not power-user search.
 
 package editor
 
-import "strings"
+import "unicode"
 
 // Match describes one find hit. Line and Col follow the same rune-indexed
 // convention as Position; Width is the rune count of the query so the
@@ -26,22 +29,34 @@ type Match struct {
 	Width int
 }
 
-// FindAll returns every case-insensitive substring match of query inside
-// buf, in document order. An empty query returns nil — the caller is
-// expected to clear its UI rather than show "0 of 0" results. Matches do
-// not overlap: after a hit the scanner advances past the matched run, so
-// "aaaa" with query "aa" yields two matches at columns 0 and 2.
+// FindAll returns every substring match of query inside buf, in document
+// order. Matching is smart-case: an all-lowercase query matches any
+// case, any uppercase letter in the query makes the match exact — so
+// "id" finds ID and id, while "ID" finds only ID. An empty query returns
+// nil — the caller is expected to clear its UI rather than show "0 of 0"
+// results. Matches do not overlap: after a hit the scanner advances past
+// the matched run, so "aaaa" with query "aa" yields two matches at
+// columns 0 and 2.
 func FindAll(buf *Buffer, query string) []Match {
 	if query == "" || buf == nil {
 		return nil
 	}
-	needle := []rune(strings.ToLower(query))
+	caseSensitive := hasUpper(query)
+	needle := []rune(query)
 	if len(needle) == 0 {
 		return nil
 	}
+	if !caseSensitive {
+		lowerRunes(needle)
+	}
 	var out []Match
 	for lineIdx, raw := range buf.Lines {
-		hay := []rune(strings.ToLower(raw))
+		// Decoded here rather than through Buffer.LineRunes: the fold
+		// below writes in place and LineRunes hands out a shared slice.
+		hay := []rune(raw)
+		if !caseSensitive {
+			lowerRunes(hay)
+		}
 		col := 0
 		for col+len(needle) <= len(hay) {
 			if runesEqual(hay[col:col+len(needle)], needle) {
@@ -66,6 +81,30 @@ func runesEqual(a, b []rune) bool {
 		}
 	}
 	return true
+}
+
+// lowerRunes case-folds a decoded line in place. Folding per rune rather
+// than via strings.ToLower keeps the rune count — which is what Col and
+// Width are measured in — identical to the unfolded line, and decodes
+// the line once instead of once per case form.
+func lowerRunes(rs []rune) {
+	for i, r := range rs {
+		rs[i] = unicode.ToLower(r)
+	}
+}
+
+// hasUpper reports whether s contains an uppercase letter — the
+// smart-case trigger. Deliberately the same predicate internal/search
+// uses; duplicated rather than exported across the package boundary
+// because it is six lines and the alternative is an import edge from the
+// editor onto the project-search engine.
+func hasUpper(s string) bool {
+	for _, r := range s {
+		if unicode.IsUpper(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // FirstMatchAtOrAfter returns the index into matches of the first hit at
@@ -113,6 +152,7 @@ func MatchEndPosition(m Match) Position {
 // and on every Enter / Shift-Enter press).
 func (t *Tab) SetFindQuery(query string) {
 	t.FindQuery = query
+	t.findRows = nil // the per-line index belongs to the old match list
 	if query == "" {
 		t.FindMatches = nil
 		t.FindIndex = -1
@@ -161,20 +201,64 @@ func (t *Tab) FindPrev() {
 	t.FocusCurrentMatch()
 }
 
+// findRowSpan is the half-open range of FindMatches living on one buffer
+// line. FindAll emits matches in document order, so a line's hits are
+// always contiguous and one span describes all of them.
+type findRowSpan struct{ start, end int }
+
+// buildFindRows indexes FindMatches by line. Built lazily on first
+// lookup: the package's only writers of FindMatches (SetFindQuery,
+// ClearFind) drop the index, and the recorded length catches anyone who
+// assigns the exported field directly.
+func (t *Tab) buildFindRows() {
+	rows := make(map[int]findRowSpan)
+	for i, m := range t.FindMatches {
+		sp, ok := rows[m.Line]
+		if !ok {
+			sp.start = i
+		}
+		sp.end = i + 1
+		rows[m.Line] = sp
+	}
+	t.findRows = rows
+	t.findRowsFor = len(t.FindMatches)
+}
+
 // matchAtRune returns the index into FindMatches of the match that
 // covers (line, col), or -1 when none does. The renderer calls this once
-// per visible cell, so the implementation has to stay cheap — a linear
-// scan is fine for realistic file sizes (hundreds of matches at most),
-// and avoids the overhead of building a per-line index. If this ever
-// shows up in a profile, switch to a sorted-by-line bsearch.
+// per visible cell, so it goes through the per-line index and a binary
+// search rather than scanning the list: a query with thousands of hits
+// made every repaint O(cells x matches).
+//
+// The answer matches the old linear scan exactly — the lowest-indexed
+// covering match wins. Within a line FindAll emits non-decreasing ends,
+// so "first match on this line whose end is past col" is that same
+// match, whether the hits are adjacent or overlapping.
 func (t *Tab) matchAtRune(line, col int) int {
-	for i, m := range t.FindMatches {
-		if m.Line != line {
-			continue
+	if len(t.FindMatches) == 0 {
+		return -1
+	}
+	if t.findRows == nil || t.findRowsFor != len(t.FindMatches) {
+		t.buildFindRows()
+	}
+	sp, ok := t.findRows[line]
+	if !ok {
+		return -1
+	}
+	lo, hi := sp.start, sp.end
+	for lo < hi {
+		mid := int(uint(lo+hi) >> 1)
+		if m := t.FindMatches[mid]; m.Col+m.Width <= col {
+			lo = mid + 1
+		} else {
+			hi = mid
 		}
-		if col >= m.Col && col < m.Col+m.Width {
-			return i
-		}
+	}
+	if lo >= sp.end {
+		return -1
+	}
+	if m := t.FindMatches[lo]; col >= m.Col {
+		return lo
 	}
 	return -1
 }
@@ -186,6 +270,7 @@ func (t *Tab) ClearFind() {
 	t.FindQuery = ""
 	t.FindMatches = nil
 	t.FindIndex = -1
+	t.findRows = nil
 }
 
 // ReplaceCurrentMatch swaps the current find match for repl and

@@ -248,3 +248,54 @@ func TestHighlightVisible_SkipsGiantLines(t *testing.T) {
 		t.Fatal("humane neighbours must keep their styles")
 	}
 }
+
+// TestHighlightWindow_SkipsGiantLines is the live-path twin of
+// TestHighlightVisible_SkipsGiantLines and the regression for the guard
+// being on the wrong door: Render only ever calls HighlightWindow, which
+// used to join the window raw, so the "one minified line must not cost
+// seconds per keystroke" cap was not on the path any user actually hits.
+func TestHighlightWindow_SkipsGiantLines(t *testing.T) {
+	giant := strings.Repeat("x:=1;", 200_000) // ~1MB single line
+	lines := []string{"package main", giant, "var y = 2"}
+	start := time.Now()
+	styles, winStart, winEnd := HighlightWindow("a.go", lines, 0, 3, theme.Default())
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("giant line still dominates lexing: %v", elapsed)
+	}
+	if winStart != 0 || winEnd != 3 {
+		t.Fatalf("window = [%d,%d), want the whole 3-line file", winStart, winEnd)
+	}
+	// The capped row is fed to the lexer as an empty line, so its style
+	// row comes back empty and the renderer draws it plain.
+	if len(styles[1]) != 0 {
+		t.Fatalf("giant line should be left unstyled, got %d styles", len(styles[1]))
+	}
+	if len(styles[0]) == 0 || len(styles[2]) == 0 {
+		t.Fatal("humane neighbours must keep their styles")
+	}
+}
+
+// TestHighlightWindow_GridIsAbsolutelyIndexed pins the caller contract
+// both render paths depend on: the grid is indexed by buffer line, not
+// by window offset, and rows outside the window come back nil. tab.go
+// and wrap.go read t.Styles[lineIdx] directly, so flipping this to
+// window-relative would silently shift every colour by winStart.
+func TestHighlightWindow_GridIsAbsolutelyIndexed(t *testing.T) {
+	lines := make([]string, 600)
+	for i := range lines {
+		lines[i] = "var x = 1"
+	}
+	styles, winStart, winEnd := HighlightWindow("a.go", lines, 500, 10, theme.Default())
+	if len(styles) != len(lines) {
+		t.Fatalf("grid has %d rows, want one per file line (%d)", len(styles), len(lines))
+	}
+	if winStart != 244 || winEnd != 600 {
+		t.Fatalf("window = [%d,%d), want [244,600) for a 10-row view at 500", winStart, winEnd)
+	}
+	if styles[winStart-1] != nil {
+		t.Fatal("rows before the window must be nil")
+	}
+	if len(styles[500]) != len("var x = 1") {
+		t.Fatalf("row 500 has %d styles, want the line's rune count", len(styles[500]))
+	}
+}

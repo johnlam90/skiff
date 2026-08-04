@@ -1,7 +1,7 @@
 ---
 title: "FAQ"
 metaTitle: "Skiff FAQ — Vim, Plugins, LSP, License"
-metaDescription: "Why no vim mode, no tree-sitter, no config file, no Ctrl shortcuts. Plus license, contributing, LSP, multi-cursor, plugins, and Windows arm64."
+metaDescription: "Why no vim mode, no tree-sitter, no config system, no Ctrl shortcuts. Plus license, contributing, LSP, multi-cursor, plugins, and Windows arm64."
 summary: "Quick answers to the most-asked questions."
 weight: 130
 ---
@@ -14,9 +14,9 @@ Because the people who want vim already have vim, and the people who want Skiff 
 
 Tree-sitter requires CGO, per-language grammar packaging, and platform-specific build steps. Skiff ships as a single static Go binary on purpose — drop it on a server, run it. Chroma gives you syntax highlighting in pure Go with zero setup. Highlighting is all Skiff needs; structural editing is a feature for a different product.
 
-## Why no config file?
+## Why no config *system*?
 
-A config file is a tax. Every option you expose is one more thing the user has to research, decide on, and maintain. Skiff picks defaults. The two things that *do* vary per-user (custom actions, format-on-save commands) live in tiny JSON files with three or four fields. That's it.
+A config file is a tax. Every option you expose is one more thing the user has to research, decide on, and maintain. Skiff picks defaults. What's left is three keys the editor writes for you — `icons`, `theme` and `wrap` in `~/.config/skiff/config.json`, each set from a picker or a menu row rather than by hand — plus the two things that genuinely vary per-user, custom actions and format-on-save commands, in tiny JSON files with three or four fields. See [Configuration](/docs/configuration/). No plugin manifests, no keymap file, no dotfile sprawl.
 
 ## Why no `Ctrl+` shortcuts?
 

@@ -281,17 +281,19 @@ func TestRenderImage_FillsBackground(t *testing.T) {
 	tab.renderImage(scr, theme.Default(), 0, 0, 10, 5)
 	scr.Show()
 
+	th := theme.Default()
 	cells, w, _ := scr.GetContents()
-	// At least one cell should be a space with the theme background — the
-	// padding around a tiny 2x2 image inside a 10x5 cell rect.
+	// The padding around a width-bound image must be a space carrying the
+	// editor background — a blank cell with the terminal's own default
+	// colour would show as a hole in the theme.
 	foundPad := false
-	for y := 0; y < 5; y++ {
-		for x := 0; x < w; x++ {
+	for y := range 5 {
+		for x := range w {
 			c := cells[y*w+x]
-			if len(c.Runes) == 0 {
+			if len(c.Runes) == 0 || c.Runes[0] != ' ' {
 				continue
 			}
-			if c.Runes[0] == ' ' {
+			if _, bg, _ := c.Style.Decompose(); bg == th.BG {
 				foundPad = true
 				break
 			}
@@ -301,7 +303,7 @@ func TestRenderImage_FillsBackground(t *testing.T) {
 		}
 	}
 	if !foundPad {
-		t.Fatal("expected at least one bg-padded cell around a 4x1 image")
+		t.Error("expected padding cells painted with the theme background")
 	}
 }
 

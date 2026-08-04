@@ -9,6 +9,7 @@ package editor
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -27,14 +28,32 @@ func TestFindAll_BasicMatches(t *testing.T) {
 	}
 }
 
-// TestFindAll_CaseInsensitive proves matching ignores letter case in
-// both the query and the buffer. Without this, the "type to find" UX
-// is much less forgiving than users expect from VS Code.
-func TestFindAll_CaseInsensitive(t *testing.T) {
+// TestFindAll_SmartCaseLowerQuery proves an all-lowercase query still
+// matches any case in the buffer. Most queries are typed lowercase and
+// the forgiving "type to find" loop is the whole point of the bar.
+func TestFindAll_SmartCaseLowerQuery(t *testing.T) {
 	buf := NewBuffer("Foo FOO foO")
-	got := FindAll(buf, "fOo")
+	got := FindAll(buf, "foo")
 	if len(got) != 3 {
 		t.Fatalf("expected 3 case-insensitive matches, got %d: %v", len(got), got)
+	}
+}
+
+// TestFindAll_SmartCaseUpperQuery pins the other half of smart case: a
+// single uppercase letter makes the query exact, so hunting a symbol
+// like ID doesn't drag in every id. Same rule internal/search applies to
+// the project panel, so the two search surfaces never disagree.
+func TestFindAll_SmartCaseUpperQuery(t *testing.T) {
+	buf := NewBuffer("id ID Id iD")
+	got := FindAll(buf, "ID")
+	if len(got) != 1 {
+		t.Fatalf("expected only the exact ID, got %d: %v", len(got), got)
+	}
+	if got[0].Col != 3 {
+		t.Fatalf("matched the wrong occurrence: %+v", got[0])
+	}
+	if all := FindAll(buf, "id"); len(all) != 4 {
+		t.Fatalf("lowercase query should match all four, got %d: %v", len(all), all)
 	}
 }
 
@@ -222,6 +241,108 @@ func TestMatchAtRune_HitAndMiss(t *testing.T) {
 	}
 }
 
+// linearMatchAtRune is the pre-index implementation of matchAtRune: the
+// straight scan that returns the first match covering the cell. It is
+// kept here purely as the oracle the indexed version is checked against.
+func linearMatchAtRune(matches []Match, line, col int) int {
+	for i, m := range matches {
+		if m.Line != line {
+			continue
+		}
+		if col >= m.Col && col < m.Col+m.Width {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestMatchAtRune_MatchesLinearScan is the equivalence proof for turning
+// the per-cell probe from an O(matches) scan into a per-line index plus a
+// binary search. Every cell of every line — including the ones between,
+// before, and after hits — has to resolve to the same match index the
+// old scan returned, for adjacent hits, hits that touch the line's edges,
+// and hand-built overlapping spans the scanner itself never emits.
+func TestMatchAtRune_MatchesLinearScan(t *testing.T) {
+	cases := []struct {
+		name    string
+		lines   string
+		matches []Match
+	}{
+		{
+			name:    "adjacent hits",
+			lines:   "aaaaaa\nbb aa",
+			matches: []Match{{0, 0, 2}, {0, 2, 2}, {0, 4, 2}, {1, 3, 2}},
+		},
+		{
+			name:    "overlapping spans",
+			lines:   "abcabcabc",
+			matches: []Match{{0, 0, 4}, {0, 2, 4}, {0, 3, 6}},
+		},
+		{
+			name:    "hit at both edges",
+			lines:   "xyz\nlonger line here",
+			matches: []Match{{0, 0, 1}, {0, 2, 1}, {1, 0, 6}, {1, 12, 4}},
+		},
+		{
+			name:    "no matches on some lines",
+			lines:   "one\ntwo\nthree",
+			matches: []Match{{1, 1, 2}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tab := &Tab{Buffer: NewBuffer(tc.lines)}
+			tab.FindMatches = tc.matches
+			for line := -1; line <= tab.Buffer.LineCount(); line++ {
+				for col := -1; col <= 20; col++ {
+					want := linearMatchAtRune(tc.matches, line, col)
+					if got := tab.matchAtRune(line, col); got != want {
+						t.Fatalf("matchAtRune(%d, %d) = %d, linear scan says %d",
+							line, col, got, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestMatchAtRune_IndexRebuildsAfterQueryChange guards the cached index's
+// freshness. The renderer probes thousands of cells between edits, so the
+// index is built lazily and dropped by the writers of FindMatches — if a
+// re-query left the old index in place the highlight would paint the
+// previous query's hits.
+func TestMatchAtRune_IndexRebuildsAfterQueryChange(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("foo bar foo")}
+	tab.SetFindQuery("foo")
+	if got := tab.matchAtRune(0, 0); got != 0 { // builds the index
+		t.Fatalf("seed probe = %d", got)
+	}
+
+	tab.SetFindQuery("bar")
+	if got := tab.matchAtRune(0, 0); got != -1 {
+		t.Fatalf("stale index still reports a hit at col 0: %d", got)
+	}
+	if got := tab.matchAtRune(0, 4); got != 0 {
+		t.Fatalf("new query's hit not found at col 4: %d", got)
+	}
+
+	// A direct write to the exported field is caught by the recorded
+	// match count, without any invalidation call. Document order is the
+	// documented shape of the field, so the replacement respects it.
+	tab.FindMatches = []Match{{Line: 0, Col: 0, Width: 3}, {Line: 0, Col: 8, Width: 3}}
+	if got := tab.matchAtRune(0, 8); got != 1 {
+		t.Fatalf("direct assignment not picked up: %d", got)
+	}
+	if got := tab.matchAtRune(0, 1); got != 0 {
+		t.Fatalf("direct assignment lost the first hit: %d", got)
+	}
+
+	tab.ClearFind()
+	if got := tab.matchAtRune(0, 0); got != -1 {
+		t.Fatalf("ClearFind left the index live: %d", got)
+	}
+}
+
 // TestReplaceCurrentMatch pins the single-replace contract: the match
 // text swaps, the query re-runs (count shrinks), the walk stays on the
 // next match forward, and one undo restores everything.
@@ -281,4 +402,108 @@ func TestReplaceLines(t *testing.T) {
 	if tab.Buffer.Lines[1] != "two" {
 		t.Fatalf("undo should restore: %v", tab.Buffer.Lines)
 	}
+}
+
+// FuzzFindAll pins the span contract the find UI is built on. The renderer
+// asks "is this cell inside a match?" once per painted cell and FindNext /
+// FindPrev walk the slice assuming document order, so a match that
+// overlaps its neighbour, points past the end of its line, or doesn't
+// actually cover the query would paint garbage and jump the cursor
+// nowhere. The completeness half matters just as much: if the lowered
+// line contains the lowered query, at least one match must be reported.
+func FuzzFindAll(f *testing.F) {
+	seeds := []struct {
+		text  string
+		query string
+	}{
+		{"", ""},
+		{"foo bar foo", "foo"},
+		{"aaaa", "aa"},
+		{"MiXeD case Line\nmixed CASE line", "mixed"},
+		{"日本語テキスト\n日本語", "日本語"},
+		{"e\u0301e\u0301e\u0301", "e\u0301"},
+		{"line one\r\nline two\r\n", "\r"},
+		{strings.Repeat("ab", 4096), "aba"},
+		{"          ", " "},
+		{"tab\tsep\ttab", "\t"},
+		{"ünïcödé", "Ï"},
+		{"👨\u200d👩\u200d👦 family\n👨 alone", "👨"},
+		{"🇯🇵🇺🇸 flags", "🇺🇸"},
+		{"混ざったmixed幅width", "mixed"},
+		{"❤\ufe0f and ❤ differ", "❤"},
+	}
+	for _, s := range seeds {
+		f.Add(s.text, s.query)
+	}
+
+	f.Fuzz(func(t *testing.T, text, query string) {
+		// FindAll compares DECODED runes on both sides, so invalid UTF-8
+		// has already collapsed to RuneError before any comparison
+		// happens — "\x81" and "\xcc" are the same rune to the matcher.
+		// Normalise the inputs into that domain so the assertions below
+		// check the spans the matcher produced instead of re-litigating
+		// the encoding. Match positions are unaffected: FindAll decodes
+		// every line anyway.
+		text = string([]rune(text))
+		query = string([]rune(query))
+
+		buf := NewBuffer(text)
+		matches := FindAll(buf, query)
+
+		if query == "" {
+			if matches != nil {
+				t.Fatalf("empty query must report no matches, got %v", matches)
+			}
+			return
+		}
+
+		// Smart case: an all-lowercase query folds the haystack, any
+		// uppercase letter in it makes the comparison exact.
+		caseSensitive := hasUpper(query)
+		needle := query
+		if !caseSensitive {
+			needle = strings.ToLower(query)
+		}
+		wantWidth := len([]rune(needle))
+
+		perLine := make(map[int]int, len(matches))
+		prev := Match{Line: -1}
+		for _, m := range matches {
+			if m.Line < prev.Line || (m.Line == prev.Line && m.Col < prev.Col+prev.Width) {
+				t.Fatalf("matches must ascend without overlapping: %+v then %+v", prev, m)
+			}
+			if m.Line < 0 || m.Line >= buf.LineCount() {
+				t.Fatalf("match line %d outside buffer of %d lines", m.Line, buf.LineCount())
+			}
+			if m.Width != wantWidth {
+				t.Fatalf("match width %d, want the query's %d runes", m.Width, wantWidth)
+			}
+			hay := []rune(buf.Lines[m.Line])
+			if !caseSensitive {
+				hay = []rune(strings.ToLower(buf.Lines[m.Line]))
+			}
+			if m.Col < 0 || m.Col+m.Width > len(hay) {
+				t.Fatalf("match span [%d,%d) escapes the %d-rune line %d",
+					m.Col, m.Col+m.Width, len(hay), m.Line)
+			}
+			if got := string(hay[m.Col : m.Col+m.Width]); got != needle {
+				t.Fatalf("match at %d:%d covers %q, want %q", m.Line, m.Col, got, needle)
+			}
+			perLine[m.Line]++
+			prev = m
+		}
+
+		// A line that visibly contains the query must produce a hit —
+		// silently missing matches is the failure mode a "no panic" fuzz
+		// target would never catch.
+		for i, raw := range buf.Lines {
+			line := raw
+			if !caseSensitive {
+				line = strings.ToLower(raw)
+			}
+			if strings.Contains(line, needle) && perLine[i] == 0 {
+				t.Fatalf("line %d (%q) contains %q but reported no match", i, raw, query)
+			}
+		}
+	})
 }
