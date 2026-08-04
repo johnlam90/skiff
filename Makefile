@@ -77,6 +77,13 @@ test-short:
 # lint runs the same three gates CI enforces, in the same order, so a
 # clean local run means a clean pipeline. STATICCHECK_VERSION is pinned to
 # the tag .github/workflows/test.yml installs — bump both together.
+#
+# gofmt is VERSION-SENSITIVE: newer toolchains reflow doc comments the
+# older one leaves alone, and vice versa. CI resolves Go from the go
+# directive in go.mod, so a newer local toolchain can call a file clean
+# that CI rejects. If lint passes here and fails in CI, reproduce with
+# that exact version: go install golang.org/dl/go1.24.0@latest &&
+# go1.24.0 download && go1.24.0 fmt ./...
 STATICCHECK_VERSION := v0.6.1
 lint:
 	@unformatted="$$(gofmt -l . | grep -v '^website/' || true)"; \
