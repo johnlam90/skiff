@@ -7,10 +7,12 @@
 
 // indent.go owns two related concerns:
 //
-//   1. Visual-column math. Tabs render as multi-cell tab stops, so a rune's
-//      "screen position" is no longer equal to its index in the line. The
-//      renderer, cursor placement, and mouse hit-test all consult these
-//      helpers when converting between rune indices and visual cells.
+//   1. Visual-column math. Tabs render as multi-cell tab stops, CJK and
+//      emoji glyphs claim two cells, and combining marks claim none, so a
+//      rune's "screen position" is no longer equal to its index in the
+//      line. The renderer, cursor placement, and mouse hit-test all consult
+//      these helpers when converting between rune indices and visual cells.
+//      The cell widths themselves come from cluster.go.
 //
 //   2. Indent style detection. When a tab is opened, we sample its existing
 //      indentation and pick the unit (tab character vs N spaces) the user
@@ -37,57 +39,72 @@ const defaultSpaceIndent = "    "
 
 // RuneVisualWidth returns the cell count occupied by r when it lands at the
 // given visualCol (0-based, measured from the start of the line). Hard tabs
-// expand to fill enough cells to reach the next TabStop boundary; everything
-// else is one cell. This deliberately ignores east-asian wide chars and
-// combining marks — the rest of the buffer code treats one rune as one cell
-// and adding wide-char support is a separate, larger project.
+// expand to fill enough cells to reach the next TabStop boundary; every
+// other rune reports the width Unicode gives it in a monospace grid — 0 for
+// combining marks, ZWJ, and control characters, 2 for east-asian wide and
+// fullwidth glyphs and emoji, 1 for the rest.
+//
+// This is a per-RUNE answer, and a rune is not always a character: U+FE0F
+// reports 0 here but widens the emoji in front of it, and the five runes of
+// a family emoji report 2+0+2+0+2 while the family itself paints in two
+// cells. Layout code walks clusters through ClusterAt for exactly that
+// reason. Reach for this only with a rune that has no neighbours.
 func RuneVisualWidth(r rune, visualCol int) int {
 	if r == '\t' {
-		w := TabStop - (visualCol % TabStop)
-		if w == 0 {
-			w = TabStop
-		}
-		return w
+		return tabCells(visualCol)
 	}
-	return 1
+	return runeCellWidth(r)
 }
 
 // LineVisualCol returns the visual column (0-based) at the rune position
-// runeCol within runes. Tabs in the prefix expand to tab stops. Used for
-// cursor placement and selection / find highlighting.
+// runeCol within runes. Tabs in the prefix expand to tab stops and wide
+// glyphs count double. Used for cursor placement and selection / find
+// highlighting.
 //
 // runeCol is clamped to [0, len(runes)] so callers can pass an end-of-line
-// position without bounds-checking.
+// position without bounds-checking, and a runeCol that lands *inside* a
+// grapheme cluster reports the column the cluster starts at: a caret can
+// sit before or after "é" but there is no cell between the e and its
+// accent to report.
 func LineVisualCol(runes []rune, runeCol int) int {
 	if runeCol > len(runes) {
 		runeCol = len(runes)
 	}
 	visualCol := 0
-	for i := 0; i < runeCol; i++ {
-		visualCol += RuneVisualWidth(runes[i], visualCol)
+	for i := 0; i < runeCol; {
+		end, w := ClusterAt(runes, i, visualCol)
+		if end > runeCol {
+			break // runeCol sits inside this cluster
+		}
+		visualCol += w
+		i = end
 	}
 	return visualCol
 }
 
-// RuneColAtVisual returns the rune index whose start column is at or just
-// before targetVisualCol, snapping clicks inside a tab's visual span back
-// to the tab's start. Used by mouse hit-testing — clicking anywhere in a
-// 4-cell tab places the cursor at the tab character itself, not somewhere
-// "inside" it (which would be a no-op anyway).
+// RuneColAtVisual returns the rune index of the cluster whose cells cover
+// targetVisualCol, snapping clicks inside a multi-cell glyph back to its
+// first rune. Used by mouse hit-testing — clicking the right half of a CJK
+// ideograph or anywhere in a 4-cell tab places the cursor on that
+// character, not somewhere "inside" it, and never between a base rune and
+// its combining marks.
 //
 // When targetVisualCol is past the line's end, the rune count is returned
-// (cursor lands at the end-of-line virtual position).
+// (cursor lands at the end-of-line virtual position). Zero-width clusters
+// are skipped rather than returned: there is no cell to click on them
+// with.
 func RuneColAtVisual(runes []rune, targetVisualCol int) int {
 	if targetVisualCol <= 0 {
 		return 0
 	}
 	visualCol := 0
-	for i, r := range runes {
-		w := RuneVisualWidth(r, visualCol)
+	for i := 0; i < len(runes); {
+		end, w := ClusterAt(runes, i, visualCol)
 		if targetVisualCol < visualCol+w {
 			return i
 		}
 		visualCol += w
+		i = end
 	}
 	return len(runes)
 }

@@ -10,6 +10,8 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -19,14 +21,113 @@ import (
 	"github.com/johnlam90/skiff/internal/editor"
 )
 
-// TestLeaderActionFor_AllBindingsResolve walks the binding table and
-// verifies every entry returns a non-nil action. Catches accidentally
-// dropping a method reference when the table is reshuffled.
-func TestLeaderActionFor_AllBindingsResolve(t *testing.T) {
+// leaderFuncID identifies an App method by its code pointer. Go funcs
+// aren't comparable with ==, and this table's only interesting failure
+// mode is "the right key wired to the wrong method", so identity — not
+// non-nil-ness — is what the test has to compare.
+func leaderFuncID(fn func(*App)) uintptr {
+	return reflect.ValueOf(fn).Pointer()
+}
+
+// leaderFuncName resolves a bound method back to its qualified Go name
+// so a mis-wired binding fails with "fires (*App).menuUndo, want
+// (*App).menuSave" instead of two opaque addresses.
+func leaderFuncName(fn func(*App)) string {
+	if fn == nil {
+		return "<nil>"
+	}
+	f := runtime.FuncForPC(leaderFuncID(fn))
+	if f == nil {
+		return "<unknown>"
+	}
+	name := f.Name()
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	return name
+}
+
+// TestLeaderActionFor_BindingsFireIntendedMethods is the guard on the
+// project's entire keyboard shortcut surface. The expected table below
+// is written out by hand on purpose: iterating leaderBindings() and
+// asserting each entry merely resolves non-nil passes just as happily
+// when 's' has been rebound to menuQuit, which is the one mistake this
+// table actually suffers. Every key must resolve to the intended method
+// (compared by code pointer) and render the intended cheat-strip label,
+// no key may be bound twice, and adding a binding without listing it
+// here is itself a failure — an unreviewed shortcut is the thing we're
+// trying to prevent.
+func TestLeaderActionFor_BindingsFireIntendedMethods(t *testing.T) {
+	// Deliberately its own struct rather than leaderBinding: the
+	// expectation must not inherit fields (or field order) from the type
+	// under test, so adding presentation metadata to leaderBinding can
+	// never silently reshape what this test asserts.
+	want := []struct {
+		key    rune
+		action func(*App)
+		desc   string
+		group  string
+	}{
+		{'s', (*App).menuSave, "save", "File"},
+		{'n', (*App).menuNewFile, "new file", "File"},
+		{'w', (*App).menuClose, "close tab", "File"},
+		{'o', (*App).menuReopenTab, "reopen tab", "File"},
+		{'u', (*App).menuUndo, "undo", "Edit"},
+		{'r', (*App).menuRedo, "redo", "Edit"},
+		{'c', (*App).menuCopy, "copy", "Edit"},
+		{'x', (*App).menuCut, "cut", "Edit"},
+		{'v', (*App).menuPaste, "paste", "Edit"},
+		{'/', (*App).menuToggleLineComment, "comment", "Edit"},
+		{'k', (*App).menuMoveLineUp, "line up", "Edit"},
+		{'j', (*App).menuMoveLineDown, "line down", "Edit"},
+		{'d', (*App).menuDuplicateLine, "duplicate", "Edit"},
+		{'f', (*App).openFind, "find", "Go"},
+		{'F', (*App).menuFindInProject, "find in project", "Go"},
+		{'l', (*App).menuGoToLine, "goto line", "Go"},
+		{'p', (*App).openFinder, "open file", "Go"},
+		{'b', (*App).menuMoveWordLeft, "word left", "Go"},
+		{'e', (*App).menuMoveWordRight, "word right", "Go"},
+		{'%', (*App).menuGoToMatchingBracket, "match bracket", "Go"},
+		{'g', (*App).focusGitPanel, "git panel", "Git"},
+		{'t', (*App).menuToggleSidebar, "sidebar", "View"},
+		{'z', (*App).menuToggleWrap, "wrap", "View"},
+		{'?', (*App).menuKeyboardShortcuts, "shortcuts", "View"},
+		{'q', (*App).menuQuit, "quit", "Quit"},
+	}
+
+	bound := make(map[rune]leaderBinding, len(want))
 	for _, b := range leaderBindings() {
-		if leaderActionFor(b.key) == nil {
-			t.Errorf("binding %q resolved to nil", b.key)
+		if prev, dup := bound[b.key]; dup {
+			t.Fatalf("Esc %q is bound twice (%q then %q); leaderActionFor only ever reaches the first", b.key, prev.desc, b.desc)
 		}
+		bound[b.key] = b
+	}
+
+	for _, w := range want {
+		b, ok := bound[w.key]
+		if !ok {
+			t.Errorf("Esc %q (%s) is not bound at all", w.key, w.desc)
+			continue
+		}
+		if b.desc != w.desc {
+			t.Errorf("Esc %q cheat-strip label = %q, want %q", w.key, b.desc, w.desc)
+		}
+		if b.group != w.group {
+			t.Errorf("Esc %q (%s) is filed under %q, want %q", w.key, w.desc, b.group, w.group)
+		}
+		got := leaderActionFor(w.key)
+		if got == nil {
+			t.Errorf("leaderActionFor(%q) = nil, want %s", w.key, leaderFuncName(w.action))
+			continue
+		}
+		if leaderFuncID(got) != leaderFuncID(w.action) {
+			t.Errorf("Esc %q fires %s, want %s (%s)", w.key, leaderFuncName(got), leaderFuncName(w.action), w.desc)
+		}
+		delete(bound, w.key)
+	}
+
+	for key, b := range bound {
+		t.Errorf("Esc %q (%s → %s) is bound but not listed in this test; every shortcut must be reviewed here", key, b.desc, leaderFuncName(b.action))
 	}
 }
 

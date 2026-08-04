@@ -369,14 +369,58 @@ func TestGitPanelClick_UntrackedDirRevealsInExplorer(t *testing.T) {
 	}
 }
 
-// TestGitPanelClick_IgnoresChrome verifies clicks on the branch row and
-// below the last change row are inert — only real rows activate.
+// TestGitPanelClick_IgnoresChrome verifies the panel's dead cells stay
+// dead: the gaps between the action buttons, the rows inside the list
+// viewport that sit past the last change, and everything below the
+// viewport. Only a real row activates, and nothing else in the panel
+// moves. The branch row is deliberately not covered here — it is a
+// live control that opens the switch-branch picker, pinned by
+// TestGitPanelClick_BranchRowOpensPicker in gitlog_test.go.
 func TestGitPanelClick_IgnoresChrome(t *testing.T) {
 	a, _, _ := dirtyRepoApp(t)
 	a.toggleGitPanel()
-	a.gitPanelClick(5, 50)
-	if diffIsOpen(a) || confirmIsOpen(a) {
-		t.Fatal("clicks below the list should not open anything")
+	if len(a.gitPanelRows) != 2 {
+		t.Fatalf("fixture: want 2 change rows, got %d", len(a.gitPanelRows))
+	}
+	_, _, sw, _ := a.sidebarRect()
+	btns := a.gitPanelButtons(sw)
+	if len(btns) < 2 || btns[0].x1 >= btns[1].x0 {
+		t.Fatalf("fixture: want a button row with a dead cell between buttons, got %+v", btns)
+	}
+	// A row past the last change but still inside the list window —
+	// a different guard from the far-below case, and the one that
+	// would index past the row slice if it went missing.
+	listH, _ := a.gitPanelBody()
+	pastRows := gitPanelListTop + len(a.gitPanelRows) + 1
+	if pastRows-gitPanelListTop >= listH {
+		t.Fatalf("fixture: list window (%d rows) too short to click past the rows inside it", listH)
+	}
+	a.gitPanelSelected = 1
+	checks, msg := len(a.gitCommitChecks), a.statusMsg
+	for _, tc := range []struct {
+		name string
+		x, y int
+	}{
+		// One cell past [Commit] and before [Push]: hit zones are
+		// half-open, so this cell belongs to neither button.
+		{"gap in the action row", btns[0].x1, 2},
+		{"past the last row, inside the list window", 5, pastRows},
+		{"far below the list window", 5, 50},
+	} {
+		a.gitPanelClick(tc.x, tc.y)
+		if a.overlays.IsOpen() {
+			t.Fatalf("%s: click opened %T", tc.name, a.overlays.Top())
+		}
+		if !a.gitPanelActive || a.gitPanelSelected != 1 || a.gitPanelScroll != 0 {
+			t.Fatalf("%s: panel state moved — active %v, selected %d, scroll %d",
+				tc.name, a.gitPanelActive, a.gitPanelSelected, a.gitPanelScroll)
+		}
+		if len(a.gitCommitChecks) != checks {
+			t.Fatalf("%s: click touched the commit checkboxes", tc.name)
+		}
+		if a.statusMsg != msg {
+			t.Fatalf("%s: click flashed %q", tc.name, a.statusMsg)
+		}
 	}
 }
 
@@ -508,7 +552,11 @@ func TestStatusBarClick_TogglesGitPanel(t *testing.T) {
 // feature must be reachable from the main menu. Since the git verbs
 // moved behind the "Git…" drill-in, the row lives there — it still
 // carries the Esc-g shortcut, is greyed out outside a repo, and is the
-// keyboard route into the panel (menuGitChanges arms keyboard focus).
+// keyboard route into the panel: firing it shows the panel *and* hands
+// it the keyboard. A row that only made the panel visible would strand
+// the user who reached for the menu precisely because they have no
+// mouse, which is the whole reason menuGitChanges routes through
+// focusGitPanel rather than toggleGitPanel.
 func TestMenuGitChangesRow(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	item := drillInItemByLabel(t, a, "Git changes")
@@ -523,6 +571,16 @@ func TestMenuGitChangesRow(t *testing.T) {
 	a.gitSnap.IsRepo = true
 	if !item.enabled(a) {
 		t.Fatal("row should be enabled inside a git repo")
+	}
+	// The panel gate is the cached branch; seed it the way a real
+	// session's startup status refresh does.
+	a.gitSnap.Branch = "main"
+	a.menuGitChanges()
+	if !a.gitPanelActive {
+		t.Fatal("the menu row should show the Git panel")
+	}
+	if !a.gitPanelKeysOn() {
+		t.Fatal("the menu row must hand the panel the keyboard, not just show it")
 	}
 }
 

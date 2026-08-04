@@ -136,6 +136,40 @@ func TestWrapSegments_Progress(t *testing.T) {
 	}
 }
 
+// TestWrapSegments_BreaksBeforeWideGlyph is the wide-character version of
+// the width budget: an ideograph needs two cells, so one that would
+// straddle the right edge moves down whole. Measuring it as one cell puts
+// half a glyph on each row, which no terminal can draw and which shifts
+// every later cell on the row by one.
+func TestWrapSegments_BreaksBeforeWideGlyph(t *testing.T) {
+	// Five cells of pane: "ab" then 日 fills it exactly, 本 must move down.
+	got := WrapSegments([]rune("ab日本"), 5)
+	want := []int{0, 3}
+	if !equalInts(got, want) {
+		t.Fatalf("segs = %v, want %v", got, want)
+	}
+	// An odd pane leaves one cell spare on each row rather than slicing.
+	got = WrapSegments([]rune("日本語"), 3)
+	want = []int{0, 1, 2}
+	if !equalInts(got, want) {
+		t.Fatalf("odd-width segs = %v, want %v", got, want)
+	}
+}
+
+// TestWrapSegments_KeepsClustersWhole checks the other half of the same
+// rule: a break index is always a cluster boundary, so a continuation row
+// can never open with a combining mark orphaned from its base.
+func TestWrapSegments_KeepsClustersWhole(t *testing.T) {
+	runes := []rune("ae\u0301e\u0301e\u0301e\u0301") // 'a' then four é clusters
+	for width := 1; width <= 6; width++ {
+		for _, start := range WrapSegments(runes, width) {
+			if got := ClusterStart(runes, start); got != start {
+				t.Errorf("width %d: segment starts at %d, inside the cluster at %d", width, start, got)
+			}
+		}
+	}
+}
+
 // TestWrapRowOfCol pins the boundary rule: a column at a segment start
 // belongs to that (later) row, and end-of-line belongs to the last row.
 func TestWrapRowOfCol(t *testing.T) {
@@ -250,6 +284,53 @@ func TestRenderWrapped_ContinuationRows(t *testing.T) {
 		if strings.ContainsRune(row, '›') || strings.ContainsRune(row, '‹') {
 			t.Errorf("row %d = %q: wrap mode must not draw overflow chevrons", i, row)
 		}
+	}
+}
+
+// TestRenderWrapped_WideGlyphsRowLayout is the wrap-mode version of the
+// cell budget. A nine-cell pane holds four ideographs with one cell to
+// spare, so the fifth moves to the next row rather than being sliced, each
+// glyph owns two cells, and the caret on the continuation row lands at the
+// segment-local cell — not the segment-local rune.
+func TestRenderWrapped_WideGlyphsRowLayout(t *testing.T) {
+	scr := newSimScreen(t, 16, 6) // gutter 6 → content width 9
+	defer scr.Fini()
+
+	tab := wrapTestTab(t, "日本語です。ました")
+	tab.Cursor = Position{Line: 0, Col: 5} // second row, one glyph in
+	tab.Anchor = tab.Cursor
+	tab.Render(scr, theme.Default(), 0, 0, 16, 6)
+	scr.Show()
+
+	cells, w, _ := scr.GetContents()
+	contentX := defaultGutterWidth + 1
+	row := func(y int, offs ...int) []string {
+		out := make([]string, 0, len(offs))
+		for _, off := range offs {
+			out = append(out, string(cells[y*w+contentX+off].Runes))
+		}
+		return out
+	}
+	// Four glyphs at even cells, their second halves owned by the screen.
+	first := row(0, 0, 1, 2, 3, 4, 5, 6, 7, 8)
+	want := []string{"日", "", "本", "", "語", "", "で", "", " "}
+	for i := range want {
+		if first[i] != want[i] {
+			t.Errorf("row 0 cell %d = %q, want %q", i, first[i], want[i])
+		}
+	}
+	if got := row(1, 0, 2)[0]; got != "す" {
+		t.Errorf("row 1 should continue with す, got %q", got)
+	}
+
+	cx, cy, vis := scr.GetCursor()
+	if !vis {
+		t.Fatal("cursor hidden")
+	}
+	// Col 5 is the sixth glyph: second row (segment starts at rune 4), one
+	// glyph in, so two cells from the content edge.
+	if cy != 1 || cx != contentX+2 {
+		t.Errorf("cursor at (%d,%d), want (%d,1)", cx, cy, contentX+2)
 	}
 }
 
@@ -421,6 +502,17 @@ func equalInts(a, b []int) bool {
 	return true
 }
 
+// singleCluster reports whether runes is exactly one grapheme cluster —
+// the one shape a wrap segment is allowed to overflow its pane with,
+// because there is nothing smaller to break it into.
+func singleCluster(runes []rune) bool {
+	if len(runes) == 0 {
+		return false
+	}
+	end, _ := ClusterAt(runes, 0, 0)
+	return end == len(runes)
+}
+
 // FuzzWrapSegments hammers the segment splitter with adversarial lines and
 // pane widths. Every wrap walk in the package (render, hit-test, anchor
 // advance/retreat) trusts three properties, so those are what we assert
@@ -446,6 +538,14 @@ func FuzzWrapSegments(f *testing.F) {
 		{"one-really-long-unbreakable-token", 7},
 		{"e\u0301 combining acute", 4},
 		{"tab\tafter\ttab", 5},
+		{"日本語のテキスト", 1}, // a pane narrower than one glyph
+		{"ab日本語", 5},    // a wide glyph straddling the right edge
+		{"🇯🇵 flag then text", 3},
+		{"👨\u200d👩\u200d👦 family", 4},
+		{"a\u0301\u0302\u0303 stacked marks", 2},
+		{"❤\ufe0f emoji presentation", 3},
+		{"混ざったmixed幅width", 7},
+		{"a \u0303b cd", 2}, // whitespace carrying a combining mark
 	}
 	for _, s := range seeds {
 		f.Add(s.line, s.width)
@@ -494,12 +594,22 @@ func FuzzWrapSegments(f *testing.F) {
 			// A run of spaces or tabs is allowed to hang past the right
 			// edge (painting clips it) so continuation rows never open on
 			// the wrapping whitespace. Everything the user can actually
-			// see must fit.
+			// see must fit — unless the segment is a single grapheme
+			// cluster, which is the smallest thing a row can hold: a
+			// two-cell ideograph in a one-cell pane has to overflow
+			// somewhere, and splitting it is not an option.
+			// Trim by cluster, not by rune: whitespace can carry a
+			// combining mark or a joiner, and the whole cluster is what
+			// hangs off the edge.
 			trimmed := seg
-			for len(trimmed) > 0 && isWrapSpace(trimmed[len(trimmed)-1]) {
-				trimmed = trimmed[:len(trimmed)-1]
+			for len(trimmed) > 0 {
+				last := ClusterStart(trimmed, len(trimmed)-1)
+				if !isWrapSpace(trimmed[last]) {
+					break
+				}
+				trimmed = trimmed[:last]
 			}
-			if w := LineVisualCol(trimmed, len(trimmed)); w > width {
+			if w := LineVisualCol(trimmed, len(trimmed)); w > width && !singleCluster(trimmed) {
 				t.Fatalf("segment %d paints %d cells, wider than the %d-cell pane (segment %q, line %q)",
 					i, w, width, string(seg), line)
 			}
@@ -510,6 +620,24 @@ func FuzzWrapSegments(f *testing.F) {
 		// original bytes are not the contract.
 		if string(rebuilt) != string(runes) {
 			t.Fatalf("segments do not reconstruct the line:\n got %q\nwant %q", string(rebuilt), string(runes))
+		}
+
+		// A break may never land inside a character: every segment starts
+		// on a cluster boundary, which is what lets the render and
+		// hit-test paths treat a segment's rune subslice as a line of its
+		// own. Collected in one forward walk — asking per segment would be
+		// quadratic on a line with no ASCII in it.
+		boundary := make([]bool, len(runes)+1)
+		boundary[len(runes)] = true
+		for i := 0; i < len(runes); {
+			boundary[i] = true
+			next, _ := ClusterAt(runes, i, 0)
+			i = next
+		}
+		for i, start := range segs {
+			if !boundary[start] {
+				t.Fatalf("segment %d starts at %d, inside a cluster (line %q)", i, start, line)
+			}
 		}
 
 		// Every rune column must resolve to the segment that actually

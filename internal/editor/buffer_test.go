@@ -488,6 +488,11 @@ func FuzzBufferInsertDelete(f *testing.F) {
 		{"a", strings.Repeat("z", 5000), 0, 1},
 		{"        ", "\t", 0, 4},
 		{"lone\rcarriage\r", "\r", 0, 4},
+		{"👨\u200d👩\u200d👦", "\u200d👦", 0, 5},
+		{"🇯🇵", "🇺🇸", 0, 1},
+		{"a\u0301", "\u0302", 0, 2},
+		{"日本語", "\t", 0, 2},
+		{"❤\ufe0f", "\ufe0e", 0, 1},
 		{"clamp me", "x", 999, 999},
 		{"clamp me", "x", -5, -5},
 	}

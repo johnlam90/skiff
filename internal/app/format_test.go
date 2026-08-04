@@ -175,27 +175,44 @@ func TestRunFormatOnSave_UnknownTrustOpensPrompt(t *testing.T) {
 // TestRunFormatOnSave_DeniedIsNoop pins the half of the trust model
 // that's easy to forget: a remembered "No" should not re-prompt and
 // should not run the formatter. Otherwise the user gets nagged on
-// every save in a project they explicitly rejected.
+// every save in a project they explicitly rejected. The configured
+// formatter clobbers the file it is handed, so a leaked exec shows up
+// in the bytes on disk — "no confirm is open" on its own passes against
+// an implementation that shells out anyway.
 func TestRunFormatOnSave_DeniedIsNoop(t *testing.T) {
 	useTestTrustFile(t)
 	root := t.TempDir()
-	writeFormatConfig(t, root, `{"commands":{"go":["echo","ran"]}}`)
+	// sh -c '…' <path> binds the file to $0, so the formatter's whole
+	// observable effect is overwriting the file it was asked to format.
+	writeFormatConfig(t, root, `{"commands":{"go":["sh","-c","echo formatted > \"$0\"","$FILE"]}}`)
 	preTrust(t, root, false)
 	a := newTestApp(t, root)
 	target := filepath.Join(root, "main.go")
-	if err := os.WriteFile(target, []byte("package main\n"), 0644); err != nil {
+	const original = "package main\n"
+	if err := os.WriteFile(target, []byte(original), 0644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	openTabAtPath(t, a, target)
+	tab := openTabAtPath(t, a, target)
 
 	a.runFormatOnSave(a.tabs.At(0))
 
 	if confirmIsOpen(a) {
 		t.Fatal("denied trust should not re-prompt")
 	}
-	// No hook assertion needed anymore: the cancel hook lives on the
-	// confirm prefab itself, so with no confirm up there is structurally
+	// No hook assertion needed: the cancel hook lives on the confirm
+	// prefab itself, so with no confirm up there is structurally
 	// nothing to leak.
+	expectNoFormatEvent(t, a, 150*time.Millisecond)
+	onDisk, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("reread: %v", err)
+	}
+	if string(onDisk) != original {
+		t.Fatalf("formatter ran under a denied trust: file is %q, want %q", string(onDisk), original)
+	}
+	if buf := tab.Buffer.String(); buf != original {
+		t.Fatalf("buffer changed under a denied trust: got %q, want %q", buf, original)
+	}
 }
 
 // TestTrustPromptCancel_PersistsDeny exercises the bridge between

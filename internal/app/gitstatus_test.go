@@ -577,3 +577,124 @@ func TestRefreshGitStatus_RefreshesGutterInSingleFileMode(t *testing.T) {
 		t.Fatal("expected gutter markers to be refreshed in single-file mode, got none")
 	}
 }
+
+// missingGitResult is a collection result that looks like what
+// git.Repo.Status returns on a machine with no git binary: not a repo,
+// nothing dirty, and the one bit that separates that from a plain
+// directory.
+func missingGitResult() gitStatusResult {
+	return gitStatusResult{
+		st:       gitStatus{GitMissing: true},
+		tabLines: map[string]map[int]editor.GitLineChange{},
+	}
+}
+
+// TestGitMissing_FlashesExactlyOnce is the reason ErrGitMissing exists.
+// Without the binary the whole git surface is inert forever, so the user
+// has to be told — but the fact is static for the process lifetime and
+// the status tick fires every ten seconds, so telling them repeatedly
+// would bury every other flash under it.
+func TestGitMissing_FlashesExactlyOnce(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+
+	a.statusMsg = ""
+	a.handleGitStatusEvent(&gitStatusEvent{when: time.Now(), res: missingGitResult()})
+	if !strings.Contains(a.statusMsg, "git was not found") {
+		t.Fatalf("first snapshot must explain the missing binary, got %q", a.statusMsg)
+	}
+
+	for tick := 2; tick <= 5; tick++ {
+		a.statusMsg = ""
+		a.handleGitStatusEvent(&gitStatusEvent{when: time.Now(), res: missingGitResult()})
+		if a.statusMsg != "" {
+			t.Fatalf("tick %d re-flashed a static fact: %q", tick, a.statusMsg)
+		}
+	}
+}
+
+// TestGitMissing_QuietWhenGitExists guards the other direction: a plain
+// directory on a machine that has git is the overwhelmingly common case
+// and must stay silent.
+func TestGitMissing_QuietWhenGitExists(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.statusMsg = ""
+	a.handleGitStatusEvent(&gitStatusEvent{
+		when: time.Now(),
+		res:  gitStatusResult{tabLines: map[string]map[int]editor.GitLineChange{}},
+	})
+	if a.statusMsg != "" {
+		t.Fatalf("a non-repo with git installed must not flash, got %q", a.statusMsg)
+	}
+}
+
+// TestGitUnavailableMsg_SeparatesMissingBinaryFromNonRepo pins the copy
+// the panel openers use. "Not a git repository" sends the user looking
+// for a .git directory that was never the problem — on a machine with no
+// git, every directory would say it, forever.
+func TestGitUnavailableMsg_SeparatesMissingBinaryFromNonRepo(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+
+	a.gitSnap = gitStatus{}
+	a.statusMsg = ""
+	a.toggleGitPanel()
+	if a.statusMsg != "Not a git repository" {
+		t.Fatalf("plain directory: got %q", a.statusMsg)
+	}
+	if a.gitPanelActive {
+		t.Fatal("the panel must not open without a repo")
+	}
+
+	a.gitSnap = gitStatus{GitMissing: true}
+	a.statusMsg = ""
+	a.toggleGitPanel()
+	if !strings.Contains(a.statusMsg, "git was not found on PATH") {
+		t.Fatalf("missing binary: got %q", a.statusMsg)
+	}
+}
+
+// TestGitPanelEmptyLabel_NamesMissingGit covers the panel's empty state.
+// An empty change list means "clean tree" only when git actually ran;
+// with no binary the same blank list would be an invented fact, and the
+// user would have no way to learn why the panel is dead.
+func TestGitPanelEmptyLabel_NamesMissingGit(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	scr := a.screen.(tcell.SimulationScreen)
+	a.gitPanelActive = true
+	a.gitPanelRows = nil
+
+	a.gitSnap = gitStatus{IsRepo: true, Branch: "main"}
+	a.draw()
+	scr.Show()
+	if body := screenLine(scr, gitPanelListTop); !strings.Contains(body, "No uncommitted changes") {
+		t.Fatalf("clean repo empty state: %q", body)
+	}
+
+	a.gitSnap = gitStatus{GitMissing: true}
+	a.draw()
+	scr.Show()
+	body := screenLine(scr, gitPanelListTop)
+	if !strings.Contains(body, "git was not found on PATH") {
+		t.Fatalf("missing-git empty state must say so, got %q", body)
+	}
+	if strings.Contains(body, "No uncommitted changes") {
+		t.Fatalf("missing-git empty state must not claim a clean tree, got %q", body)
+	}
+}
+
+// TestLoadGitStatus_NoGitOnPath closes the loop between internal/git's
+// sentinel and the flash above it: with nothing executable on PATH the
+// real exec path has to come back GitMissing rather than as an ordinary
+// "not a repo", or noteGitMissing never fires on the machines it exists
+// for.
+func TestLoadGitStatus_NoGitOnPath(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", filepath.Join(dir, "definitely-empty"))
+
+	st := loadGitStatus(dir, "")
+	if !st.GitMissing {
+		t.Fatalf("no git on PATH must set GitMissing, got %+v", st)
+	}
+	if st.IsRepo {
+		t.Fatalf("no git on PATH cannot report a repo, got %+v", st)
+	}
+}

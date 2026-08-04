@@ -42,9 +42,19 @@ const (
 	minEditorAfterDrag  = 40
 	minWidth            = 50
 	minHeight           = 24
-	statusFlashFor      = 3 * time.Second
-	doubleClickWindow   = 500 * time.Millisecond
-	doubleEscWindow     = 500 * time.Millisecond
+
+	// autoHideSidebarWidth is the terminal width below which the file
+	// explorer collapses on its own. Not a taste number: it is exactly
+	// the width at which the splitter's own clamp gives up — under
+	// minSidebarWidth + minEditorAfterDrag the tree and the editor
+	// cannot both keep their minimum, so resizeSidebar starts starving
+	// the editor instead. A tmux split on a laptop crosses this
+	// constantly, and a 39-column editor behind an 18-column tree is
+	// worth less than no tree at all. See applyResponsiveSidebar.
+	autoHideSidebarWidth = minSidebarWidth + minEditorAfterDrag
+	statusFlashFor       = 3 * time.Second
+	doubleClickWindow    = 500 * time.Millisecond
+	doubleEscWindow      = 500 * time.Millisecond
 
 	// menuEscWindow is the double-Esc window for opening the menu — much
 	// wider than the leader's doubleEscWindow on purpose. Under tmux's
@@ -138,6 +148,15 @@ type App struct {
 	// act on the wrong tab.
 	tabs editor.TabList
 
+	// previewCoachShown records that this session already explained
+	// what a preview tab is. Preview tabs replace each other in place,
+	// which reads as "my tabs keep vanishing" until someone says the
+	// word "preview" — so the first one created flashes an
+	// explanation. Once per session, not once per preview: the rule is
+	// learned immediately and the flash would otherwise fire on every
+	// tree click. See notePreviewCreated.
+	previewCoachShown bool
+
 	// activeFolder is the directory the editor is currently "working
 	// in" — the default target for New File from the main menu. It
 	// updates whenever the user clicks a folder in the tree, opens a
@@ -151,6 +170,22 @@ type App struct {
 	// sidebarShown controls whether the file explorer panel is visible.
 	// When false the editor and tab bar fill the whole window.
 	sidebarShown bool
+
+	// sidebarAutoHidden records that applyResponsiveSidebar — not the
+	// user — is what hid the explorer, so widening the terminal may put
+	// it back. An explicit toggle (the ≡ row or Esc t) clears it, which
+	// is the whole point of tracking it apart from sidebarShown: the
+	// automatic behavior must never reopen a panel the user
+	// deliberately closed.
+	sidebarAutoHidden bool
+
+	// sidebarNarrow is the last width verdict applyResponsiveSidebar
+	// acted on, which makes the rule edge-triggered: only a crossing of
+	// autoHideSidebarWidth does anything. A user who reopens the
+	// explorer while the terminal is still narrow therefore keeps it —
+	// every later resize inside the same narrow episode is a no-op
+	// rather than a fight.
+	sidebarNarrow bool
 
 	// wrapOn is the soft-wrap preference stamped onto every tab at
 	// creation and flipped (for all open tabs at once) by the menu
@@ -328,6 +363,12 @@ type App struct {
 	// in-flight one lands. Both are main-thread-only state.
 	gitRefreshInFlight bool
 	gitRefreshQueued   bool
+
+	// gitMissingSeen records that we have already told the user this
+	// machine has no git binary. The fact never changes within a
+	// process, so the flash is once per session — the 10s status tick
+	// would otherwise reprint it forever.
+	gitMissingSeen bool
 
 	// customActions is the list of user-configured shell-out actions
 	// loaded from ~/.config/skiff/actions.json at startup. When
@@ -560,6 +601,11 @@ func (a *App) Close() {
 // each event, redraws, and exits when a.quit is set.
 func (a *App) Run() error {
 	a.width, a.height = a.screen.Size()
+	// Apply the narrow-terminal rule against the size we booted at, not
+	// just against later resizes: starting inside a 55-column tmux pane
+	// is the exact case this exists for, and tcell does not synthesise
+	// an EventResize for the initial size.
+	a.applyResponsiveSidebar()
 	a.draw()
 	a.screen.Show()
 
@@ -600,6 +646,7 @@ func (a *App) handleEvent(ev tcell.Event) {
 		// active tab on screen rather than wherever the old scroll
 		// left it.
 		a.ensureActiveTabVisible()
+		a.applyResponsiveSidebar()
 		a.screen.Sync()
 	case *tcell.EventKey:
 		a.handleKey(e)
@@ -647,6 +694,50 @@ func (a *App) handleEvent(ev tcell.Event) {
 	case *branchListEvent:
 		a.handleBranchList(e)
 	}
+}
+
+// applyResponsiveSidebar collapses the file explorer when the terminal
+// gets too narrow to hold both panels, and puts it back when the
+// terminal grows again. Skiff's habitat is a tmux split on a laptop,
+// where crossing autoHideSidebarWidth is a routine event rather than an
+// exotic one, and an 18-column tree in front of a sliver of code is a
+// worse deal than no tree.
+//
+// Two properties are load-bearing and easy to lose:
+//
+// It is EDGE-triggered. Only a crossing of the threshold acts, so
+// reopening the explorer with Esc t inside a still-narrow window sticks
+// instead of being re-hidden by the next stray resize event.
+//
+// It restores only what it hid. sidebarAutoHidden is set here and
+// cleared by menuToggleSidebar, so a panel the user closed on purpose
+// stays closed however wide the terminal gets.
+func (a *App) applyResponsiveSidebar() {
+	// Single-file mode never built a tree, so there is no panel whose
+	// width could be crowding anything.
+	if a.tree == nil {
+		return
+	}
+	narrow := a.width < autoHideSidebarWidth
+	if narrow == a.sidebarNarrow {
+		return
+	}
+	a.sidebarNarrow = narrow
+	if narrow {
+		if !a.sidebarShown {
+			return
+		}
+		a.sidebarShown = false
+		a.sidebarAutoHidden = true
+		a.flash("Narrow window — file explorer hidden (Esc t shows it)")
+		return
+	}
+	if !a.sidebarAutoHidden {
+		return
+	}
+	a.sidebarShown = true
+	a.sidebarAutoHidden = false
+	a.flash("File explorer restored")
 }
 
 // flash sets a transient status message that displays for statusFlashFor

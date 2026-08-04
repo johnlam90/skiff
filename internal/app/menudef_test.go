@@ -47,14 +47,14 @@ var preRedesignMenuActions = []string{
 }
 
 // postRedesignMenuActions is everything the redesign-era menu ADDED to
-// the catalog: the two drill-in doors, the navigation rows and the
-// disk-conflict escape hatch shipped alongside it. Listing them
-// explicitly is what makes the catalog test a two-way pin — a stray new
-// row has to be declared here on purpose.
+// the catalog: the two drill-in doors, the navigation rows, the
+// disk-conflict escape hatch shipped alongside it, and the shortcut
+// reference. Listing them explicitly is what makes the catalog test a
+// two-way pin — a stray new row has to be declared here on purpose.
 var postRedesignMenuActions = []string{
 	"Git…", "File clipboard…",
 	"Go to matching bracket", "Move to previous word", "Move to next word",
-	"Resolve disk conflict…", "Refresh file tree",
+	"Resolve disk conflict…", "Refresh file tree", "Keyboard shortcuts…",
 }
 
 // menuCatalog flattens every built-in row the ≡ menu can reach — the top
@@ -115,21 +115,21 @@ func drillInItemByLabel(t *testing.T, a *App, label string) menuItemDef {
 
 // TestMenuLayout_EmptySession pins the headline claim of the redesign:
 // with no tab, no repo and no custom actions the menu collapses to the
-// eight rows that can actually do something — New file, the two project
-// searches, the four view rows and Quit — and the whole modal is 16
+// nine rows that can actually do something — New file, the two project
+// searches, the five view rows and Quit — and the whole modal is 17
 // cells tall, well inside an 80×24 tmux split.
 func TestMenuLayout_EmptySession(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.customActions = nil
 	items, dividers, h := a.menuLayout()
 
-	if h != 16 {
-		t.Errorf("modalHeight = %d, want 16", h)
+	if h != 17 {
+		t.Errorf("modalHeight = %d, want 17", h)
 	}
-	if got := len(items); got != 8 {
-		t.Errorf("item count = %d, want 8; got %v", got, menuLabels(a, items))
+	if got := len(items); got != 9 {
+		t.Errorf("item count = %d, want 9; got %v", got, menuLabels(a, items))
 	}
-	wantDiv := []int{3, 5, 8, 13}
+	wantDiv := []int{3, 5, 8, 14}
 	if len(dividers) != len(wantDiv) {
 		t.Fatalf("dividers = %v, want %v", dividers, wantDiv)
 	}
@@ -245,6 +245,7 @@ func TestMenuCatalog_Shortcuts(t *testing.T) {
 		"Duplicate line":         "Esc d",
 		"Hide file explorer":     "Esc t",
 		"Unwrap long lines":      "Esc z",
+		"Keyboard shortcuts…":    "Esc ?",
 		"Quit editor":            "Esc q",
 		// Demoted into the Git drill-in — the hint travels with it.
 		"Git changes": "Esc g",
@@ -384,8 +385,8 @@ func TestMenuLayout_WithCustomActions(t *testing.T) {
 	}
 	items, _, h := a.menuLayout()
 
-	if h != 19 { // 16 + 2 items + 1 divider
-		t.Errorf("modalHeight = %d, want 19", h)
+	if h != 20 { // 17 + 2 items + 1 divider
+		t.Errorf("modalHeight = %d, want 20", h)
 	}
 	// Custom actions should be the second-to-last and third-to-last
 	// rows, with Quit as the final row.

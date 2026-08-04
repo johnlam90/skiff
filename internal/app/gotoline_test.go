@@ -55,20 +55,32 @@ func TestMenuGoToLineJumps(t *testing.T) {
 }
 
 // TestGoToLineRejectsGarbage pins the failure mode: non-numeric input
-// must not move the cursor — the user gets a flash, not a surprise jump.
+// must not move the cursor and must say so — the user gets the
+// "positive number" flash, not a silent no-op and not a surprise jump.
 func TestGoToLineRejectsGarbage(t *testing.T) {
 	dir := t.TempDir()
 	path := seedBigFile(t, dir)
 	a := newTestApp(t, dir)
 	a.openFile(path)
 
+	// Park the caret away from the top: a parse failure that fell
+	// through to JumpToLine would clamp to line 0, which is invisible
+	// if the caret is already there.
+	tab := a.activeTabPtr()
+	tab.Cursor.Line, tab.Cursor.Col = 10, 2
+	tab.Anchor = tab.Cursor
+	before := tab.Cursor
+
 	a.menuGoToLine()
 	promptPrefab(t, a).Field.SetText("abc")
 	submitPrompt(a)
 
-	tab := a.activeTabPtr()
-	if tab.Cursor.Line != 0 {
-		t.Fatalf("garbage input moved the cursor to line %d", tab.Cursor.Line)
+	tab = a.activeTabPtr()
+	if tab.Cursor != before {
+		t.Fatalf("garbage input moved the cursor to %+v, want %+v", tab.Cursor, before)
+	}
+	if !strings.Contains(a.statusMsg, "Go to line needs a positive number") {
+		t.Fatalf("garbage input must flash a rejection, got %q", a.statusMsg)
 	}
 }
 

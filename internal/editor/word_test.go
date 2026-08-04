@@ -13,6 +13,10 @@ import "testing"
 // snake_case and digits) are word runes, everything a programmer would
 // call a separator is not. Double-click selection and caret motion both
 // route through this, so a change here is a change to both.
+//
+// The non-ASCII half is the documented judgement call: letters are word
+// runes whatever the script, which puts CJK ideographs and kana in and
+// leaves symbols, emoji, and CJK punctuation out.
 func TestIsWordChar(t *testing.T) {
 	for _, r := range "abzABZ_019" {
 		if !IsWordChar(r) {
@@ -22,6 +26,16 @@ func TestIsWordChar(t *testing.T) {
 	for _, r := range []rune{' ', '\t', '.', ',', '-', '!', '\n', '/', '(', ')', '"'} {
 		if IsWordChar(r) {
 			t.Errorf("IsWordChar(%q) = true, want false", r)
+		}
+	}
+	for _, r := range []rune{'日', 'あ', 'ア', '한', 'é', 'ü', '\u0301', 'Ω', '٣'} {
+		if !IsWordChar(r) {
+			t.Errorf("IsWordChar(%q) = false, want true (letter, digit, or mark)", r)
+		}
+	}
+	for _, r := range []rune{'。', '、', '　', '😀', '→', '\u200d'} {
+		if IsWordChar(r) {
+			t.Errorf("IsWordChar(%q) = true, want false (punctuation or symbol)", r)
 		}
 	}
 }
@@ -92,6 +106,76 @@ func TestWordMotion_AgreesWithSelectionBoundaries(t *testing.T) {
 						line, col, got, end)
 				}
 			}
+		}
+	}
+}
+
+// TestWordMotion_AgreesOnUnicodeText re-runs the same agreement invariant
+// over text the ASCII predicate used to split wrongly. CJK, accented latin
+// (both precomposed and decomposed), and emoji all have to give WordLeft,
+// WordRight, and WordRangeAt the same answer — a drift here is a caret
+// that lands somewhere double-click would not.
+func TestWordMotion_AgreesOnUnicodeText(t *testing.T) {
+	for _, line := range []string{
+		"日本語 の テキスト",
+		"混ざったmixed幅width",
+		"cafe\u0301 na\u0308ive",
+		"café naïve",
+		"emoji 😀 between 🇯🇵 words",
+		"a\u0301b\u0302c\u0303",
+	} {
+		runes := []rune(line)
+		for col := 0; col <= len(runes); col++ {
+			start, end, ok := WordRangeAt(runes, col)
+			if !ok {
+				continue
+			}
+			if got := ClusterStart(runes, start); got != start {
+				t.Fatalf("%q col %d: word starts at %d, inside the cluster at %d", line, col, start, got)
+			}
+			if got := ClusterStart(runes, end); got != end {
+				t.Fatalf("%q col %d: word ends at %d, inside the cluster at %d", line, col, end, got)
+			}
+			snapped := ClusterStart(runes, col)
+			if snapped > start {
+				if got := WordLeft(runes, col); got != start {
+					t.Fatalf("%q col %d: WordLeft = %d, selection starts the word at %d",
+						line, col, got, start)
+				}
+			}
+			if snapped < end {
+				if got := WordRight(runes, col); got != end {
+					t.Fatalf("%q col %d: WordRight = %d, selection ends the word at %d",
+						line, col, got, end)
+				}
+			}
+		}
+	}
+}
+
+// TestWordRangeAt_UnicodeSpans pins the concrete calls behind the CJK
+// decision documented in word.go: a Han run selects as one word, a
+// decomposed accent stays inside its word instead of ending it, and emoji
+// are separators rather than words.
+func TestWordRangeAt_UnicodeSpans(t *testing.T) {
+	cases := []struct {
+		name               string
+		line               string
+		col                int
+		wantStart, wantEnd int
+		wantOK             bool
+	}{
+		{"han run is one word", "日本語 x", 1, 0, 3, true},
+		{"kana joins its run", "テキストです", 2, 0, 6, true},
+		{"combining accent stays inside", "cafe\u0301 x", 2, 0, 5, true},
+		{"emoji is a separator", "hi 😀 there", 3, 0, 0, false},
+		{"cjk punctuation separates", "日本、語", 0, 0, 2, true},
+	}
+	for _, c := range cases {
+		start, end, ok := WordRangeAt([]rune(c.line), c.col)
+		if ok != c.wantOK || (ok && (start != c.wantStart || end != c.wantEnd)) {
+			t.Errorf("%s: WordRangeAt(%q, %d) = (%d, %d, %v), want (%d, %d, %v)",
+				c.name, c.line, c.col, start, end, ok, c.wantStart, c.wantEnd, c.wantOK)
 		}
 	}
 }

@@ -178,9 +178,10 @@ func gitMenuGroup() []menuItemDef {
 	}
 }
 
-// viewMenuGroup is the chrome toggles, the manual tree refresh and the
-// theme picker — always applicable, except the two tree-dependent rows
-// in single-file mode where there is no tree to show, hide or rescan.
+// viewMenuGroup is the chrome toggles, the manual tree refresh, the
+// theme picker and the shortcut reference — always applicable, except
+// the two tree-dependent rows in single-file mode where there is no
+// tree to show, hide or rescan.
 func viewMenuGroup() []menuItemDef {
 	return []menuItemDef{
 		{shortcut: "Esc t", action: (*App).menuToggleSidebar, enabled: alwaysTrue, labelFor: (*App).sidebarToggleLabel, visible: (*App).hasTree},
@@ -191,6 +192,10 @@ func viewMenuGroup() []menuItemDef {
 		// beats waiting.
 		{label: "Refresh file tree", action: (*App).menuRefreshTree, enabled: alwaysTrue, visible: (*App).hasTree},
 		{label: "Theme…", action: (*App).menuTheme, enabled: alwaysTrue},
+		// Last row of the group on purpose: it is the one row that
+		// teaches the other rows. Sourced from leaderBindings(), so it
+		// can never advertise a gesture the dispatch dropped.
+		{label: "Keyboard shortcuts…", shortcut: "Esc ?", action: (*App).menuKeyboardShortcuts, enabled: alwaysTrue},
 	}
 }
 

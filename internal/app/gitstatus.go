@@ -81,6 +81,43 @@ func loadGitStatus(rootDir, base string) gitStatus {
 	return git.Open(rootDir).Status(base)
 }
 
+// gitUnavailableMsg explains why there is nothing git-shaped to show.
+// "Not a git repository" is a lie on a machine with no git binary:
+// every directory would say it, forever, and the user would go looking
+// for a .git that was never the problem. internal/git already draws the
+// distinction (ErrGitMissing → Snapshot.GitMissing); this is the caller
+// the sentinel was added for.
+func (a *App) gitUnavailableMsg() string {
+	if a.gitSnap.GitMissing {
+		return "git was not found on PATH"
+	}
+	return "Not a git repository"
+}
+
+// gitPanelEmptyLabel is the line the Git panel draws when it has no
+// rows. An empty list means "clean tree" only when git actually ran —
+// claiming it on a machine without the binary invents a fact, and
+// leaves the user with no way to learn why the whole git surface is
+// inert.
+func (a *App) gitPanelEmptyLabel() string {
+	if a.gitSnap.GitMissing {
+		return a.gitUnavailableMsg()
+	}
+	return "No uncommitted changes"
+}
+
+// noteGitMissing tells the user once — and only once — that this
+// machine has no git binary. The fact is static for the process
+// lifetime, so the 10-second status tick would otherwise reprint it
+// forever and bury every other flash under it.
+func (a *App) noteGitMissing(st gitStatus) {
+	if !st.GitMissing || a.gitMissingSeen {
+		return
+	}
+	a.gitMissingSeen = true
+	a.flash("git was not found on PATH — branch and change badges are off")
+}
+
 // readRepo returns the handle the app's asynchronous git reads go
 // through: real git in production, or the injected Runner when a test
 // installed one. Call it on the main thread and hand the result to the
@@ -432,6 +469,7 @@ func (a *App) openTabPaths() []string {
 // panel is up. Main-thread only — the async path hands results here
 // via gitStatusEvent.
 func (a *App) applyGitStatus(res gitStatusResult) {
+	a.noteGitMissing(res.st)
 	if a.tree != nil {
 		a.gitSnap = res.st
 		if !res.st.IsRepo {

@@ -568,6 +568,9 @@ func (t *Tab) InsertRune(r rune) {
 }
 
 // Backspace deletes the character before the cursor (or the selection if any).
+// "Character" means grapheme cluster, not rune: backspacing over "é" takes
+// the accent with the e rather than stranding a combining mark on the
+// letter in front of it, and one press removes one thing the user can see.
 // Coalesces with adjacent backspaces inside the undo window. No-op on
 // image tabs.
 func (t *Tab) Backspace() {
@@ -582,23 +585,17 @@ func (t *Tab) Backspace() {
 		return
 	}
 	t.pushUndo(undoGroupBackspace)
-	var prev Position
-	if t.Cursor.Col == 0 {
-		prev.Line = t.Cursor.Line - 1
-		prev.Col = len([]rune(t.Buffer.Lines[prev.Line]))
-	} else {
-		prev = Position{Line: t.Cursor.Line, Col: t.Cursor.Col - 1}
-	}
-	t.Cursor = t.Buffer.DeleteRange(prev, t.Cursor)
+	t.Cursor = t.Buffer.DeleteRange(t.clusterLeftOf(t.Cursor), t.Cursor)
 	t.Anchor = t.Cursor
 	t.Dirty = true
 	t.StyleStale = true
 	t.cursorMoved = true
 }
 
-// Delete removes the character after the cursor (or the selection if any).
-// Coalesces with adjacent forward-deletes inside the undo window. No-op
-// on image tabs.
+// Delete removes the character after the cursor (or the selection if any),
+// again a whole grapheme cluster so a forward delete can't behead a
+// character and leave its marks behind. Coalesces with adjacent
+// forward-deletes inside the undo window. No-op on image tabs.
 func (t *Tab) Delete() {
 	if t.IsImage() {
 		return
@@ -607,27 +604,57 @@ func (t *Tab) Delete() {
 		t.DeleteSelection()
 		return
 	}
-	end := t.Buffer.EndPos()
-	if t.Cursor == end {
+	if t.Cursor == t.Buffer.EndPos() {
 		return
 	}
 	t.pushUndo(undoGroupDelete)
-	var next Position
-	line := []rune(t.Buffer.Lines[t.Cursor.Line])
-	if t.Cursor.Col >= len(line) {
-		next = Position{Line: t.Cursor.Line + 1, Col: 0}
-	} else {
-		next = Position{Line: t.Cursor.Line, Col: t.Cursor.Col + 1}
-	}
-	t.Cursor = t.Buffer.DeleteRange(t.Cursor, next)
+	t.Cursor = t.Buffer.DeleteRange(t.Cursor, t.clusterRightOf(t.Cursor))
 	t.Anchor = t.Cursor
 	t.Dirty = true
 	t.StyleStale = true
 	t.cursorMoved = true
 }
 
-// MoveCursor shifts the cursor by (dLine, dCol). When extend is true the
-// anchor is left in place so the user is extending a selection.
+// clusterLeftOf returns the position one grapheme cluster before p,
+// wrapping to the end of the previous line at column 0 and stopping at the
+// start of the buffer. Shared by Backspace and leftward caret motion so
+// the two can never disagree about what "one character" is.
+func (t *Tab) clusterLeftOf(p Position) Position {
+	if p.Col <= 0 {
+		if p.Line <= 0 {
+			return Position{}
+		}
+		prev := p.Line - 1
+		return Position{Line: prev, Col: len(t.Buffer.LineRunes(prev))}
+	}
+	return Position{Line: p.Line, Col: PrevCluster(t.Buffer.LineRunes(p.Line), p.Col)}
+}
+
+// clusterRightOf returns the position one grapheme cluster after p,
+// wrapping to column 0 of the next line past the last rune and stopping at
+// the end of the buffer. The mirror of clusterLeftOf, shared by Delete and
+// rightward caret motion.
+func (t *Tab) clusterRightOf(p Position) Position {
+	runes := t.Buffer.LineRunes(p.Line)
+	if p.Col >= len(runes) {
+		if p.Line >= t.Buffer.LineCount()-1 {
+			return Position{Line: p.Line, Col: len(runes)}
+		}
+		return Position{Line: p.Line + 1}
+	}
+	return Position{Line: p.Line, Col: NextCluster(runes, p.Col)}
+}
+
+// MoveCursor shifts the cursor by dLine lines and dCol characters. When
+// extend is true the anchor is left in place so the user is extending a
+// selection.
+//
+// dCol counts grapheme clusters, taken one step at a time: an arrow key
+// walks past "é" or an emoji in a single press, and a multi-column delta
+// that runs off the end of a line keeps stepping onto the next line
+// instead of losing the overshoot. Vertical motion keeps the rune column
+// (the historical behaviour — it is not a "sticky visual column") but
+// snaps it onto a cluster boundary in the new line.
 func (t *Tab) MoveCursor(dLine, dCol int, extend bool) {
 	cur := t.Cursor
 	if dLine != 0 {
@@ -638,32 +665,17 @@ func (t *Tab) MoveCursor(dLine, dCol int, extend bool) {
 		if cur.Line >= t.Buffer.LineCount() {
 			cur.Line = t.Buffer.LineCount() - 1
 		}
-		runes := []rune(t.Buffer.Lines[cur.Line])
+		runes := t.Buffer.LineRunes(cur.Line)
 		if cur.Col > len(runes) {
 			cur.Col = len(runes)
 		}
+		cur.Col = ClusterStart(runes, cur.Col)
 	}
-	if dCol != 0 {
-		cur.Col += dCol
-		if cur.Col < 0 {
-			// Wrap to the end of the previous line.
-			if cur.Line > 0 {
-				cur.Line--
-				cur.Col = len([]rune(t.Buffer.Lines[cur.Line]))
-			} else {
-				cur.Col = 0
-			}
-		} else {
-			runes := []rune(t.Buffer.Lines[cur.Line])
-			if cur.Col > len(runes) {
-				if cur.Line < t.Buffer.LineCount()-1 {
-					cur.Line++
-					cur.Col = 0
-				} else {
-					cur.Col = len(runes)
-				}
-			}
-		}
+	for n := dCol; n > 0; n-- {
+		cur = t.clusterRightOf(cur)
+	}
+	for n := dCol; n < 0; n++ {
+		cur = t.clusterLeftOf(cur)
 	}
 	t.Cursor = cur
 	if !extend {
@@ -676,9 +688,13 @@ func (t *Tab) MoveCursor(dLine, dCol int, extend bool) {
 }
 
 // MoveCursorTo sets the cursor to a specific buffer position. Position is
-// clamped within the buffer; extend=true preserves the selection anchor.
+// clamped within the buffer and snapped back to a grapheme boundary — a
+// caret parked between a base rune and its accent would render a cell to
+// the left of where it edits — and extend=true preserves the selection
+// anchor.
 func (t *Tab) MoveCursorTo(p Position, extend bool) {
 	p = t.Buffer.Clamp(p)
+	p.Col = ClusterStart(t.Buffer.LineRunes(p.Line), p.Col)
 	t.Cursor = p
 	if !extend {
 		t.Anchor = p
@@ -797,11 +813,25 @@ func (t *Tab) EnsureVisible(viewW, viewH int) {
 	if t.Cursor.Line >= t.ScrollY+viewH {
 		t.ScrollY = t.Cursor.Line - viewH + 1
 	}
-	if t.Cursor.Col < t.ScrollX {
-		t.ScrollX = t.Cursor.Col
-	}
-	if t.Cursor.Col >= t.ScrollX+contentW {
-		t.ScrollX = t.Cursor.Col - contentW + 1
+	// Horizontal scrolling is measured in cells, not runes: ScrollX is a
+	// rune index, but "is the caret off the right edge" is a question
+	// about the cells between them, and a line of CJK answers it very
+	// differently from a line of ASCII. RuneColAtVisual turns the target
+	// cell back into a rune index, which lands on a cluster boundary by
+	// construction so the pan never starts mid-character.
+	runes := t.Buffer.LineRunes(t.Cursor.Line)
+	cursorVisual := LineVisualCol(runes, t.Cursor.Col)
+	scrollVisual := LineVisualCol(runes, t.ScrollX)
+	if cursorVisual < scrollVisual {
+		t.ScrollX = RuneColAtVisual(runes, cursorVisual)
+	} else if cursorVisual >= scrollVisual+contentW {
+		sx := RuneColAtVisual(runes, cursorVisual-contentW+1)
+		// A wide glyph straddling the new left edge would leave the caret
+		// one cell past the right edge; start at the next cluster instead.
+		if LineVisualCol(runes, sx)+contentW <= cursorVisual {
+			sx = NextCluster(runes, sx)
+		}
+		t.ScrollX = sx
 	}
 	if t.ScrollY < 0 {
 		t.ScrollY = 0
@@ -937,8 +967,12 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		// Line content, with syntax styles, selection bg, and line bg.
 		// We walk from the start of the line so tab stops anchor to col 0
 		// — a tab one cell into the line still expands to the next stop,
-		// not the next-stop-from-the-scroll-offset. ScrollX skips runes;
-		// the visual column we paint at is rune-walked from there.
+		// not the next-stop-from-the-scroll-offset — and we walk by
+		// grapheme cluster so a combining mark rides in its base's cell
+		// instead of claiming one of its own. Clipping is done in visual
+		// cells rather than rune indices, which is what stops a wide glyph
+		// straddling the left edge from painting its right half as a
+		// half-character: cell 0 falls off, cell 1 paints a blank.
 		runes := t.Buffer.LineRunes(lineIdx)
 		var styles []tcell.Style
 		if lineIdx < len(t.Styles) {
@@ -946,17 +980,13 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		}
 		scrollVisual := LineVisualCol(runes, t.ScrollX)
 		visualCol := 0 // visual cell offset from the start of the LINE
-		for runeIdx, r := range runes {
-			width := RuneVisualWidth(r, visualCol)
-			if runeIdx >= t.ScrollX {
-				// Once we're past ScrollX, paint each cell of this rune.
-				// The rune's first cell shows the actual glyph (or ' '
-				// for tabs); padding cells for a multi-cell tab show a
-				// space so the trailing tab area still gets the right bg.
+		for runeIdx := 0; runeIdx < len(runes); {
+			next, width := ClusterAt(runes, runeIdx, visualCol)
+			if visualCol+width > scrollVisual {
 				st := t.cellStyle(th, styles, lineIdx, runeIdx, lineBg, hasSel, selStart, selEnd)
-				glyph := r
-				if r == '\t' {
-					glyph = ' '
+				glyph, comb := runes[runeIdx], runes[runeIdx+1:next]
+				if glyph == '\t' {
+					glyph, comb = ' ', nil
 				}
 				for cell := 0; cell < width; cell++ {
 					sc := visualCol - scrollVisual + cell
@@ -966,14 +996,19 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 					if sc >= contentW {
 						break
 					}
-					ch := glyph
+					// The cluster's first cell carries the glyph and its
+					// combining marks; padding cells carry a space so the
+					// area under a wide glyph or a tab still gets the row
+					// background.
 					if cell > 0 {
-						ch = ' '
+						scr.SetContent(contentX+sc, cy, ' ', nil, st)
+						continue
 					}
-					scr.SetContent(contentX+sc, cy, ch, nil, st)
+					scr.SetContent(contentX+sc, cy, glyph, comb, st)
 				}
 			}
 			visualCol += width
+			runeIdx = next
 		}
 
 		// Overflow affordance: paint a muted '‹' / '›' over the leftmost /

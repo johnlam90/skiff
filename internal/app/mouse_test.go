@@ -15,6 +15,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -114,22 +115,65 @@ func TestTabBarClick_SwitchesTab(t *testing.T) {
 	}
 }
 
-// TestScrollAt routes scroll to the panel under the cursor; we just verify
-// it doesn't panic across the three regions.
+// TestScrollAt pins the wheel's panel routing, which is the whole point
+// of the function: a wheel over the sidebar moves the tree and leaves the
+// buffer alone, a wheel over the editor moves the buffer and leaves the
+// tree alone, and a wheel on the status bar moves neither. Calling all
+// three and asserting nothing (the previous shape) passes just as well
+// when every region scrolls the same panel.
 func TestScrollAt(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "f.txt")
-	if err := os.WriteFile(target, []byte("a\nb\nc\n"), 0644); err != nil {
+	// Enough lines that both panels have somewhere to scroll to.
+	if err := os.WriteFile(target, []byte(strings.Repeat("line\n", 200)), 0644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
+	for i := range 40 {
+		sib := filepath.Join(dir, "sib"+strconv.Itoa(i)+".txt")
+		if err := os.WriteFile(sib, []byte("x"), 0644); err != nil {
+			t.Fatalf("seed sibling: %v", err)
+		}
+	}
 	a := newTestApp(t, dir)
+	a.refreshTree()
 	a.openFile(target)
-	a.scrollAt(1, 5, 1)           // sidebar
-	a.scrollAt(60, 5, 1)          // editor
-	a.scrollAt(60, a.height-1, 1) // status bar (no-op-ish)
+	a.draw() // give the tree a visible-row count to clamp against
+	tab := a.activeTabPtr()
+
+	// Sidebar: tree moves, buffer does not.
+	treeBefore, tabBefore := a.tree.ScrollY, tab.ScrollY
+	a.scrollAt(1, 5, 3)
+	if a.tree.ScrollY == treeBefore {
+		t.Fatalf("wheel over the sidebar left tree.ScrollY at %d", a.tree.ScrollY)
+	}
+	if tab.ScrollY != tabBefore {
+		t.Fatalf("wheel over the sidebar scrolled the buffer to %d", tab.ScrollY)
+	}
+
+	// Editor: buffer moves, tree does not.
+	treeBefore = a.tree.ScrollY
+	a.scrollAt(60, 5, 3)
+	if tab.ScrollY == tabBefore {
+		t.Fatalf("wheel over the editor left tab.ScrollY at %d", tab.ScrollY)
+	}
+	if a.tree.ScrollY != treeBefore {
+		t.Fatalf("wheel over the editor scrolled the tree to %d", a.tree.ScrollY)
+	}
+
+	// Status bar: neither panel moves.
+	treeBefore, tabBefore = a.tree.ScrollY, tab.ScrollY
+	a.scrollAt(60, a.height-1, 3)
+	if a.tree.ScrollY != treeBefore || tab.ScrollY != tabBefore {
+		t.Fatalf("wheel on the status bar scrolled something: tree %d→%d, tab %d→%d",
+			treeBefore, a.tree.ScrollY, tabBefore, tab.ScrollY)
+	}
 }
 
-// TestSidebarClick_File opens a file when a file row is clicked.
+// TestSidebarClick_File pins what the name has always promised: clicking
+// a file row opens that file. The previous body clicked row 1 — which is
+// the project-name row, not a file — and then asserted only "at most one
+// tab", so it passed with nothing opened at all. Row 1 is the root, so
+// the first child sits at row 2.
 func TestSidebarClick_File(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "click.txt")
@@ -139,20 +183,44 @@ func TestSidebarClick_File(t *testing.T) {
 	a := newTestApp(t, dir)
 	// Render once so the tree has visible rows for HitTest.
 	a.draw()
-	// File row is row 1 (0 is the root); click at column 1, row 1.
-	a.sidebarClick(1, 1)
-	// Only a no-panic guarantee — depending on row order we may or may
-	// not have opened the file. Just make sure no crash and either zero
-	// or one tab is open.
-	if a.tabs.Len() > 1 {
-		t.Fatalf("unexpected tabs: %d", a.tabs.Len())
+
+	a.sidebarClick(1, 2)
+
+	if a.tabs.Len() != 1 {
+		t.Fatalf("clicking the file row opened %d tabs, want 1", a.tabs.Len())
+	}
+	tab := a.activeTabPtr()
+	if tab == nil || tab.Path != target {
+		t.Fatalf("opened tab = %v, want %q", tab, target)
+	}
+	// The click also moves the "working folder" to the file's parent —
+	// that is what makes a following New File land next to it.
+	if a.activeFolder != a.rootDir {
+		t.Errorf("active folder = %q, want the file's parent %q", a.activeFolder, a.rootDir)
 	}
 }
 
-// TestSidebarClick_Miss is safe when (x,y) hits no row.
+// TestSidebarClick_Miss covers a click below the last tree row: it must
+// be an inert no-op, not merely non-fatal. Asserting the state is
+// untouched is what distinguishes "the hit-test missed" from "the
+// hit-test silently fell through to the last row".
 func TestSidebarClick_Miss(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("z"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.draw()
+	before := a.activeFolder
+
 	a.sidebarClick(1, 100) // off the bottom of the tree
+
+	if a.tabs.Len() != 0 {
+		t.Fatalf("a missed click opened %d tabs", a.tabs.Len())
+	}
+	if a.activeFolder != before {
+		t.Fatalf("a missed click moved the active folder to %q", a.activeFolder)
+	}
 }
 
 // TestSidebarClick_RootRowResetsActiveFolder pins the bug fix:
@@ -186,24 +254,35 @@ func TestSidebarClick_RootRowResetsActiveFolder(t *testing.T) {
 	}
 }
 
-// TestSelectWordAt selects the word under a buffer position.
+// TestSelectWordAt pins both halves of the double-click contract: over a
+// word it selects exactly that word, and over a position with no word
+// under it (an empty line) it does nothing at all — it must neither
+// fabricate a selection nor clobber the one already there. The second
+// half used to be a bare call with no assertion, so a SelectWordAt that
+// collapsed the caret onto the clicked point passed it.
 func TestSelectWordAt(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "w.txt")
-	if err := os.WriteFile(target, []byte("hello world"), 0644); err != nil {
+	if err := os.WriteFile(target, []byte("hello world\n\nagain\n"), 0644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	a := newTestApp(t, dir)
 	a.openFile(target)
 	tab := a.activeTabPtr()
+
 	a.selectWordAt(tab, editor.Position{Line: 0, Col: 2})
 	if tab.Anchor.Col != 0 || tab.Cursor.Col != 5 {
 		t.Fatalf("word select: anchor=%v cursor=%v", tab.Anchor, tab.Cursor)
 	}
 
-	// Empty line — no selection.
-	tab.Buffer = editor.NewBuffer("")
-	a.selectWordAt(tab, editor.Position{Line: 0, Col: 0})
+	// Line 1 is empty: the click has no word under it, so the existing
+	// "hello" selection must survive untouched.
+	wantAnchor, wantCursor := tab.Anchor, tab.Cursor
+	a.selectWordAt(tab, editor.Position{Line: 1, Col: 0})
+	if tab.Anchor != wantAnchor || tab.Cursor != wantCursor {
+		t.Fatalf("empty line moved the selection: anchor %v→%v, cursor %v→%v",
+			wantAnchor, tab.Anchor, wantCursor, tab.Cursor)
+	}
 }
 
 // TestEditorPress_PlacesCaret moves the caret to the clicked spot.
@@ -289,11 +368,20 @@ func TestEditorPress_DoubleClickSelectsWord(t *testing.T) {
 	}
 }
 
-// TestEditorPress_NoTabSafe doesn't panic with no active tab.
+// TestEditorPress_NoTabSafe covers the startup screen. Not crashing is
+// the floor, not the contract: editorPress must report false so the
+// caller does not arm editor drag mode over an empty pane — a press
+// that "handled" nothing but armed the drag is how stray motion starts
+// mutating a selection that does not exist.
 func TestEditorPress_NoTabSafe(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	a.editorPress(50, 5)
+	if a.editorPress(50, 5) {
+		t.Fatal("editorPress with no active tab must report unhandled")
+	}
 	a.editorDrag(50, 5)
+	if a.tabs.Len() != 0 {
+		t.Fatalf("a press on the empty pane created %d tabs", a.tabs.Len())
+	}
 }
 
 // TestEditorDrag_AutoScroll arms the auto-scroll direction when dragging

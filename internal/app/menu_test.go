@@ -200,13 +200,61 @@ func TestMenuActivate_RunsHovered(t *testing.T) {
 	}
 }
 
-// TestMenuActivate_OutOfRange and disabled rows are no-ops.
+// TestMenuActivate_OutOfRange pins both guards on menuActivate: an index
+// that is not a row, and a row this session has dimmed, must run nothing
+// at all. hoveredMenuRow is set by hover math and by a layout that
+// shrinks under the filter, so a stale or dimmed index is ordinary — and
+// every menu action closes the menu on its way out, which makes "the
+// menu is still up and nothing else moved" the whole contract.
 func TestMenuActivate_OutOfRange(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	a.hoveredMenuRow = -1
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	openTestFile(t, a, dir, "t.txt", "hello\n")
+	a.openMenu()
+
+	type snapshot struct {
+		menuOpen     bool
+		sidebarShown bool
+		quit         bool
+		statusMsg    string
+		tabs         int
+	}
+	take := func() snapshot {
+		return snapshot{a.menuOpen, a.sidebarShown, a.quit, a.statusMsg, a.tabs.Len()}
+	}
+	before := take()
+	if !before.menuOpen {
+		t.Fatal("precondition: openMenu should have left the menu up")
+	}
+
+	for _, row := range []int{-1, 999} {
+		a.hoveredMenuRow = row
+		a.menuActivate()
+		if got := take(); got != before {
+			t.Fatalf("menuActivate at row %d changed the app: got %+v, want %+v", row, got, before)
+		}
+	}
+
+	// The dimmed half: a freshly opened, clean buffer leaves Undo, Paste
+	// and friends visible but inapplicable, and Enter on one of those
+	// must be as inert as Enter on nothing.
+	items, _, _ := a.menuLayout()
+	dimmed := -1
+	for i, it := range items {
+		if !it.enabled(a) {
+			dimmed = i
+			break
+		}
+	}
+	if dimmed < 0 {
+		t.Fatalf("fixture: expected at least one dimmed row, got %v", menuLabels(a, items))
+	}
+	a.hoveredMenuRow = dimmed
 	a.menuActivate()
-	a.hoveredMenuRow = 999
-	a.menuActivate()
+	if got := take(); got != before {
+		t.Fatalf("menuActivate on dimmed row %q changed the app: got %+v, want %+v",
+			a.menuLabel(items[dimmed]), got, before)
+	}
 }
 
 // TestUpdateMenuHover snaps to the right row when over an enabled row, and
@@ -336,33 +384,54 @@ func TestMenuFilter_NarrowsAndEnterRunsBestMatch(t *testing.T) {
 // TestMenuFilter_BestMatchBeatsMenuOrder pins the ranking tie-break: a
 // word-prefix hit wins over a row that merely contains the query and
 // happens to sit higher in the table, so Enter runs what the user meant.
+//
+// "in" is the query where the tiers and the table disagree. Edit's
+// "Toggle line comment" carries it mid-word (rank 2) and comes first;
+// Go's "Find in file" has it at a word start (rank 1) and comes later,
+// so rank has to override position. The winner is spelled out by hand
+// on purpose — an expectation recomputed from menuMatchRank would stay
+// green if the tiers were swapped, which is the regression this guards.
 func TestMenuFilter_BestMatchBeatsMenuOrder(t *testing.T) {
+	const (
+		winner          = "Find in file"        // rank 1, lower in the table
+		higherButLooser = "Toggle line comment" // rank 2, higher in the table
+	)
+
 	dir := t.TempDir()
 	a := newTestApp(t, dir)
 	openTestFile(t, a, dir, "main.go", "package main\n")
 	a.openMenu()
 
-	for _, r := range "line" {
+	for _, r := range "in" {
 		a.handleMenuKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
 	}
 	items, _, _ := a.menuLayout()
-	if len(items) < 2 {
-		t.Fatalf("filter 'line' should match several rows, got %v", menuLabels(a, items))
-	}
-	// "Toggle line comment" contains "line" mid-label (rank 2) and
-	// comes first in the table; "Move line up" has it at a word start
-	// (rank 1) — hmm, both are word-prefixed, so assert on the tier
-	// instead of a specific row: whatever is selected must rank as well
-	// as every other match.
-	best := menuMatchRank(strings.ToLower(a.menuLabel(items[a.hoveredMenuRow])), "line")
+
+	// Both rows have to be live candidates or the comparison below is
+	// theatre: a hidden or dimmed loser can't lose.
+	live := make(map[string]bool, len(items))
 	for _, it := range items {
-		if !it.enabled(a) {
-			continue
+		if it.enabled(a) {
+			live[a.menuLabel(it)] = true
 		}
-		if r := menuMatchRank(strings.ToLower(a.menuLabel(it)), "line"); r < best {
-			t.Fatalf("selected %q (rank %d) but %q ranks better (%d)",
-				a.menuLabel(items[a.hoveredMenuRow]), best, a.menuLabel(it), r)
+	}
+	for _, want := range []string{winner, higherButLooser} {
+		if !live[want] {
+			t.Fatalf("fixture: %q must be an enabled match for 'in'; matches = %v", want, menuLabels(a, items))
 		}
+	}
+
+	if a.hoveredMenuRow < 0 || a.hoveredMenuRow >= len(items) {
+		t.Fatalf("filter 'in' left the selection at row %d of %d matches %v",
+			a.hoveredMenuRow, len(items), menuLabels(a, items))
+	}
+	switch got := a.menuLabel(items[a.hoveredMenuRow]); got {
+	case winner:
+		// The row the ranking must pick.
+	case higherButLooser:
+		t.Fatalf("menu order beat the rank: selected %q, want the better-ranked %q", got, winner)
+	default:
+		t.Fatalf("filter 'in' selected %q, want %q; matches = %v", got, winner, menuLabels(a, items))
 	}
 }
 

@@ -96,7 +96,7 @@ func (a *App) toggleGitPanel() {
 	// every 10-second tick) so the toggle never blocks on git; the async
 	// kick below brings the rows fully up to date a beat later.
 	if a.gitSnap.Branch == "" {
-		a.flash("Not a git repository")
+		a.flash(a.gitUnavailableMsg())
 		return
 	}
 	a.sidebarShown = true
@@ -114,7 +114,7 @@ func (a *App) showGitPanel() {
 		return
 	}
 	if a.gitSnap.Branch == "" {
-		a.flash("Not a git repository")
+		a.flash(a.gitUnavailableMsg())
 		return
 	}
 	a.gitPanelActive = true
@@ -890,7 +890,7 @@ func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 
 	if len(a.gitPanelRows) == 0 {
 		muted := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
-		drawClipped(a.screen, sx+1, sy+gitPanelListTop, sw-1, "No uncommitted changes", muted)
+		drawClipped(a.screen, sx+1, sy+gitPanelListTop, sw-1, a.gitPanelEmptyLabel(), muted)
 	} else {
 		rowFocus := a.gitPanelRowFocus()
 		for i := range listH {

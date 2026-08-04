@@ -130,8 +130,11 @@ func TestNewFileLabel_TruncatesLongPaths(t *testing.T) {
 	}
 }
 
-// TestRelativeFolderLabel covers the three branches: root, subdir, and a
-// non-relatable path.
+// TestRelativeFolderLabel covers all three branches: the project root
+// (basename plus separator), a subdirectory (path relative to the root),
+// and a folder filepath.Rel cannot relate to the root at all, which has to
+// degrade to the folder's own basename rather than leak a broken path into
+// the New File hint.
 func TestRelativeFolderLabel(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "child")
@@ -153,6 +156,13 @@ func TestRelativeFolderLabel(t *testing.T) {
 	subLabel := a.relativeFolderLabel(sub)
 	if subLabel != "child"+string(filepath.Separator) {
 		t.Fatalf("subdir label: got %q", subLabel)
+	}
+
+	// Non-relatable → filepath.Rel refuses to relate a relative folder
+	// to the absolute root, so the label falls back to the basename.
+	oddLabel := a.relativeFolderLabel(filepath.Join("not-under", "the-root"))
+	if want := "the-root" + string(filepath.Separator); oddLabel != want {
+		t.Fatalf("non-relatable label: got %q, want %q", oddLabel, want)
 	}
 }
 
@@ -386,5 +396,160 @@ func TestApplyTheme_KeepsDegradeOnLowColor(t *testing.T) {
 
 	if !a.theme.LowColor {
 		t.Fatalf("switching to %q dropped the low-colour fallback", other)
+	}
+}
+
+// resizeApp drives a real terminal resize through the event loop's own
+// path — SetSize then EventResize — so the responsive-sidebar rule is
+// exercised the way tcell delivers it rather than by poking fields.
+func resizeApp(t *testing.T, a *App, w, h int) {
+	t.Helper()
+	a.screen.(tcell.SimulationScreen).SetSize(w, h)
+	a.handleEvent(tcell.NewEventResize(w, h))
+}
+
+// TestApplyResponsiveSidebar_HidesWhenNarrowRestoresWhenWide is the
+// headline behavior: a tmux split dragged under autoHideSidebarWidth
+// gives the whole window to the editor, says why, and hands the tree
+// back when the pane grows again. Asserted against the painted screen,
+// not just the flag, because the point is that the tree stops taking
+// columns.
+func TestApplyResponsiveSidebar_HidesWhenNarrowRestoresWhenWide(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sidebarfile.go"), []byte("package p\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.refreshTree()
+
+	a.draw()
+	a.screen.Show()
+	if !screenHasText(t, a, "sidebarfile.go") {
+		t.Fatal("precondition: the tree should be visible on a wide terminal")
+	}
+
+	resizeApp(t, a, autoHideSidebarWidth-1, 30)
+
+	if a.sidebarShown {
+		t.Error("the explorer should collapse below autoHideSidebarWidth")
+	}
+	if !a.sidebarAutoHidden {
+		t.Error("the collapse must be recorded as automatic so it can be undone")
+	}
+	if !strings.Contains(a.statusMsg, "file explorer") {
+		t.Errorf("a silent collapse looks like a bug; flash was %q", a.statusMsg)
+	}
+	a.draw()
+	a.screen.Show()
+	if screenHasText(t, a, "sidebarfile.go") {
+		t.Error("the tree is still painting after the auto-collapse")
+	}
+
+	resizeApp(t, a, 100, 30)
+
+	if !a.sidebarShown {
+		t.Error("growing back past the threshold should restore the explorer")
+	}
+	if a.sidebarAutoHidden {
+		t.Error("the auto-hidden flag must clear once the panel is back")
+	}
+	a.draw()
+	a.screen.Show()
+	if !screenHasText(t, a, "sidebarfile.go") {
+		t.Error("the tree never came back")
+	}
+}
+
+// TestApplyResponsiveSidebar_LeavesUserHiddenPanelAlone is the rule that
+// keeps the automatic behavior from overriding a decision: a panel the
+// user closed from the ≡ menu stays closed however wide the terminal
+// gets. Tracking auto-hidden separately from hidden is what buys this.
+func TestApplyResponsiveSidebar_LeavesUserHiddenPanelAlone(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+
+	a.menuToggleSidebar() // explicit hide, on a wide terminal
+	if a.sidebarShown {
+		t.Fatal("precondition: the toggle should have hidden the panel")
+	}
+
+	resizeApp(t, a, autoHideSidebarWidth-1, 30)
+	if a.sidebarAutoHidden {
+		t.Error("narrowing must not claim credit for a panel the user hid")
+	}
+
+	resizeApp(t, a, 120, 40)
+	if a.sidebarShown {
+		t.Fatal("widening reopened a panel the user closed on purpose")
+	}
+}
+
+// TestApplyResponsiveSidebar_ExplicitHideRetiresPendingRestore is the
+// case that actually needs menuToggleSidebar to clear the auto-hidden
+// flag. The panel collapses on its own, the user brings it back, then
+// changes their mind and closes it — the pending automatic restore from
+// the first step must be retired, or widening the terminal reopens a
+// panel the user shut two keystrokes ago.
+func TestApplyResponsiveSidebar_ExplicitHideRetiresPendingRestore(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+
+	resizeApp(t, a, autoHideSidebarWidth-1, 30)
+	if !a.sidebarAutoHidden {
+		t.Fatal("precondition: the panel should have auto-collapsed")
+	}
+
+	a.menuToggleSidebar() // show
+	a.menuToggleSidebar() // and hide again, deliberately
+	if a.sidebarAutoHidden {
+		t.Error("an explicit toggle must retire the pending automatic restore")
+	}
+
+	resizeApp(t, a, 120, 40)
+	if a.sidebarShown {
+		t.Fatal("widening reopened a panel the user had just closed")
+	}
+}
+
+// TestApplyResponsiveSidebar_ExplicitShowSurvivesNarrowResizes covers the
+// other half of "never fight the user": someone who reopens the explorer
+// with Esc t inside a cramped pane wants it there. Because the rule is
+// edge-triggered on the threshold, later resizes that stay narrow leave
+// it alone instead of re-hiding it on every drag tick.
+func TestApplyResponsiveSidebar_ExplicitShowSurvivesNarrowResizes(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+
+	resizeApp(t, a, autoHideSidebarWidth-1, 30)
+	if a.sidebarShown {
+		t.Fatal("precondition: the panel should have auto-collapsed")
+	}
+
+	a.menuToggleSidebar() // "no, I want it"
+	resizeApp(t, a, autoHideSidebarWidth-6, 30)
+	if !a.sidebarShown {
+		t.Error("a still-narrow resize re-hid a panel the user just reopened")
+	}
+
+	resizeApp(t, a, 120, 40)
+	if !a.sidebarShown {
+		t.Error("widening should have left the user's panel alone")
+	}
+}
+
+// TestApplyResponsiveSidebar_SingleFileModeIsInert pins the guard for
+// the mode with no tree at all: there is no panel crowding the editor,
+// so narrowing must change nothing and must not flash an explanation
+// for a panel the session never had.
+func TestApplyResponsiveSidebar_SingleFileModeIsInert(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.tree = nil
+	a.sidebarShown = false
+	a.statusMsg = ""
+
+	resizeApp(t, a, autoHideSidebarWidth-1, 30)
+
+	if a.sidebarShown || a.sidebarAutoHidden {
+		t.Errorf("single-file mode touched sidebar state: shown=%v auto=%v", a.sidebarShown, a.sidebarAutoHidden)
+	}
+	if a.statusMsg != "" {
+		t.Errorf("flashed %q about a panel that does not exist", a.statusMsg)
 	}
 }

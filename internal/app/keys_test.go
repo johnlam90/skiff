@@ -39,7 +39,12 @@ func TestHandleKey_EscDoubleTapOpensMenu(t *testing.T) {
 	}
 }
 
-// TestHandleKey_MenuNavKeys move highlight and Enter activates.
+// TestHandleKey_MenuNavKeys pins the menu's whole keyboard contract:
+// Down advances the highlight, Up walks it back, and Enter commits the
+// highlighted row — runs its action and dismisses the menu. The Enter
+// half is the one that matters. Arrows that move a highlight nothing
+// ever commits leave the menu a cheat-sheet, not a keyboard interface,
+// which is the whole reason skiff can afford to have no Ctrl bindings.
 func TestHandleKey_MenuNavKeys(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.openMenu()
@@ -51,6 +56,33 @@ func TestHandleKey_MenuNavKeys(t *testing.T) {
 	a.handleKey(keyEv(tcell.KeyUp, 0))
 	if a.hoveredMenuRow != first {
 		t.Fatalf("Up should return to %d, got %d", first, a.hoveredMenuRow)
+	}
+
+	// Walk Down onto the sidebar toggle: the cheapest observable row in
+	// the menu — it flips one bool and needs no tab, repo or clipboard.
+	items, _, _ := a.menuLayout()
+	target := ""
+	for range items {
+		if a.hoveredMenuRow < 0 || a.hoveredMenuRow >= len(items) {
+			t.Fatalf("navigation left the selection at row %d of %d", a.hoveredMenuRow, len(items))
+		}
+		if l := a.menuLabel(items[a.hoveredMenuRow]); l == "Hide file explorer" || l == "Show file explorer" {
+			target = l
+			break
+		}
+		a.handleKey(keyEv(tcell.KeyDown, 0))
+	}
+	if target == "" {
+		t.Fatalf("Down never reached the sidebar toggle; rows = %v", menuLabels(a, items))
+	}
+
+	before := a.sidebarShown
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+	if a.sidebarShown == before {
+		t.Fatalf("Enter on %q should have toggled the sidebar, still %v", target, a.sidebarShown)
+	}
+	if a.menuOpen {
+		t.Fatal("Enter should have run the row and closed the menu")
 	}
 }
 
@@ -85,7 +117,11 @@ func TestHandleKey_MenuShortcutAfterNavigation(t *testing.T) {
 	}
 }
 
-// TestHandleKey_RoutesToActiveTab dispatches typing to the active tab.
+// TestHandleKey_RoutesToActiveTab pins that handleKey actually reaches
+// the active tab rather than merely surviving the keys: the runes land
+// in the buffer, Enter splits the line, and the caret keys leave the
+// cursor at a known position. A router that swallowed every keystroke
+// would leave an empty buffer and a cursor at the origin.
 func TestHandleKey_RoutesToActiveTab(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "t.txt")
@@ -94,10 +130,31 @@ func TestHandleKey_RoutesToActiveTab(t *testing.T) {
 	}
 	a := newTestApp(t, dir)
 	a.openFile(target)
+	tab := a.activeTabPtr()
+	if tab == nil {
+		t.Fatal("openFile should have made t.txt the active tab")
+	}
+	// The Tab / Backspace / Delete arithmetic below counts the indent
+	// unit's runes, so name the fixture's value: a changed default for
+	// unremarkable files should read as that, not as a routing bug.
+	if tab.IndentUnit != "    " {
+		t.Fatalf("precondition: IndentUnit = %q, want four spaces", tab.IndentUnit)
+	}
+
 	a.handleKey(keyEv(tcell.KeyRune, 'a'))
 	a.handleKey(keyEv(tcell.KeyRune, 'b'))
 	a.handleKey(keyEv(tcell.KeyEnter, 0))
 	a.handleKey(keyEv(tcell.KeyRune, 'c'))
+	if got := string(tab.Buffer.LineRunes(0)); got != "ab" {
+		t.Fatalf("line 0 after typing: got %q, want %q", got, "ab")
+	}
+	if got := string(tab.Buffer.LineRunes(1)); got != "c" {
+		t.Fatalf("line 1 after Enter then typing: got %q, want %q", got, "c")
+	}
+	if got := tab.Cursor; got != (editor.Position{Line: 1, Col: 1}) {
+		t.Fatalf("cursor after typing: got %+v, want line 1 col 1", got)
+	}
+
 	a.handleKey(keyEv(tcell.KeyTab, 0))
 	a.handleKey(keyEv(tcell.KeyBackspace, 0))
 	a.handleKey(keyEv(tcell.KeyHome, 0))
@@ -109,6 +166,16 @@ func TestHandleKey_RoutesToActiveTab(t *testing.T) {
 	a.handleKey(keyEv(tcell.KeyPgUp, 0))
 	a.handleKey(keyEv(tcell.KeyPgDn, 0))
 	a.handleKey(keyEv(tcell.KeyDelete, 0))
+
+	// Tab inserted the four-space unit, Backspace took one space back,
+	// and Delete removed the space under the caret — which Up/Down
+	// parked at column 2, the width of the shorter line above.
+	if got := string(tab.Buffer.LineRunes(1)); got != "c  " {
+		t.Fatalf("line 1 after the editing keys: got %q, want %q", got, "c  ")
+	}
+	if got := tab.Cursor; got != (editor.Position{Line: 1, Col: 2}) {
+		t.Fatalf("cursor after the navigation keys: got %+v, want line 1 col 2", got)
+	}
 }
 
 // TestHandleKey_PasteAltRuneInsertsLiteral covers coalescing *inside* a

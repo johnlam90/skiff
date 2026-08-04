@@ -270,7 +270,7 @@ func TestDrawDiffView_WordLevelHighlight(t *testing.T) {
 	a.screen.Show()
 	scr := a.screen.(tcell.SimulationScreen)
 	cells, w, _ := scr.GetContents()
-	mx, my, mw, _ := diffOv(t, a).modalRect()
+	mx, my, _, _ := diffOv(t, a).modalRect()
 	rowY := my + 5 // hunk, ctx, then the change row
 	leftTextX := mx + 2 + diffNoGutter
 
@@ -283,7 +283,6 @@ func TestDrawDiffView_WordLevelHighlight(t *testing.T) {
 	if attrsCommon&tcell.AttrReverse != 0 {
 		t.Fatal("common suffix should not be reversed")
 	}
-	_ = mw
 }
 
 // TestScrollDiffH_ClampsAndSlides pins the horizontal scroll bounds

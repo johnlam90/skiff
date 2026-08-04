@@ -32,6 +32,26 @@ OSC 52 is the mechanism. Most terminal emulators ship with OSC 52 writes disable
 
 Even if Skiff copies successfully, your *local* terminal has to be allowed to write to the system clipboard. Check the same setting above. Some corporate Macs disable clipboard access entirely via MDM; if `pbpaste` doesn't return your last copy, the issue is upstream of Skiff.
 
+## "Selection too large for the terminal clipboard"
+
+OSC 52 puts the whole selection inside one escape sequence, and that sequence has to survive every hop to your terminal. The tightest hop anyone can name is tmux, which caps an OSC string at 1 MiB — so after base64 inflation Skiff refuses anything over 512 KiB rather than writing half a sequence (a truncated OSC 52 leaves the terminal's parser swallowing everything Skiff draws next).
+
+The copy is not lost: the editor's own clipboard always gets the text first, so `Esc v` still pastes it inside Skiff. Only the trip to your *local* machine is skipped. To get a big block onto your laptop's clipboard, use a custom action (`cat "$FILE" | ...`) or copy it in smaller pieces.
+
+## Branch and change badges are missing
+
+If the status bar shows no branch, the tree isn't tinted, and the GIT tab is absent, first check whether Skiff flashed "git was not found on PATH — branch and change badges are off" at startup. It says that once per session when `git` isn't on the `PATH` Skiff inherited — which is easy to hit on a minimal container or when your shell adds git via a profile that a non-login SSH command never sources. Run `git --version` in the same shell you launch Skiff from.
+
+Every git surface repeats the real reason: with no binary the panel and its openers say "git was not found on PATH" rather than "Not a git repository", so the two failures are never confused. Install git (or fix `PATH`) and the branch and badges come back on the next 10-second tick, no restart needed — quietly, though: the warning is once per process, so there's no "resolved" message to wait for. Watch the status bar for the branch instead.
+
+## A folder says "(unreadable)" or "… N more"
+
+Both are deliberate labels, not glitches.
+
+**`(unreadable)`** means the directory exists but Skiff got a permission (or I/O) error reading it. Previously it rendered exactly like an empty folder, which was the tree's most confident lie. It still expands, and it keeps whatever children it last saw rather than blanking them — a failed read is not evidence the directory emptied. Skiff retries on every refresh, so fixing the mode bits clears the label on the next tick.
+
+**`… N more`** means *that directory* has more than 1000 entries the tree would have shown and it stopped listing there. The cap is per directory, not per project, and it counts what survives the hide list (`.git`, `node_modules`, `.vscode`, and friends are filtered out before the cap applies), so N is the number of rows you'd otherwise be scrolling past — not raw `readdir` output. The row is inert: clicking it does nothing. The sidebar is a navigation aid; use the finder (`Esc p`) for anything in the tail, since it indexes the whole project regardless of directory size.
+
 ## Indexing is slow
 
 The fuzzy file finder uses `git ls-files` for git repos (~150 ms on 50,000 files) and falls back to a `filepath.Walk` on non-git projects.
@@ -58,6 +78,18 @@ If the configured binary isn't installed, Skiff silently does nothing on save �
 
 The finder index refreshes every 10 seconds and immediately after any create / rename / delete *inside* Skiff. If you create a file from another shell pane, wait up to 10 seconds, then reopen the finder.
 
+## The file explorer vanished when I shrank the pane
+
+That's deliberate. Below 58 columns — 18 for the narrowest useful tree plus 40 for the editor — Skiff hides the explorer rather than showing you a sliver of code next to a sliver of tree, and flashes "Narrow window — file explorer hidden (Esc t shows it)". Widen the pane past 58 and it returns with "File explorer restored".
+
+`Esc t` overrides it either way, and the override sticks: reopening the explorer inside a narrow pane won't be undone by the next resize, and a panel you closed yourself is never reopened for you no matter how wide the window gets.
+
+## CJK or emoji sits one column off
+
+Skiff measures text in grapheme clusters and terminal cells with the same Unicode engine tcell uses to place a cell, so an ideograph takes two columns, a combining mark none, and a ZWJ emoji two — the caret, the selection, the find highlight and soft wrap all agree with what you see.
+
+One class of character can still disagree with your *terminal*: the ambiguous-width set — `±`, `→`, `°`, `Ω`, the box-drawing glyphs. Unicode declines to say whether they're one cell or two, Skiff draws them as one, and a terminal (or tmux) configured to treat them as double-width drifts one column per character on that line. Terminals that offer the choice usually name it something like "treat ambiguous-width characters as double width"; turning it off makes the columns agree again. Skiff won't follow that setting — it's a global switch that would reflow everyone's box-drawn text.
+
 ## My terminal's color is off
 
 Skiff's palettes are authored in 24-bit color. Most modern terminals support it; some older ones default to 256-color mode. Check `tput colors` — anything less than `16777216` means truecolor isn't on. Set `COLORTERM=truecolor` in your shell rc and reconnect, and if you run tmux, start it with `tmux -2`.
@@ -70,4 +102,4 @@ Image preview uses the half-block technique — every cell is `▀` with a top c
 
 ## I want to see what `Esc t` does
 
-The whole leader table is in the [Hotkeys](/docs/hotkeys/) doc. The action menu also shows the bound combo next to each item, so you can learn the table by using the menu first.
+Press `Esc ?` — the editor prints the whole leader table, grouped, with a short note on the ≡ menu. It's generated from the same table the keys dispatch through, so it can't be out of date. `≡` → **Keyboard shortcuts…** opens the same sheet, the action menu shows each row's combo next to it, and the [Hotkeys](/docs/hotkeys/) doc has the table plus the reasoning.

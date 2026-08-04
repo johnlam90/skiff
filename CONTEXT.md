@@ -26,6 +26,13 @@ actions pass through to the editor — the find bar, the project-find bar,
 the leader strip. A strip is not an overlay and never sits on the stack.
 _Avoid_: bar, bottom panel
 
+**Shortcut reference**:
+The `Esc ?` overlay: the whole leader table under its group headings plus
+a note on the ≡ menu. Generated from `leaderBindings()`, so it cannot
+advertise a gesture the dispatch dropped. Distinct from the **leader
+strip**, which is a strip showing only what is armed right now.
+_Avoid_: help screen, cheat sheet (that's the strip's job), keymap
+
 **Prefab**:
 A ready-made overlay kind (prompt, confirm, pick, form) that a feature
 fills with text and callbacks instead of drawing its own surface.
@@ -99,3 +106,16 @@ The sidebar's second mode: the list of changed files with their change
 kinds, replacing the explorer tree while active. Mouse-first, but it can
 take keyboard focus (`Esc g`) to walk rows, stage them, and reach the
 action buttons without a mouse.
+
+### Text
+
+**Grapheme cluster**:
+The unit the editor lays text out in: the runes a reader sees as one
+character — a letter and its combining marks, a ZWJ emoji sequence, a
+flag's two regional indicators. Runes are what a buffer stores and
+cells are what the terminal paints; the cluster is what the caret
+steps over, Backspace removes, wrap refuses to split, and a
+double-click selects whole. Widths come from `uniseg`, the same
+engine tcell measures a cell with.
+_Avoid_: character, glyph, rune (a rune is a different unit — name
+which one you mean)

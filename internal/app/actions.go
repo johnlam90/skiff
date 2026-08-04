@@ -434,6 +434,10 @@ func (a *App) menuRefreshTree() {
 // menuToggleSidebar shows or hides the file explorer panel. The editor and
 // tab bar reflow to fill the freed cells when the panel is hidden, and
 // snap back when it returns.
+//
+// This is the explicit choice, so it also retires any pending automatic
+// restore: whichever way the user just flipped the panel, widening the
+// terminal later must not override it. See applyResponsiveSidebar.
 func (a *App) menuToggleSidebar() {
 	a.closeMenu()
 	// Single-file mode has no file tree, so there's nothing to show or
@@ -445,6 +449,7 @@ func (a *App) menuToggleSidebar() {
 		return
 	}
 	a.sidebarShown = !a.sidebarShown
+	a.sidebarAutoHidden = false
 }
 
 // sidebarToggleLabel returns the label the toggle row should display given

@@ -15,69 +15,104 @@
 // token starts. So the predicate moved here, next to the buffer it
 // classifies, and mouse.go calls into it.
 //
-// The predicate stays deliberately ASCII-ish (letters, digits, underscore).
-// It is not unicode.IsLetter: identifiers in the languages this editor
-// opens are overwhelmingly ASCII, and folding accented letters or CJK into
-// "word" would make double-click swallow whole phrases in prose files
-// where the old behavior stopped at the run of latin characters. Widening
-// it is a deliberate future change, not an accident of implementation.
+// The predicate is Unicode-aware: letters, digits, underscore, and
+// combining marks are word runes. That is a deliberate call on the two
+// scripts that make "a word" ambiguous:
+//
+//   - CJK ideographs and kana COUNT as word runes. They are letters, and
+//     the alternative is worse in both directions: double-clicking a Han
+//     run would select nothing, and word-wise motion would treat the whole
+//     unspaced sentence as one boundary run and leap over it in a single
+//     press. Counting them means a run of Han between two punctuation
+//     marks selects as one word — long, but predictable, and it is what
+//     VS Code does with its default separator list.
+//   - Combining marks count too, so "café" written with a combining acute
+//     is one word rather than "caf" plus a stray accent. Motion also steps
+//     by grapheme cluster (see cluster.go), which makes that structural
+//     rather than a happy accident.
+//
+// Latin text with accents ("naïve") is the case that quietly improved: the
+// old ASCII-only predicate split it mid-word.
 
 package editor
+
+import (
+	"unicode"
+	"unicode/utf8"
+)
 
 // IsWordChar reports whether r counts as part of a word for selection and
 // caret motion. Underscore is included because snake_case identifiers read
 // as one token to a programmer; everything else — punctuation, whitespace,
-// operators — is a boundary.
+// operators — is a boundary. See the file comment for why letters outside
+// ASCII (including CJK) are in.
 func IsWordChar(r rune) bool {
-	return r == '_' ||
-		(r >= 'a' && r <= 'z') ||
-		(r >= 'A' && r <= 'Z') ||
-		(r >= '0' && r <= '9')
+	// Source code is overwhelmingly ASCII and this runs per rune inside
+	// every motion, so the common case never touches the Unicode tables.
+	if r < utf8.RuneSelf {
+		return r == '_' ||
+			(r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9')
+	}
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r)
 }
 
 // WordLeft returns the column a leftward word motion from col lands on:
-// skip backwards over any boundary runes, then over the word run behind
+// skip backwards over any boundary clusters, then over the word run behind
 // them, so the caret stops at the START of the word to its left. col is
 // clamped into runes at both ends — the caret can legitimately sit one
 // past the last rune, and clamping here means no caller has to.
+//
+// The walk steps by grapheme cluster and classifies a cluster by its base
+// rune, so a motion can never stop between a letter and its accent.
 func WordLeft(runes []rune, col int) int {
-	i := col
-	if i > len(runes) {
-		i = len(runes)
+	i := ClusterStart(runes, clampCol(runes, col))
+	for i > 0 {
+		p := PrevCluster(runes, i)
+		if IsWordChar(runes[p]) {
+			break
+		}
+		i = p
 	}
-	if i < 0 {
-		i = 0
-	}
-	for i > 0 && !IsWordChar(runes[i-1]) {
-		i--
-	}
-	for i > 0 && IsWordChar(runes[i-1]) {
-		i--
+	for i > 0 {
+		p := PrevCluster(runes, i)
+		if !IsWordChar(runes[p]) {
+			break
+		}
+		i = p
 	}
 	return i
 }
 
 // WordRight returns the column a rightward word motion from col lands on:
-// skip forward over any boundary runes, then over the word run past them,
-// so the caret stops at the END of the word to its right. This mirrors
-// WordLeft — left lands on a word's first rune, right lands one past its
-// last — which is what makes a left-then-right round trip re-select the
-// same token.
+// skip forward over any boundary clusters, then over the word run past
+// them, so the caret stops at the END of the word to its right. This
+// mirrors WordLeft — left lands on a word's first rune, right lands one
+// past its last — which is what makes a left-then-right round trip
+// re-select the same token.
 func WordRight(runes []rune, col int) int {
-	i := col
-	if i > len(runes) {
-		i = len(runes)
-	}
-	if i < 0 {
-		i = 0
-	}
+	i := ClusterStart(runes, clampCol(runes, col))
 	for i < len(runes) && !IsWordChar(runes[i]) {
-		i++
+		i = NextCluster(runes, i)
 	}
 	for i < len(runes) && IsWordChar(runes[i]) {
-		i++
+		i = NextCluster(runes, i)
 	}
 	return i
+}
+
+// clampCol pins a column into [0, len(runes)] — the caret's legal range,
+// one past the last rune included. Shared by the word helpers so each one
+// isn't re-deriving the same two bounds checks.
+func clampCol(runes []rune, col int) int {
+	if col > len(runes) {
+		return len(runes)
+	}
+	if col < 0 {
+		return 0
+	}
+	return col
 }
 
 // WordRangeAt returns the half-open [start, end) column span of the word
@@ -90,19 +125,18 @@ func WordRight(runes []rune, col int) int {
 // resolves to that word: that is where a double-click at the right edge of
 // a token puts you, and it is what makes Alt+Right then double-click agree.
 func WordRangeAt(runes []rune, col int) (start, end int, ok bool) {
-	if col > len(runes) {
-		col = len(runes)
-	}
-	if col < 0 {
-		col = 0
-	}
+	col = ClusterStart(runes, clampCol(runes, col))
 	start = col
-	for start > 0 && IsWordChar(runes[start-1]) {
-		start--
+	for start > 0 {
+		p := PrevCluster(runes, start)
+		if !IsWordChar(runes[p]) {
+			break
+		}
+		start = p
 	}
 	end = col
 	for end < len(runes) && IsWordChar(runes[end]) {
-		end++
+		end = NextCluster(runes, end)
 	}
 	if start == end {
 		return 0, 0, false

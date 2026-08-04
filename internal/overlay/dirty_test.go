@@ -124,16 +124,28 @@ func TestDirty_MouseActivatesAndOutsideCancels(t *testing.T) {
 // pin for the optional Labels field: leaving it zero must reproduce the
 // hand-tuned Cancel / Discard / Save columns exactly, so the stock
 // unsaved-changes modal renders where it always did.
+//
+// The numbers are written out rather than read back from the dirtyBtn*
+// constants: columns() returns those same constants on the default path,
+// so an expectation sourced from them would follow any retune and pin
+// nothing at all. Change the constants and this test is supposed to fail.
 func TestDirty_DefaultLabelsKeepPinnedGeometry(t *testing.T) {
 	d, _ := testDirty()
 	xs, ws := d.columns()
-	wantX := [3]int{dirtyBtnCancelX, dirtyBtnDiscardX, dirtyBtnSaveX}
-	wantW := [3]int{dirtyBtnCancelW, dirtyBtnDiscardW, dirtyBtnSaveW}
+	wantX := [3]int{5, 22, 42}
+	wantW := [3]int{10, 11, 8} // "[ Cancel ]", "[ Discard ]", "[ Save ]"
 	if xs != wantX || ws != wantW {
 		t.Fatalf("default columns = %v/%v, want %v/%v", xs, ws, wantX, wantW)
 	}
-	if d.labels() != dirtyDefaultLabels {
-		t.Fatalf("default labels = %v", d.labels())
+	wantLabels := [3]string{"[ Cancel ]", "[ Discard ]", "[ Save ]"}
+	if got := d.labels(); got != wantLabels {
+		t.Fatalf("default labels = %v, want %v", got, wantLabels)
+	}
+	// The captions have to actually fit the columns they were tuned for.
+	for i, l := range wantLabels {
+		if len([]rune(l)) != wantW[i] {
+			t.Errorf("label %q is %d cells wide, but its column is %d", l, len([]rune(l)), wantW[i])
+		}
 	}
 }
 

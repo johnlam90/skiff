@@ -154,11 +154,15 @@ func bodyConfirm(n int) (*Confirm, *[]string) {
 // every existing confirm in the app passes only Message, so the frame
 // size and the button row must stay exactly where they were before Body
 // existed — otherwise every Yes/No hit zone in the editor shifts.
+//
+// The rect is spelled out rather than recomputed with
+// Centered(80, 24, confirmWidth, confirmHeight): that is the very
+// expression rect() evaluates on the empty-body path, so an expectation
+// built from it tracks any drift instead of catching it.
 func TestConfirm_EmptyBodyKeepsClassicGeometry(t *testing.T) {
 	c, _ := testConfirm()
-	r := c.rect()
-	want := Centered(80, 24, confirmWidth, confirmHeight)
-	if r != want {
+	want := Rect{X: 13, Y: 7, W: 54, H: 9} // 80×24 screen, 54×9 modal
+	if r := c.rect(); r != want {
 		t.Fatalf("message-only rect drifted: got %+v want %+v", r, want)
 	}
 	if c.buttonRow() != 5 || c.buttonOffset() != 0 {

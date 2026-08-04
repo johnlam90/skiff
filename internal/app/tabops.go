@@ -17,6 +17,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -159,6 +160,13 @@ func (a *App) closeTab(tab *editor.Tab) {
 
 // copySelection puts the active tab's selection on the system clipboard
 // (via OSC 52) and into the editor's internal clipboard.
+//
+// The internal copy happens first and unconditionally: even when the
+// selection is too big for the terminal to carry, paste-inside-skiff
+// still works, so the flash says what was lost rather than "copy
+// failed". An oversized OSC 52 is the one failure the user can act on
+// (select less), which is why it gets its own message instead of the
+// generic "clipboard unavailable".
 func (a *App) copySelection() {
 	tab := a.activeTabPtr()
 	if tab == nil || !tab.HasSelection() {
@@ -167,6 +175,10 @@ func (a *App) copySelection() {
 	txt := tab.SelectionText()
 	a.clipBuf = txt
 	if err := clipboard.CopyToSystem(txt); err != nil {
+		if errors.Is(err, clipboard.ErrTooLarge) {
+			a.flash("Selection too large for the terminal clipboard — copied inside skiff only")
+			return
+		}
 		a.flash("Copied (system clipboard unavailable)")
 		return
 	}

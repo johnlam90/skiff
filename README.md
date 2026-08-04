@@ -75,7 +75,11 @@ The goals, in order:
   can't apply right now (git verbs with no repo, edit verbs with no
   tab) are hidden rather than greyed out.
 - **Live file tree** — auto-refreshes every 10 seconds so files added
-  or removed from disk show up without you doing anything.
+  or removed from disk show up without you doing anything. A directory
+  it can't read is labelled `(unreadable)` rather than drawn as empty,
+  and a directory past 1000 entries is truncated with an inert
+  `… N more` row — the sidebar is for navigating, the finder (`Esc p`)
+  indexes the rest.
 - **External change detection** — if a file on disk changes underneath
   an open clean buffer, the editor reloads it; if your buffer is dirty,
   you get the [disk-conflict prompt](#when-a-file-changes-under-you) —
@@ -91,7 +95,11 @@ The goals, in order:
   added/modified/deleted lines (click one for a diff popup), the status
   bar shows the branch plus a change count, and the sidebar's
   [GIT tab](#git-changes) lists every uncommitted change with
-  click-to-diff — VS Code's Source Control view, one click away.
+  click-to-diff — VS Code's Source Control view, one click away. On a
+  machine with no `git` on `PATH` the editor says so once ("git was not
+  found on PATH — branch and change badges are off") and every git
+  surface repeats that reason instead of claiming "not a git
+  repository".
 - **Project-wide search & replace** — `Esc F` sweeps every file in the
   project (smart-case, with match-case / whole-word / regex chips),
   groups the hits by file, and opens any hit at its line. `Tab` grows
@@ -112,7 +120,10 @@ The goals, in order:
   sideways and `‹`/`›` chevrons mark clipped lines.
 - **Preview tabs** — a single tree click opens a file in one reusable
   *italic* tab, so browsing ten files doesn't leave ten tabs behind.
-  Click the file again, or just start typing, to pin it.
+  Click the file again, or just start typing, to pin it. The first
+  preview of each session says so once — "Preview tab — edit it or
+  click again to keep it open" — because a tab that replaces itself
+  silently reads as tabs going missing.
 - **Scrollbar with a change map** — long files get a clickable,
   draggable scrollbar on the editor's right edge with the file's git
   changes marked along it, so "where did I change this file" is one
@@ -128,6 +139,14 @@ The goals, in order:
   file itself (tab vs N spaces), and a file that arrived with CRLF
   line endings is written back with CRLF, so editing one line of a
   Windows-authored file doesn't turn the whole file into a diff.
+- **CJK, emoji and combining marks line up** — column math is done in
+  grapheme clusters and terminal cells, not runes: an ideograph takes
+  two columns, a combining mark none, a ZWJ family emoji two rather
+  than six. One arrow press steps over a whole cluster (so does one
+  `Backspace`), soft wrap never breaks a wide glyph across rows, and
+  selections, the find highlight and the gutter stay aligned with what
+  you see. Widths come from the same Unicode engine `tcell` uses to
+  size a cell, so the caret can't drift away from the glyph under it.
 - **File clipboard** — cut, copy, paste, and duplicate files or folders
   from the tree's right-click menu or the main `≡` menu. Nothing is
   ever overwritten: a taken name becomes `name copy.ext`.
@@ -145,9 +164,18 @@ The goals, in order:
   tiny file the Nerd-Font icons preference lives in. Tokyo Night
   stays the default.
 - **Toggleable, draggable sidebar** — show/hide the file tree from the
-  menu, or drag the splitter to resize it.
+  menu (or `Esc t`), or drag the splitter to resize it. Below 58
+  columns — too narrow to hold an 18-column tree and 40 columns of
+  code — the explorer hides itself and says so ("Narrow window — file
+  explorer hidden (Esc t shows it)"), then comes back when the window
+  grows. It only restores what *it* hid: a panel you closed on purpose
+  stays closed, and reopening it inside a narrow pane sticks.
 - **Clipboard over SSH** — OSC 52, including a `tmux` passthrough so
-  copy works from inside a tmux session on a remote host.
+  copy works from inside a tmux session on a remote host. One escape
+  sequence can only carry so much: past 512 KiB (tmux's 1 MiB ceiling
+  minus base64 inflation) the copy is refused with "Selection too large
+  for the terminal clipboard — copied inside skiff only" rather than
+  half-written, and pasting inside the editor still works.
 - **Survives a low-color terminal** — under 256 colors the palettes
   stop being distinguishable, so skiff spends attributes instead of
   hue: reverse video for the selection and the status bar, bold for the
@@ -279,35 +307,46 @@ Then:
 Skiff deliberately avoids `Ctrl+`-style shortcuts (they fight `tmux`,
 `zellij`, and the terminal itself — `Ctrl+S` is XOFF flow control on a
 real terminal). Instead, **`Esc` is the leader key**: tap `Esc`, then
-within half a second tap one of the letters below.
+within half a second tap one of the keys below.
 
-| Combo       | Action                 |
-| ----------- | ---------------------- |
-| `Esc Esc`   | Open ≡ menu            |
-| `Esc s`     | Save                   |
-| `Esc u`     | Undo                   |
-| `Esc r`     | Redo                   |
-| `Esc w`     | Close tab              |
-| `Esc o`     | Reopen closed tab      |
-| `Esc q`     | Quit                   |
-| `Esc n`     | New file               |
-| `Esc t`     | Toggle sidebar         |
-| `Esc z`     | Toggle line wrap       |
-| `Esc /`     | Toggle line comment    |
-| `Esc k`     | Move line up           |
-| `Esc j`     | Move line down         |
-| `Esc d`     | Duplicate line         |
-| `Esc c`     | Copy selection         |
-| `Esc x`     | Cut selection          |
-| `Esc v`     | Paste                  |
-| `Esc f`     | Find in file           |
-| `Esc F`     | Find in project        |
-| `Esc l`     | Go to line             |
-| `Esc p`     | Find file in project   |
-| `Esc b`     | Move to previous word  |
-| `Esc e`     | Move to next word      |
-| `Esc %`     | Go to matching bracket |
-| `Esc g`     | Focus the Git panel    |
+| Combo       | Action                 | Group |
+| ----------- | ---------------------- | ----- |
+| `Esc Esc`   | Open ≡ menu            | —     |
+| `Esc s`     | Save                   | File  |
+| `Esc n`     | New file               | File  |
+| `Esc w`     | Close tab              | File  |
+| `Esc o`     | Reopen closed tab      | File  |
+| `Esc u`     | Undo                   | Edit  |
+| `Esc r`     | Redo                   | Edit  |
+| `Esc c`     | Copy selection         | Edit  |
+| `Esc x`     | Cut selection          | Edit  |
+| `Esc v`     | Paste                  | Edit  |
+| `Esc /`     | Toggle line comment    | Edit  |
+| `Esc k`     | Move line up           | Edit  |
+| `Esc j`     | Move line down         | Edit  |
+| `Esc d`     | Duplicate line         | Edit  |
+| `Esc f`     | Find in file           | Go    |
+| `Esc F`     | Find in project        | Go    |
+| `Esc l`     | Go to line             | Go    |
+| `Esc p`     | Find file in project   | Go    |
+| `Esc b`     | Move to previous word  | Go    |
+| `Esc e`     | Move to next word      | Go    |
+| `Esc %`     | Go to matching bracket | Go    |
+| `Esc g`     | Focus the Git panel    | Git   |
+| `Esc t`     | Toggle sidebar         | View  |
+| `Esc z`     | Toggle line wrap       | View  |
+| `Esc ?`     | Keyboard shortcuts     | View  |
+| `Esc q`     | Quit                   | Quit  |
+
+The rows are in `leaderBindings()`' own order, and the Group column is
+its `group` field — the same six headings the ≡ menu uses, so "where
+does this live?" has one answer.
+
+**Forgot one? `Esc ?`** opens the whole table as a scrollable overlay,
+grouped exactly as above, plus a short note on the ≡ menu and its
+filter. It's *generated* from the dispatch table (`≡` →
+**Keyboard shortcuts…** is the same row), so it can't drift into
+advertising a gesture that no longer fires.
 
 A lone `Esc` is harmless — if you don't follow it with a bound key
 within the window, your next keystroke goes to the editor as normal,

@@ -41,9 +41,35 @@ func TestDetectLangLabel(t *testing.T) {
 	}
 }
 
-// TestDraw_AllPanels exercises the drawing path so the stdout/screen code
-// is covered. Result correctness is exercised manually; here we just make
-// sure no panics across several states.
+// screenText flattens the simulation screen's front buffer into one rune
+// slice so a test can assert that a label was actually painted. Show()
+// first: GetContents serves the front buffer, which a bare draw() has
+// not yet swapped into.
+func screenText(t *testing.T, a *App) []rune {
+	t.Helper()
+	scr, ok := a.screen.(tcell.SimulationScreen)
+	if !ok {
+		t.Fatalf("test app is not backed by a SimulationScreen")
+	}
+	scr.Show()
+	cells, _, _ := scr.GetContents()
+	out := make([]rune, 0, len(cells))
+	for _, c := range cells {
+		if len(c.Runes) > 0 {
+			out = append(out, c.Runes[0])
+		} else {
+			out = append(out, ' ')
+		}
+	}
+	return out
+}
+
+// TestDraw_AllPanels walks the render pass through every top-level state
+// and asserts each one actually paints its distinguishing text. The
+// previous version called draw() in each state and asserted nothing at
+// all, so a draw() that painted an empty screen — or painted the wrong
+// panel in every state — passed it. Cell-exact geometry stays in the
+// focused tests below; this one pins "the right surface got drawn".
 func TestDraw_AllPanels(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "f.txt")
@@ -51,30 +77,69 @@ func TestDraw_AllPanels(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	a := newTestApp(t, dir)
-	a.draw() // empty editor + sidebar
+
+	paints := func(state, want string) {
+		t.Helper()
+		if !containsRunes(screenText(t, a), want) {
+			t.Errorf("%s: screen never painted %q", state, want)
+		}
+	}
+	omits := func(state, unwanted string) {
+		t.Helper()
+		if containsRunes(screenText(t, a), unwanted) {
+			t.Errorf("%s: screen still shows %q", state, unwanted)
+		}
+	}
+
+	a.draw()
+	paints("empty editor", "No file open")
+
 	a.openFile(target)
-	a.draw() // with a tab
+	a.draw()
+	paints("open tab", "f.txt") // tab strip
+	paints("open tab", "hi")    // buffer body
+	omits("open tab", "No file open")
+	omits("open tab", "● f.txt") // clean tab: no modified dot
+
 	a.activeTabPtr().Dirty = true
-	a.draw() // dirty marker
+	a.draw()
+	// The status bar still holds openFile's flash here, so the dirty
+	// state's visible marker is the tab strip's dot.
+	paints("dirty tab", "● f.txt")
+
 	a.openMenu()
-	a.draw() // with menu modal
+	a.draw()
+	paints("menu", "Save")
 	a.closeMenu()
-	a.openPrompt("T", "H", "x", nil)
+
+	a.openPrompt("Rename file", "new name", "f.txt", nil)
 	a.draw()
+	paints("prompt", "Rename file")
 	a.closeAllModals()
-	a.openConfirm("T", "M", nil)
+
+	a.openConfirm("Discard?", "Throw away unsaved edits", nil)
 	a.draw()
+	paints("confirm", "Throw away unsaved edits")
 	a.closeAllModals()
+
 	a.openTreeContext(a.tree.Root, 5, 5)
 	a.draw()
+	paints("tree context", "Copy rel path")
 	a.closeAllModals()
+
 	a.flash("hello")
-	a.draw() // status flash
+	a.draw()
+	paints("status flash", "hello")
+
 	a.sidebarShown = false
 	a.draw()
-	// Tiny window → too-small message.
+	omits("sidebar hidden", filepath.Base(dir))
+
+	// Tiny window → the resize message replaces every panel.
 	a.width, a.height = 5, 5
 	a.draw()
+	paints("tiny window", "Wind") // the message is clipped to 5 columns
+	omits("tiny window", "f.txt")
 }
 
 // TestDrawStatusBar_RendersBranchRightAligned pins down the lower-right

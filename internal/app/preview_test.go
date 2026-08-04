@@ -186,3 +186,53 @@ func TestOpenFile_OversizedFileFlashesSizeAndOpensNoTab(t *testing.T) {
 		}
 	}
 }
+
+// TestPreviewCoachMark_FiresOnceThenStaysQuiet pins the whole point of
+// the coach mark: preview tabs replace each other silently, which reads
+// as "my tabs keep vanishing" until someone names the behavior — so the
+// first preview of the session explains it. The second must not, or
+// browsing a tree turns into a status bar that shouts the same sentence
+// on every click.
+func TestPreviewCoachMark_FiresOnceThenStaysQuiet(t *testing.T) {
+	dir := t.TempDir()
+	p1, p2 := seedTwo(t, dir)
+	a := newTestApp(t, dir)
+
+	a.openFilePreview(p1)
+	if !strings.Contains(a.statusMsg, "Preview tab") {
+		t.Fatalf("first preview should explain itself, flash was %q", a.statusMsg)
+	}
+	if !a.previewCoachShown {
+		t.Error("the once-per-session flag was never set")
+	}
+
+	a.statusMsg = ""
+	a.openFilePreview(p2)
+	if a.statusMsg != "" {
+		t.Errorf("second preview re-explained itself: %q", a.statusMsg)
+	}
+}
+
+// TestPreviewCoachMark_SilentForPermanentOpens keeps the hint attached
+// to the behavior it describes. A finder / menu / CLI open pins its tab
+// and has nothing surprising to explain, so it must announce the file
+// the way it always did and leave the coach mark armed for the first
+// real preview.
+func TestPreviewCoachMark_SilentForPermanentOpens(t *testing.T) {
+	dir := t.TempDir()
+	p1, p2 := seedTwo(t, dir)
+	a := newTestApp(t, dir)
+
+	a.openFile(p1)
+	if a.previewCoachShown {
+		t.Fatal("a permanent open must not spend the session's one coach mark")
+	}
+	if strings.Contains(a.statusMsg, "Preview tab") {
+		t.Errorf("permanent open flashed the preview hint: %q", a.statusMsg)
+	}
+
+	a.openFilePreview(p2)
+	if !strings.Contains(a.statusMsg, "Preview tab") {
+		t.Errorf("the first real preview should still explain itself, got %q", a.statusMsg)
+	}
+}

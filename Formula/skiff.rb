@@ -45,6 +45,7 @@ class Skiff < Formula
   end
 
   test do
-    assert_path_exists bin/"skiff"
+    assert_match "skiff #{version}", shell_output("#{bin}/skiff --version")
+    assert_match "action menu", shell_output("#{bin}/skiff --help")
   end
 end

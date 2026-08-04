@@ -166,7 +166,10 @@ func TestActivateGitLogRow_OpensCommitDiff(t *testing.T) {
 // TestMenuFileHistory_ScopesToActiveTab verifies the ≡ row opens the
 // active file's history — b.txt sees only the commit that created it —
 // and that activating an entry scopes the diff to that file with its
-// syntax path attached.
+// syntax path attached. The syntax path is the half that used to go
+// unchecked: gitLogOverlay.activate hands g.path to openDiffView as
+// langPath, and an empty one silently drops highlighting for the whole
+// diff while the title still reads right.
 func TestMenuFileHistory_ScopesToActiveTab(t *testing.T) {
 	a, _, bFile := historyRepoApp(t)
 	a.openFile(bFile)
@@ -178,9 +181,23 @@ func TestMenuFileHistory_ScopesToActiveTab(t *testing.T) {
 	if !gitLogIsOpen(a) || len(gitLogOv(t, a).entries) != 1 {
 		t.Fatalf("want open with 1 entry, top=%T", a.overlays.Top())
 	}
+	// The scoping path is also the syntax path the diff inherits.
+	if got := gitLogOv(t, a).path; got != bFile {
+		t.Fatalf("history scope: got %q, want the active tab %q", got, bFile)
+	}
 	a.handleKey(keyEv(tcell.KeyEnter, 0))
 	if !diffIsOpen(a) || !strings.Contains(diffOv(t, a).title, "b.txt") {
 		t.Fatalf("diff should open scoped to b.txt, title %q", diffOv(t, a).title)
+	}
+	// Precomputed context styles exist only when a non-empty langPath
+	// reached openDiffView — one style row per diff row.
+	d := diffOv(t, a)
+	if len(d.rows) == 0 {
+		t.Fatal("diff should have rows to style")
+	}
+	if len(d.rowStyles) != len(d.rows) {
+		t.Fatalf("diff should carry %s's syntax styles: got %d style rows for %d diff rows",
+			filepath.Base(bFile), len(d.rowStyles), len(d.rows))
 	}
 }
 

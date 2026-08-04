@@ -49,6 +49,9 @@ internal/app/layout.go        All screen geometry: panel rects + splitter clampi
 internal/app/draw.go          The render pass + tab-strip layout
 internal/app/refresh.go       10s tick: off-thread scan, on-loop apply, tab reconcile
 internal/app/keys.go          Keyboard entry point: Esc-leader windows, arrows, typing
+internal/app/leader.go        Esc-leader table (key/action/desc/group) — the single
+                              source for dispatch, cheat-strip and Esc ? sheet
+internal/app/cheatsheet.go    Esc ? shortcut reference, generated from leaderBindings()
 internal/app/mouse.go         Mouse dispatcher + drag/auto-scroll state
 internal/app/menudef.go       Menu data model: rows, groups, drill-ins, filter matcher
 internal/app/menu.go          Menu behavior: filter field, nav, hit-test, drawing
@@ -72,9 +75,19 @@ internal/editor/scrollbar.go  Right-edge scrollbar + git change map
 internal/editor/highlight.go  Chroma → []tcell.Style per line
 internal/editor/indent.go     Visual-column math, indent detection, Enter auto-indent
 internal/editor/word.go       The single definition of "a word" + word-wise motion
+internal/editor/cluster.go    Grapheme clusters + terminal cell widths (uniseg)
 internal/editor/bracket.go    Bracket match under the caret (+ the render decision)
-internal/filetree/filetree.go Lazy tree, identity-preserving refresh, hit-test, render
+internal/filetree/filetree.go Lazy tree, identity-preserving refresh, hit-test,
+                              render — plus the per-directory child cap
+                              (MaxDirChildren + "… N more" sentinel) and the
+                              ReadErr "(unreadable)" mark
 internal/search/search.go     Literal smart-case project search engine
+internal/finder/              Project file index (git ls-files, gitignore-aware
+                              walk fallback) + the fzy-style fuzzy matcher
+internal/format/              Format-on-save: project + defaults config and the
+                              (path, config-hash) trust store
+internal/customactions/       Loader for ~/.config/skiff/actions.json, incl. the
+                              optional per-action prompts
 internal/session/session.go   Session store — one file per project under
                               ~/.local/state/skiff/sessions/ (legacy
                               sessions.json is migrated + renamed aside)
@@ -91,7 +104,8 @@ internal/git/                 Git process boundary: Repo over a Runner
                               Snapshot model (IsRepo/Branch/Ahead/Behind/
                               Files) every git-aware surface consumes
 internal/git/ref.go           SafeRef: refuses refs git would read as an option
-internal/clipboard/clipboard.go OSC 52 to /dev/tty with tmux passthrough wrap
+internal/clipboard/clipboard.go OSC 52 to /dev/tty with tmux passthrough wrap,
+                              capped at MaxPayloadBytes (ErrTooLarge above it)
 internal/userconfig/userconfig.go ~/.config/skiff/config.json (icons, theme, wrap)
 internal/icons/icons.go       Nerd Font detection (deadline-bounded) + glyphs
 internal/theme/theme.go       Default Tokyo Night palette + contrast helpers
@@ -190,7 +204,43 @@ a cached file-wide visual-row map — the O(viewport) walks are the
 design, and they keep huge files snappy with zero invalidation logic.
 Tab stops reset at each segment, so a segment's rune subslice behaves
 exactly like an independent line under the existing visual-column
-helpers. The scrollbar stays buffer-line proportional on purpose.
+helpers. Segments break only on grapheme boundaries, so a wide glyph is
+never split across rows — that is what keeps the subslice property true
+for CJK and emoji. The scrollbar stays buffer-line proportional on
+purpose.
+
+### Three units: runes are stored, clusters are walked, cells are painted
+`Position.Col` indexes RUNES and `Buffer` splices runes — that never
+changes. But a rune is not a character and not a cell: a CJK ideograph
+eats two cells, a combining mark none, and a ZWJ family emoji is five
+runes painted in two cells. Caret motion and layout therefore walk
+grapheme clusters via `ClusterAt` (cluster.go), never by summing
+`RuneVisualWidth` over runes — summing gives a family emoji 6 cells
+instead of 2 and drifts the caret off the glyph under it. Widths come
+from `github.com/rivo/uniseg`, which is the same engine tcell's
+`CellBuffer.Put` uses, so our column math and tcell's cell buffer agree
+by construction; swapping in a hand-rolled width table reintroduces the
+drift on exactly the text that is hardest to debug. That is also why
+`github.com/rivo/uniseg` is a DIRECT dependency in `go.mod` rather than
+the indirect one it used to be under tcell: the editor now measures
+text itself, so it has to pin the same segmenter tcell resolves cells
+with — inheriting it transitively lets a tcell upgrade move our column
+math without a line of our code changing. `RuneVisualWidth` is still
+correct for a rune with no neighbours (tabs, plain ASCII) and wrong for
+anything else.
+
+Two scope limits, both deliberate. **Matching is still sub-cluster**:
+`FindAll` compares decoded rune slices and `internal/search` works on
+strings and regexps, so neither is cluster-aware — a query for a bare
+combining mark or the second regional indicator of a flag can match a
+position no caret can occupy. The highlight still lines
+up in cells — the cluster takes its base rune's style — so alignment
+holds while cluster-granular *matching* does not. Don't "fix" that
+without deciding what a partial-cluster hit should select. And
+**`uniseg.EastAsianAmbiguousWidth` is left at its default 1**, so `±`,
+`→` and box-drawing characters stay one cell. Setting it to 2 would
+reflow every existing user's terminal-drawn text; it is a global in
+uniseg, so a single assignment anywhere changes the whole editor.
 
 ### `Buffer.LineRunes` memoises — so a buffer is not thread-safe to READ
 `LineRunes` caches its decode in `Buffer.runeCache` and hands back a
@@ -288,6 +338,40 @@ A drag is detected when a press lands at exactly `x == splitterX()`.
 Min widths: `minSidebarWidth = 18`, `minEditorAfterDrag = 40`. Don't
 let the editor shrink below that.
 
+### Responsive sidebar: edge-triggered, and it restores only what it hid
+`applyResponsiveSidebar` hides the explorer below
+`autoHideSidebarWidth` (`minSidebarWidth + minEditorAfterDrag` = 58).
+Two properties are load-bearing. It is **edge-triggered** — only a
+crossing of the threshold acts (`a.sidebarNarrow` is the memo), so
+`Esc t` inside a still-narrow window sticks instead of being re-hidden
+by the next resize event. And it **restores only what it hid** —
+`sidebarAutoHidden` is set here and cleared by `menuToggleSidebar`, so
+a panel the user closed on purpose stays closed however wide the
+terminal gets. Don't "simplify" either one into `sidebarShown =
+width >= autoHideSidebarWidth`: that form is level-triggered, so it
+re-hides the panel on every resize event inside a narrow episode and
+stomps an `Esc t` the user just pressed.
+`TestApplyResponsiveSidebar_ExplicitShowSurvivesNarrowResizes` is the
+test that catches it.
+
+### Every shortcut surface is generated from `leaderBindings()`
+`leader.go` is the single source: `leaderActionFor` dispatches from it,
+`leaderstrip.go` renders the armed-window strip from it, and
+`cheatsheet.go` builds the `Esc ?` overlay from it via
+`leaderDisplayGroups` (bucketed by the binding's `group` field, whose
+names deliberately match the ≡ menu's top-level groups). Never
+hand-write a second list of keys — a reference that can disagree with
+the dispatch teaches a gesture that does nothing.
+The drop-nothing guarantee lives in `groupLeaderBindings`, the pure
+helper: an unknown group name appends its own heading rather than
+dropping the binding, so a new `group` string can't make a shortcut
+vanish from the sheet. `leaderDisplayGroups` is just the one-line
+wrapper that feeds it `leaderBindings()` — the split exists so the
+guarantee can be tested against a synthetic table carrying a
+deliberately unregistered group, not only against today's real one.
+Adding a binding is one struct literal; the menu row, the strip and the
+overlay follow.
+
 ## Build / run
 
 ```sh
@@ -327,8 +411,9 @@ loops forever.
 - `Ctrl+` editor shortcuts (they fight tmux/terminals — that's the
   whole reason the action menu exists).
 - A config *system*. Skiff is opinionated: `~/.config/skiff/config.json`
-  exists but stays a flat file of tiny keys (`icons`, `theme`) — no
-  plugin manifests, no per-key UI beyond a picker, no dotfile sprawl.
+  exists but stays a flat file of tiny keys (`icons`, `theme`, `wrap`)
+  — no plugin manifests, no per-key UI beyond a picker, no dotfile
+  sprawl.
 - CGO dependencies. The whole point is one static binary.
 - Tree-sitter. We use Chroma intentionally — pure Go, no setup.
 - Cross-repo release tokens. The `homebrew-skiff` tap repo mirrors

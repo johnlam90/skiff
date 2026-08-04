@@ -427,6 +427,10 @@ func FuzzFindAll(f *testing.F) {
 		{"          ", " "},
 		{"tab\tsep\ttab", "\t"},
 		{"ünïcödé", "Ï"},
+		{"👨\u200d👩\u200d👦 family\n👨 alone", "👨"},
+		{"🇯🇵🇺🇸 flags", "🇺🇸"},
+		{"混ざったmixed幅width", "mixed"},
+		{"❤\ufe0f and ❤ differ", "❤"},
 	}
 	for _, s := range seeds {
 		f.Add(s.text, s.query)

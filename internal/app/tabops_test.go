@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/johnlam90/skiff/internal/clipboard"
 	"github.com/johnlam90/skiff/internal/editor"
 )
 
@@ -251,7 +252,11 @@ func TestSaveActiveTab_NoTab(t *testing.T) {
 	a.saveActiveTab()
 }
 
-// TestCopyCutPaste exercises the clipboard glue.
+// TestCopyCutPaste pins the buffer effects of the clipboard trio, not
+// just the clipBuf bookkeeping: copy leaves the text alone, cut removes
+// exactly the selection and collapses the caret, and paste re-inserts
+// at the caret rather than at the start of the line. An empty internal
+// clipboard refuses with a flash instead of silently inserting nothing.
 func TestCopyCutPaste(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "f.txt")
@@ -276,25 +281,48 @@ func TestCopyCutPaste(t *testing.T) {
 	if a.clipBuf != "hello" {
 		t.Fatalf("copy: clipBuf %q", a.clipBuf)
 	}
-
-	// Cut: same selection should now empty the buffer.
-	tab.Anchor = editor.Position{Line: 0, Col: 0}
-	tab.Cursor = editor.Position{Line: 0, Col: 5}
-	a.cutSelection()
-	if tab.Buffer.LineRunes(0) != nil && len(tab.Buffer.LineRunes(0)) != 0 {
-		// Some buffer impls return empty slice; both fine.
+	if got := string(tab.Buffer.LineRunes(0)); got != "hello" {
+		t.Fatalf("copy must not touch the buffer: line 0 = %q, want %q", got, "hello")
 	}
 
-	// Paste empty path: when clipBuf empty, flash about external paste.
+	// Cut takes exactly the selection out of the buffer and leaves the
+	// caret where the selection started.
+	tab.Anchor = editor.Position{Line: 0, Col: 0}
+	tab.Cursor = editor.Position{Line: 0, Col: 2}
+	a.cutSelection()
+	if a.clipBuf != "he" {
+		t.Fatalf("cut: clipBuf %q, want %q", a.clipBuf, "he")
+	}
+	if got := string(tab.Buffer.LineRunes(0)); got != "llo" {
+		t.Fatalf("cut: line 0 = %q, want %q", got, "llo")
+	}
+	if tab.Cursor != (editor.Position{Line: 0, Col: 0}) {
+		t.Fatalf("cut: cursor %+v, want line 0 col 0", tab.Cursor)
+	}
+
+	// Paste empty path: when clipBuf empty, flash about external paste
+	// and leave the buffer alone.
 	a.clipBuf = ""
 	a.pasteClipboard()
 	if !strings.Contains(a.statusMsg, "clipboard empty") {
 		t.Fatalf("expected empty-clip flash, got %q", a.statusMsg)
 	}
+	if got := string(tab.Buffer.LineRunes(0)); got != "llo" {
+		t.Fatalf("refused paste edited the buffer: line 0 = %q, want %q", got, "llo")
+	}
 
-	// Paste with content.
-	a.clipBuf = "X"
+	// Paste with content: the text lands at the caret and the caret
+	// advances past it.
+	a.clipBuf = "he"
+	tab.Cursor = editor.Position{Line: 0, Col: 1}
+	tab.Anchor = tab.Cursor
 	a.pasteClipboard()
+	if got := string(tab.Buffer.LineRunes(0)); got != "lhelo" {
+		t.Fatalf("paste: line 0 = %q, want %q", got, "lhelo")
+	}
+	if tab.Cursor != (editor.Position{Line: 0, Col: 3}) {
+		t.Fatalf("paste: cursor %+v, want line 0 col 3", tab.Cursor)
+	}
 }
 
 // TestPasteClipboard_NoTab is safe with no tab open.
@@ -318,5 +346,38 @@ func TestOpenFile_StampsWrapPreference(t *testing.T) {
 	a.openFile(target)
 	if a.activeTabPtr().Wrap {
 		t.Fatal("tab should inherit wrap-off from the app preference")
+	}
+}
+
+// TestCopySelection_OversizedFlashesDistinctly wires the clipboard cap
+// to the user. OSC 52 above the cap is silently dropped by tmux, so the
+// old code flashed "Copied" over a copy that never happened. The
+// contract now has three parts: the internal clipboard still gets the
+// text (paste inside skiff keeps working), the flash names the real
+// problem, and it is not the generic "clipboard unavailable" — that one
+// is nothing the user can act on, this one is (select less).
+func TestCopySelection_OversizedFlashesDistinctly(t *testing.T) {
+	dir := t.TempDir()
+	big := strings.Repeat("x", clipboard.MaxPayloadBytes+16)
+	target := filepath.Join(dir, "big.txt")
+	if err := os.WriteFile(target, []byte(big), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+
+	tab := a.activeTabPtr()
+	tab.Anchor = editor.Position{Line: 0, Col: 0}
+	tab.Cursor = editor.Position{Line: 0, Col: len(big)}
+	a.copySelection()
+
+	if len(a.clipBuf) != len(big) {
+		t.Fatalf("internal clipboard must still hold the selection, got %d bytes", len(a.clipBuf))
+	}
+	if !strings.Contains(a.statusMsg, "too large") {
+		t.Fatalf("flash must name the size problem, got %q", a.statusMsg)
+	}
+	if strings.Contains(a.statusMsg, "unavailable") {
+		t.Fatalf("oversized copy must not reuse the generic failure copy, got %q", a.statusMsg)
 	}
 }

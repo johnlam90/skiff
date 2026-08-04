@@ -13,6 +13,7 @@
 package filetree
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -35,6 +36,18 @@ type Node struct {
 	Expanded bool
 	Loaded   bool
 	Children []*Node
+
+	// ReadErr records the most recent failed read of this directory —
+	// permissions, a vanished path, an I/O error. Without it an
+	// unreadable directory renders exactly like an empty one and the
+	// tree quietly lies about a permission problem. Cleared by the next
+	// successful merge, so a chmod +r shows up on the following refresh.
+	ReadErr error
+
+	// Sentinel marks the synthetic "… N more" row appended to a
+	// truncated directory. It is not a filesystem entry: Path is empty
+	// and HitTest refuses to return it, so a click lands on nothing.
+	Sentinel bool
 }
 
 // TrashPrefix marks in-place session-trash entries: when moving a
@@ -49,6 +62,32 @@ const TrashPrefix = ".skifftrash-"
 // project is indistinguishable from a tree that failed to load, which
 // is the first thing a user hits after `mkdir proj && skiff proj`.
 const EmptyFolderLabel = "(folder is empty)"
+
+// UnreadableLabel is the muted marker appended to a directory row whose
+// last read failed. It is deliberately text rather than a colour: the
+// difference between "empty" and "I could not look" has to survive a
+// monochrome terminal and a colourblind reader.
+const UnreadableLabel = "(unreadable)"
+
+// MaxDirChildren caps how many entries of one directory the tree
+// retains. The sidebar is a navigation aid, not a file manager — past a
+// few hundred rows nobody is scrolling to find anything, they are using
+// the finder (Esc-p), which indexes the whole project regardless of
+// this cap. 1000 keeps the retained node graph, the flatten walk and
+// the render pass bounded no matter what a build directory contains,
+// while sitting far above any hand-maintained directory.
+//
+// Over the cap the directory gets a trailing "… N more" sentinel row so
+// the truncation is visible instead of silent. The sentinel is inert:
+// clicking it does nothing (HitTest returns ok=false). Raising the cap
+// on click was the alternative and was rejected — it makes a row that
+// silently reshapes the tree under the cursor, and it re-opens the
+// unbounded case the cap exists to close.
+const MaxDirChildren = 1000
+
+// moreRowFormat renders the sentinel row's label from the count of
+// entries the cap dropped.
+const moreRowFormat = "… %d more"
 
 // GitChangeKind describes the strongest git status a tree row should
 // show — the git package's ChangeKind under its historical tree-side
@@ -133,12 +172,18 @@ func loadChildren(n *Node) error {
 // with the new list. Existing child Nodes whose names still appear on disk
 // are kept by-pointer so their Expanded state, loaded grandchildren, etc.
 // survive a refresh. New names get fresh Nodes; vanished names are dropped.
+//
+// A failed read is recorded on the node rather than discarded: callers
+// throughout the package ignore this error (an expand or a refresh has
+// nowhere to report it), and without the mark the row would render as a
+// plain empty directory.
 func (n *Node) reload() error {
 	if !n.IsDir {
 		return nil
 	}
 	entries, err := os.ReadDir(n.Path)
 	if err != nil {
+		n.ReadErr = err
 		return err
 	}
 	n.merge(scanEntries(entries))
@@ -182,13 +227,38 @@ func scanEntries(entries []os.DirEntry) []ScanEntry {
 // grandchildren live on. This is the half of a refresh that mutates the
 // node graph the renderer walks, so it must run on the main thread —
 // see Tree.ApplyScan.
+//
+// Entries are sorted (and truncated to MaxDirChildren) before any Node
+// is allocated, so expanding a directory with 100k entries costs 1000
+// nodes rather than 100k. Sorting first is what makes the cap keep the
+// rows a user would actually look at — directories, then names — instead
+// of whatever order the filesystem happened to hand back. The sort is
+// in place: entries belongs to the caller's DirScan and is not shared.
+//
+// A successful merge clears ReadErr: this is the point where a
+// directory that was unreadable last tick proves it is readable again.
 func (n *Node) merge(entries []ScanEntry) {
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].IsDir != entries[j].IsDir {
+			return entries[i].IsDir
+		}
+		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+	})
+	hidden := 0
+	if len(entries) > MaxDirChildren {
+		hidden = len(entries) - MaxDirChildren
+		entries = entries[:MaxDirChildren]
+	}
+
 	existing := make(map[string]*Node, len(n.Children))
 	for _, c := range n.Children {
+		if c.Sentinel {
+			continue // synthetic; never matches a dirent
+		}
 		existing[c.Name] = c
 	}
 
-	children := make([]*Node, 0, len(entries))
+	children := make([]*Node, 0, len(entries)+1)
 	for _, e := range entries {
 		if old, ok := existing[e.Name]; ok && old.IsDir == e.IsDir {
 			children = append(children, old)
@@ -200,14 +270,15 @@ func (n *Node) merge(entries []ScanEntry) {
 			IsDir: e.IsDir,
 		})
 	}
-	sort.SliceStable(children, func(i, j int) bool {
-		if children[i].IsDir != children[j].IsDir {
-			return children[i].IsDir
-		}
-		return strings.ToLower(children[i].Name) < strings.ToLower(children[j].Name)
-	})
+	if hidden > 0 {
+		children = append(children, &Node{
+			Name:     fmt.Sprintf(moreRowFormat, hidden),
+			Sentinel: true,
+		})
+	}
 	n.Children = children
 	n.Loaded = true
+	n.ReadErr = nil
 }
 
 // Refresh re-reads every directory in the tree that has been loaded at
@@ -222,11 +293,14 @@ func (t *Tree) Refresh() {
 	refreshNode(t.Root)
 }
 
-// refreshNode is Tree.Refresh's recursive worker. It reloads only Loaded
-// directories — there's no value in reading directories the user has
-// never seen.
+// refreshNode is Tree.Refresh's recursive worker. It reloads only
+// directories the tree has read at least once — there's no value in
+// reading directories the user has never seen — plus any directory
+// carrying a ReadErr, which never got its first successful read and is
+// exactly the node whose mark should clear the moment it becomes
+// readable again.
 func refreshNode(n *Node) {
-	if !n.IsDir || !n.Loaded {
+	if !n.IsDir || (!n.Loaded && n.ReadErr == nil) {
 		return
 	}
 	_ = n.reload()
@@ -246,9 +320,11 @@ func (t *Tree) LoadedDirs() []string {
 	return paths
 }
 
-// collectLoadedDirs is LoadedDirs' recursive worker.
+// collectLoadedDirs is LoadedDirs' recursive worker. It mirrors
+// refreshNode's guard, marked-but-unloaded directories included, so the
+// background sweep retries them and clears the mark on its own.
 func collectLoadedDirs(n *Node, paths *[]string) {
-	if n == nil || !n.IsDir || !n.Loaded {
+	if n == nil || !n.IsDir || (!n.Loaded && n.ReadErr == nil) {
 		return
 	}
 	*paths = append(*paths, n.Path)
@@ -281,18 +357,16 @@ func ScanDirs(paths []string) []DirScan {
 // it rewrites Children on the nodes the renderer walks.
 //
 // The scan may be slightly stale by the time it lands, so the merge is
-// deliberately conservative: only directories that are still Loaded and
-// still present in the scan are touched. A directory the user expanded
-// after the scan started isn't in the listing and keeps the fresh
-// children its own read just produced; a directory that failed to read
-// keeps what it had rather than blinking empty.
+// deliberately conservative: only directories that are still Loaded (or
+// still marked unreadable) and still present in the scan are touched. A
+// directory the user expanded after the scan started isn't in the
+// listing and keeps the fresh children its own read just produced; a
+// directory that failed to read keeps the children it had rather than
+// blinking empty, and picks up the ReadErr mark so the row says so.
 func (t *Tree) ApplyScan(scans []DirScan) {
-	byPath := make(map[string][]ScanEntry, len(scans))
+	byPath := make(map[string]DirScan, len(scans))
 	for _, s := range scans {
-		if s.Err != nil {
-			continue
-		}
-		byPath[s.Path] = s.Entries
+		byPath[s.Path] = s
 	}
 	applyScanNode(t.Root, byPath)
 }
@@ -300,12 +374,16 @@ func (t *Tree) ApplyScan(scans []DirScan) {
 // applyScanNode is ApplyScan's recursive worker. It walks the live graph
 // rather than the scan list because the graph is the authority on what
 // is still Loaded and still reachable.
-func applyScanNode(n *Node, byPath map[string][]ScanEntry) {
-	if n == nil || !n.IsDir || !n.Loaded {
+func applyScanNode(n *Node, byPath map[string]DirScan) {
+	if n == nil || !n.IsDir || (!n.Loaded && n.ReadErr == nil) {
 		return
 	}
-	if entries, ok := byPath[n.Path]; ok {
-		n.merge(entries)
+	if scan, ok := byPath[n.Path]; ok {
+		if scan.Err != nil {
+			n.ReadErr = scan.Err
+		} else {
+			n.merge(scan.Entries)
+		}
 	}
 	for _, c := range n.Children {
 		applyScanNode(c, byPath)
@@ -401,10 +479,18 @@ func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 	// is nothing here". Say so explicitly, in the muted tone the row
 	// deserves. drawString clips to w, so a narrow sidebar truncates
 	// instead of bleeding into the editor.
+	//
+	// A root we could not read gets the other label: "empty" would be a
+	// fabrication, and the permission problem is the one thing the user
+	// needs to know to fix it.
 	if len(flat) == 0 {
 		if listH > 0 {
+			label := EmptyFolderLabel
+			if t.Root.ReadErr != nil {
+				label = UnreadableLabel
+			}
 			emptyStyle := tcell.StyleDefault.Background(bg).Foreground(th.Muted).Italic(true)
-			drawString(scr, x, listTop, w, " "+EmptyFolderLabel, emptyStyle)
+			drawString(scr, x, listTop, w, " "+label, emptyStyle)
 		}
 		t.visible = nil
 		return
@@ -455,6 +541,21 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 	bg := th.SidebarBG
 	indent := strings.Repeat("  ", item.Depth)
 
+	// The "… N more" sentinel is not a filesystem entry: no chevron, no
+	// glyph, no git badge, and italic-muted so it reads as a note about
+	// the list rather than another row in it.
+	if item.Node.Sentinel {
+		st := tcell.StyleDefault.Background(bg).Foreground(th.Muted).Italic(true)
+		drawString(scr, x, y, w, " "+indent+"  "+item.Node.Name, st)
+		return
+	}
+
+	// A directory whose last read failed is dimmed and labelled. The
+	// dimming is the glance-level cue; the label is what survives a
+	// monochrome terminal, and it is placed before active/dirty in the
+	// cascade below so a loud row still keeps the text.
+	unreadable := item.Node.ReadErr != nil
+
 	// Compute the row-level foreground via this priority cascade
 	// (highest wins last):
 	//
@@ -473,7 +574,7 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 	} else {
 		fg = th.FileColor
 	}
-	if strings.HasPrefix(item.Node.Name, ".") {
+	if strings.HasPrefix(item.Node.Name, ".") || unreadable {
 		fg = th.Muted
 	}
 	if active {
@@ -501,6 +602,9 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 	} else {
 		prefix = " " + indent + "  "
 		suffix = item.Node.Name
+	}
+	if unreadable {
+		suffix += " " + UnreadableLabel
 	}
 
 	if !withIcons {
@@ -611,8 +715,11 @@ func (t *Tree) clampScroll(total, viewH int) {
 // unreachable once the user has selected any subfolder. Rows 2+ map
 // into the rendered children list.
 //
-// ok=false means the click landed on the EXPLORER header or empty
-// space below the last entry.
+// ok=false means the click landed on the EXPLORER header, empty space
+// below the last entry, or the "… N more" sentinel. The sentinel is
+// deliberately inert: it is a note about the list, not an entry, and
+// every caller of HitTest goes on to open, expand, or target the node
+// it gets back.
 func (t *Tree) HitTest(localX, localY int) (*Node, bool) {
 	_ = localX
 	if localY < 1 {
@@ -626,7 +733,7 @@ func (t *Tree) HitTest(localX, localY int) (*Node, bool) {
 		return nil, false
 	}
 	n := t.visible[row]
-	if n == nil {
+	if n == nil || n.Sentinel {
 		return nil, false
 	}
 	return n, true
@@ -812,12 +919,14 @@ func (t *Tree) ExpandDirs(rels []string) {
 
 // childByName returns the direct child of n named name, or nil when no such
 // child exists. Reveal uses it to descend the path component by component.
+// The "… N more" sentinel is skipped: it has no path on disk, so
+// descending into it would walk off the filesystem.
 func childByName(n *Node, name string) *Node {
 	if n == nil {
 		return nil
 	}
 	for _, c := range n.Children {
-		if c.Name == name {
+		if c.Name == name && !c.Sentinel {
 			return c
 		}
 	}

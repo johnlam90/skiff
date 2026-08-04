@@ -38,11 +38,19 @@ type Info struct {
 	scroll int
 }
 
-// rect computes the info rectangle: fixed width, height tracking the
-// visible body rows.
+// rect computes the info rectangle: infoWidth, or the whole screen when
+// the terminal is narrower than that. Without the clamp the frame's
+// right border and every line's tail fall off the edge of an 80-column
+// tmux pane — and the surfaces that use Info (a failed command's
+// stderr, the shortcut reference) are needed most exactly there.
+// Height tracks the visible body rows.
 func (n *Info) rect() Rect {
 	w, h := n.Size()
-	return Centered(w, h, infoWidth, n.bodyRows()+infoChromeRows)
+	fw := infoWidth
+	if w < fw {
+		fw = w
+	}
+	return Centered(w, h, fw, n.bodyRows()+infoChromeRows)
 }
 
 // bodyRows returns the visible body height: the screen minus chrome,

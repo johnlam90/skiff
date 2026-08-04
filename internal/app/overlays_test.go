@@ -173,19 +173,7 @@ func TestStackDraw_PaintsTopOverlay(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.openPrompt("Rename file", "", "", nil)
 	a.draw()
-	scr := a.screen.(tcell.SimulationScreen)
-	scr.Show() // GetContents reads the front buffer
-	cells, w, _ := scr.GetContents()
-	var b []rune
-	for _, c := range cells {
-		if len(c.Runes) > 0 {
-			b = append(b, c.Runes[0])
-		} else {
-			b = append(b, ' ')
-		}
-	}
-	_ = w
-	if !containsRunes(b, "Rename file") {
+	if !containsRunes(screenText(t, a), "Rename file") {
 		t.Fatal("draw() did not paint the open prompt's title")
 	}
 }

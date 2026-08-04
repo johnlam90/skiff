@@ -15,8 +15,11 @@ package editor
 import "strings"
 
 // Position is a buffer location measured in lines and rune-indexed columns.
-// Line is 0-based; Col is 0-based and counts runes (not bytes, not screen
-// cells), so a multi-byte character or a CJK glyph each count as one column.
+// Line is 0-based; Col is 0-based and counts runes — not bytes, not screen
+// cells, and not characters as a user counts them. A CJK glyph is one
+// column but two cells; an "é" written as e + U+0301 is two columns, one
+// cell, and one character. cluster.go converts between the three, and the
+// caret only ever rests on a column that starts a grapheme cluster.
 type Position struct {
 	Line int
 	Col  int

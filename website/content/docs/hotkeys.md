@@ -12,35 +12,44 @@ So `Esc` is the leader. Tap `Esc`, then within half a second tap a bound letter.
 
 ## The full table
 
-| Combo       | Action                 |
-| ----------- | ---------------------- |
-| `Esc Esc`   | Open ≡ menu            |
-| `Esc s`     | Save                   |
-| `Esc u`     | Undo                   |
-| `Esc r`     | Redo                   |
-| `Esc w`     | Close tab              |
-| `Esc o`     | Reopen closed tab      |
-| `Esc q`     | Quit                   |
-| `Esc n`     | New file               |
-| `Esc t`     | Toggle sidebar         |
-| `Esc z`     | Toggle line wrap       |
-| `Esc /`     | Toggle line comment    |
-| `Esc k`     | Move line up           |
-| `Esc j`     | Move line down         |
-| `Esc d`     | Duplicate line         |
-| `Esc c`     | Copy selection         |
-| `Esc x`     | Cut selection          |
-| `Esc v`     | Paste                  |
-| `Esc f`     | Find in file           |
-| `Esc F`     | Find in project        |
-| `Esc l`     | Go to line             |
-| `Esc p`     | Find file in project   |
-| `Esc b`     | Move to previous word  |
-| `Esc e`     | Move to next word      |
-| `Esc %`     | Go to matching bracket |
-| `Esc g`     | Focus the Git panel    |
+| Combo       | Action                 | Group |
+| ----------- | ---------------------- | ----- |
+| `Esc Esc`   | Open ≡ menu            | —     |
+| `Esc s`     | Save                   | File  |
+| `Esc n`     | New file               | File  |
+| `Esc w`     | Close tab              | File  |
+| `Esc o`     | Reopen closed tab      | File  |
+| `Esc u`     | Undo                   | Edit  |
+| `Esc r`     | Redo                   | Edit  |
+| `Esc c`     | Copy selection         | Edit  |
+| `Esc x`     | Cut selection          | Edit  |
+| `Esc v`     | Paste                  | Edit  |
+| `Esc /`     | Toggle line comment    | Edit  |
+| `Esc k`     | Move line up           | Edit  |
+| `Esc j`     | Move line down         | Edit  |
+| `Esc d`     | Duplicate line         | Edit  |
+| `Esc f`     | Find in file           | Go    |
+| `Esc F`     | Find in project        | Go    |
+| `Esc l`     | Go to line             | Go    |
+| `Esc p`     | Find file in project   | Go    |
+| `Esc b`     | Move to previous word  | Go    |
+| `Esc e`     | Move to next word      | Go    |
+| `Esc %`     | Go to matching bracket | Go    |
+| `Esc g`     | Focus the Git panel    | Git   |
+| `Esc t`     | Toggle sidebar         | View  |
+| `Esc z`     | Toggle line wrap       | View  |
+| `Esc ?`     | Keyboard shortcuts     | View  |
+| `Esc q`     | Quit                   | Quit  |
+
+The order and the Group column come straight from the binding table in the source; the six headings are the same ones the ≡ menu groups its rows under.
 
 While the leader window is armed, a one-row cheat strip above the status bar lists every key that works right now, so there is nothing to memorize.
+
+## `Esc ?` — the whole table, in the editor
+
+`Esc ?` (or `≡` → **Keyboard shortcuts…**) opens a scrollable, read-only reference: every binding above under its group heading, followed by a short section on the ≡ menu — that `≡` and a double `Esc` open the same thing, that typing filters every action at once, and that right-click is a convenience rather than a door, since tmux and macOS Terminal routinely swallow Button3. `Esc`, `Enter`, or the OK button dismisses it.
+
+The binding half is generated from the dispatch table, not written by hand, so the sheet cannot advertise a gesture that no longer fires. If a shortcut is in the editor, it is in that overlay.
 
 ## Alt is the same gesture
 
@@ -66,7 +75,7 @@ Standard movement and editing keys behave the way every editor since the Macinto
 
 `Enter` copies the current line's leading whitespace onto the new line, and adds one more indent level when the line ends with an opening `{`, `[`, `(` — or a `:` in a Python or YAML file. The indent unit is whatever the file already uses (tab, or N spaces), detected on open. One `Enter` is one undo step.
 
-A word is `[A-Za-z0-9_]` — the same definition double-click selection uses, so the two never disagree about where a token starts.
+A word is letters, digits and underscore — ASCII plus their Unicode equivalents, so accented and CJK text is one word rather than a run of boundaries. Word-wise caret motion and double-click selection share the one definition, so the two never disagree about where a token starts. The caret itself moves by grapheme cluster: one press steps over a whole emoji or a base-plus-combining-mark pair, never into the middle of one.
 
 ## Git panel keys
 

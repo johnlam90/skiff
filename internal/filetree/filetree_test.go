@@ -14,6 +14,7 @@
 package filetree
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1505,5 +1506,312 @@ func TestExpandDirsUnknownSkipped(t *testing.T) {
 	got := tr.ExpandedDirs()
 	if len(got) != 1 || got[0] != "real" {
 		t.Fatalf("only 'real' should expand, got %v", got)
+	}
+}
+
+// skipIfRoot bails out of a permission test when the process can read
+// anything regardless of mode bits. chmod 000 does not restrict root, so
+// the directory the test just made unreadable would still list fine and
+// the assertion would fail for an environment reason rather than a code
+// defect.
+func skipIfRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod 000 does not restrict root, so an unreadable directory cannot be simulated")
+	}
+}
+
+// mkUnreadable creates dir under parent and strips every permission bit
+// so os.ReadDir on it fails, restoring the bits on cleanup so t.TempDir
+// can remove the tree.
+func mkUnreadable(t *testing.T, parent, name string) string {
+	t.Helper()
+	p := filepath.Join(parent, name)
+	if err := os.Mkdir(p, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", p, err)
+	}
+	if err := os.WriteFile(filepath.Join(p, "hidden.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed %s: %v", p, err)
+	}
+	if err := os.Chmod(p, 0o000); err != nil {
+		t.Fatalf("chmod %s: %v", p, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(p, 0o755) })
+	return p
+}
+
+// TestUnreadableDirIsMarkedNotEmpty is the whole point of Node.ReadErr:
+// before it, a directory we lacked permission to read rendered exactly
+// like a directory with nothing in it, so the tree confidently reported
+// "nothing here" about a place it had never managed to look.
+func TestUnreadableDirIsMarkedNotEmpty(t *testing.T) {
+	skipIfRoot(t)
+	root := t.TempDir()
+	mkUnreadable(t, root, "locked")
+	mustMkdir(t, filepath.Join(root, "vacant"))
+
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	locked, vacant := findChild(tr.Root, "locked"), findChild(tr.Root, "vacant")
+	if locked == nil || vacant == nil {
+		t.Fatalf("expected both dirs as children, got %v", tr.Root.Children)
+	}
+	tr.Toggle(locked)
+	tr.Toggle(vacant)
+
+	if locked.ReadErr == nil {
+		t.Fatal("an unreadable directory must carry ReadErr")
+	}
+	if vacant.ReadErr != nil {
+		t.Fatalf("a readable empty directory must not be marked: %v", vacant.ReadErr)
+	}
+
+	cells, w := renderAndCollect(t, tr, 40, 20)
+	lockedRow, vacantRow := rowText(cells, w, 2), rowText(cells, w, 3)
+	if !strings.Contains(lockedRow, "locked/") || !strings.Contains(lockedRow, UnreadableLabel) {
+		t.Fatalf("locked row must carry the marker, got %q", lockedRow)
+	}
+	if strings.Contains(vacantRow, UnreadableLabel) {
+		t.Fatalf("empty row must stay unmarked, got %q", vacantRow)
+	}
+	if lockedRow == vacantRow {
+		t.Fatal("unreadable and empty directories must not render identically")
+	}
+}
+
+// TestUnreadableMarkClearsOnRefresh pins the other half of the mark: the
+// identity-preserving refresh has to retract it the moment the directory
+// becomes readable, or a one-off permission blip leaves a permanent lie
+// on the row.
+func TestUnreadableMarkClearsOnRefresh(t *testing.T) {
+	skipIfRoot(t)
+	root := t.TempDir()
+	locked := mkUnreadable(t, root, "locked")
+
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	n := findChild(tr.Root, "locked")
+	tr.Toggle(n)
+	if n.ReadErr == nil {
+		t.Fatal("setup: expected the node to be marked unreadable")
+	}
+
+	if err := os.Chmod(locked, 0o755); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	tr.Refresh()
+
+	if n.ReadErr != nil {
+		t.Fatalf("mark must clear once the directory reads: %v", n.ReadErr)
+	}
+	if findChild(n, "hidden.txt") == nil {
+		t.Fatalf("children must load on the clearing refresh, got %v", n.Children)
+	}
+}
+
+// TestApplyScanMarksUnreadable covers the background sweep's half. The
+// sweep is where a directory that went unreadable between ticks is
+// noticed; ApplyScan used to drop failed listings entirely, which kept
+// the stale children on screen with no hint they were stale.
+func TestApplyScanMarksUnreadable(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, "sub"))
+	mustWrite(t, filepath.Join(root, "sub", "a.txt"), "a")
+
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	sub := findChild(tr.Root, "sub")
+	tr.Toggle(sub)
+	if len(sub.Children) != 1 {
+		t.Fatalf("setup: expected one child, got %v", sub.Children)
+	}
+
+	tr.ApplyScan([]DirScan{{Path: sub.Path, Err: os.ErrPermission}})
+	if sub.ReadErr == nil {
+		t.Fatal("a failed scan must mark the node")
+	}
+	if len(sub.Children) != 1 {
+		t.Fatalf("a failed scan must keep the children it had, got %v", sub.Children)
+	}
+
+	tr.ApplyScan([]DirScan{{Path: sub.Path, Entries: []ScanEntry{{Name: "a.txt"}, {Name: "b.txt"}}}})
+	if sub.ReadErr != nil {
+		t.Fatalf("a successful scan must clear the mark: %v", sub.ReadErr)
+	}
+	if len(sub.Children) != 2 {
+		t.Fatalf("successful scan should merge both entries, got %v", sub.Children)
+	}
+}
+
+// TestUnreadableRootLabel: the root has no row of its own under the
+// project name, so an unreadable root falls through to the placeholder
+// line — which said "(folder is empty)" and was the most confident lie
+// in the tree.
+func TestUnreadableRootLabel(t *testing.T) {
+	tr := &Tree{Root: &Node{Path: "/nope", Name: "nope", IsDir: true, Expanded: true, Loaded: true}}
+	cells, w := renderAndCollect(t, tr, 40, 10)
+	if got := rowText(cells, w, 2); !strings.Contains(got, EmptyFolderLabel) {
+		t.Fatalf("a readable empty root says so, got %q", got)
+	}
+
+	tr.Root.ReadErr = os.ErrPermission
+	cells, w = renderAndCollect(t, tr, 40, 10)
+	got := rowText(cells, w, 2)
+	if !strings.Contains(got, UnreadableLabel) || strings.Contains(got, EmptyFolderLabel) {
+		t.Fatalf("an unreadable root must say so, got %q", got)
+	}
+}
+
+// TestMaxDirChildren_SentinelRow pins the truncation contract: a
+// directory past the cap keeps exactly MaxDirChildren real entries and
+// gains one visible "… N more" row, so the user can see that the tree
+// stopped listing rather than believing the directory ends there.
+func TestMaxDirChildren_SentinelRow(t *testing.T) {
+	root := t.TempDir()
+	over := 7
+	for i := range MaxDirChildren + over {
+		mustWrite(t, filepath.Join(root, fmt.Sprintf("f%05d.txt", i)), "x")
+	}
+
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := len(tr.Root.Children); got != MaxDirChildren+1 {
+		t.Fatalf("children: got %d, want %d real + 1 sentinel", got, MaxDirChildren)
+	}
+	last := tr.Root.Children[len(tr.Root.Children)-1]
+	if !last.Sentinel {
+		t.Fatalf("the final child must be the sentinel, got %+v", last)
+	}
+	if last.Path != "" {
+		t.Fatalf("the sentinel must have no filesystem path, got %q", last.Path)
+	}
+	if want := fmt.Sprintf(moreRowFormat, over); last.Name != want {
+		t.Fatalf("sentinel label: got %q, want %q", last.Name, want)
+	}
+
+	// The retained slice is the head of the sorted order, so the row the
+	// truncation drops is the last name, not an arbitrary one.
+	if first := tr.Root.Children[0].Name; first != "f00000.txt" {
+		t.Fatalf("truncation must keep the sorted head, got %q first", first)
+	}
+	if lastReal := tr.Root.Children[MaxDirChildren-1].Name; lastReal != fmt.Sprintf("f%05d.txt", MaxDirChildren-1) {
+		t.Fatalf("truncation must cut the sorted tail, got %q last", lastReal)
+	}
+}
+
+// TestMaxDirChildren_SentinelRendersAndIsInert: the sentinel has to be
+// legible on screen and do nothing when clicked. Returning it from
+// HitTest would hand callers a Node with no path — every one of them
+// goes on to open, expand or target what it gets back.
+func TestMaxDirChildren_SentinelRendersAndIsInert(t *testing.T) {
+	root := t.TempDir()
+	for i := range MaxDirChildren + 3 {
+		mustWrite(t, filepath.Join(root, fmt.Sprintf("f%05d.txt", i)), "x")
+	}
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Scroll so the tail of the list — sentinel included — is on screen.
+	tr.ScrollY = MaxDirChildren
+	cells, w := renderAndCollect(t, tr, 40, 10)
+
+	sentinelRow := -1
+	for y := 2; y < 10; y++ {
+		if strings.Contains(rowText(cells, w, y), "3 more") {
+			sentinelRow = y
+			break
+		}
+	}
+	if sentinelRow < 0 {
+		t.Fatal("the sentinel row never rendered")
+	}
+	if n, ok := tr.HitTest(4, sentinelRow); ok || n != nil {
+		t.Fatalf("clicking the sentinel must land on nothing, got ok=%v n=%+v", ok, n)
+	}
+
+	// A real row on the same screen still hit-tests, so the guard is not
+	// simply breaking the whole list.
+	if n, ok := tr.HitTest(4, sentinelRow-1); !ok || n == nil || n.Sentinel {
+		t.Fatalf("the row above the sentinel must still be clickable, got ok=%v n=%+v", ok, n)
+	}
+}
+
+// TestMaxDirChildren_SentinelSurvivesRefresh: the sentinel is rebuilt by
+// every merge, so a refresh must neither duplicate it nor let it be
+// mistaken for a surviving dirent and carried over as a real node.
+func TestMaxDirChildren_SentinelSurvivesRefresh(t *testing.T) {
+	root := t.TempDir()
+	for i := range MaxDirChildren + 2 {
+		mustWrite(t, filepath.Join(root, fmt.Sprintf("f%05d.txt", i)), "x")
+	}
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	mustWrite(t, filepath.Join(root, "f99999.txt"), "x")
+	tr.Refresh()
+
+	sentinels := 0
+	for _, c := range tr.Root.Children {
+		if c.Sentinel {
+			sentinels++
+		}
+	}
+	if sentinels != 1 {
+		t.Fatalf("exactly one sentinel expected after refresh, got %d", sentinels)
+	}
+	if want := fmt.Sprintf(moreRowFormat, 3); tr.Root.Children[len(tr.Root.Children)-1].Name != want {
+		t.Fatalf("sentinel must track the new entry count, want %q", want)
+	}
+	if len(tr.Root.Children) != MaxDirChildren+1 {
+		t.Fatalf("child count must stay capped, got %d", len(tr.Root.Children))
+	}
+}
+
+// TestMaxDirChildren_MergeStaysBounded is the responsiveness claim
+// stated as an assertion: a directory listing of any size collapses to a
+// fixed number of retained nodes, so the flatten walk, the render pass
+// and every later refresh of that branch cost the same whether the
+// directory holds a thousand entries or a hundred thousand. Driving
+// merge directly keeps the test off disk — os.ReadDir's own cost is not
+// what the cap is about.
+func TestMaxDirChildren_MergeStaysBounded(t *testing.T) {
+	const total = 100_000
+	entries := make([]ScanEntry, 0, total)
+	for i := range total {
+		entries = append(entries, ScanEntry{Name: fmt.Sprintf("f%06d", i)})
+	}
+	n := &Node{Path: "/huge", Name: "huge", IsDir: true}
+	n.merge(entries)
+
+	if got := len(n.Children); got != MaxDirChildren+1 {
+		t.Fatalf("retained %d nodes for %d entries; the cap is not holding", got, total)
+	}
+	if want := fmt.Sprintf(moreRowFormat, total-MaxDirChildren); n.Children[len(n.Children)-1].Name != want {
+		t.Fatalf("sentinel label: got %q, want %q", n.Children[len(n.Children)-1].Name, want)
+	}
+
+	var flat []flatNode
+	n.Expanded = true
+	flattenInto(n, 0, &flat)
+	if got := len(flat); got != MaxDirChildren+2 {
+		t.Fatalf("flatten walked %d rows; the render pass is not bounded", got)
+	}
+
+	// A second merge of the same listing must not grow the graph — the
+	// sentinel from round one is synthetic and has to be rebuilt, never
+	// carried over as a surviving dirent.
+	n.merge(entries)
+	if got := len(n.Children); got != MaxDirChildren+1 {
+		t.Fatalf("re-merge grew the graph to %d nodes", got)
 	}
 }

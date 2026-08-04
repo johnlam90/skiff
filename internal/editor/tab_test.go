@@ -835,19 +835,36 @@ func TestTab_Render_DrawsLineNumbersAndContent(t *testing.T) {
 	}
 }
 
-// TestTab_Render_HighlightsSelection draws a selection and confirms Render
-// completes cleanly with mid-line cursor visibility — selection bg is theme
-// dependent so we just ensure no panic and the cursor lands at col 5.
+// TestTab_Render_HighlightsSelection pins that the selection is actually
+// painted, not merely survived: every cell inside the selected span
+// carries the theme's Selection background and the first cell outside it
+// does not. The cursor's landing column is checked alongside because the
+// two are computed from the same visual-column walk.
 func TestTab_Render_HighlightsSelection(t *testing.T) {
 	scr := newSimScreen(t, 40, 10)
 	defer scr.Fini()
+	th := theme.Default()
 
 	tab, _ := NewTab("")
 	tab.Buffer = NewBuffer("hello world")
 	tab.Anchor = Position{Line: 0, Col: 0}
 	tab.Cursor = Position{Line: 0, Col: 5}
 
-	tab.Render(scr, theme.Default(), 0, 0, 40, 10)
+	tab.Render(scr, th, 0, 0, 40, 10)
+	scr.Show()
+
+	cells, w, _ := scr.GetContents()
+	contentX := gutterWidthFor(tab.Buffer.LineCount()) + 1
+	for off := range 5 {
+		_, bg, _ := cells[0*w+contentX+off].Style.Decompose()
+		if bg != th.Selection {
+			t.Errorf("cell %d of the selection has bg %v, want Selection %v", off, bg, th.Selection)
+		}
+	}
+	if _, bg, _ := cells[0*w+contentX+5].Style.Decompose(); bg == th.Selection {
+		t.Error("the space after the selection was painted as selected")
+	}
+
 	cx, _, vis := scr.GetCursor()
 	if !vis {
 		t.Fatal("cursor hidden")
@@ -939,6 +956,222 @@ func TestTab_HitTest_ClampsColumnAtLineEnd(t *testing.T) {
 	}
 	if pos.Col != 2 {
 		t.Fatalf("col = %d, want 2", pos.Col)
+	}
+}
+
+// TestTab_HitTest_WideGlyphs is the click half of wide-character support:
+// a cell offset has to be converted through cell widths, not rune counts,
+// or every click past a CJK run lands one rune left per ideograph. Both
+// cells of a glyph belong to it, so clicking either half selects it.
+func TestTab_HitTest_WideGlyphs(t *testing.T) {
+	tab, _ := NewTab("")
+	tab.Buffer = NewBuffer("日本x")
+	contentX := defaultGutterWidth + 1
+
+	cases := []struct{ cell, want int }{
+		{0, 0}, // left half of 日
+		{1, 0}, // right half of 日 snaps back onto it
+		{2, 1}, // left half of 本
+		{3, 1},
+		{4, 2}, // the 'x' sits at cell 4, not cell 2
+		{5, 3}, // past the end
+	}
+	for _, c := range cases {
+		pos, ok := tab.HitTest(contentX+c.cell, 0, 40, 10)
+		if !ok {
+			t.Fatalf("cell %d: expected ok", c.cell)
+		}
+		if pos.Col != c.want {
+			t.Errorf("click at cell %d = col %d, want %d", c.cell, pos.Col, c.want)
+		}
+	}
+}
+
+// TestTab_Render_WideGlyphOwnsTwoCells checks the paint side. A width-2
+// glyph goes in the first of its two cells and the second is left as a
+// blank the screen owns — tcell reports it with no runes at all — so the
+// next character starts two cells along and the hardware cursor lands on
+// the same grid the text was painted into.
+func TestTab_Render_WideGlyphOwnsTwoCells(t *testing.T) {
+	scr := newSimScreen(t, 40, 4)
+	defer scr.Fini()
+
+	tab, _ := NewTab("")
+	tab.Buffer = NewBuffer("日本x")
+	tab.Cursor = Position{Line: 0, Col: 2} // after both ideographs
+	tab.Anchor = tab.Cursor
+
+	tab.Render(scr, theme.Default(), 0, 0, 40, 4)
+	scr.Show()
+
+	cells, _, _ := scr.GetContents()
+	contentX := gutterWidthFor(tab.Buffer.LineCount()) + 1
+	for _, want := range []struct {
+		off int
+		r   rune
+	}{{0, '日'}, {2, '本'}, {4, 'x'}} {
+		got := cells[contentX+want.off].Runes
+		if len(got) == 0 || got[0] != want.r {
+			t.Errorf("cell %d holds %q, want %q", want.off, string(got), string(want.r))
+		}
+	}
+	for _, off := range []int{1, 3} {
+		if got := cells[contentX+off].Runes; len(got) != 0 {
+			t.Errorf("cell %d should be the second half of a wide glyph, got %q", off, string(got))
+		}
+	}
+
+	cx, _, vis := scr.GetCursor()
+	if !vis {
+		t.Fatal("cursor hidden")
+	}
+	if cx != contentX+4 {
+		t.Errorf("cursor x = %d, want %d (two ideographs = four cells)", cx, contentX+4)
+	}
+}
+
+// TestTab_Render_CombiningMarkRidesItsBase pins the other half of the
+// cluster paint: a mark is not given a cell of its own (tcell would render
+// it as a blank, dropping the accent) but travels as a combining rune in
+// its base's cell, and the character after it starts one cell along.
+func TestTab_Render_CombiningMarkRidesItsBase(t *testing.T) {
+	scr := newSimScreen(t, 40, 4)
+	defer scr.Fini()
+
+	tab, _ := NewTab("")
+	tab.Buffer = NewBuffer("e\u0301x")
+
+	tab.Render(scr, theme.Default(), 0, 0, 40, 4)
+	scr.Show()
+
+	cells, _, _ := scr.GetContents()
+	contentX := gutterWidthFor(tab.Buffer.LineCount()) + 1
+	if got := cells[contentX].Runes; len(got) != 2 || got[0] != 'e' || got[1] != '\u0301' {
+		t.Errorf("first cell holds %q, want the e and its combining acute", string(got))
+	}
+	if got := cells[contentX+1].Runes; len(got) == 0 || got[0] != 'x' {
+		t.Errorf("second cell holds %q, want the x one cell along", string(got))
+	}
+}
+
+// TestTab_Render_PanKeepsWideGlyphsWhole pins horizontal panning over
+// wide text: the pan starts at a cluster boundary, so the leftmost column
+// can never show the tail half of a glyph whose head scrolled off. Cell 0
+// carries the '‹' overflow hint (it always covers the first content cell,
+// wide or not); everything after it must be the untouched remainder of the
+// line at its true cell offsets.
+func TestTab_Render_PanKeepsWideGlyphsWhole(t *testing.T) {
+	scr := newSimScreen(t, 20, 3)
+	defer scr.Fini()
+
+	tab, _ := NewTab("")
+	tab.Buffer = NewBuffer("日本語x")
+	tab.ScrollX = 1 // pan 日 off the left edge
+	tab.cursorMoved = false
+
+	tab.Render(scr, theme.Default(), 0, 0, 20, 3)
+	scr.Show()
+
+	cells, _, _ := scr.GetContents()
+	contentX := gutterWidthFor(tab.Buffer.LineCount()) + 1
+	want := []string{"‹", " ", "語", "", "x"}
+	for off, w := range want {
+		got := string(cells[contentX+off].Runes)
+		if got != w {
+			t.Errorf("cell %d holds %q, want %q", off, got, w)
+		}
+	}
+}
+
+// TestTab_Backspace_RemovesWholeCluster is the deletion contract: one
+// press removes one character as a person counts them, never a fragment
+// that leaves a combining mark orphaned onto the letter in front of it.
+func TestTab_Backspace_RemovesWholeCluster(t *testing.T) {
+	cases := []struct{ name, text, want string }{
+		{"emoji wearing a combining mark", "x😀\u0301", "x"},
+		{"letter with a combining acute", "xe\u0301", "x"},
+		{"zwj family", "x👨\u200d👩\u200d👦", "x"},
+		{"regional indicator pair", "x🇯🇵", "x"},
+		{"plain ascii still deletes one rune", "xy", "x"},
+	}
+	for _, c := range cases {
+		tab := &Tab{Buffer: NewBuffer(c.text)}
+		tab.Cursor = tab.Buffer.EndPos()
+		tab.Anchor = tab.Cursor
+		tab.Backspace()
+		if got := tab.Buffer.String(); got != c.want {
+			t.Errorf("%s: buffer %q, want %q", c.name, got, c.want)
+		}
+		if tab.Cursor.Col != len([]rune(c.want)) {
+			t.Errorf("%s: cursor col %d, want %d", c.name, tab.Cursor.Col, len([]rune(c.want)))
+		}
+	}
+}
+
+// TestTab_Delete_RemovesWholeCluster mirrors Backspace forwards: a delete
+// may not behead a character and leave its marks behind.
+func TestTab_Delete_RemovesWholeCluster(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("e\u0301😀x")}
+	tab.Cursor = Position{Line: 0, Col: 0}
+	tab.Anchor = tab.Cursor
+
+	tab.Delete()
+	if got := tab.Buffer.String(); got != "😀x" {
+		t.Fatalf("after deleting the é cluster: %q", got)
+	}
+	tab.Delete()
+	if got := tab.Buffer.String(); got != "x" {
+		t.Fatalf("after deleting the emoji: %q", got)
+	}
+}
+
+// TestTab_MoveCursor_StepsByCluster walks an arrow key across text whose
+// characters are several runes long. Each press must cross exactly one
+// character in each direction, and the two directions must retrace the
+// same stops.
+func TestTab_MoveCursor_StepsByCluster(t *testing.T) {
+	// é (runes 0-1), 日 (2), family (3-7), z (8) — nine runes, four
+	// characters, five caret stops.
+	tab := &Tab{Buffer: NewBuffer("e\u0301日👨\u200d👩\u200d👦z")}
+	tab.Cursor = Position{Line: 0, Col: 0}
+	tab.Anchor = tab.Cursor
+
+	for _, want := range []int{2, 3, 8, 9, 9} {
+		tab.MoveCursor(0, 1, false)
+		if tab.Cursor.Col != want {
+			t.Fatalf("right landed on col %d, want %d", tab.Cursor.Col, want)
+		}
+	}
+	for _, want := range []int{8, 3, 2, 0, 0} {
+		tab.MoveCursor(0, -1, false)
+		if tab.Cursor.Col != want {
+			t.Fatalf("left landed on col %d, want %d", tab.Cursor.Col, want)
+		}
+	}
+}
+
+// TestTab_EnsureVisible_PansByCells pins the horizontal scroll fix: with
+// wide text, "the caret is off the right edge" is a question about cells.
+// Counting runes instead under-scrolls and hides the caret entirely — a
+// cursor the renderer then refuses to show.
+func TestTab_EnsureVisible_PansByCells(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer(strings.Repeat("日", 40))}
+	tab.Cursor = Position{Line: 0, Col: 30}
+	tab.Anchor = tab.Cursor
+
+	const viewW = 26 // gutter 6 + 1 → 19 content cells
+	tab.EnsureVisible(viewW, 10)
+
+	runes := tab.Buffer.LineRunes(0)
+	contentW := viewW - gutterWidthFor(tab.Buffer.LineCount()) - 1
+	cursorVisual := LineVisualCol(runes, tab.Cursor.Col)
+	scrollVisual := LineVisualCol(runes, tab.ScrollX)
+	if cursorVisual < scrollVisual || cursorVisual >= scrollVisual+contentW {
+		t.Fatalf("caret at cell %d is outside the panned window [%d,%d)",
+			cursorVisual, scrollVisual, scrollVisual+contentW)
+	}
+	if got := ClusterStart(runes, tab.ScrollX); got != tab.ScrollX {
+		t.Errorf("ScrollX %d is inside a cluster starting at %d", tab.ScrollX, got)
 	}
 }
 
