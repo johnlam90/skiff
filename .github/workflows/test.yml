@@ -5,26 +5,43 @@
 # Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 # =============================================================================
 #
-# Test pipeline for Skiff. Runs `go test ./...` with the race detector
-# on every push and every pull request, on Linux + macOS so we catch
-# platform-specific flakes before they ship. The release workflow
-# (release.yml) doesn't depend on this — it triggers separately on push
-# to main — but a red test job is meant to block merges via the PR's
-# required-checks setting (configure that on GitHub once the first run
-# is green).
+# Test pipeline for Skiff. Runs the formatters, the static analysers, and
+# `go test ./...` with the race detector on Linux + macOS so we catch
+# platform-specific flakes before they ship.
+#
+# Two entry points, one definition of "green":
+#
+#   * pull_request — the required check that blocks merges.
+#   * workflow_call — release.yml calls this workflow and gates the tag
+#     and the GoReleaser run on it, so a red suite can never publish.
+#
+# There is deliberately NO push trigger on main. A push to main runs
+# release.yml, which calls this workflow as its first job — adding a push
+# trigger here would run the whole matrix a second time on the same commit
+# for no extra signal. Release-automation commits (the version bump and
+# the brew formula) carry [skip ci], so neither entry point fires for
+# them; that loop-breaker is load-bearing, see CLAUDE.md's Releases
+# section.
 
 name: Test
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:
+
+# Read-only is all the suite needs. Declared explicitly because a called
+# workflow would otherwise inherit release.yml's contents:write.
+permissions:
+  contents: read
 
 # Cancel in-flight runs for the same ref when a new push lands. Saves CI
 # minutes when someone pushes a quick fix on top of an in-progress run.
+# github.workflow is the CALLER's name for a reusable run, so the release
+# gate and a standalone PR run never land in the same group and cancel
+# each other.
 concurrency:
-  group: test-${{ github.ref }}
+  group: test-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -38,10 +55,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # go.mod's `go` directive is the single source of truth for the
+      # toolchain. Naming a version here instead (`stable`, `1.24.x`) lets
+      # CI drift away from what the module declares it needs.
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version-file: go.mod
           cache: true
 
       - name: Verify go.mod is tidy
@@ -56,8 +76,32 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # Formatting and static analysis are platform-independent, so they
+      # run once rather than once per matrix leg.
+      - name: Gofmt
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          # website/ is a Hugo + Tailwind tree with no Go in it; excluded so
+          # a stray vendored .go file there can't fail the Go pipeline.
+          unformatted="$(gofmt -l . | grep -v '^website/' || true)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:" >&2
+            echo "$unformatted" >&2
+            gofmt -d $unformatted >&2
+            exit 1
+          fi
+
       - name: Vet
         run: go vet ./...
+
+      # Pinned, not @latest: a staticcheck release that adds a check would
+      # otherwise turn an unrelated PR red out of nowhere. Bump this
+      # deliberately. setup-go already put GOPATH/bin on PATH.
+      - name: Staticcheck
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.6.1
+          staticcheck ./...
 
       - name: Test
         run: go test -race -coverprofile=coverage.out ./...

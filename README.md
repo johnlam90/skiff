@@ -284,7 +284,9 @@ above the status bar:
  Find: foo█                       3 of 12   Enter: next · Shift+Enter: prev · Esc: close
 ```
 
-- Type to search — matching is **case-insensitive substring**, results
+- Type to search — matching is **smart-case substring**: an
+  all-lowercase query matches any case, a single uppercase letter makes
+  it exact (`id` finds `ID` and `id`; `ID` finds only `ID`). Results
   highlight live as you type.
 - `Enter` jumps to the next match (wraps at the end), `Shift+Enter`
   jumps to the previous one.
@@ -297,8 +299,9 @@ above the status bar:
 - The active match is painted a brighter color than the rest, so you
   can pick out where you are in the result set.
 
-There's no regex, whole-word, or case-sensitive toggle in v1 — the
-common case is "I know roughly what I'm looking for, take me there."
+There's no regex or whole-word toggle in v1, and case needs no toggle —
+smart case reads it off how you type. The common case is "I know roughly
+what I'm looking for, take me there."
 
 ### Find file in project
 

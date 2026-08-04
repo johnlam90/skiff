@@ -337,3 +337,99 @@ func pathInside(candidate, root string) bool {
 	}
 	return !strings.HasPrefix(rel, "..")
 }
+
+// refreshGitStatus re-runs `git status --porcelain` against the project
+// root and stamps the resulting dirty-paths sets onto the file tree, so
+// changed files render in the Modified color on the next draw. This is
+// the synchronous flavour — it blocks until git answers — used at
+// startup (nothing is interactive yet) and by tests. Interactive code
+// paths use refreshGitStatusAsync so a slow `git status` on a huge or
+// network-mounted repo can never stall typing.
+func (a *App) refreshGitStatus() {
+	a.applyGitStatus(collectGitStatus(a.rootDir, a.diffBase, a.openTabPaths(), a.tree == nil))
+}
+
+// refreshGitStatusAsync collects git status on a background goroutine
+// and posts the result back to the main loop as a gitStatusEvent —
+// the same goroutine → custom event pattern the auto-scroller and the
+// finder indexer use, so no UI state is ever touched off-thread.
+// Kicks while a collection is already in flight coalesce into a single
+// follow-up run, so a burst of file operations costs at most two
+// status calls rather than one each.
+func (a *App) refreshGitStatusAsync() {
+	if a.gitRefreshInFlight {
+		a.gitRefreshQueued = true
+		return
+	}
+	a.gitRefreshInFlight = true
+	rootDir, base, paths, skipStatus := a.rootDir, a.diffBase, a.openTabPaths(), a.tree == nil
+	scr := a.screen
+	go func() {
+		res := collectGitStatus(rootDir, base, paths, skipStatus)
+		_ = scr.PostEvent(&gitStatusEvent{when: time.Now(), res: res})
+	}()
+}
+
+// handleGitStatusEvent applies a finished background collection and
+// launches the follow-up run if more refresh requests arrived while
+// this one was in flight.
+func (a *App) handleGitStatusEvent(e *gitStatusEvent) {
+	a.gitRefreshInFlight = false
+	a.applyGitStatus(e.res)
+	if a.gitRefreshQueued {
+		a.gitRefreshQueued = false
+		a.refreshGitStatusAsync()
+	}
+}
+
+// openTabPaths returns the file paths of every open text tab — the set
+// whose gutter markers a status collection should refresh. Image tabs
+// and untitled buffers have no diff to compute.
+func (a *App) openTabPaths() []string {
+	paths := make([]string, 0, a.tabs.Len())
+	for _, tab := range a.tabs.Tabs() {
+		if tab == nil || tab.Path == "" || tab.IsImage() {
+			continue
+		}
+		paths = append(paths, tab.Path)
+	}
+	return paths
+}
+
+// applyGitStatus stamps a collection result onto the UI: tree tint
+// maps, branch, per-tab gutter markers, and the Git panel rows when the
+// panel is up. Main-thread only — the async path hands results here
+// via gitStatusEvent.
+func (a *App) applyGitStatus(res gitStatusResult) {
+	if a.tree != nil {
+		a.gitSnap = res.st
+		if !res.st.IsRepo {
+			a.tree.DirtyFiles = nil
+			a.tree.DirtyFolders = nil
+			// No repo, no Git panel — fall back to the explorer rather
+			// than strand the user on a view with nothing behind it.
+			a.gitPanelActive = false
+			a.gitPanelRows = nil
+		} else {
+			dirtyFiles := rebaseGitPaths(res.st.Files, a.tree.Root.Path)
+			a.tree.DirtyFiles = dirtyFiles
+			a.tree.DirtyFolders = dirtyFolderSet(dirtyFiles, a.tree.Root.Path)
+		}
+	}
+	// Tabs opened after the collection started aren't in the map and
+	// keep the gutter lines they loaded on open; tabs closed since are
+	// simply skipped by the path lookup.
+	for _, tab := range a.tabs.Tabs() {
+		if tab == nil || tab.Path == "" || tab.IsImage() {
+			continue
+		}
+		if lines, ok := res.tabLines[tab.Path]; ok {
+			tab.GitLines = lines
+		}
+	}
+	// Keep the Git panel live: whatever refreshed the status (the 10s
+	// tick, a save, a file op) also refreshes the visible list.
+	if a.gitPanelActive {
+		a.rebuildGitChangesRows()
+	}
+}

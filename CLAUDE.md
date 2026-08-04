@@ -61,6 +61,9 @@ internal/editor/highlight.go  Chroma → []tcell.Style per line
 internal/filetree/filetree.go Lazy tree, identity-preserving refresh, hit-test, render
 internal/search/search.go     Literal smart-case project search engine
 internal/session/session.go   Per-project session store (~/.local/state/skiff)
+internal/atomicfile/atomicfile.go Temp-file + fsync + rename write, shared by
+                              every config/state file (session, trust,
+                              config.json, .skiff/format.json)
 internal/overlay/             Floating surfaces: the Stack (routing truth),
                               Field/chrome primitives, and the prefab
                               overlays (Prompt/Confirm/Info/Dirty/Form/
@@ -72,9 +75,10 @@ internal/git/                 Git process boundary: Repo over a Runner
                               Files) every git-aware surface consumes
 internal/clipboard/clipboard.go OSC 52 to /dev/tty with tmux passthrough wrap
 internal/userconfig/userconfig.go ~/.config/skiff/config.json (icons, theme)
-internal/icons/icons.go       Nerd Font detection + per-file glyph mapping
+internal/icons/icons.go       Nerd Font detection (deadline-bounded) + glyphs
 internal/theme/theme.go       Default Tokyo Night palette + contrast helpers
 internal/theme/palettes.go    Theme registry — 25 druk-ported palettes + ByID
+internal/theme/degrade.go     Low-color fallback: hue → bold/underline/reverse
 internal/version/version.go   const Version = "x.y.z" — single line, CI bumps it
 ```
 

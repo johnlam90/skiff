@@ -420,3 +420,106 @@ func equalInts(a, b []int) bool {
 	}
 	return true
 }
+
+// FuzzWrapSegments hammers the segment splitter with adversarial lines and
+// pane widths. Every wrap walk in the package (render, hit-test, anchor
+// advance/retreat) trusts three properties, so those are what we assert
+// rather than "it didn't panic": segments start at 0 and strictly ascend,
+// the segment slices concatenate back into the original line byte-for-byte
+// (no rune dropped, duplicated, or reordered), and no segment paints wider
+// than the pane once the trailing whitespace that is deliberately allowed
+// to hang past the right edge is discounted.
+func FuzzWrapSegments(f *testing.F) {
+	seeds := []struct {
+		line  string
+		width int
+	}{
+		{"", 10},
+		{"hello world", 5},
+		{"日本語のテキストが折り返される", 6},
+		{"\t\t\tdeeply indented block", 4},
+		{"                        ", 3},
+		{"a\rb\rc\r", 2},
+		{"\r", 1},
+		{strings.Repeat("supercalifragilistic ", 40), 17},
+		{"word word word", 0},
+		{"one-really-long-unbreakable-token", 7},
+		{"e\u0301 combining acute", 4},
+		{"tab\tafter\ttab", 5},
+	}
+	for _, s := range seeds {
+		f.Add(s.line, s.width)
+	}
+
+	f.Fuzz(func(t *testing.T, line string, width int) {
+		// Clamp into the range a real pane can occupy. Absurd widths add
+		// no coverage (everything collapses to a single segment) and a
+		// negative width only has one interesting case, which the
+		// non-positive branch below already pins.
+		width %= 512
+		if width < -1 {
+			width = -1
+		}
+
+		runes := []rune(line)
+		segs := WrapSegments(runes, width)
+
+		if len(segs) == 0 || segs[0] != 0 {
+			t.Fatalf("segments must start at 0, got %v", segs)
+		}
+		if width <= 0 && len(segs) != 1 {
+			t.Fatalf("non-positive width must collapse to one segment, got %v", segs)
+		}
+		for i := 1; i < len(segs); i++ {
+			if segs[i] <= segs[i-1] {
+				t.Fatalf("segments not strictly ascending: %v", segs)
+			}
+		}
+		if last := segs[len(segs)-1]; last > len(runes) {
+			t.Fatalf("segment start %d is past the %d-rune line", last, len(runes))
+		}
+
+		rebuilt := make([]rune, 0, len(runes))
+		for i := range segs {
+			start, end := wrapSegBounds(segs, i, len(runes))
+			if start > end || end > len(runes) {
+				t.Fatalf("segment %d has bad bounds [%d,%d) over %d runes", i, start, end, len(runes))
+			}
+			seg := runes[start:end]
+			rebuilt = append(rebuilt, seg...)
+
+			if width <= 0 {
+				continue
+			}
+			// A run of spaces or tabs is allowed to hang past the right
+			// edge (painting clips it) so continuation rows never open on
+			// the wrapping whitespace. Everything the user can actually
+			// see must fit.
+			trimmed := seg
+			for len(trimmed) > 0 && isWrapSpace(trimmed[len(trimmed)-1]) {
+				trimmed = trimmed[:len(trimmed)-1]
+			}
+			if w := LineVisualCol(trimmed, len(trimmed)); w > width {
+				t.Fatalf("segment %d paints %d cells, wider than the %d-cell pane (segment %q, line %q)",
+					i, w, width, string(seg), line)
+			}
+		}
+		// Compare rune slices, not the raw string: WrapSegments is only
+		// ever handed Buffer.LineRunes output, so invalid UTF-8 has
+		// already collapsed to RuneError before it gets here and the
+		// original bytes are not the contract.
+		if string(rebuilt) != string(runes) {
+			t.Fatalf("segments do not reconstruct the line:\n got %q\nwant %q", string(rebuilt), string(runes))
+		}
+
+		// Every rune column must resolve to the segment that actually
+		// contains it — hit-test and cursor placement both depend on this.
+		for col := 0; col <= len(runes); col++ {
+			row := WrapRowOfCol(segs, col)
+			start, end := wrapSegBounds(segs, row, len(runes))
+			if col < start || (col > end) {
+				t.Fatalf("col %d resolved to segment %d with bounds [%d,%d)", col, row, start, end)
+			}
+		}
+	})
+}

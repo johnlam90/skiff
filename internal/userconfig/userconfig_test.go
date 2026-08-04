@@ -8,6 +8,7 @@
 package userconfig
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -283,5 +284,44 @@ func TestSetWrapPreservesOtherKeys(t *testing.T) {
 	cfg, err = Load(fresh)
 	if err != nil || !cfg.Wrap {
 		t.Fatalf("fresh load: %+v %v", cfg, err)
+	}
+}
+
+// TestSetThemeWritesAtomically pins the durability contract added
+// after the audit: config.json is read-modify-written on every theme
+// or wrap toggle, so a torn write silently resets the user's whole
+// config. Shrinking the file must leave no trailing bytes from the
+// longer previous version, and no temp file may survive beside it.
+func TestSetThemeWritesAtomically(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	long := `{"theme": "` + strings.Repeat("x", 400) + `"}`
+	if err := os.WriteFile(path, []byte(long), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := SetTheme(path, "nord"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if strings.Contains(string(data), strings.Repeat("x", 10)) {
+		t.Fatalf("stale bytes survived the rewrite:\n%s", data)
+	}
+	if !json.Valid(data) {
+		t.Fatalf("config.json is not valid JSON after a shrinking write:\n%s", data)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "config.json" {
+		names := []string{}
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("expected only config.json in the config dir, got %v", names)
 	}
 }

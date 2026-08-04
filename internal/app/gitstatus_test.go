@@ -543,3 +543,37 @@ func sortedKeys[K comparable](m map[string]K) []string {
 	sort.Strings(out)
 	return out
 }
+
+// TestRefreshGitStatus_RefreshesGutterInSingleFileMode pins the
+// single-file-mode fix: with no file tree, refreshGitStatus must still
+// reload the open tab's per-line gutter markers (a file-scoped git diff
+// that doesn't need the tree). Without this, saving a file in
+// single-file mode — which routes through refreshGitStatus — would
+// leave the gutter markers frozen at their open-time state.
+func TestRefreshGitStatus_RefreshesGutterInSingleFileMode(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	target := filepath.Join(repo, "f.go")
+	writeFileT(t, target, "package main\n\nfunc main() {}\n")
+	gitRun(t, repo, "add", "f.go")
+	gitRun(t, repo, "commit", "-m", "init")
+
+	a := newTestApp(t, repo)
+	a.tree = nil // simulate single-file mode
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	if tab == nil {
+		t.Fatal("expected an open tab")
+	}
+
+	// Clean file → no markers yet. Now dirty the worktree and clear the
+	// tab's cached markers so we can prove refreshGitStatus repopulates
+	// them despite tree == nil.
+	writeFileT(t, target, "package main\n\nfunc main() { println(1) }\n")
+	tab.GitLines = nil
+	a.refreshGitStatus()
+
+	if len(tab.GitLines) == 0 {
+		t.Fatal("expected gutter markers to be refreshed in single-file mode, got none")
+	}
+}

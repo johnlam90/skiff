@@ -200,3 +200,77 @@ func TestDefault_WCAGContrast(t *testing.T) {
 		}
 	}
 }
+
+// TestEnsureContrast_LeavesReadablePairsAlone: the correction must be
+// a no-op for every pairing that already clears the floor, or loading
+// a theme would quietly repaint palettes their authors got right.
+func TestEnsureContrast_LeavesReadablePairsAlone(t *testing.T) {
+	th := Default()
+	if got := ensureContrast(th.StatusFg, th.StatusBG, minStatusContrast); got != th.StatusFg {
+		t.Fatalf("default status bar was rewritten: %v -> %v", th.StatusFg, got)
+	}
+	if got := ensureContrast(th.Text, th.BG, 4.5); got != th.Text {
+		t.Fatalf("readable body text was rewritten: %v -> %v", th.Text, got)
+	}
+}
+
+// TestEnsureContrast_ClearsTheFloorFromEitherSide walks the two ways a
+// chip fails — near-white text on a light bar, near-black text on a
+// dark one — and asserts the result clears the target without landing
+// on the wrong side of the background. Choosing the pole by contrast
+// rather than by "is the background light?" is what makes the second
+// case work.
+func TestEnsureContrast_ClearsTheFloorFromEitherSide(t *testing.T) {
+	cases := []struct {
+		name   string
+		fg, bg tcell.Color
+	}{
+		{"white on a light chip", tcell.NewRGBColor(0xfc, 0xfc, 0xfc), tcell.NewRGBColor(0xff, 0xb4, 0x54)},
+		{"black on a dark chip", tcell.NewRGBColor(0x1a, 0x1a, 0x1a), tcell.NewRGBColor(0x33, 0x33, 0x40)},
+		{"same color as the background", tcell.NewRGBColor(0x80, 0x80, 0x80), tcell.NewRGBColor(0x80, 0x80, 0x80)},
+	}
+	for _, c := range cases {
+		got := ensureContrast(c.fg, c.bg, minStatusContrast)
+		if r := ContrastRatio(got, c.bg); r < minStatusContrast {
+			t.Errorf("%s: corrected to %.2f:1, need >= %.1f:1", c.name, r, minStatusContrast)
+		}
+	}
+}
+
+// TestEnsureContrast_IsMinimal pins the "keep the palette's character"
+// half of the contract: the walk stops at the first step over the
+// floor, so the result must not overshoot toward pure black/white the
+// way a naive "just use Text" swap would.
+func TestEnsureContrast_IsMinimal(t *testing.T) {
+	fg := tcell.NewRGBColor(0xfc, 0xfc, 0xfc)
+	bg := tcell.NewRGBColor(0xff, 0xb4, 0x54)
+	got := ensureContrast(fg, bg, minStatusContrast)
+	r := ContrastRatio(got, bg)
+	if r > minStatusContrast+2.0 {
+		t.Fatalf("overshot to %.2f:1 — the correction should stop just over the floor", r)
+	}
+	if got == tcell.NewRGBColor(0, 0, 0) {
+		t.Fatal("snapped all the way to black instead of walking toward it")
+	}
+}
+
+// TestReadable_OnlyTouchesStatusFg documents the deliberate narrowness
+// of the load-time correction: body text and syntax colors keep their
+// upstream values (Solarized's 4.13:1 text is a design decision, not a
+// port bug), so only the status foreground may move.
+func TestReadable_OnlyTouchesStatusFg(t *testing.T) {
+	raw := Theme{
+		Text:     tcell.NewRGBColor(0x30, 0x30, 0x30),
+		BG:       tcell.NewRGBColor(0x40, 0x40, 0x40),
+		StatusFg: tcell.NewRGBColor(0xfc, 0xfc, 0xfc),
+		StatusBG: tcell.NewRGBColor(0xff, 0xb4, 0x54),
+	}
+	got := readable(raw)
+	if got.StatusFg == raw.StatusFg {
+		t.Fatal("readable() left an unreadable status bar alone")
+	}
+	got.StatusFg = raw.StatusFg
+	if got != raw {
+		t.Fatal("readable() changed a field other than StatusFg")
+	}
+}

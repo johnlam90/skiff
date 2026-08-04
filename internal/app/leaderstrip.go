@@ -9,7 +9,7 @@
 // window is armed, the row above the status bar lists every bound key
 // with a short description (druk's Ctrl+K "peek" adapted to skiff's
 // Esc-only world). It clears itself when the window expires — the Esc
-// handler schedules a wake-up event just past doubleEscMs.
+// handler schedules a wake-up event just past doubleEscWindow.
 
 package app
 
@@ -23,7 +23,7 @@ import (
 // the leader window is armed and nothing that owns the keyboard (menu,
 // modals, bars — states where a leader key can't fire) is open.
 func (a *App) leaderStripVisible() bool {
-	if a.lastEscape.IsZero() || time.Since(a.lastEscape) >= doubleEscMs {
+	if a.lastEscape.IsZero() || time.Since(a.lastEscape) >= doubleEscWindow {
 		return false
 	}
 	if a.overlays.IsOpen() || a.findOpen || a.projFindOpen {

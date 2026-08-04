@@ -1,7 +1,7 @@
 ---
 title: "Find in File"
 metaTitle: "Find in File with Skiff (Esc f)"
-metaDescription: "Esc f opens Skiff's in-file search bar. Case-insensitive substring, live highlight, Enter for next, Shift+Enter for previous, Esc to close."
+metaDescription: "Esc f opens Skiff's in-file search bar. Smart-case substring, live highlight, Enter for next, Shift+Enter for previous, Esc to close."
 summary: "Search the current file with Esc f."
 weight: 50
 ---
@@ -14,7 +14,7 @@ weight: 50
 
 ## How matching works
 
-- Case-insensitive substring. No regex, no whole-word, no case-sensitive toggle.
+- Smart-case substring: an all-lowercase query matches any case, a single uppercase letter in the query makes it exact — so `id` finds `ID` and `id`, while `ID` finds only `ID`. Same rule the project-wide search uses. No regex, no whole-word.
 - Results highlight live as you type — the editor shows every match in the visible buffer the moment you change the query.
 - The active match paints in a brighter color than the rest, so you can pick out where you are in the result set.
 
@@ -33,6 +33,6 @@ Each tab carries its own search state. Switch to another tab, search there, and 
 
 Closing the bar with `Esc` clears highlights. Opening it again starts fresh.
 
-## Why no regex
+## Why no toggles
 
-Regex search is a pile of UI surface (toggles, error states, escape rules) for a feature most "find in file" users never reach for. The 90% case is "I know roughly what I'm looking for, take me there." That's what `Esc f` does. For the 10% case, the right tool is `rg` in the next pane of your tmux session.
+Regex search is a pile of UI surface (toggles, error states, escape rules) for a feature most "find in file" users never reach for, and a case-sensitivity toggle is a chip you have to notice, reach for, and remember the state of — smart case answers it by watching how you type. The 90% case is "I know roughly what I'm looking for, take me there." That's what `Esc f` does. For the 10% case, the right tool is `rg` in the next pane of your tmux session.

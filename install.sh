@@ -8,9 +8,12 @@
 #
 # One-liner installer / upgrader for Skiff. Detects the host OS and
 # architecture, downloads the matching archive from the latest GitHub
-# Release, extracts the static `skiff` binary, and drops it into
-# ~/.local/bin (preferred) or /usr/local/bin. Re-running the script
-# performs an upgrade — same flow, latest version.
+# Release, verifies it against the release's published checksums.txt,
+# extracts the static `skiff` binary, and drops it into ~/.local/bin
+# (preferred) or /usr/local/bin. Re-running the script performs an
+# upgrade — same flow, latest version. A missing checksum entry, a
+# mismatch, or a host with no sha256 tool aborts the install; there is
+# deliberately no "skip verification" escape hatch.
 #
 # Usage:
 #
@@ -114,6 +117,52 @@ fetch() {
 	fi
 }
 
+# sha256_of prints the lowercase sha256 of a file using whichever hasher
+# the host ships: Linux and BusyBox have `sha256sum`, macOS has `shasum`
+# instead. Returns non-zero when neither exists so the caller can abort —
+# "no hasher, install anyway" is not a tradeoff this script gets to make
+# on the user's behalf.
+sha256_of() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1 | tr 'A-F' 'a-f'
+	elif command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 "$1" | cut -d' ' -f1 | tr 'A-F' 'a-f'
+	else
+		return 1
+	fi
+}
+
+# verify_checksum aborts unless the downloaded archive's sha256 matches the
+# entry GoReleaser published in checksums.txt for this tag. This is remote
+# code about to land on the user's PATH, so a truncated CDN response, a
+# stale mirror, or a swapped asset has to be a loud failure — never a
+# warning the curl-pipe-sh user will scroll straight past.
+#
+# checksums.txt is `<sha256>␠␠<filename>`; awk field-matches the exact name
+# (with an optional binary-mode `*` prefix) so a `.` in the archive name
+# can't act as a regex wildcard and pick up a neighbouring line.
+verify_checksum() {
+	archive_path="$1"
+	archive_name="$2"
+	sums_file="$3"
+
+	expected="$(awk -v want="$archive_name" \
+		'$2 == want || $2 == "*" want { print tolower($1); exit }' "$sums_file")"
+	if [ -z "$expected" ]; then
+		fatal "checksums.txt has no entry for $archive_name — refusing to install unverified bytes"
+	fi
+
+	actual="$(sha256_of "$archive_path")" \
+		|| fatal "no sha256 tool on PATH (need sha256sum or shasum) — refusing to install unverified bytes"
+
+	if [ "$actual" != "$expected" ]; then
+		printf '%serror:%s checksum mismatch for %s\n' "$RED" "$RESET" "$archive_name" >&2
+		printf '  expected %s\n' "$expected" >&2
+		printf '  actual   %s\n' "$actual" >&2
+		fatal "the download is corrupt or has been tampered with — aborting"
+	fi
+}
+
 # resolve_version picks the version to install. If the user passed VERSION,
 # trust it as-is (allowing pinned installs). Otherwise we follow GitHub's
 # /releases/latest redirect — that's a single HTTP call with no API rate
@@ -191,11 +240,14 @@ warn_if_not_in_path() {
 		*":$dir:"*) return ;;
 	esac
 	warn "$dir is not on your \$PATH — add this to your shell rc:"
+	# shellcheck disable=SC2016  # $PATH is meant to stay literal — this is
+	# a line the user copies into their shell rc, not one we expand here.
 	printf '\n    %sexport PATH="%s:\$PATH"%s\n\n' "$BOLD" "$dir" "$RESET" >&2
 }
 
 main() {
 	require_cmd tar
+	require_cmd awk
 
 	os="$(detect_os)"
 	arch="$(detect_arch)"
@@ -206,6 +258,7 @@ main() {
 
 	archive="${BINARY}_${bare_version}_${os}_${arch}.tar.gz"
 	url="https://github.com/${REPO}/releases/download/${version}/${archive}"
+	sums_url="https://github.com/${REPO}/releases/download/${version}/checksums.txt"
 
 	info "Installing ${BINARY} ${version} (${os}/${arch})"
 	info "  source: ${url}"
@@ -217,6 +270,13 @@ main() {
 
 	fetch "$url" "$tmp/$archive" \
 		|| fatal "download failed (was the release published with this archive name?)"
+
+	# Verify BEFORE extracting: tar on a hostile archive is already too
+	# much trust to hand a file we haven't authenticated.
+	fetch "$sums_url" "$tmp/checksums.txt" \
+		|| fatal "could not download checksums.txt for ${version} — refusing to install unverified bytes"
+	verify_checksum "$tmp/$archive" "$archive" "$tmp/checksums.txt"
+	info "  sha256 verified"
 
 	tar -xzf "$tmp/$archive" -C "$tmp" \
 		|| fatal "extraction failed (archive may be corrupt)"

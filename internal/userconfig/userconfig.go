@@ -33,6 +33,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/johnlam90/skiff/internal/atomicfile"
 )
 
 // IconsMode is the user's preference for Nerd Font icons in the file
@@ -198,15 +200,15 @@ func SetWrap(path string, on bool) error {
 	return writeRaw(path, raw)
 }
 
-// writeRaw marshals the merged key map back to disk, creating the
-// config directory on first write. Shared tail of the Set* helpers.
+// writeRaw marshals the merged key map back to disk. The write goes
+// through atomicfile because config.json is read-modify-written on
+// every theme/wrap toggle: a truncated file would silently reset the
+// user's preferences (and drop any key a newer skiff had written)
+// rather than fail loudly.
 func writeRaw(path string, raw map[string]any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	return atomicfile.Write(path, data, 0644)
 }

@@ -43,6 +43,7 @@ func (a *App) captureSession() session.Project {
 		}
 		if i == a.tabs.ActiveIndex() {
 			p.Active = len(p.Tabs)
+			p.ActivePath = rel
 		}
 		p.Tabs = append(p.Tabs, session.TabState{
 			Path:    rel,
@@ -61,7 +62,9 @@ func (a *App) captureSession() session.Project {
 // restoreSession re-applies the saved session for this project root, if
 // any: expanded folders first (cheap, always safe), then tabs whose
 // files still exist, then the active tab and sidebar. Called from New
-// before the event loop starts.
+// before the event loop starts. The active tab is matched by path, not
+// by saved index — skipping a vanished file shifts every later index,
+// so an index would focus the wrong tab.
 func (a *App) restoreSession() {
 	if a.tree == nil {
 		return
@@ -75,7 +78,8 @@ func (a *App) restoreSession() {
 		a.sidebarWidth = p.SidebarWidth
 	}
 	a.sidebarShown = p.SidebarShown
-	for _, ts := range p.Tabs {
+	active, legacyActive := -1, -1
+	for i, ts := range p.Tabs {
 		abs := filepath.Join(a.rootDir, filepath.FromSlash(ts.Path))
 		if info, err := os.Stat(abs); err != nil || info.IsDir() {
 			continue
@@ -89,9 +93,23 @@ func (a *App) restoreSession() {
 		t.ScrollY = ts.ScrollY
 		t.Preview = ts.Preview
 		a.tabs.Append(t)
+		if p.ActivePath != "" && ts.Path == p.ActivePath {
+			active = a.tabs.Len() - 1
+		}
+		// Sessions written before ActivePath existed only have an
+		// index; translate it through the survivors we actually opened.
+		if i == p.Active {
+			legacyActive = a.tabs.Len() - 1
+		}
+	}
+	if active < 0 {
+		active = legacyActive
 	}
 	if a.tabs.Len() > 0 {
-		a.tabs.ActivateAt(p.Active)
+		if active < 0 {
+			active = 0
+		}
+		a.tabs.ActivateAt(active)
 		a.syncActiveTreeFile()
 	}
 }

@@ -55,8 +55,44 @@ func TestCaptureSessionContents(t *testing.T) {
 	if got.Active != 1 {
 		t.Fatalf("active: got %d, want 1 (untitled skipped)", got.Active)
 	}
+	if got.ActivePath != filepath.Join("sub", "two.go") {
+		t.Fatalf("activePath: got %q", got.ActivePath)
+	}
 	if got.SidebarWidth != 31 || got.SidebarShown {
 		t.Fatalf("sidebar: %+v", got)
+	}
+}
+
+// TestRestoreActiveTabByPath: the active tab is remembered by path, so
+// a vanished earlier file (which shifts every later index) still lands
+// focus on the tab the user left it on.
+func TestRestoreActiveTabByPath(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	mkFile(t, root, "target.go", "l1\n")
+	mkFile(t, root, "other.go", "l1\n")
+	if err := session.Save(root, session.Project{
+		Tabs: []session.TabState{
+			{Path: "gone.go"},
+			{Path: "target.go"},
+			{Path: "other.go"},
+		},
+		Active:       1,
+		ActivePath:   "target.go",
+		SidebarShown: true,
+		SavedAt:      time.Now(),
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	a := newTestApp(t, root)
+	a.restoreSession()
+	if a.tabs.Len() != 2 {
+		t.Fatalf("tabs: got %d, want 2", a.tabs.Len())
+	}
+	tab := a.activeTabPtr()
+	if tab == nil || filepath.Base(tab.Path) != "target.go" {
+		t.Fatalf("active tab: %+v", tab)
 	}
 }
 

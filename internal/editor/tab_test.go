@@ -63,6 +63,140 @@ func TestNewTab_ExistingFile(t *testing.T) {
 	}
 }
 
+// TestTab_LineEndingRoundTrip is the CRLF regression. Opening a
+// Windows-authored file and saving it back untouched must produce the
+// same bytes: before the ending was tracked, every line kept its \r in
+// the buffer and the save wrote it back inside the line, so a one-line
+// edit turned the whole file into a diff.
+func TestTab_LineEndingRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string // bytes on disk after an untouched save
+	}{
+		{"crlf", "alpha\r\nbeta\r\n", "alpha\r\nbeta\r\n"},
+		{"lf", "alpha\nbeta\n", "alpha\nbeta\n"},
+		{"crlf without trailing newline", "alpha\r\nbeta", "alpha\r\nbeta"},
+		{"single line no newline", "alpha", "alpha"},
+		// A mixed file normalises to whichever ending dominates — the
+		// same call every other editor makes.
+		{"mostly crlf", "a\r\nb\r\nc\nd\r\n", "a\r\nb\r\nc\r\nd\r\n"},
+		{"mostly lf", "a\nb\nc\r\nd\n", "a\nb\nc\nd\n"},
+		{"tie favours lf", "a\r\nb\n", "a\nb\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "f.txt")
+			if err := os.WriteFile(path, []byte(tc.src), 0644); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			tab, err := NewTab(path)
+			if err != nil {
+				t.Fatalf("NewTab: %v", err)
+			}
+			for i, ln := range tab.Buffer.Lines {
+				if strings.Contains(ln, "\r") {
+					t.Fatalf("line %d kept a carriage return: %q", i, ln)
+				}
+			}
+			if err := tab.Save(); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read back: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Fatalf("round trip = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTab_SaveKeepsCRLFAfterEdit proves the ending survives real editing
+// and not just an untouched save — the point of tracking it is that
+// changing one line of a CRLF file leaves every other line alone.
+func TestTab_SaveKeepsCRLFAfterEdit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f.txt")
+	if err := os.WriteFile(path, []byte("one\r\ntwo\r\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.MoveCursorTo(Position{Line: 1, Col: 3}, false)
+	tab.InsertString("!")
+	if err := tab.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != "one\r\ntwo!\r\n" {
+		t.Fatalf("after edit = %q, want CRLF preserved", got)
+	}
+}
+
+// TestTab_ReloadRedetectsLineEnding covers a file whose convention
+// changed on disk under an open tab. Reload takes the disk version as
+// the new truth, so the recorded ending has to move with it or the next
+// save undoes whatever converted the file.
+func TestTab_ReloadRedetectsLineEnding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f.txt")
+	if err := os.WriteFile(path, []byte("one\ntwo\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	if tab.LineEnding != LineEndingLF {
+		t.Fatalf("LF file detected as %v", tab.LineEnding)
+	}
+	if err := os.WriteFile(path, []byte("one\r\ntwo\r\n"), 0644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if err := tab.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if tab.LineEnding != LineEndingCRLF {
+		t.Fatalf("after reload ending = %v, want CRLF", tab.LineEnding)
+	}
+}
+
+// TestDetectLineEnding exercises the dominance counter directly,
+// including the tie that has to fall to LF (what the editor writes for a
+// brand-new file) and the no-newline case.
+func TestDetectLineEnding(t *testing.T) {
+	cases := []struct {
+		src  string
+		want LineEnding
+	}{
+		{"", LineEndingLF},
+		{"no newline at all", LineEndingLF},
+		{"a\nb\n", LineEndingLF},
+		{"a\r\nb\r\n", LineEndingCRLF},
+		{"a\r\nb\nc\r\n", LineEndingCRLF},
+		{"a\r\nb\n", LineEndingLF},
+		{"\n", LineEndingLF},
+		{"\r\n", LineEndingCRLF},
+		{"lone\rcarriage", LineEndingLF},
+	}
+	for _, tc := range cases {
+		if got := detectLineEnding([]byte(tc.src)); got != tc.want {
+			t.Fatalf("detectLineEnding(%q) = %v, want %v", tc.src, got, tc.want)
+		}
+	}
+	if got := LineEndingLF.Newline(); got != "\n" {
+		t.Fatalf("LF newline = %q", got)
+	}
+	if got := LineEndingCRLF.Newline(); got != "\r\n" {
+		t.Fatalf("CRLF newline = %q", got)
+	}
+}
+
 // TestNewTab_MissingFile creates a tab for a nonexistent path with an empty
 // buffer — matches editor convention of "open" creating on first save.
 func TestNewTab_MissingFile(t *testing.T) {

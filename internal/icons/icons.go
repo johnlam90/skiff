@@ -24,6 +24,12 @@
 //     any *.ttf / *.otf whose filename contains "Nerd". Slower but
 //     works on stock macOS where fc-list usually isn't installed.
 //
+// Both strategies share one deadline (detectTimeout). Detection runs
+// before the first frame is painted, so "we couldn't tell in two
+// seconds" has to mean "no icons", not "no editor" — a wedged
+// fontconfig or a font dir on a stalled network mount used to hang
+// startup indefinitely.
+//
 // Neither strategy can tell whether the *terminal* is configured to
 // render the font — only that the OS knows about it. That's why the
 // editor pairs detection with a manual override in config.json: users
@@ -31,16 +37,48 @@
 package icons
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/userconfig"
 )
+
+// detectTimeout bounds the whole "is a Nerd Font installed?" question.
+// Detection runs on the startup path with nothing drawn yet, so a
+// wedged fontconfig (stale cache, unreachable NFS font dir) used to
+// hang the editor before it painted its first frame. Two seconds is
+// far longer than a healthy fc-list needs and short enough that a
+// broken one just costs a blink. Tests shorten it.
+var detectTimeout = 2 * time.Second
+
+// maxFontWalkDepth bounds how far below a font directory the fallback
+// walk descends. Real installs are flat or one vendor folder deep
+// (~/Library/Fonts/JetBrainsMono/*.ttf); an unbounded walk turns
+// somebody's symlinked-in asset tree into a startup stall.
+const maxFontWalkDepth = 3
+
+// fcList runs `fc-list : family` under ctx and returns its stdout.
+// It's a package var so tests can inject a canned — or deliberately
+// hanging — implementation without requiring fontconfig on the host.
+var fcList = runFcList
+
+// runFcList is the real fc-list invocation. LookPath first so a
+// missing fontconfig is a cheap error rather than an exec failure,
+// and CommandContext so the deadline actually kills the process
+// instead of leaking it behind a returned error.
+func runFcList(ctx context.Context) ([]byte, error) {
+	if _, err := exec.LookPath("fc-list"); err != nil {
+		return nil, err
+	}
+	return exec.CommandContext(ctx, "fc-list", ":", "family").Output()
+}
 
 // Resolve maps a user's IconsMode preference to a concrete on/off
 // decision, running detection iff the mode is "auto". Centralised so
@@ -61,11 +99,17 @@ func Resolve(mode userconfig.IconsMode) bool {
 // walk if fontconfig isn't present. Returns false on any error
 // rather than propagating — the caller's only question is "icons
 // or no icons", and the safe answer when we can't tell is "no".
+//
+// The two strategies share a single detectTimeout budget: this runs
+// on the startup path, so a broken font setup must cost a blink, not
+// the editor.
 func Detect() bool {
-	if detectViaFcList() {
+	ctx, cancel := context.WithTimeout(context.Background(), detectTimeout)
+	defer cancel()
+	if detectViaFcList(ctx) {
 		return true
 	}
-	return detectViaFilesystem()
+	return detectViaFilesystem(ctx)
 }
 
 // detectViaFcList shells out to fc-list and looks for any family name
@@ -74,13 +118,11 @@ func Detect() bool {
 // names ("Hack Nerd Font", "JetBrainsMono NF", "Mononoki Nerd Font
 // Propo", etc.), and the only common substring is "Nerd".
 //
-// Returns false on any error — including fc-list not being installed —
-// so the caller falls through to the filesystem walk.
-func detectViaFcList() bool {
-	if _, err := exec.LookPath("fc-list"); err != nil {
-		return false
-	}
-	out, err := exec.Command("fc-list", ":", "family").Output()
+// Returns false on any error — including fc-list not being installed
+// or the deadline expiring — so the caller falls through to the
+// filesystem walk.
+func detectViaFcList(ctx context.Context) bool {
+	out, err := fcList(ctx)
 	if err != nil {
 		return false
 	}
@@ -96,12 +138,15 @@ func detectViaFcList() bool {
 //
 // We stop at the first match: the question is binary, and walking
 // the entire fonts tree on every editor start is overkill.
-func detectViaFilesystem() bool {
+func detectViaFilesystem(ctx context.Context) bool {
 	for _, dir := range fontDirs() {
 		if dir == "" {
 			continue
 		}
-		if found := walkForNerdFont(dir); found {
+		if ctx.Err() != nil {
+			return false
+		}
+		if found := walkForNerdFont(ctx, dir); found {
 			return true
 		}
 	}
@@ -145,16 +190,27 @@ func fontDirs() []string {
 // name contains "nerd". Errors during walk are treated as "didn't
 // find anything in this subtree" — many font dirs have unreadable
 // system entries we should skip rather than abort on.
-func walkForNerdFont(root string) bool {
+//
+// The walk is bounded twice: by maxFontWalkDepth, so a deep tree
+// under a font dir can't turn into a full-disk crawl, and by ctx, so
+// the whole of startup detection still finishes on a deadline even
+// when the directory lives on a stalled network mount.
+func walkForNerdFont(ctx context.Context, root string) bool {
 	if info, err := os.Stat(root); err != nil || !info.IsDir() {
 		return false
 	}
 	found := false
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return filepath.SkipAll
+		}
 		if err != nil {
 			return nil // skip unreadable entries, keep walking siblings
 		}
 		if d.IsDir() {
+			if path != root && dirDepth(root, path) >= maxFontWalkDepth {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		name := strings.ToLower(d.Name())
@@ -169,6 +225,18 @@ func walkForNerdFont(root string) bool {
 		return nil
 	})
 	return found
+}
+
+// dirDepth counts how many path elements dir sits below root — the
+// root's immediate children are depth 1. An unrelated or unresolvable
+// path reports maxFontWalkDepth so the caller prunes rather than
+// descends into something we can't reason about.
+func dirDepth(root, dir string) int {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == "." {
+		return maxFontWalkDepth
+	}
+	return strings.Count(rel, string(filepath.Separator)) + 1
 }
 
 // FolderClosed and FolderOpen are the two folder glyphs the file tree

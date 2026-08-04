@@ -51,6 +51,26 @@ func initRepo(t *testing.T) string {
 	return dir
 }
 
+// gitT runs one git command against dir and fails the test if git
+// does. Test setup wants the opposite of the production runner's
+// best-effort posture: a seed step that silently no-ops produces a test
+// that passes for the wrong reason.
+func gitT(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// writeSeed writes a fixture file, failing the test on any error.
+func writeSeed(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
 // TestRepo_OutputReadsRealGit is the contract test: a read command
 // against a real repo returns git's stdout.
 func TestRepo_OutputReadsRealGit(t *testing.T) {
@@ -116,6 +136,42 @@ func TestRepo_ReadTimeoutKillsHangingCommands(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("timeout should kill the command quickly, took %v", elapsed)
+	}
+}
+
+// TestRepo_WriteTimeoutKillsWedgedWrites pins the deadline added to the
+// write path. GIT_TERMINAL_PROMPT=0 silences git's own prompt but not a
+// third-party credential helper or askpass binary blocking on its own
+// stdin — and because writes run one at a time behind a single busy
+// gate, one such hang would retire the editor's git verbs for the rest
+// of the session. The real bound is minutes; the test shortens it.
+func TestRepo_WriteTimeoutKillsWedgedWrites(t *testing.T) {
+	dir := initRepo(t)
+	r := Open(dir)
+	r.writeTimeout = 150 * time.Millisecond
+	start := time.Now()
+	_, err := r.RunSequence([][]string{{"-c", "alias.slow=!sleep 5", "slow"}})
+	if err == nil {
+		t.Fatal("a wedged write must fail")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("write timeout should kill the command quickly, took %v", elapsed)
+	}
+}
+
+// TestRepo_WriteTimeoutIsGenerous pins the tradeoff the deadline makes:
+// it is a hang guard, not a performance budget. A push over a slow link
+// takes minutes legitimately, and a bound tight enough to interrupt one
+// would corrupt the user's mental model of whether their work landed.
+func TestRepo_WriteTimeoutIsGenerous(t *testing.T) {
+	if writeTimeout < time.Minute {
+		t.Fatalf("writeTimeout = %v; a real push must not be cut short", writeTimeout)
+	}
+	if got := Open("/repo").writeTimeout; got != writeTimeout {
+		t.Fatalf("Open must apply the write deadline, got %v", got)
+	}
+	if got := OpenWith("/repo", &Fake{}).writeTimeout; got != writeTimeout {
+		t.Fatalf("OpenWith must apply the write deadline, got %v", got)
 	}
 }
 

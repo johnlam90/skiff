@@ -61,8 +61,10 @@ func (f *Fake) Output(root string, timeout time.Duration, args ...string) ([]byt
 	return f.lookup(args)
 }
 
-// Combined implements Runner.
-func (f *Fake) Combined(root string, args ...string) ([]byte, error) {
+// Combined implements Runner. The write deadline is recorded by the
+// caller's choice, not honored here — the Fake answers instantly, and
+// a test that wants a slow write scripts it at the Repo level.
+func (f *Fake) Combined(root string, timeout time.Duration, args ...string) ([]byte, error) {
 	return f.lookup(args)
 }
 

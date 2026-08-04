@@ -175,7 +175,7 @@ func TestHandleKey_LeaderUnboundFallsThrough(t *testing.T) {
 }
 
 // TestHandleKey_LeaderTimesOut verifies the leader state fully expires:
-// once menuEscMs has passed since the last Esc, a bound letter must
+// once menuEscWindow has passed since the last Esc, a bound letter must
 // reach the editor as a normal keystroke instead of firing the action
 // or the timeout hint.
 func TestHandleKey_LeaderTimesOut(t *testing.T) {
@@ -190,7 +190,7 @@ func TestHandleKey_LeaderTimesOut(t *testing.T) {
 	a.handleKey(keyEv(tcell.KeyEsc, 0))
 	// Backdate the Esc timestamp past every window so the next 's'
 	// is treated as a plain keystroke rather than Save or a hint.
-	a.lastEscape = time.Now().Add(-2 * menuEscMs)
+	a.lastEscape = time.Now().Add(-2 * menuEscWindow)
 	a.handleKey(keyEv(tcell.KeyRune, 's'))
 
 	if got := a.activeTabPtr().Buffer.Lines[0]; got != "s" {
@@ -250,8 +250,8 @@ func TestHandleKey_EscDoubleTapStillOpensMenu(t *testing.T) {
 // menu window: tmux's escape-time munches a fast Esc,Esc into ONE
 // delivered Esc, so the only tap spacing that produces two separate
 // events is slower than the old 500ms window allowed. Two Escs up to
-// menuEscMs apart must still open the menu, while the leader keeps its
-// tighter doubleEscMs window (next test).
+// menuEscWindow apart must still open the menu, while the leader keeps its
+// tighter doubleEscWindow window (next test).
 func TestHandleKey_EscDoubleTapWideWindowOpensMenu(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.handleKey(keyEv(tcell.KeyEsc, 0))

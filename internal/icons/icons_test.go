@@ -8,9 +8,11 @@
 package icons
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -115,7 +117,7 @@ func TestDetectViaFilesystemFindsNerdFont(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "HackNerdFont-Regular.ttf"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if !walkForNerdFont(dir) {
+	if !walkForNerdFont(context.Background(), dir) {
 		t.Fatalf("expected to find Nerd Font in %s", dir)
 	}
 }
@@ -128,7 +130,7 @@ func TestDetectViaFilesystemMissesNonMatching(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "Arial.ttf"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if walkForNerdFont(dir) {
+	if walkForNerdFont(context.Background(), dir) {
 		t.Fatalf("Arial.ttf should not match a Nerd Font search")
 	}
 }
@@ -141,7 +143,7 @@ func TestDetectViaFilesystemRejectsWrongExtension(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "nerd-readme.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if walkForNerdFont(dir) {
+	if walkForNerdFont(context.Background(), dir) {
 		t.Fatalf("non-font with 'nerd' in name should not match")
 	}
 }
@@ -200,7 +202,101 @@ func TestColorForUnknownReturnsFallback(t *testing.T) {
 // quiet no-match rather than an error — the walker is called for
 // every candidate path and most won't exist on any given system.
 func TestDetectViaFilesystemMissingDir(t *testing.T) {
-	if walkForNerdFont("/definitely/does/not/exist/at/all") {
+	if walkForNerdFont(context.Background(), "/definitely/does/not/exist/at/all") {
 		t.Fatalf("missing dir should return false, not panic or true")
+	}
+}
+
+// TestWalkForNerdFontStopsAtMaxDepth pins the startup-stall guard: a
+// font dir with a deep tree under it (a symlinked asset folder, a
+// checked-out repo of fonts) must not turn Detect() into a full
+// subtree crawl. Files within the bound still match.
+func TestWalkForNerdFontStopsAtMaxDepth(t *testing.T) {
+	root := t.TempDir()
+	shallow := filepath.Join(root, "a", "b")
+	deep := filepath.Join(shallow, "c", "d")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "HackNerdFont.ttf"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed deep: %v", err)
+	}
+	if walkForNerdFont(context.Background(), root) {
+		t.Fatalf("walk descended past maxFontWalkDepth=%d", maxFontWalkDepth)
+	}
+
+	if err := os.WriteFile(filepath.Join(shallow, "HackNerdFont.ttf"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed shallow: %v", err)
+	}
+	if !walkForNerdFont(context.Background(), root) {
+		t.Fatal("a font two levels down should still be found")
+	}
+}
+
+// TestWalkForNerdFontHonoursContext: the walk shares the detection
+// deadline, so an already-expired context must abort it even when a
+// match is sitting right there. This is what keeps a font dir on a
+// stalled network mount from blocking the first frame.
+func TestWalkForNerdFontHonoursContext(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "HackNerdFont.ttf"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if walkForNerdFont(ctx, dir) {
+		t.Fatal("expired context should abort the walk")
+	}
+}
+
+// TestDetectViaFcListParsesFamilies covers the happy path of the
+// fontconfig probe without needing fontconfig on the host: any family
+// line containing "nerd font" or "nerdfont" is a hit, and nothing
+// else is.
+func TestDetectViaFcListParsesFamilies(t *testing.T) {
+	t.Cleanup(func() { fcList = runFcList })
+	cases := []struct {
+		out  string
+		want bool
+	}{
+		{"DejaVu Sans\nHack Nerd Font Mono\n", true},
+		{"JetBrainsMono NerdFont\n", true},
+		{"DejaVu Sans\nLiberation Mono\n", false},
+	}
+	for _, tc := range cases {
+		fcList = func(context.Context) ([]byte, error) { return []byte(tc.out), nil }
+		if got := detectViaFcList(context.Background()); got != tc.want {
+			t.Fatalf("detectViaFcList(%q) = %v, want %v", tc.out, got, tc.want)
+		}
+	}
+}
+
+// TestDetectFcListTimeoutFallsThrough is the regression test for the
+// audit finding: a wedged fc-list used to hang startup forever
+// because the exec had no deadline. Detect() must give up on the
+// deadline and still answer, well inside the time the hung command
+// would have taken.
+func TestDetectFcListTimeoutFallsThrough(t *testing.T) {
+	prevList, prevTimeout := fcList, detectTimeout
+	t.Cleanup(func() { fcList, detectTimeout = prevList, prevTimeout })
+
+	detectTimeout = 50 * time.Millisecond
+	started := make(chan struct{})
+	fcList = func(ctx context.Context) ([]byte, error) {
+		close(started)
+		<-ctx.Done() // a hung fontconfig: only the deadline frees us
+		return nil, ctx.Err()
+	}
+
+	done := make(chan bool, 1)
+	go func() { done <- Detect() }()
+	<-started
+	select {
+	case got := <-done:
+		if got {
+			t.Fatal("a timed-out probe must not report a Nerd Font")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Detect() never returned; the fc-list deadline is not wired up")
 	}
 }

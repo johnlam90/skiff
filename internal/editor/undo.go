@@ -32,6 +32,27 @@ import "time"
 // way back without unbounded memory growth.
 const maxUndoEntries = 500
 
+// maxUndoBytes caps what the whole undo stack may hold. Depth alone is
+// the wrong bound: every entry is a full-buffer snapshot, so 500 entries
+// of a large file is gigabytes of history behind a session that never
+// felt heavy. 32MiB keeps a long editing run on a normal source file
+// entirely in history while making the pathological case impossible.
+// The redo stack is not budgeted separately: its entries only ever
+// arrive by being moved off the undo stack, so it can never outgrow
+// what this already bounds.
+const maxUndoBytes = 32 << 20
+
+// minUndoEntries is how many entries survive the byte budget no matter
+// how big they are — undoing the paste that just went wrong has to work
+// even when that single snapshot is over budget on its own.
+const minUndoEntries = 4
+
+// lineHeaderBytes is the per-line overhead a snapshot pays for the
+// string header itself (pointer + length on a 64-bit build). Counted
+// separately from the text because a snapshot of a huge file is mostly
+// headers: the strings are shared with the live buffer.
+const lineHeaderBytes = 16
+
 // undoCoalesceWindow is the inactivity gap that closes a coalescing
 // group. 500ms feels right — pause-and-think between words almost
 // always lasts longer than this, while a typing burst lands well inside.
@@ -61,6 +82,18 @@ type snapshot struct {
 	Anchor Position
 }
 
+// size estimates the memory one entry holds: the line headers plus the
+// text they point at. Snapshots share unchanged line strings with the
+// live buffer and with each other, so this over-counts on purpose — a
+// budget wants an upper bound, not an audit of unique allocations.
+func (s snapshot) size() int {
+	n := len(s.Lines) * lineHeaderBytes
+	for _, ln := range s.Lines {
+		n += len(ln)
+	}
+	return n
+}
+
 // captureSnapshot returns a deep copy of the current buffer state so a
 // later mutation can't bleed into history.
 func (t *Tab) captureSnapshot() snapshot {
@@ -88,13 +121,16 @@ func (t *Tab) applySnapshot(s snapshot) {
 	t.StyleStale = true
 }
 
-// initUndo seeds the original-state snapshot used by RevertFile. Called
-// from NewTab and Reload — both moments where the buffer is now "what's
-// on disk" and any prior history is meaningless.
+// initUndo seeds the original-state snapshot used by RevertFile and the
+// saved baseline the dirty flag is measured against. Called from NewTab
+// and Reload — both moments where the buffer is now "what's on disk"
+// and any prior history is meaningless.
 func (t *Tab) initUndo() {
 	t.undoOriginal = t.captureSnapshot()
+	t.savedBaseline = t.undoOriginal
 	t.undoStack = nil
 	t.redoStack = nil
+	t.undoBytes = 0
 	t.lastUndoGroup = undoGroupNone
 }
 
@@ -108,16 +144,54 @@ func (t *Tab) pushUndo(group undoGroup) {
 		t.lastUndoAt = time.Now() // extend the window
 		return
 	}
-	snap := t.captureSnapshot()
-	t.undoStack = append(t.undoStack, snap)
-	if len(t.undoStack) > maxUndoEntries {
-		// Drop the oldest entry. Keep the original snapshot intact —
-		// it lives in undoOriginal, not the stack.
-		t.undoStack = t.undoStack[1:]
-	}
+	t.pushUndoSnapshot(t.captureSnapshot())
 	t.redoStack = nil
 	t.lastUndoGroup = group
 	t.lastUndoAt = time.Now()
+}
+
+// pushUndoSnapshot appends one entry and trims the stack back inside
+// both caps. Every append to undoStack goes through here (and every
+// removal through popUndoSnapshot) so undoBytes can't drift away from
+// what the stack actually holds.
+func (t *Tab) pushUndoSnapshot(s snapshot) {
+	t.undoStack = append(t.undoStack, s)
+	t.undoBytes += s.size()
+	t.trimUndoStack()
+}
+
+// popUndoSnapshot removes and returns the newest entry. The vacated
+// slot is cleared so the snapshot's lines aren't kept alive by the
+// slice's spare capacity.
+func (t *Tab) popUndoSnapshot() snapshot {
+	last := len(t.undoStack) - 1
+	s := t.undoStack[last]
+	t.undoBytes -= s.size()
+	t.undoStack[last] = snapshot{}
+	t.undoStack = t.undoStack[:last]
+	return s
+}
+
+// trimUndoStack evicts oldest-first until the stack fits both the depth
+// cap and the byte budget, never going below minUndoEntries. Evicted
+// slots are cleared before the slice shrinks — leaving them in the tail
+// keeps the snapshots reachable and makes the budget a lie.
+func (t *Tab) trimUndoStack() {
+	drop, bytes := 0, t.undoBytes
+	for len(t.undoStack)-drop > minUndoEntries &&
+		(len(t.undoStack)-drop > maxUndoEntries || bytes > maxUndoBytes) {
+		bytes -= t.undoStack[drop].size()
+		drop++
+	}
+	if drop == 0 {
+		return
+	}
+	kept := copy(t.undoStack, t.undoStack[drop:])
+	for i := kept; i < len(t.undoStack); i++ {
+		t.undoStack[i] = snapshot{}
+	}
+	t.undoStack = t.undoStack[:kept]
+	t.undoBytes = bytes
 }
 
 // canCoalesce reports whether a pending push of the given group should
@@ -169,6 +243,34 @@ func (t *Tab) CanRevert() bool {
 	return false
 }
 
+// markSaved re-points the dirty comparison at the bytes just written to
+// disk. Tab.Save calls it; initUndo does the same for a file that was
+// just read.
+func (t *Tab) markSaved() {
+	t.savedBaseline = t.captureSnapshot()
+}
+
+// matchesSaved reports whether the buffer is identical to what was last
+// read from or written to disk. Undo / Redo derive Dirty from this
+// rather than from CanRevert: CanRevert compares against the ON-OPEN
+// snapshot, so undoing past a save used to clear the dirty flag while
+// disk still held the newer text — and the tab would then close without
+// a prompt, dropping the edit.
+func (t *Tab) matchesSaved() bool {
+	if t.Buffer == nil {
+		return len(t.savedBaseline.Lines) == 0
+	}
+	if len(t.Buffer.Lines) != len(t.savedBaseline.Lines) {
+		return false
+	}
+	for i, ln := range t.Buffer.Lines {
+		if ln != t.savedBaseline.Lines[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // Undo restores the previous snapshot. Returns true when a step was
 // actually undone — false lets the caller flash a "nothing to undo"
 // message. The current state is moved onto the redo stack first so a
@@ -177,15 +279,9 @@ func (t *Tab) Undo() bool {
 	if len(t.undoStack) == 0 {
 		return false
 	}
-	current := t.captureSnapshot()
-	t.redoStack = append(t.redoStack, current)
-
-	last := len(t.undoStack) - 1
-	prev := t.undoStack[last]
-	t.undoStack = t.undoStack[:last]
-
-	t.applySnapshot(prev)
-	t.Dirty = t.CanRevert()
+	t.redoStack = append(t.redoStack, t.captureSnapshot())
+	t.applySnapshot(t.popUndoSnapshot())
+	t.Dirty = !t.matchesSaved()
 	t.breakUndoGroup()
 	return true
 }
@@ -196,15 +292,15 @@ func (t *Tab) Redo() bool {
 	if len(t.redoStack) == 0 {
 		return false
 	}
-	current := t.captureSnapshot()
-	t.undoStack = append(t.undoStack, current)
+	t.pushUndoSnapshot(t.captureSnapshot())
 
 	last := len(t.redoStack) - 1
 	next := t.redoStack[last]
+	t.redoStack[last] = snapshot{}
 	t.redoStack = t.redoStack[:last]
 
 	t.applySnapshot(next)
-	t.Dirty = t.CanRevert()
+	t.Dirty = !t.matchesSaved()
 	t.breakUndoGroup()
 	return true
 }
@@ -218,14 +314,10 @@ func (t *Tab) RevertFile() bool {
 	if !t.CanRevert() {
 		return false
 	}
-	current := t.captureSnapshot()
-	t.undoStack = append(t.undoStack, current)
-	if len(t.undoStack) > maxUndoEntries {
-		t.undoStack = t.undoStack[1:]
-	}
+	t.pushUndoSnapshot(t.captureSnapshot())
 	t.redoStack = nil
 	t.applySnapshot(t.undoOriginal)
-	t.Dirty = t.CanRevert() // false now — buffer matches original
+	t.Dirty = !t.matchesSaved()
 	t.breakUndoGroup()
 	return true
 }

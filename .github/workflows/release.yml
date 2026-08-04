@@ -7,6 +7,11 @@
 #
 # Release pipeline for Skiff. Triggers on every push to main:
 #
+#   0. Runs the FULL test suite by calling .github/workflows/test.yml as a
+#      reusable workflow. Everything below is gated on it: a red suite
+#      never tags and never publishes. Calling the workflow (rather than
+#      copying its steps, or trusting a separate run that happens to be
+#      green) keeps one definition of "green" for PRs and releases.
 #   1. Determines the next version. If the pushed commit hand-edited
 #      internal/version/version.go (you bumped major/minor manually), the
 #      workflow uses that version as-is. Otherwise it auto-bumps the patch
@@ -17,6 +22,12 @@
 #      push an updated Homebrew formula into Formula/ in this same repo
 #      (using the default GITHUB_TOKEN — no separate tap repo or PAT
 #      required).
+#
+# Both auto-commits (version bump, brew formula) carry [skip ci] so this
+# workflow does not re-trigger itself. That marker is the only thing
+# breaking the loop — do not remove it. Note that gating on test.yml adds
+# no new trigger: workflow_call runs inside THIS run, so there is still
+# exactly one workflow listening for pushes to main.
 
 name: Release
 
@@ -45,7 +56,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Gate. `needs: test` on the release job below is what makes a red
+  # suite block the tag and the publish.
+  test:
+    uses: ./.github/workflows/test.yml
+
   release:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -57,10 +74,13 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Same toolchain source of truth as test.yml — the binaries we ship
+      # must be built with the Go version the module declares, not
+      # whatever "stable" resolved to on release day.
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       # Decide whether to auto-bump or accept a hand-edited version.
       - name: Determine version

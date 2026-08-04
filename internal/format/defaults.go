@@ -35,6 +35,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+
+	"github.com/johnlam90/skiff/internal/atomicfile"
 )
 
 // DefaultsFile is the filename used inside the user's config dir.
@@ -43,7 +45,11 @@ const DefaultsFile = "format-defaults.json"
 // defaultsPathEnv lets tests redirect the defaults file location.
 // Production code uses DefaultsPath. We use a separate env var from
 // the trust override so a single test can set both independently.
-var defaultsPathEnv = "SPICEEDIT_DEFAULTS_FILE"
+// legacyDefaultsPathEnv is the pre-rename spelling, still accepted.
+var (
+	defaultsPathEnv       = "SKIFF_DEFAULTS_FILE"
+	legacyDefaultsPathEnv = "SPICEEDIT_DEFAULTS_FILE"
+)
 
 // DefaultsPath returns the canonical defaults-file location:
 // $XDG_CONFIG_HOME/skiff/format-defaults.json, falling back to
@@ -51,9 +57,10 @@ var defaultsPathEnv = "SPICEEDIT_DEFAULTS_FILE"
 // resolves — the caller treats that as "no defaults file possible"
 // and skips the install-prompt feature entirely.
 //
-// Tests can override the path via SPICEEDIT_DEFAULTS_FILE.
+// Tests can override the path via SKIFF_DEFAULTS_FILE (or the
+// deprecated SPICEEDIT_DEFAULTS_FILE).
 func DefaultsPath() string {
-	if override := os.Getenv(defaultsPathEnv); override != "" {
+	if override := envOverride(defaultsPathEnv, legacyDefaultsPathEnv); override != "" {
 		return override
 	}
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
@@ -141,11 +148,7 @@ func InstallCommandIntoProject(rootDir, ext string, argv []string) (string, erro
 	// expect POSIX text files (many editors, lints).
 	data = append(data, '\n')
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := atomicfile.Write(path, data, 0644); err != nil {
 		return "", err
 	}
 

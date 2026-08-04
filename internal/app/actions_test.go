@@ -1,0 +1,572 @@
+// =============================================================================
+// File: internal/app/actions_test.go
+// Author: Spicer Matthews <spicer@cloudmanic.com>
+// Created: 2026-08-04
+// Copyright: 2026 Cloudmanic, LLC. All rights reserved.
+// =============================================================================
+
+// Tests for actions.go — one exercise per action-menu handler, driven the
+// way a click would drive it (menu open, action runs, menu closes). The
+// custom-action cases cover the async shell-out end to end: env expansion
+// in, customActionDoneEvent out, info modal on failure.
+
+package app
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gdamore/tcell/v2"
+
+	"github.com/johnlam90/skiff/internal/customactions"
+	"github.com/johnlam90/skiff/internal/editor"
+)
+
+// TestSidebarToggleLabel flips between Show/Hide based on sidebarShown.
+func TestSidebarToggleLabel(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	if a.sidebarToggleLabel() != "Hide file explorer" {
+		t.Fatalf("got %q", a.sidebarToggleLabel())
+	}
+	a.sidebarShown = false
+	if a.sidebarToggleLabel() != "Show file explorer" {
+		t.Fatalf("got %q", a.sidebarToggleLabel())
+	}
+}
+
+// TestMenuToggleSidebar flips the sidebarShown flag.
+func TestMenuToggleSidebar(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	if !a.sidebarShown {
+		t.Fatal("sidebar should start visible")
+	}
+	a.menuToggleSidebar()
+	if a.sidebarShown {
+		t.Fatal("expected hidden after first toggle")
+	}
+	a.menuToggleSidebar()
+	if !a.sidebarShown {
+		t.Fatal("expected shown after second toggle")
+	}
+}
+
+// TestMenuToggleLineComment runs the menu action against the active tab so the
+// app layer and editor-layer primitive stay wired together.
+func TestMenuToggleLineComment(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(target, []byte("one\ntwo"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+
+	a.menuToggleLineComment()
+
+	if got := a.activeTabPtr().Buffer.String(); got != "// one\ntwo" {
+		t.Fatalf("buffer = %q, want current line commented", got)
+	}
+	if a.statusMsg != "Toggled line comment" {
+		t.Fatalf("statusMsg = %q", a.statusMsg)
+	}
+}
+
+// TestMenuToggleLineComment_Unsupported flashes a clear no-op instead of
+// guessing at block-comment-only formats.
+func TestMenuToggleLineComment_Unsupported(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "index.html")
+	if err := os.WriteFile(target, []byte("<main></main>"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+
+	a.menuToggleLineComment()
+
+	if got := a.activeTabPtr().Buffer.String(); got != "<main></main>" {
+		t.Fatalf("unsupported buffer changed to %q", got)
+	}
+	if a.statusMsg != "No line comment syntax for this file" {
+		t.Fatalf("statusMsg = %q", a.statusMsg)
+	}
+}
+
+// TestMenuSaveAndClose saves then closes the active tab.
+func TestMenuSaveAndClose(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "sc.txt")
+	if err := os.WriteFile(target, []byte("seed"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	a.activeTabPtr().InsertString("Y")
+	a.menuSaveAndClose()
+	if a.tabs.Len() != 0 {
+		t.Fatalf("expected tab closed; got %d tabs", a.tabs.Len())
+	}
+}
+
+// TestMenuSaveAndClose_NoTab is a no-op when nothing is open.
+func TestMenuSaveAndClose_NoTab(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.menuSaveAndClose()
+}
+
+// TestMenuClickPaths covers menuSave/menuCopy/menuCut/menuPaste/menuClose
+// menuQuit and menuRefreshTree as one-liners.
+func TestMenuClickPaths(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("hi"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+
+	// Selection so copy/cut have something to operate on.
+	tab := a.activeTabPtr()
+	tab.Anchor = editor.Position{Line: 0, Col: 0}
+	tab.Cursor = editor.Position{Line: 0, Col: 2}
+
+	a.menuOpen = true
+	a.menuSave()
+	a.menuOpen = true
+	a.menuCopy()
+	a.menuOpen = true
+	tab.Anchor = editor.Position{Line: 0, Col: 0}
+	tab.Cursor = editor.Position{Line: 0, Col: 1}
+	a.menuCut()
+	a.menuOpen = true
+	a.menuPaste()
+	a.menuOpen = true
+	a.menuRefreshTree()
+
+	// Clean the tab before quitting; the dirty-quit path is exercised
+	// separately in dirty_modal_test.go.
+	tab.Dirty = false
+	a.menuOpen = true
+	a.menuQuit()
+	if !a.quit {
+		t.Fatal("menuQuit should set quit flag")
+	}
+}
+
+// TestUndoRedoRevert_MenuPaths exercises the new history actions end
+// to end through the menu wrappers. The flash on no-op paths is also
+// covered so the user always gets feedback when they hit a dead-end.
+func TestUndoRedoRevert_MenuPaths(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "edit.txt")
+	if err := os.WriteFile(target, []byte("seed"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+
+	// Nothing to undo / redo / revert on a freshly opened file.
+	if a.hasUndo() || a.hasRedo() || a.hasRevert() {
+		t.Fatal("freshly opened tab should have no history")
+	}
+	a.menuOpen = true
+	a.menuUndo()
+	a.menuOpen = true
+	a.menuRedo()
+	a.menuOpen = true
+	a.menuRevert()
+
+	// One edit → undo + revert become available.
+	tab.MoveCursorTo(editor.Position{Line: 0, Col: 4}, false)
+	tab.InsertString("X")
+	if !a.hasUndo() || !a.hasRevert() {
+		t.Fatal("expected undo + revert after edit")
+	}
+	if a.hasRedo() {
+		t.Fatal("redo should still be empty")
+	}
+
+	a.menuOpen = true
+	a.menuUndo()
+	if got := tab.Buffer.String(); got != "seed" {
+		t.Fatalf("after menuUndo = %q, want seed", got)
+	}
+	if !a.hasRedo() {
+		t.Fatal("redo should be populated after an undo")
+	}
+
+	a.menuOpen = true
+	a.menuRedo()
+	if got := tab.Buffer.String(); got != "seedX" {
+		t.Fatalf("after menuRedo = %q, want seedX", got)
+	}
+
+	// Revert back to original; then Undo must recover the post-edit state.
+	a.menuOpen = true
+	a.menuRevert()
+	if got := tab.Buffer.String(); got != "seed" {
+		t.Fatalf("after menuRevert = %q, want seed", got)
+	}
+	a.menuOpen = true
+	a.menuUndo()
+	if got := tab.Buffer.String(); got != "seedX" {
+		t.Fatalf("after undo-of-revert = %q, want seedX", got)
+	}
+}
+
+// TestUndoRedoRevert_NoTabSafelyNoOps guards against crashes when the
+// menu rows somehow fire with no active tab — they should silently
+// return rather than dereferencing nil.
+func TestUndoRedoRevert_NoTabSafelyNoOps(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.menuOpen = true
+	a.menuUndo()
+	a.menuOpen = true
+	a.menuRedo()
+	a.menuOpen = true
+	a.menuRevert()
+	if a.hasUndo() || a.hasRedo() || a.hasRevert() {
+		t.Fatal("no-tab predicates should all be false")
+	}
+}
+
+// TestMenuClose_NoTab safely no-ops.
+func TestMenuClose_NoTab(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.menuOpen = true
+	a.menuClose()
+}
+
+// TestRunCustomAction_NoFileStillRuns confirms a prompt-less action
+// runs even with no tab open. Earlier the runner short-circuited
+// here with a "no file open" flash, but that gate guessed wrong
+// for $FILE-free commands like "brew upgrade …" — they got blocked
+// even though they had no file dependency at all. The new contract:
+// always run; if a $FILE-dependent command then fails because FILE
+// is empty, the failure surfaces in the info modal with the actual
+// stderr, which is more informative than a generic flash.
+func TestRunCustomAction_NoFileStillRuns(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran.txt")
+	a := newTestApp(t, dir)
+	a.customActions = []customactions.Action{{
+		Label:   "Touch marker",
+		Command: "touch " + marker,
+	}}
+	a.runCustomAction(0)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ev := a.screen.PollEvent()
+		if ev == nil {
+			break
+		}
+		if _, ok := ev.(*customActionDoneEvent); ok {
+			break
+		}
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("command did not run: %v", err)
+	}
+	if strings.Contains(a.statusMsg, "no file open") {
+		t.Errorf("status flash should not mention no file open: %q", a.statusMsg)
+	}
+}
+
+// TestRunCustomAction_OutOfRange is a no-op when idx is bogus. Caller
+// should never produce one but the guard keeps a stale layout from
+// crashing the editor.
+func TestRunCustomAction_OutOfRange(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.runCustomAction(0)  // empty list
+	a.runCustomAction(99) // out of range
+}
+
+// TestRunCustomAction_ExecutesAndPostsEvent runs a real `sh -c`
+// command against a small file and confirms that (a) the command
+// observed FILE / FILENAME via env, and (b) a customActionDoneEvent
+// lands on the screen's event queue. The chosen command writes a
+// marker file that lets the test verify env reached the subprocess.
+func TestRunCustomAction_ExecutesAndPostsEvent(t *testing.T) {
+	// Redirect the action log into the test's temp dir so we don't
+	// scribble into the developer's real ~/.local/state/skiff/.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir := t.TempDir()
+	target := filepath.Join(dir, "src.txt")
+	if err := os.WriteFile(target, []byte("payload"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	marker := filepath.Join(dir, "marker.txt")
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	a.customActions = []customactions.Action{{
+		Label:   "Mark",
+		Command: `printf "%s|%s" "$FILE" "$FILENAME" > ` + marker,
+	}}
+
+	a.runCustomAction(0)
+
+	// The action runs in a goroutine and posts an event back. Pull
+	// events off the screen's queue until we see the done event, with
+	// a sanity timeout so a regression can't hang the suite forever.
+	deadline := time.Now().Add(2 * time.Second)
+	var done *customActionDoneEvent
+	for time.Now().Before(deadline) && done == nil {
+		ev := a.screen.PollEvent()
+		if ev == nil {
+			break
+		}
+		if d, ok := ev.(*customActionDoneEvent); ok {
+			done = d
+		}
+	}
+	if done == nil {
+		t.Fatal("no customActionDoneEvent received within timeout")
+	}
+	if done.err != nil {
+		t.Fatalf("action errored: %v", done.err)
+	}
+	if done.label != "Mark" {
+		t.Errorf("event label = %q", done.label)
+	}
+
+	// Verify the subprocess saw the env variables we exported.
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("marker read: %v", err)
+	}
+	want := target + "|" + "src.txt"
+	if string(got) != want {
+		t.Fatalf("marker content = %q, want %q", got, want)
+	}
+}
+
+// TestRunCustomAction_PromptedSkipsNoFileGuard ensures actions that
+// declare prompts can run even when no tab is open. Copy-from-remote
+// is the motivating case — without this, the very first thing the
+// user wants to do in a fresh session would silently flash "no file
+// open" and refuse to show the form.
+func TestRunCustomAction_PromptedSkipsNoFileGuard(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.customActions = []customactions.Action{{
+		Label:   "Copy from remote",
+		Command: "true",
+		Prompts: []customactions.Prompt{
+			{Key: "HOST", Type: customactions.PromptSelect, Options: []string{"a", "b"}},
+		},
+	}}
+	a.runCustomAction(0)
+
+	if !formIsOpen(a) {
+		t.Fatal("prompted action with no file open should still show the form modal")
+	}
+	if strings.Contains(a.statusMsg, "no file open") {
+		t.Errorf("prompted action should not flash no-file-open: %q", a.statusMsg)
+	}
+}
+
+// TestRunCustomAction_PromptedExportsValuesAndExpands walks the full
+// SCP-from-remote path: the form opens, we fill it in, submit, and
+// assert the spawned shell saw both the form-collected env vars
+// (HOST, REMOTE_SRC) and the editor-state vars (PROJECT_ROOT). This
+// is the contract that makes the feature actually useful — if any of
+// these don't reach the shell, the user's command fails silently.
+func TestRunCustomAction_PromptedExportsValuesAndExpands(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "marker.txt")
+	a := newTestApp(t, dir)
+	a.customActions = []customactions.Action{{
+		Label:   "Copy from remote",
+		Command: `printf "%s|%s|%s" "$HOST" "$REMOTE_SRC" "$PROJECT_ROOT" > ` + marker,
+		Prompts: []customactions.Prompt{
+			{Key: "HOST", Type: customactions.PromptSelect, Options: []string{"cascade", "rager"}},
+			{Key: "REMOTE_SRC", Type: customactions.PromptText},
+		},
+	}}
+
+	a.runCustomAction(0)
+	if !formIsOpen(a) {
+		t.Fatal("form did not open")
+	}
+
+	// Fill in REMOTE_SRC by typing into the focused field after Tab'ing
+	// past the HOST select — all through real routing.
+	a.handleKey(tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone))
+	for _, r := range "/etc/hosts" {
+		a.handleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
+	a.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if formIsOpen(a) {
+		t.Fatal("Enter on last field should submit")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ev := a.screen.PollEvent()
+		if ev == nil {
+			break
+		}
+		if _, ok := ev.(*customActionDoneEvent); ok {
+			break
+		}
+	}
+
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("marker read: %v", err)
+	}
+	parts := strings.Split(string(got), "|")
+	if len(parts) != 3 {
+		t.Fatalf("marker = %q, want HOST|REMOTE_SRC|PROJECT_ROOT", got)
+	}
+	if parts[0] != "cascade" {
+		t.Errorf("HOST = %q, want %q", parts[0], "cascade")
+	}
+	if parts[1] != "/etc/hosts" {
+		t.Errorf("REMOTE_SRC = %q, want %q", parts[1], "/etc/hosts")
+	}
+	if !strings.HasSuffix(parts[2], filepath.Base(dir)) {
+		t.Errorf("PROJECT_ROOT = %q, want suffix matching tempdir", parts[2])
+	}
+}
+
+// TestHandleCustomActionDone_FailureOpensInfoModal pins the error
+// reporting upgrade. The pre-fix behaviour was a one-line status
+// flash that truncated scp's stderr exactly when the user most
+// needed to read it. Now failures route into the info modal so the
+// stderr lines stay visible until dismissed.
+func TestHandleCustomActionDone_FailureOpensInfoModal(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.handleCustomActionDone(&customActionDoneEvent{
+		label:  "Copy from remote",
+		err:    fmt.Errorf("exit status 1"),
+		output: []byte("scp: /etc/missing: No such file or directory\n"),
+	})
+	n := infoPrefab(t, a)
+	joined := strings.Join(n.Lines, "\n")
+	if !strings.Contains(joined, "scp:") || !strings.Contains(joined, "missing") {
+		t.Errorf("info body missing stderr preview: %q", joined)
+	}
+	if !strings.Contains(n.Title, "Copy from remote") {
+		t.Errorf("title = %q, want it to mention the action label", n.Title)
+	}
+}
+
+// TestHandleCustomActionDone_SuccessRefreshesTree confirms a
+// successful action triggers an immediate tree refresh so a
+// freshly-pulled file appears without waiting on the 10-second
+// auto-refresh tick. Pinning this avoids a regression where a user
+// runs Copy-from-remote, sees "done", and then has to pause before
+// the new file becomes clickable in the sidebar.
+func TestHandleCustomActionDone_SuccessRefreshesTree(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	// Drop a file directly on disk that the tree hasn't seen yet —
+	// without an explicit refresh it would only show up on the next
+	// 10-second tick.
+	newFile := filepath.Join(dir, "fresh.txt")
+	if err := os.WriteFile(newFile, []byte("payload"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	beforeChildren := len(a.tree.Root.Children)
+	a.handleCustomActionDone(&customActionDoneEvent{label: "X"})
+	if got := len(a.tree.Root.Children); got <= beforeChildren {
+		t.Errorf("tree was not refreshed: %d → %d children", beforeChildren, got)
+	}
+}
+
+// TestSplitErrorOutput_TruncatesAndAppendsLogPath nails the body
+// the info modal renders on failure. Without truncation a runaway
+// scp -v dump would push the dialog off-screen; without the actions.log
+// pointer the user can't easily get the full version even though
+// we're already writing it.
+func TestSplitErrorOutput_TruncatesAndAppendsLogPath(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "/tmp/xdgtest")
+
+	long := strings.Repeat("really long line that exceeds eighty cells ", 4)
+	out := []byte(long + "\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\n")
+	body := splitErrorOutput(fmt.Errorf("exit 1"), out)
+
+	if body[0] != "exit 1" {
+		t.Errorf("body[0] = %q, want exit-error summary", body[0])
+	}
+	last := body[len(body)-1]
+	if !strings.Contains(last, "actions.log") {
+		t.Errorf("last line = %q, want actions.log pointer", last)
+	}
+	for _, ln := range body {
+		if runeLen(ln) > 80 {
+			t.Errorf("line over 80 cells: %q (len=%d)", ln, runeLen(ln))
+		}
+	}
+	if !strings.Contains(strings.Join(body, "\n"), "truncated") {
+		t.Error("expected '… truncated' marker for >maxLines output")
+	}
+}
+
+// TestMenuToggleSidebar_NoPanicInSingleFileMode is a regression guard for
+// a crash: the Esc-t leader calls menuToggleSidebar directly, bypassing the
+// menu row's hasTree gate. In single-file mode (tree == nil) flipping
+// sidebarShown true would send draw() into a.tree.Render on a nil tree and
+// panic. The toggle must stay a no-op so the sidebar can't be shown when
+// there's no tree behind it.
+func TestMenuToggleSidebar_NoPanicInSingleFileMode(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.tree = nil // single-file mode
+	a.sidebarShown = false
+
+	a.menuToggleSidebar() // simulates the Esc-t leader
+
+	if a.sidebarShown {
+		t.Fatal("sidebar must stay hidden in single-file mode — no tree to render")
+	}
+	a.draw() // would panic on nil a.tree.Render if the toggle flipped it on
+}
+
+// TestMenuToggleWrap pins the toggle's full contract: it flips the app
+// preference and every open tab together, swaps the dynamic menu label,
+// and persists the choice to the user config file.
+func TestMenuToggleWrap(t *testing.T) {
+	cfgHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "t.txt")
+	if err := os.WriteFile(target, []byte("hello"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	if !a.activeTabPtr().Wrap {
+		t.Fatal("tabs should open with wrap on by default")
+	}
+	if got := a.wrapToggleLabel(); got != "Unwrap long lines" {
+		t.Fatalf("label = %q, want Unwrap long lines", got)
+	}
+
+	a.menuToggleWrap()
+	if a.wrapOn || a.activeTabPtr().Wrap {
+		t.Fatal("toggle should turn wrap off for the app and all open tabs")
+	}
+	if got := a.wrapToggleLabel(); got != "Wrap long lines" {
+		t.Fatalf("label after toggle = %q, want Wrap long lines", got)
+	}
+	data, err := os.ReadFile(filepath.Join(cfgHome, "skiff", "config.json"))
+	if err != nil {
+		t.Fatalf("config not written: %v", err)
+	}
+	if !strings.Contains(string(data), `"wrap": "off"`) {
+		t.Fatalf("config missing wrap off:\n%s", data)
+	}
+
+	a.menuToggleWrap()
+	if !a.wrapOn || !a.activeTabPtr().Wrap {
+		t.Fatal("second toggle should turn wrap back on")
+	}
+}

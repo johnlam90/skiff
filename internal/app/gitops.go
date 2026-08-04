@@ -87,7 +87,7 @@ func (a *App) handleGitOpDone(e *gitOpDoneEvent) {
 		a.openConfirm("Branch not merged",
 			name+" has commits that aren't merged anywhere. Force delete?",
 			func(app *App) {
-				app.runGitOp("Force delete", "Deleted "+name, false, []string{"branch", "-D", name})
+				app.runGitOp("Force delete", "Deleted "+name, false, []string{"branch", "-D", "--", name})
 			})
 	default:
 		lines := []string{explainGit(e.output), ""}
@@ -175,11 +175,35 @@ func gitHasUpstream(root string) bool {
 	return err == nil
 }
 
+// flashUnsafeRef reports a ref skiff refused to place on git's argv.
+// Flash, not a modal: it is either a hostile clone or a typo, and
+// neither deserves ceremony.
+func (a *App) flashUnsafeRef(name string) {
+	a.flash(fmt.Sprintf("Refusing unsafe branch name %q", name))
+}
+
+// safeRef validates a ref that arrived from a picker row, a prompt, or
+// the refs a cloned repository shipped, before it reaches git's argv.
+func (a *App) safeRef(name string) (string, bool) {
+	ref, err := git.SafeRef(name)
+	if err != nil {
+		a.flashUnsafeRef(name)
+		return "", false
+	}
+	return ref, true
+}
+
 // gitPushCmds builds the push command: plain when an upstream exists,
 // --set-upstream origin <branch> for a branch's first push (druk's
-// rule — the second push shouldn't need a shell visit either).
+// rule — the second push shouldn't need a shell visit either). push
+// takes no `--` separator, so an unsafe branch name loses the
+// positional entirely: plain `push` then fails with git's own "no
+// upstream" message instead of handing git an option we didn't write.
 func gitPushCmds(root, branch string) [][]string {
 	if gitHasUpstream(root) {
+		return [][]string{{"push"}}
+	}
+	if _, err := git.SafeRef(branch); err != nil {
 		return [][]string{{"push"}}
 	}
 	return [][]string{{"push", "--set-upstream", "origin", branch}}
@@ -366,6 +390,15 @@ func (a *App) setDiffBase(base string) {
 	if base == a.gitSnap.Branch {
 		base = "" // comparing a branch against itself is just HEAD
 	}
+	if base != "" {
+		// The base is pasted onto the argv of every diff the editor
+		// runs — tree tint, gutter, panel list, diff view — and stays
+		// there until it's cleared. Validate once, here, instead of at
+		// four call sites that would each have to remember.
+		if _, ok := a.safeRef(base); !ok {
+			return
+		}
+	}
 	a.diffBase = base
 	if base == "" {
 		a.flash("Comparing against HEAD")
@@ -462,22 +495,36 @@ func (a *App) doGitSwitchBranch(name string) {
 		return
 	}
 	cmds := gitSwitchCmds(a.rootDir, name)
+	if cmds == nil {
+		a.flashUnsafeRef(name)
+		return
+	}
 	a.runGitOp("Switch branch", "On "+localBranchName(name), true, cmds...)
 }
 
 // gitSwitchCmds picks the checkout invocation for name (local or
-// remote-tracking spelling).
+// remote-tracking spelling), or nil when the name can't safely reach
+// git's argv. Every ref is followed by `--`: without the separator a
+// branch a clone shipped named `--output=/tmp/x` is read as an option
+// rather than a ref. SafeRef covers the same hole for the `-b` value,
+// which sits in a position no separator protects.
 func gitSwitchCmds(root, name string) [][]string {
+	if _, err := git.SafeRef(name); err != nil {
+		return nil
+	}
 	i := strings.IndexByte(name, '/')
 	if i < 0 {
-		return [][]string{{"checkout", name}}
+		return [][]string{{"checkout", name, "--"}}
 	}
 	local := name[i+1:]
+	if _, err := git.SafeRef(local); err != nil {
+		return nil
+	}
 	_, err := git.Output(root, "rev-parse", "--verify", "--quiet", "refs/heads/"+local)
 	if err == nil {
-		return [][]string{{"checkout", local}}
+		return [][]string{{"checkout", local, "--"}}
 	}
-	return [][]string{{"checkout", "-b", local, "--track", name}}
+	return [][]string{{"checkout", "-b", local, "--track", name, "--"}}
 }
 
 // localBranchName strips the remote prefix from a remote-tracking
@@ -500,7 +547,10 @@ func (a *App) menuGitNewBranch() {
 		if name == "" {
 			return
 		}
-		app.runGitOp("New branch", "On "+name, false, []string{"checkout", "-b", name})
+		if _, ok := app.safeRef(name); !ok {
+			return
+		}
+		app.runGitOp("New branch", "On "+name, false, []string{"checkout", "-b", name, "--"})
 	})
 }
 
@@ -564,7 +614,10 @@ func (a *App) openMergeBranchPick(all []string) {
 	}
 	a.openListPick("Merge into "+a.gitSnap.Branch, branchPickItems(names, ""),
 		func(app *App, i int) {
-			app.runGitOp("Merge", "Merged "+names[i], true, []string{"merge", "--no-edit", names[i]})
+			if _, ok := app.safeRef(names[i]); !ok {
+				return
+			}
+			app.runGitOp("Merge", "Merged "+names[i], true, []string{"merge", "--no-edit", names[i], "--"})
 		}, nil, nil)
 }
 
@@ -580,7 +633,10 @@ func (a *App) menuGitRenameBranch() {
 		if name == "" || name == old {
 			return
 		}
-		app.runGitOp("Rename branch", "Renamed to "+name, false, []string{"branch", "-m", old, name})
+		if _, ok := app.safeRef(name); !ok {
+			return
+		}
+		app.runGitOp("Rename branch", "Renamed to "+name, false, []string{"branch", "-m", "--", old, name})
 	})
 }
 
@@ -605,11 +661,14 @@ func (a *App) openDeleteBranchPick(all []string) {
 	a.openListPick("Delete branch", branchPickItems(names, ""),
 		func(app *App, i int) {
 			name := names[i]
+			if _, ok := app.safeRef(name); !ok {
+				return
+			}
 			app.openConfirm("Delete branch",
 				"Delete "+name+"? Unmerged work on it would be lost.",
 				func(app2 *App) {
 					app2.gitDeleteTarget = name
-					app2.runGitOp("Delete branch", "Deleted "+name, false, []string{"branch", "-d", name})
+					app2.runGitOp("Delete branch", "Deleted "+name, false, []string{"branch", "-d", "--", name})
 				})
 		}, nil, nil)
 }

@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Match is one hit: a project-relative path, a 1-based line number, the
@@ -168,14 +169,59 @@ func searchFile(path, rel, needle string, caseSensitive bool, re *regexp.Regexp,
 // offset and length (-1, 0 when none). Regex and whole-word are layered
 // here so the sweep loop stays a single call.
 func lineMatch(line, needle string, caseSensitive bool, re *regexp.Regexp, wholeWord bool) (int, int) {
-	return lineMatchFrom(line, 0, needle, caseSensitive, re, wholeWord)
+	return lineMatchFrom(line, matchHaystack(line, caseSensitive, re), 0, needle, re, wholeWord)
+}
+
+// matchHaystack returns the string literal probes run against: the line
+// itself in case-sensitive or regex mode, its offset-preserving fold
+// otherwise. Callers that probe one line repeatedly (ReplaceLine's scan)
+// build it once and pass it down — folding inside the probe made a long
+// line quadratic, since each probe lowercased the whole remaining tail.
+func matchHaystack(line string, caseSensitive bool, re *regexp.Regexp) string {
+	if caseSensitive || re != nil {
+		return line
+	}
+	return foldLine(line)
+}
+
+// foldLine returns a lowercase copy of line whose byte offsets still name
+// the same positions as the original. Runes whose lowercase form encodes
+// to a different width (the Kelvin sign, dotted capital I, a handful of
+// others) and invalid UTF-8 bytes are deliberately left alone: the
+// offsets this feeds are used to slice the ORIGINAL line, so folding
+// those would slide every later offset and cut a replacement mid-rune.
+// Every line without one of them — which is very nearly all of them —
+// folds exactly the way strings.ToLower would.
+func foldLine(line string) string {
+	var out []byte
+	for i, r := range line {
+		if r == utf8.RuneError {
+			// Either a real U+FFFD, which folds to itself, or an invalid
+			// byte, which strings.ToLower would widen to three.
+			continue
+		}
+		lower := unicode.ToLower(r)
+		if lower == r || utf8.RuneLen(lower) != utf8.RuneLen(r) {
+			continue
+		}
+		if out == nil {
+			out = []byte(line)
+		}
+		utf8.EncodeRune(out[i:], lower)
+	}
+	if out == nil {
+		return line
+	}
+	return string(out)
 }
 
 // lineMatchFrom is lineMatch with a starting byte offset — the scan
-// loop replaceLine walks the line with. Word-boundary checks always
-// consult the FULL line, so a suffix scan can't mistake a mid-word
-// position for a word start.
-func lineMatchFrom(line string, from int, needle string, caseSensitive bool, re *regexp.Regexp, wholeWord bool) (int, int) {
+// loop ReplaceLine walks the line with. hay is the haystack literal
+// probes search (see matchHaystack); it is byte-aligned with line, so an
+// offset found in one names the same position in the other.
+// Word-boundary checks always consult the FULL line, so a suffix scan
+// can't mistake a mid-word position for a word start.
+func lineMatchFrom(line, hay string, from int, needle string, re *regexp.Regexp, wholeWord bool) (int, int) {
 	for from <= len(line) {
 		var idx, length int
 		if re != nil {
@@ -185,11 +231,7 @@ func lineMatchFrom(line string, from int, needle string, caseSensitive bool, re 
 			}
 			idx, length = from+loc[0], loc[1]-loc[0]
 		} else {
-			hay := line[from:]
-			if !caseSensitive {
-				hay = strings.ToLower(hay)
-			}
-			i := strings.Index(hay, needle)
+			i := strings.Index(hay[from:], needle)
 			if i < 0 {
 				return -1, 0
 			}
@@ -286,9 +328,11 @@ func ReplaceLine(line, query, repl string, opts Options) (string, int) {
 		return line, 0
 	}
 	var b strings.Builder
+	// Folded once for the whole scan below, not once per probe.
+	hay := matchHaystack(line, caseSensitive, re)
 	from, n := 0, 0
 	for {
-		idx, length := lineMatchFrom(line, from, needle, caseSensitive, re, opts.WholeWord)
+		idx, length := lineMatchFrom(line, hay, from, needle, re, opts.WholeWord)
 		if idx < 0 {
 			break
 		}
@@ -321,6 +365,12 @@ func ReplaceLine(line, query, repl string, opts Options) (string, int) {
 	}
 	if n == 0 {
 		return line, 0
+	}
+	// A zero-width regex hit at end-of-line pushes `from` one past the
+	// last byte (the +1 above forces progress with nothing left to copy),
+	// so the tail write has to clamp or it slices out of range.
+	if from > len(line) {
+		from = len(line)
 	}
 	b.WriteString(line[from:])
 	return b.String(), n

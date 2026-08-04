@@ -55,6 +55,29 @@ const (
 	GitLineDeleted
 )
 
+// LineEnding is the newline convention a file uses on disk. Buffers are
+// normalised to bare LF-separated lines on load (see NewBuffer) and the
+// recorded ending is written back on save, so editing one line of a
+// CRLF file doesn't turn the whole file into a diff.
+type LineEnding int
+
+const (
+	// LineEndingLF is "\n". It is the zero value, so a Tab built by hand
+	// (tests, scratch buffers) writes POSIX-style.
+	LineEndingLF LineEnding = iota
+	// LineEndingCRLF is "\r\n" — the convention Windows-authored files
+	// arrive with.
+	LineEndingCRLF
+)
+
+// Newline returns the bytes this ending writes between lines.
+func (e LineEnding) Newline() string {
+	if e == LineEndingCRLF {
+		return "\r\n"
+	}
+	return "\n"
+}
+
 // Tab is a single open file. It owns the on-disk path, the in-memory buffer,
 // the per-tab view state (scroll position, cursor, selection anchor), the
 // cached syntax-highlight styles, and a dirty flag.
@@ -66,6 +89,11 @@ type Tab struct {
 	ScrollY int      // Index of the first visible line.
 	ScrollX int      // Index of the first visible column (rune-indexed). Always 0 with Wrap on.
 	Dirty   bool
+
+	// LineEnding is the convention the file had on disk. The buffer
+	// holds unterminated lines, so this is the only record of how the
+	// file wants to be written back; Save re-joins with it.
+	LineEnding LineEnding
 
 	// Wrap turns on soft wrap: long lines flow onto continuation rows
 	// instead of panning horizontally. Stamped by the app from the user
@@ -110,11 +138,18 @@ type Tab struct {
 	cursorMoved bool
 
 	// Undo / redo stacks plus the original on-open snapshot used by
-	// RevertFile. See undo.go for the push / coalescing rules and the
-	// public Undo / Redo / RevertFile entry points.
+	// RevertFile and the baseline the dirty flag is measured against.
+	// savedBaseline tracks the LAST WRITE, not the open — after a save,
+	// "does this differ from disk" is a different question from "does
+	// this differ from what was opened". undoBytes is the running size
+	// of undoStack that trimUndoStack enforces the budget against. See
+	// undo.go for the push / coalescing rules and the public
+	// Undo / Redo / RevertFile entry points.
 	undoStack     []snapshot
 	redoStack     []snapshot
 	undoOriginal  snapshot
+	savedBaseline snapshot
+	undoBytes     int
 	lastUndoGroup undoGroup
 	lastUndoAt    time.Time
 
@@ -136,6 +171,13 @@ type Tab struct {
 	FindMatches []Match
 	FindIndex   int // -1 = no current match; otherwise an index into FindMatches.
 
+	// findRows indexes FindMatches by buffer line so the renderer's
+	// per-cell lookup stays sub-linear; findRowsFor is the match count
+	// it was built from, which is how a direct write to the exported
+	// FindMatches gets caught. See find.go's matchAtRune.
+	findRows    map[int]findRowSpan
+	findRowsFor int
+
 	// Preview marks a tab opened by single-clicking the file tree: the
 	// next single-click preview replaces it in place instead of piling
 	// up tabs (VS Code / druk behavior). Editing or an explicit open
@@ -151,11 +193,6 @@ type Tab struct {
 	IndentUnit string
 }
 
-// NewTab opens path and returns a Tab. If the file does not exist, the tab
-// is created with an empty buffer that will be written on first save —
-// matching what most editors do when you "open" a brand-new file path.
-// When path looks like an image we recognise (PNG / JPEG / GIF), the tab
-// is opened in read-only image-preview mode instead of as text.
 // ErrBinaryFile marks a refusal to open non-text content into a text
 // buffer. Callers surface it as a flash; image formats never hit it —
 // they take the image-tab path first.
@@ -173,6 +210,35 @@ func looksBinary(data []byte) bool {
 	return bytes.IndexByte(probe, 0) >= 0
 }
 
+// detectLineEnding picks the ending a freshly-read file should be saved
+// with: whichever convention most of its newlines already use. A tie —
+// including a file with no newline at all — goes to LF, which is what
+// the editor writes for brand-new files. A mixed file is normalised to
+// its dominant ending on the next save, which is the same call every
+// other editor makes.
+func detectLineEnding(data []byte) LineEnding {
+	crlf, lf := 0, 0
+	for i, b := range data {
+		if b != '\n' {
+			continue
+		}
+		if i > 0 && data[i-1] == '\r' {
+			crlf++
+			continue
+		}
+		lf++
+	}
+	if crlf > lf {
+		return LineEndingCRLF
+	}
+	return LineEndingLF
+}
+
+// NewTab opens path and returns a Tab. If the file does not exist, the tab
+// is created with an empty buffer that will be written on first save —
+// matching what most editors do when you "open" a brand-new file path.
+// When path looks like an image we recognise (PNG / JPEG / GIF), the tab
+// is opened in read-only image-preview mode instead of as text.
 func NewTab(path string) (*Tab, error) {
 	if path != "" && isImageExt(path) {
 		return newImageTab(path)
@@ -205,6 +271,7 @@ func NewTab(path string) (*Tab, error) {
 		Buffer:     NewBuffer(string(data)),
 		StyleStale: true,
 		Mtime:      mtime,
+		LineEnding: detectLineEnding(data),
 	}
 	t.IndentUnit = DetectIndent(t.Buffer.Lines, path)
 	// Record the on-open buffer state so RevertFile has somewhere to
@@ -281,11 +348,15 @@ func (t *Tab) Save() error {
 	if t.Path == "" {
 		return fmt.Errorf("no path set for tab")
 	}
-	if err := os.WriteFile(t.Path, []byte(t.Buffer.String()), 0644); err != nil {
+	if err := os.WriteFile(t.Path, []byte(t.Buffer.TextWith(t.LineEnding.Newline())), 0644); err != nil {
 		return err
 	}
 	t.Dirty = false
 	t.DiskGone = false
+	// Disk now holds exactly this buffer, so re-baseline the dirty
+	// comparison: after a save, "differs from what was opened" is the
+	// wrong question and only "differs from what was written" matters.
+	t.markSaved()
 	if info, err := os.Stat(t.Path); err == nil {
 		t.Mtime = info.ModTime()
 	}
@@ -330,6 +401,7 @@ func (t *Tab) Reload() error {
 		return err
 	}
 	t.Buffer = NewBuffer(string(data))
+	t.LineEnding = detectLineEnding(data)
 	t.Cursor = t.Buffer.Clamp(t.Cursor)
 	t.Anchor = t.Cursor // drop any selection — line indices may have shifted.
 	t.Dirty = false
@@ -790,7 +862,7 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		// — a tab one cell into the line still expands to the next stop,
 		// not the next-stop-from-the-scroll-offset. ScrollX skips runes;
 		// the visual column we paint at is rune-walked from there.
-		runes := []rune(t.Buffer.Lines[lineIdx])
+		runes := t.Buffer.LineRunes(lineIdx)
 		var styles []tcell.Style
 		if lineIdx < len(t.Styles) {
 			styles = t.Styles[lineIdx]
