@@ -58,7 +58,8 @@ internal/app/menu.go          Menu behavior: filter field, nav, hit-test, drawin
 internal/app/actions.go       One handler per menu row + the custom-action runner
 internal/app/tabops.go        Tab lifecycle, save/close guards, clipboard, has* gates
 internal/app/conflict.go      Dirty-buffer-vs-changed-file prompt + buffer/disk diff
-internal/app/gitchanges.go    Git panel: rows, buttons, keyboard mode, hint strip
+internal/app/gitchanges.go    Git panel: rows, buttons, keyboard mode, hint
+                              strip, and the change list's own scrollbar
 internal/app/gitstatus.go     Best-effort `git status` read behind the tree tint
 internal/app/overlays.go      Overlay stack wiring: menu adapter + dropOverlay
 internal/app/modals.go        Openers for the prefab overlays + closeAllModals
@@ -79,8 +80,14 @@ internal/editor/cluster.go    Grapheme clusters + terminal cell widths (uniseg)
 internal/editor/bracket.go    Bracket match under the caret (+ the render decision)
 internal/filetree/filetree.go Lazy tree, identity-preserving refresh, hit-test,
                               render — plus the per-directory child cap
-                              (MaxDirChildren + "… N more" sentinel) and the
-                              ReadErr "(unreadable)" mark
+                              (MaxDirChildren + "… N more" sentinel), the
+                              ReadErr "(unreadable)" mark, and the sidebar's
+                              own scrollbar column
+internal/scrollbar/           The one definition of a scrollbar: thumb
+                              geometry, its click inverse, and the Track/
+                              Thumb glyphs. No tcell, no theme — both the
+                              editor's bar and the tree's import it so they
+                              cannot drift
 internal/search/search.go     Literal smart-case project search engine
 internal/finder/              Project file index (git ls-files, gitignore-aware
                               walk fallback) + the fzy-style fuzzy matcher
@@ -97,7 +104,11 @@ internal/atomicfile/atomicfile.go Temp-file + fsync + rename write, shared by
 internal/overlay/             Floating surfaces: the Stack (routing truth),
                               Field/chrome primitives, and the prefab
                               overlays (Prompt/Confirm/Info/Dirty/Form/
-                              Popup/Pick)
+                              Popup/Pick). scrollbar.go is the shared
+                              scroll indicator every windowing prefab
+                              paints in its frame's right padding
+                              column — Confirm's trust body, Info's
+                              stderr/diff, Pick's list
 internal/git/                 Git process boundary: Repo over a Runner
                               seam (real exec + in-memory Fake), hardened
                               env + read timeouts on every call, and the

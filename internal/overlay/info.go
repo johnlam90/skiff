@@ -73,6 +73,21 @@ func (n *Info) bodyRows() int {
 // Scroll exposes the first visible line index for tests.
 func (n *Info) Scroll() int { return n.scroll }
 
+// bar describes the body's scroll indicator inside frame r: the frame's
+// right-hand padding column, spanning exactly the rows Draw fills with
+// Lines. Body text is clipped to r.W-4 cells and so never reaches that
+// column, which is what keeps DiffLineStyle off the bar — a diff
+// preview colors its own lines, not the scrollbar beside them.
+func (n *Info) bar(r Rect) bodyBar {
+	return bodyBar{
+		x:      barColumn(r),
+		top:    r.Y + 3,
+		viewH:  n.bodyRows(),
+		total:  len(n.Lines),
+		scroll: n.scroll,
+	}
+}
+
 // ScrollBy moves the body window by delta lines, clamped to the content.
 func (n *Info) ScrollBy(delta int) {
 	maxScroll := len(n.Lines) - n.bodyRows()
@@ -105,8 +120,9 @@ func (n *Info) HandleKey(ev *tcell.EventKey) {
 }
 
 // HandleMouse: wheel scrolls the body (WheelUp/WheelDown — the masks
-// tcell actually emits for wheels and trackpads); a click on OK or
-// outside the modal dismisses.
+// tcell actually emits for wheels and trackpads); a press on the scroll
+// indicator jumps the thumb there; a click on OK or outside the modal
+// dismisses.
 func (n *Info) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	r := n.rect()
 	if btn&tcell.WheelUp != 0 {
@@ -118,6 +134,14 @@ func (n *Info) HandleMouse(x, y int, btn tcell.ButtonMask) {
 		return
 	}
 	if btn&tcell.Button1 == 0 {
+		return
+	}
+	// The indicator's column is claimed before the dismissal paths: a
+	// 300-line stderr dump is exactly where a user reaches for the bar,
+	// and losing the report to a stray dismiss would be worse than not
+	// having one.
+	if b := n.bar(r); b.hit(x, y) {
+		n.scroll = b.target(y)
 		return
 	}
 	if !r.Contains(x, y) {
@@ -155,6 +179,7 @@ func (n *Info) Draw(scr tcell.Screen) {
 		st := DiffLineStyle(th, bg, line)
 		drawText(scr, r.X+2, r.Y+3+i, trimRunes(line, r.W-4), st)
 	}
+	n.bar(r).draw(scr, th)
 	DrawButton(scr, r.X+(r.W-10)/2, r.Y+r.H-3, "[  OK  ]", bg, th.Accent, true)
 	scr.HideCursor()
 }

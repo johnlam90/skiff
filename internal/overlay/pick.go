@@ -172,7 +172,8 @@ func (p *Pick) HandleKey(ev *tcell.EventKey) {
 }
 
 // HandleMouse: hover moves the highlight (with preview), click picks,
-// outside-click cancels, wheel scrolls.
+// outside-click cancels, wheel scrolls — except on the scroll
+// indicator's column, which the bar claims for itself.
 func (p *Pick) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	if btn&tcell.WheelUp != 0 {
 		p.scroll -= 3
@@ -182,6 +183,17 @@ func (p *Pick) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	if btn&tcell.WheelDown != 0 {
 		p.scroll += 3
 		p.clampScroll()
+		return
+	}
+	// Claimed before rowAt: without this a press on the bar would fall
+	// through and *pick* whichever row sits behind the thumb, which is
+	// the worst possible answer to "let me see further down the list".
+	// The hit is false whenever no bar is drawn, so a list that fits
+	// keeps the column as ordinary row surface.
+	if b := p.bar(p.rect()); b.hit(x, y) {
+		if btn&tcell.Button1 != 0 {
+			p.scroll = b.target(y)
+		}
 		return
 	}
 	idx, inside := p.rowAt(x, y)
@@ -251,6 +263,20 @@ func (p *Pick) clampScroll() {
 	}
 	if p.scroll < 0 {
 		p.scroll = 0
+	}
+}
+
+// bar describes the list's scroll indicator inside frame r. total is
+// the FILTERED length, not len(Items): the filtered view is the list
+// the user is scrolling, so narrowing the query has to shrink the bar
+// with it — and retire it entirely once the matches fit.
+func (p *Pick) bar(r Rect) bodyBar {
+	return bodyBar{
+		x:      barColumn(r),
+		top:    r.Y + 4,
+		viewH:  p.visibleRows(),
+		total:  len(p.Filtered()),
+		scroll: p.scroll,
 	}
 }
 
@@ -324,6 +350,9 @@ func (p *Pick) Draw(scr tcell.Screen) {
 	if len(filtered) == 0 {
 		drawText(scr, r.X+2, rowsStart, "no matches", mutedStyle)
 	}
+	// After the rows: drawRow fills the frame's inner width, padding
+	// column included, so the bar has to land on top of it.
+	p.bar(r).draw(scr, th)
 }
 
 // drawRow paints one row: ● on the current item, the label, and a

@@ -124,10 +124,12 @@ The goals, in order:
   preview of each session says so once — "Preview tab — edit it or
   click again to keep it open" — because a tab that replaces itself
   silently reads as tabs going missing.
-- **Scrollbar with a change map** — long files get a clickable,
-  draggable scrollbar on the editor's right edge with the file's git
+- **Scrollbars you can actually see** — long files get a clickable,
+  draggable scrollbar on the editor's right edge: a solid block thumb
+  on a shaded track, brightening while you drag it, with the file's git
   changes marked along it, so "where did I change this file" is one
-  glance (and one click) away.
+  glance (and one click) away. The file tree grows the same bar on the
+  sidebar's edge whenever the listing outgrows the panel.
 - **Editing that keeps up** — `Enter` opens the new line with the same
   indentation the old one had, plus one level after an opening `{`,
   `[`, `(` (or a trailing `:` in Python / YAML). `Alt+←` / `Alt+→`

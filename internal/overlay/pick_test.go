@@ -8,10 +8,12 @@
 package overlay
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/scrollbar"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -166,5 +168,135 @@ func TestPick_DrawShowsRowsMarkerAndTag(t *testing.T) {
 	}
 	if ph != "type" {
 		t.Fatalf("placeholder missing, got %q", ph)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// List scroll indicator
+// -----------------------------------------------------------------------------
+
+// longPick builds an n-item pick on an 80×24 screen — long enough to
+// overflow pickMaxVisible when n is large, and to fit when it is small.
+func longPick(n int) (*Pick, *[]string) {
+	var log []string
+	p := &Pick{
+		Title: "T",
+		Theme: theme.Default(),
+		Size:  func() (int, int) { return 80, 24 },
+		Items: make([]PickItem, n),
+	}
+	for i := range n {
+		p.Items[i] = PickItem{Label: "branch-" + string(rune('a'+i%26))}
+	}
+	p.Close = func() { log = append(log, "close") }
+	p.OnPick = func(i int) { log = append(log, "pick:"+p.Items[i].Label) }
+	p.Init()
+	return p, &log
+}
+
+// pickBarColumn draws p and reads its indicator column back across the
+// list rows.
+func pickBarColumn(t *testing.T, scr tcell.SimulationScreen, p *Pick) string {
+	t.Helper()
+	p.Draw(scr)
+	scr.Show()
+	return barCol(scr, p.bar(p.rect()))
+}
+
+// TestPick_NoIndicatorWhenListFits pins the no-noise half. It matters
+// more here than elsewhere: Pick sizes its frame to the item count, so
+// most picks fit exactly and a bar would be permanent decoration.
+func TestPick_NoIndicatorWhenListFits(t *testing.T) {
+	scr := simScreen(t)
+	p, _ := longPick(5)
+	col := pickBarColumn(t, scr, p)
+	if strings.ContainsAny(col, string([]rune{scrollbar.Track, scrollbar.Thumb})) {
+		t.Fatalf("a 5-item list fits in its own frame, got %q", col)
+	}
+}
+
+// TestPick_IndicatorTracksScroll pins the overflow case now that Pick
+// is the menu's drill-in surface: past pickMaxVisible rows the list
+// windows, and the bar reports both that it does and where the window
+// sits.
+func TestPick_IndicatorTracksScroll(t *testing.T) {
+	scr := simScreen(t)
+	p, _ := longPick(40)
+
+	top := pickBarColumn(t, scr, p)
+	if !strings.HasPrefix(top, string(scrollbar.Thumb)) || !strings.ContainsRune(top, scrollbar.Track) {
+		t.Fatalf("40 items in a %d-row window: got %q", p.visibleRows(), top)
+	}
+
+	p.scroll = len(p.Items) - p.visibleRows()
+	bottom := pickBarColumn(t, scr, p)
+	if !strings.HasSuffix(bottom, string(scrollbar.Thumb)) {
+		t.Fatalf("at the end the thumb must finish the track, got %q", bottom)
+	}
+	wantStart, wantLen, ok := scrollbar.Geom(len(p.Items), p.visibleRows(), p.scroll)
+	if !ok {
+		t.Fatal("fixture should overflow")
+	}
+	for row, got := range []rune(bottom) {
+		want := scrollbar.Track
+		if row >= wantStart && row < wantStart+wantLen {
+			want = scrollbar.Thumb
+		}
+		if got != want {
+			t.Fatalf("bar row %d: got %q, want %q (col %q)", row, got, want, bottom)
+		}
+	}
+}
+
+// TestPick_IndicatorShrinksWithTheFilter pins that the bar measures the
+// FILTERED list, not len(Items): typing a query that narrows 40 items
+// down to a handful must retire the bar, because the remaining rows all
+// fit and the column goes back to being row surface.
+func TestPick_IndicatorShrinksWithTheFilter(t *testing.T) {
+	scr := simScreen(t)
+	p, _ := longPick(40)
+	if !strings.ContainsRune(pickBarColumn(t, scr, p), scrollbar.Thumb) {
+		t.Fatal("unfiltered 40-item list should show a bar")
+	}
+	p.Filter.Value = []rune("branch-a")
+	p.filterChanged()
+	col := pickBarColumn(t, scr, p)
+	if strings.ContainsAny(col, string([]rune{scrollbar.Track, scrollbar.Thumb})) {
+		t.Fatalf("a narrowed list that fits must drop the bar, got %q", col)
+	}
+}
+
+// TestPick_BarPressScrollsInsteadOfPicking is the click-steal
+// regression: the bar's column is inside the row band, so without the
+// hit-test claiming it first, reaching for the scrollbar would pick
+// whatever row sits behind the thumb — checking out a branch instead of
+// scrolling to the one you wanted.
+func TestPick_BarPressScrollsInsteadOfPicking(t *testing.T) {
+	scr := simScreen(t)
+	p, log := longPick(40)
+	pickBarColumn(t, scr, p)
+
+	b := p.bar(p.rect())
+	p.HandleMouse(b.x, b.top+b.viewH-1, tcell.Button1)
+	if want := len(p.Items) - p.visibleRows(); p.scroll != want {
+		t.Fatalf("press at the foot of the bar: scroll %d, want %d", p.scroll, want)
+	}
+	if len(*log) != 0 {
+		t.Fatalf("a bar press must not pick or close, got %v", *log)
+	}
+
+	// Hovering the bar must not drag the highlight around either.
+	before := p.Selected
+	p.HandleMouse(b.x, b.top, tcell.ButtonNone)
+	if p.Selected != before {
+		t.Fatalf("hovering the bar moved the highlight: %d → %d", before, p.Selected)
+	}
+
+	// With the bar gone the same cell is ordinary row surface again.
+	short, shortLog := longPick(5)
+	sr := short.rect()
+	short.HandleMouse(barColumn(sr), sr.Y+4, tcell.Button1)
+	if len(*shortLog) == 0 {
+		t.Fatal("without a bar the padding column must still pick its row")
 	}
 }

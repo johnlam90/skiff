@@ -22,6 +22,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/icons"
+	"github.com/johnlam90/skiff/internal/scrollbar"
 	"github.com/johnlam90/skiff/internal/theme"
 
 	"github.com/johnlam90/skiff/internal/git"
@@ -110,6 +111,19 @@ type Tree struct {
 	Root    *Node
 	visible []*Node // index = screen row in the list area; nil for blank rows.
 	ScrollY int
+
+	// flatCount is how many rows the last Render flattened the tree
+	// into — the "total" the scrollbar's proportions are measured
+	// against. It is render-derived state exactly like visible above,
+	// so the bar's hit-test answers for the tree the user is actually
+	// looking at rather than re-walking the node graph on every click.
+	flatCount int
+
+	// ScrollbarActive is a pure presentational flag: the app sets it
+	// while the user drags the tree's scrollbar thumb so the thumb
+	// brightens to Accent, the same idle/active language the sidebar
+	// splitter uses. Never affects geometry.
+	ScrollbarActive bool
 
 	// ActiveFolder is the absolute path of the folder the user is
 	// currently "working in" — the default target for actions like New
@@ -429,9 +443,41 @@ func flattenInto(n *Node, depth int, out *[]flatNode) {
 	}
 }
 
+// listHeaderRows is how many rows of a tree render rect sit above the
+// scrollable list: the EXPLORER header and the project-root row. Both
+// are pinned, which is why HitTest offsets by the same number and the
+// scrollbar starts below them.
+const listHeaderRows = 2
+
+// listArea splits a render rect h rows tall into the pinned header
+// block and the scrollable list below it, returning the list's row
+// offset within the rect and its height (never negative).
+func listArea(h int) (offset, height int) {
+	height = h - listHeaderRows
+	if height < 0 {
+		height = 0
+	}
+	return listHeaderRows, height
+}
+
+// minScrollbarWidth is the narrowest tree rect that still gets a
+// scrollbar. At the app's minSidebarWidth (18) the rect is 17 columns
+// and labels keep 16 — plenty — so the bar is present at every width a
+// user can drag to. The floor only exists so a pathologically narrow
+// rect (a tiny terminal, a test fixture) spends its cells on names
+// instead of on a bar with nothing left to point at.
+const minScrollbarWidth = 6
+
 // Render draws the tree into the rectangle (x, y, w, h). Each visible row
 // is also remembered (in t.visible) so HitTest can map a click back to a
 // node without re-walking the tree.
+//
+// A listing taller than the list area reserves the rect's rightmost
+// column for the scrollbar and draws the rows one cell narrower, so
+// labels and the git change letter stop where the bar starts. The bar
+// spans only the scrollable rows: the EXPLORER header and the project
+// root above it are pinned, and a bar drawn past them would claim they
+// scroll.
 func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 	bg := th.SidebarBG
 	bgStyle := tcell.StyleDefault.Background(bg).Foreground(th.Text)
@@ -466,13 +512,19 @@ func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 	for _, c := range t.Root.Children {
 		flattenInto(c, 0, &flat)
 	}
+	t.flatCount = len(flat)
 
-	listTop := y + 2
-	listH := h - 2
-	if listH < 0 {
-		listH = 0
-	}
+	listOff, listH := listArea(h)
+	listTop := y + listOff
 	t.clampScroll(len(flat), listH)
+
+	// Reserve the bar's column before any row is drawn so truncation
+	// and the paint agree — the same order Tab.Render uses.
+	rowW := w
+	bar := t.scrollbarVisible(w, listH)
+	if bar {
+		rowW--
+	}
 
 	// An empty project renders as a bare root row with nothing under
 	// it, which reads as "the tree failed to load" rather than "there
@@ -490,7 +542,7 @@ func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 				label = UnreadableLabel
 			}
 			emptyStyle := tcell.StyleDefault.Background(bg).Foreground(th.Muted).Italic(true)
-			drawString(scr, x, listTop, w, " "+label, emptyStyle)
+			drawString(scr, x, listTop, rowW, " "+label, emptyStyle)
 		}
 		t.visible = nil
 		return
@@ -506,10 +558,83 @@ func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		item := flat[idx]
 		active := item.Node.Path == t.ActiveFile || (item.Node.IsDir && item.Node.Path == t.ActiveFolder)
 		change := t.changeKind(item.Node)
-		drawNodeRow(scr, th, x, listTop+row, w, item, active, change, t.IconsEnabled)
+		drawNodeRow(scr, th, x, listTop+row, rowW, item, active, change, t.IconsEnabled)
 		visible = append(visible, item.Node)
 	}
 	t.visible = visible
+	if bar {
+		t.renderScrollbar(scr, th, x+w-1, listTop, listH)
+	}
+}
+
+// scrollbarVisible reports whether a w-wide rect with a listH-row list
+// area draws a bar: only when the last flatten produced more rows than
+// fit, and only when the rect can spare the column. A full-height thumb
+// says nothing, so it is not drawn — the same rule the editor follows.
+func (t *Tree) scrollbarVisible(w, listH int) bool {
+	if w < minScrollbarWidth {
+		return false
+	}
+	_, _, ok := scrollbar.Geom(t.flatCount, listH, t.ScrollY)
+	return ok
+}
+
+// ScrollbarVisible reports whether the tree draws a scrollbar in a w×h
+// render rect. The app uses it to decide whether the sidebar's
+// rightmost column is a scroll target or an ordinary tree row.
+func (t *Tree) ScrollbarVisible(w, h int) bool {
+	_, listH := listArea(h)
+	return t.scrollbarVisible(w, listH)
+}
+
+// ScrollbarHit reports whether a click at rect-local (localX, localY)
+// inside a w×h render rect landed on the scrollbar. The bar owns the
+// rect's rightmost column, which is one to the LEFT of the sidebar's
+// resize splitter — the splitter lives outside this rect entirely (see
+// App.sidebarRect), so the two can never contend for a cell.
+func (t *Tree) ScrollbarHit(localX, localY, w, h int) bool {
+	listOff, listH := listArea(h)
+	if !t.scrollbarVisible(w, listH) {
+		return false
+	}
+	return localX == w-1 && localY >= listOff && localY < listOff+listH
+}
+
+// ScrollToBarRow scrolls the list so the thumb centers on the rect-local
+// row localY of a w×h render rect — the click-to-jump and drag path,
+// which are the same gesture as far as the bar is concerned. No-op when
+// no bar is drawn.
+func (t *Tree) ScrollToBarRow(w, h, localY int) {
+	listOff, listH := listArea(h)
+	if !t.scrollbarVisible(w, listH) {
+		return
+	}
+	t.ScrollY = scrollbar.TargetForThumb(t.flatCount, listH, localY-listOff)
+}
+
+// renderScrollbar paints the list area's one-column bar at x: the same
+// shaded track and solid thumb the editor draws, on the sidebar's own
+// background so the column reads as part of the panel. The thumb
+// brightens to Accent while the user drags it, matching both the editor
+// bar and the resize splitter.
+func (t *Tree) renderScrollbar(scr tcell.Screen, th theme.Theme, x, y, listH int) {
+	thumbStart, thumbLen, ok := scrollbar.Geom(t.flatCount, listH, t.ScrollY)
+	if !ok {
+		return
+	}
+	thumbFg := th.Muted
+	if t.ScrollbarActive {
+		thumbFg = th.Accent
+	}
+	trackStyle := tcell.StyleDefault.Background(th.SidebarBG).Foreground(th.Subtle)
+	thumbStyle := tcell.StyleDefault.Background(th.SidebarBG).Foreground(thumbFg)
+	for row := 0; row < listH; row++ {
+		r, st := scrollbar.Track, trackStyle
+		if row >= thumbStart && row < thumbStart+thumbLen {
+			r, st = scrollbar.Thumb, thumbStyle
+		}
+		scr.SetContent(x, y+row, r, nil, st)
+	}
 }
 
 // changeKind returns the git status color category for a tree node.
@@ -728,7 +853,7 @@ func (t *Tree) HitTest(localX, localY int) (*Node, bool) {
 	if localY == 1 {
 		return t.Root, true
 	}
-	row := localY - 2
+	row := localY - listHeaderRows
 	if row < 0 || row >= len(t.visible) {
 		return nil, false
 	}

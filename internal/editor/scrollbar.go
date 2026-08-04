@@ -9,7 +9,8 @@
 // right edge: a proportional thumb plus the file's git change marks
 // scaled onto the track — so "where are the changes in this file" is
 // answered at a glance and every mark is somewhere to click. The
-// geometry is pure math (testable without a screen); Render calls
+// geometry and the glyphs come from internal/scrollbar so the file
+// tree's bar and this one can never disagree; Render calls
 // renderScrollbar; the mouse mapping lives in the app layer via
 // ScrollTargetForClick.
 
@@ -18,59 +19,16 @@ package editor
 import (
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/scrollbar"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
-// scrollbarGeom computes the thumb for a total-line buffer in a
-// viewH-row viewport at scrollY: proportional length (min 1 row, always
-// leaving some track), start clamped to the track. ok=false means the
-// file fits and no bar should draw.
-func scrollbarGeom(total, viewH, scrollY int) (thumbStart, thumbLen int, ok bool) {
-	if viewH <= 0 || total <= viewH {
-		return 0, 0, false
-	}
-	thumbLen = viewH * viewH / total
-	if thumbLen < 1 {
-		thumbLen = 1
-	}
-	if thumbLen >= viewH {
-		thumbLen = viewH - 1
-	}
-	span := viewH - thumbLen
-	denom := total - viewH
-	thumbStart = scrollY * span / denom
-	if thumbStart < 0 {
-		thumbStart = 0
-	}
-	if thumbStart > span {
-		// Overscroll (clampScroll allows half a screen past the end)
-		// pins the thumb to the bottom instead of pushing it off-track.
-		thumbStart = span
-	}
-	return thumbStart, thumbLen, true
-}
-
-// scrollTargetForThumb maps a click at bar-local row clickY to the
-// ScrollY that centers the thumb on that row, clamped to [0, max
-// scroll]. The inverse of scrollbarGeom's position math.
-func scrollTargetForThumb(total, viewH, clickY int) int {
-	_, thumbLen, ok := scrollbarGeom(total, viewH, 0)
-	if !ok {
-		return 0
-	}
-	span := viewH - thumbLen
-	if span < 1 {
-		return 0
-	}
-	pos := clickY - thumbLen/2
-	if pos < 0 {
-		pos = 0
-	}
-	if pos > span {
-		pos = span
-	}
-	return pos * (total - viewH) / span
-}
+// gitMarkGlyph is the half-block the change map paints over the bar. It
+// is deliberately a DIFFERENT shape from the thumb's full block: a mark
+// landing on the thumb has to stay readable as a mark rather than a
+// discoloured piece of thumb, and half-vs-full is a shape difference
+// that survives a monochrome terminal.
+const gitMarkGlyph = '▐'
 
 // ScrollbarVisible reports whether the tab draws a scrollbar in a
 // viewH-row viewport — text tabs taller than the view only.
@@ -85,25 +43,36 @@ func (t *Tab) ScrollbarVisible(viewH int) bool {
 // ScrollY it requests — the app's mouse handler funnels both the
 // initial press and thumb drags through this.
 func (t *Tab) ScrollTargetForClick(viewH, clickY int) int {
-	return scrollTargetForThumb(t.Buffer.LineCount(), viewH, clickY)
+	return scrollbar.TargetForThumb(t.Buffer.LineCount(), viewH, clickY)
 }
 
-// renderScrollbar paints the bar column at x: a subtle track, a heavier
-// proportional thumb, and the file's git change marks scaled onto it.
-// Marks win over the thumb — they're the "somewhere to scroll to"
-// signal, and the thumb's position is still legible around them.
+// renderScrollbar paints the bar column at x: a light-shade track, a
+// solid proportional thumb, and the file's git change marks scaled onto
+// it. Marks win over the thumb — they're the "somewhere to scroll to"
+// signal — but on a thumb row they keep the thumb's colour as their
+// background, so a mark reads as a coloured notch ON the bar instead of
+// a hole punched THROUGH it.
+//
+// The thumb brightens to Accent while the user is dragging it, matching
+// the sidebar splitter's idle-Subtle / dragging-Accent language so
+// "this is the thing under my finger" reads the same everywhere.
 func (t *Tab) renderScrollbar(scr tcell.Screen, th theme.Theme, x, y, viewH int) {
 	total := t.Buffer.LineCount()
-	thumbStart, thumbLen, ok := scrollbarGeom(total, viewH, t.ScrollY)
+	thumbStart, thumbLen, ok := scrollbar.Geom(total, viewH, t.ScrollY)
 	if !ok {
 		return
 	}
+	thumbFg := th.Muted
+	if t.ScrollbarActive {
+		thumbFg = th.Accent
+	}
 	trackStyle := tcell.StyleDefault.Background(th.BG).Foreground(th.Subtle)
-	thumbStyle := tcell.StyleDefault.Background(th.BG).Foreground(th.Muted)
+	thumbStyle := tcell.StyleDefault.Background(th.BG).Foreground(thumbFg)
+	onThumb := func(row int) bool { return row >= thumbStart && row < thumbStart+thumbLen }
 	for row := 0; row < viewH; row++ {
-		r, st := '│', trackStyle
-		if row >= thumbStart && row < thumbStart+thumbLen {
-			r, st = '┃', thumbStyle
+		r, st := scrollbar.Track, trackStyle
+		if onThumb(row) {
+			r, st = scrollbar.Thumb, thumbStyle
 		}
 		scr.SetContent(x, y+row, r, nil, st)
 	}
@@ -127,7 +96,11 @@ func (t *Tab) renderScrollbar(scr tcell.Screen, th theme.Theme, x, y, viewH int)
 		if kind == GitLineNone {
 			continue
 		}
-		st := tcell.StyleDefault.Background(th.BG).Foreground(gitLineMarkerColor(th, kind))
-		scr.SetContent(x, y+row, '▐', nil, st)
+		bg := th.BG
+		if onThumb(row) {
+			bg = thumbFg
+		}
+		st := tcell.StyleDefault.Background(bg).Foreground(gitLineMarkerColor(th, kind))
+		scr.SetContent(x, y+row, gitMarkGlyph, nil, st)
 	}
 }

@@ -50,8 +50,10 @@ import (
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
+
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/scrollbar"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -430,6 +432,15 @@ func (a *App) gitPanelClick(x, y int) {
 		return
 	}
 	listH, _ := a.gitPanelBody()
+	// The bar owns the panel's rightmost column, so it has to be
+	// claimed before the row hit-test everything below falls through
+	// to — otherwise a press on the thumb opens the diff of whatever
+	// row happens to sit behind it. Branch line (y 1), button row
+	// (y 2) and the hint strip below the list are outside its span.
+	if a.gitPanelBarHit(x, y) {
+		a.gitPanelScrollToBar(y)
+		return
+	}
 	idx := a.gitPanelScroll + y - gitPanelListTop
 	if y < gitPanelListTop || y-gitPanelListTop >= listH || idx < 0 || idx >= len(a.gitPanelRows) {
 		return
@@ -454,6 +465,72 @@ func (a *App) gitPanelClick(x, y int) {
 // gitPanelListTop is the sidebar row where the change list starts:
 // header tabs, branch line, buttons row, then files.
 const gitPanelListTop = 3
+
+// gitPanelBarMinWidth is the narrowest panel that still spends a column
+// on the scroll indicator. The sidebar's own minimum (18) leaves the
+// panel 17 columns, so the bar is present at every width a user can
+// drag to; the floor only keeps a pathologically narrow rect (a tiny
+// terminal, a test fixture) spending its cells on file names instead
+// of on a bar with nothing left to point at. Mirrors the file tree's
+// minScrollbarWidth, for the same reason.
+const gitPanelBarMinWidth = 6
+
+// gitPanelBar returns the sidebar-local column the change list's scroll
+// indicator owns in a sw-wide panel with a listH-row list, and whether
+// it is drawn at all. The column is the panel rect's rightmost — one to
+// the LEFT of the resize splitter, exactly where the file tree puts its
+// bar, so splitter, bar and rows stay three distinct column ranges at
+// any y. ok is false when the list fits (a full-height thumb says
+// nothing) or the panel cannot spare the cell.
+func (a *App) gitPanelBar(sw, listH int) (x int, ok bool) {
+	if sw < gitPanelBarMinWidth {
+		return 0, false
+	}
+	if _, _, fits := scrollbar.Geom(len(a.gitPanelRows), listH, a.gitPanelScroll); !fits {
+		return 0, false
+	}
+	return sw - 1, true
+}
+
+// gitPanelBarHit reports whether a sidebar-local press at (x, y) landed
+// on the change list's scroll indicator. The span stops at the list's
+// last row, so the keyboard hint strip docked under it keeps its own
+// cells.
+func (a *App) gitPanelBarHit(x, y int) bool {
+	_, _, sw, _ := a.sidebarRect()
+	listH, _ := a.gitPanelBody()
+	barX, ok := a.gitPanelBar(sw, listH)
+	return ok && x == barX && y >= gitPanelListTop && y < gitPanelListTop+listH
+}
+
+// gitPanelScrollToBar scrolls the change list so its thumb centers on
+// sidebar-local row y — the click-to-jump gesture the tree's bar
+// answers, sharing the same inverse math so the two cannot drift.
+func (a *App) gitPanelScrollToBar(y int) {
+	listH, _ := a.gitPanelBody()
+	a.gitPanelScroll = scrollbar.TargetForThumb(len(a.gitPanelRows), listH, y-gitPanelListTop)
+}
+
+// drawGitPanelBar paints the change list's one-column bar at screen
+// column x: the same shaded track and solid thumb the file tree and the
+// editor draw, on the sidebar's own background so the column reads as
+// part of the panel rather than as a hole in it.
+func (a *App) drawGitPanelBar(x, top, listH int) {
+	thumbStart, thumbLen, ok := scrollbar.Geom(len(a.gitPanelRows), listH, a.gitPanelScroll)
+	if !ok {
+		return
+	}
+	bg := a.theme.SidebarBG
+	trackStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Subtle)
+	thumbStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
+	for row := range listH {
+		r, st := scrollbar.Track, trackStyle
+		if row >= thumbStart && row < thumbStart+thumbLen {
+			r, st = scrollbar.Thumb, thumbStyle
+		}
+		a.screen.SetContent(x, top+row, r, nil, st)
+	}
+}
 
 // gitPanelBtn is one clickable action on the panel's button row, with
 // its x-range in sidebar-local cells. verb is the button's full name,
@@ -842,6 +919,13 @@ func (a *App) drawSidebarHeader(sx, sy, sw int) {
 //	0    EXPLORER   GIT      (drawSidebarHeader)
 //	1    branch name
 //	2+   change rows — " M name  dir", letter colored, dir dimmed
+//
+// A change list taller than the visible rows reserves the panel's
+// rightmost column for a scrollbar and draws the rows one cell
+// narrower, so a 40-file repo says "there is more below" instead of
+// just stopping. The bar spans only the list: the branch line, the
+// button row and the keyboard hint strip are not scrollable, and a bar
+// drawn over them would claim they are.
 func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 	bg := a.theme.SidebarBG
 	fill := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
@@ -888,9 +972,19 @@ func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 	listH, hint := a.gitPanelBody()
 	a.scrollGitPanel(0)
 
+	// Reserve the bar's column before a single row is drawn, so the
+	// labels, the status letter and the stage checkbox all stop where
+	// the bar starts instead of being painted underneath it — the same
+	// ordering Tree.Render uses for the sidebar's other bar.
+	rowW := sw
+	barX, bar := a.gitPanelBar(sw, listH)
+	if bar {
+		rowW--
+	}
+
 	if len(a.gitPanelRows) == 0 {
 		muted := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
-		drawClipped(a.screen, sx+1, sy+gitPanelListTop, sw-1, a.gitPanelEmptyLabel(), muted)
+		drawClipped(a.screen, sx+1, sy+gitPanelListTop, rowW-1, a.gitPanelEmptyLabel(), muted)
 	} else {
 		rowFocus := a.gitPanelRowFocus()
 		for i := range listH {
@@ -899,8 +993,11 @@ func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 				break
 			}
 			sel := idx == a.gitPanelSelected
-			a.drawGitPanelRow(sx, sy+gitPanelListTop+i, sw, a.gitPanelRows[idx], sel, sel && rowFocus)
+			a.drawGitPanelRow(sx, sy+gitPanelListTop+i, rowW, a.gitPanelRows[idx], sel, sel && rowFocus)
 		}
+	}
+	if bar {
+		a.drawGitPanelBar(sx+barX, sy+gitPanelListTop, listH)
 	}
 	if len(hint) > 0 {
 		a.drawGitPanelHint(sx, sy, sw, sh, hint)

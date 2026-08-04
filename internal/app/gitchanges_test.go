@@ -20,6 +20,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/scrollbar"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -1094,5 +1095,232 @@ func TestGitPanelKeys_EditorPressDropsCapture(t *testing.T) {
 	}
 	if !a.gitPanelActive {
 		t.Fatal("the press releases focus, it does not close the panel")
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Change-list scroll indicator
+// -----------------------------------------------------------------------------
+
+// gitPanelApp builds an app showing the Git panel with n synthetic
+// change rows. Synthetic on purpose: the scroll indicator's whole
+// subject is list length, and a fixture that has to `git init` forty
+// files to test a thumb position is a fixture nobody will maintain.
+func gitPanelApp(t *testing.T, n int) *App {
+	t.Helper()
+	a := newTestApp(t, t.TempDir())
+	a.gitSnap.IsRepo = true
+	a.gitSnap.Branch = "main"
+	a.gitPanelActive = true
+	a.gitPanelRows = make([]gitChangeRow, n)
+	for i := range n {
+		name := "file" + itoa(i) + ".go"
+		a.gitPanelRows[i] = gitChangeRow{
+			Rel:  name,
+			Abs:  filepath.Join(a.rootDir, name),
+			Kind: filetree.GitChangeModified,
+		}
+	}
+	return a
+}
+
+// gitPanelBarColumn draws the app and reads back the panel's rightmost
+// column across the change list's rows — the bar's column when one is
+// drawn.
+func gitPanelBarColumn(t *testing.T, a *App) string {
+	t.Helper()
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	_, sy, sw, _ := a.sidebarRect()
+	listH, _ := a.gitPanelBody()
+	out := make([]rune, 0, listH)
+	for i := range listH {
+		c := cells[(sy+gitPanelListTop+i)*w+sw-1]
+		if len(c.Runes) == 0 {
+			out = append(out, ' ')
+			continue
+		}
+		out = append(out, c.Runes[0])
+	}
+	return string(out)
+}
+
+// TestGitPanelScrollbar_HiddenWhenListFits pins the no-noise rule: a
+// repo with a handful of changes shows no bar, and the column stays
+// with the file names.
+func TestGitPanelScrollbar_HiddenWhenListFits(t *testing.T) {
+	a := gitPanelApp(t, 4)
+	col := gitPanelBarColumn(t, a)
+	if strings.ContainsAny(col, string([]rune{scrollbar.Track, scrollbar.Thumb})) {
+		t.Fatalf("a 4-row list must draw no bar, got %q", col)
+	}
+	_, _, sw, _ := a.sidebarRect()
+	listH, _ := a.gitPanelBody()
+	if _, ok := a.gitPanelBar(sw, listH); ok {
+		t.Fatal("gitPanelBar should agree with what was painted")
+	}
+}
+
+// TestGitPanelScrollbar_ThumbTracksScroll is the bug this closes: a
+// repo with forty changed files used to show about thirty and simply
+// stop, with nothing saying more existed or where in the list you were.
+// The bar spans the change rows only — the branch line, the button row
+// and everything above stay clear, because they do not scroll.
+func TestGitPanelScrollbar_ThumbTracksScroll(t *testing.T) {
+	a := gitPanelApp(t, 60)
+	listH, _ := a.gitPanelBody()
+	if len(a.gitPanelRows) <= listH {
+		t.Fatalf("fixture should overflow: %d rows in %d", len(a.gitPanelRows), listH)
+	}
+
+	top := gitPanelBarColumn(t, a)
+	if !strings.HasPrefix(top, string(scrollbar.Thumb)) || !strings.ContainsRune(top, scrollbar.Track) {
+		t.Fatalf("60 rows in a %d-row list: got %q", listH, top)
+	}
+	// The chrome above the list must not carry the bar.
+	scr := a.screen.(tcell.SimulationScreen)
+	_, _, sw, _ := a.sidebarRect()
+	for y := range gitPanelListTop {
+		if got := []rune(screenLine(scr, y))[sw-1]; got == scrollbar.Track || got == scrollbar.Thumb {
+			t.Fatalf("chrome row %d carries the bar (%q) — it does not scroll", y, got)
+		}
+	}
+
+	a.scrollGitPanel(len(a.gitPanelRows))
+	bottom := gitPanelBarColumn(t, a)
+	if !strings.HasSuffix(bottom, string(scrollbar.Thumb)) {
+		t.Fatalf("at the end the thumb must finish the track, got %q", bottom)
+	}
+	wantStart, wantLen, ok := scrollbar.Geom(len(a.gitPanelRows), listH, a.gitPanelScroll)
+	if !ok {
+		t.Fatal("fixture should overflow")
+	}
+	for row, got := range []rune(bottom) {
+		want := scrollbar.Track
+		if row >= wantStart && row < wantStart+wantLen {
+			want = scrollbar.Thumb
+		}
+		if got != want {
+			t.Fatalf("bar row %d: got %q, want %q (col %q)", row, got, want, bottom)
+		}
+	}
+}
+
+// TestGitPanelScrollbar_ReservesTheRowColumn pins the width math: the
+// bar's column comes out of the row width before anything is drawn, so
+// a long path is truncated one cell earlier instead of being painted
+// underneath the bar. The stage checkbox is on the other end of the
+// row, so it is untouched either way.
+func TestGitPanelScrollbar_ReservesTheRowColumn(t *testing.T) {
+	a := gitPanelApp(t, 60)
+	long := strings.Repeat("deep/", 12) + "name.go"
+	a.gitPanelRows[0] = gitChangeRow{
+		Rel:  long,
+		Abs:  filepath.Join(a.rootDir, long),
+		Kind: filetree.GitChangeModified,
+	}
+	row := []rune(gitScreenRow(t, a, gitPanelListTop))
+	_, _, sw, _ := a.sidebarRect()
+	if got := row[sw-1]; got != scrollbar.Thumb && got != scrollbar.Track {
+		t.Fatalf("bar column should hold the bar, got %q (row %q)", got, string(row))
+	}
+	if row[sw-2] == ' ' {
+		t.Fatalf("the label should run right up to the bar, got %q", string(row))
+	}
+	if row[1] != '●' {
+		t.Fatalf("the stage checkbox must keep its cell, got %q", string(row))
+	}
+
+	// Once the listing fits, the column goes back to the label.
+	a.gitPanelRows = a.gitPanelRows[:2]
+	row = []rune(gitScreenRow(t, a, gitPanelListTop))
+	if got := row[sw-1]; got == scrollbar.Thumb || got == scrollbar.Track {
+		t.Fatalf("no bar expected once the list fits, got %q", string(row))
+	}
+}
+
+// TestGitPanelScrollbar_ClickScrollsAndLeavesTheRestAlone is the
+// hit-test three-way: the bar's column scrolls, the row beside it still
+// opens its diff, and the checkbox column still stages — all at the
+// same y, so the bar cannot be silently eating row clicks.
+func TestGitPanelScrollbar_ClickScrollsAndLeavesTheRestAlone(t *testing.T) {
+	a := gitPanelApp(t, 60)
+	a.draw()
+	_, _, sw, _ := a.sidebarRect()
+	listH, _ := a.gitPanelBody()
+	barX, ok := a.gitPanelBar(sw, listH)
+	if !ok {
+		t.Fatal("fixture should draw a bar")
+	}
+	y := gitPanelListTop + listH - 1
+
+	// The bar: scrolls, opens nothing, moves no selection. Driven
+	// through the real dispatcher, because the routing is half the
+	// claim — the press has to survive the splitter check and the
+	// tree-bar check before sidebarClick ever sees it.
+	a.handleMouse(tcell.NewEventMouse(barX, y, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(barX, y, tcell.ButtonNone, 0))
+	if want := len(a.gitPanelRows) - listH; a.gitPanelScroll != want {
+		t.Fatalf("bar click: scroll %d, want %d", a.gitPanelScroll, want)
+	}
+	if a.overlays.IsOpen() {
+		t.Fatal("a bar click must not open the diff")
+	}
+	if a.gitPanelSelected != 0 {
+		t.Fatalf("a bar click must not move the selection, got %d", a.gitPanelSelected)
+	}
+
+	// The checkbox column at the same y: stages, opens nothing.
+	idx := a.gitPanelScroll + y - gitPanelListTop
+	abs := a.gitPanelRows[idx].Abs
+	a.gitPanelClick(1, y)
+	if a.commitCheckOn(abs) {
+		t.Fatal("the checkbox column must still toggle the stage mark")
+	}
+	if a.overlays.IsOpen() {
+		t.Fatal("the checkbox must not open the diff")
+	}
+
+	// The label between them: still activates the row.
+	a.gitPanelClick(6, y)
+	if a.gitPanelSelected != idx {
+		t.Fatalf("a row click should select row %d, got %d", idx, a.gitPanelSelected)
+	}
+
+	// The button row and the branch line are above the bar's span.
+	if a.gitPanelBarHit(barX, 1) || a.gitPanelBarHit(barX, 2) {
+		t.Fatal("the bar must not claim the branch or button rows")
+	}
+	if a.gitPanelBarHit(barX, gitPanelListTop+listH) {
+		t.Fatal("the bar must stop where the list does")
+	}
+}
+
+// TestGitPanelScrollbar_KeepsClearOfTheHintStrip pins the interaction
+// with keyboard mode: the hint strip docks at the bottom of the panel
+// and takes its rows out of the list, so the bar has to shorten with
+// the list rather than paint over the bindings.
+func TestGitPanelScrollbar_KeepsClearOfTheHintStrip(t *testing.T) {
+	a := gitPanelApp(t, 60)
+	a.gitPanelKeys = true
+	listH, hint := a.gitPanelBody()
+	if len(hint) == 0 {
+		t.Fatal("keyboard mode should dock a hint strip")
+	}
+	// Every list row carries the bar, so its span is provably the
+	// list's — not just the window this helper happened to read.
+	for row, got := range []rune(gitPanelBarColumn(t, a)) {
+		if got != scrollbar.Track && got != scrollbar.Thumb {
+			t.Fatalf("list row %d of %d has no bar cell, got %q", row, listH, got)
+		}
+	}
+	scr := a.screen.(tcell.SimulationScreen)
+	_, _, sw, sh := a.sidebarRect()
+	for i := range hint {
+		if got := []rune(screenLine(scr, sh-len(hint)+i))[sw-1]; got == scrollbar.Track || got == scrollbar.Thumb {
+			t.Fatalf("hint row %d carries the bar (%q)", i, got)
+		}
 	}
 }

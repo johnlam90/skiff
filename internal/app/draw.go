@@ -50,6 +50,12 @@ func (a *App) draw() {
 		if a.gitPanelActive {
 			a.drawGitPanel(sx, sy, sw, sh)
 		} else {
+			// Both scrollbar "I'm being dragged" flags are derived from
+			// dragMode here rather than latched by the press/release
+			// path, so a drag that ends through some other route (an
+			// overlay opening, closeAllModals) can't strand a thumb in
+			// its bright Accent state. Same rule drawSplitter follows.
+			a.tree.ScrollbarActive = a.dragMode == "treescrollbar"
 			a.tree.Render(a.screen, a.theme, sx, sy, sw, sh)
 			// Overdraw the tree's plain header with the EXPLORER / GIT
 			// tab row — the tree keeps rendering its own header so its
@@ -63,6 +69,7 @@ func (a *App) draw() {
 
 	if tab := a.activeTabPtr(); tab != nil {
 		ex, ey, ew, eh := a.editorRect()
+		tab.ScrollbarActive = a.dragMode == "scrollbar"
 		tab.Render(a.screen, a.theme, ex, ey, ew, eh)
 	} else {
 		a.drawEmptyEditor()

@@ -809,3 +809,199 @@ func TestHandleMouse_EmptyEditorPressDoesNotArmEditorDrag(t *testing.T) {
 		t.Fatalf("press with no open tab must not arm a drag, got %q", a.dragMode)
 	}
 }
+
+// seedTreeFiles writes n files into dir so the sidebar's listing
+// overflows the list area and the tree grows a scrollbar.
+func seedTreeFiles(t *testing.T, dir string, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		p := filepath.Join(dir, "f"+strconv.Itoa(100+i)+".txt")
+		if err := os.WriteFile(p, []byte("x"), 0644); err != nil {
+			t.Fatalf("seed %s: %v", p, err)
+		}
+	}
+}
+
+// barCell returns the rune and foreground painted at (x, y) on the app's
+// simulation screen, after a draw.
+func barCell(t *testing.T, a *App, x, y int) (rune, tcell.Color) {
+	t.Helper()
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	c := cells[y*w+x]
+	if len(c.Runes) == 0 {
+		return ' ', tcell.ColorDefault
+	}
+	fg, _, _ := c.Style.Decompose()
+	return c.Runes[0], fg
+}
+
+// TestTreeScrollbarPressScrollsAndDrags: the sidebar's bar is a real
+// mouse target. Pressing near its bottom jumps the tree there and enters
+// the "treescrollbar" drag mode, dragging keeps the listing glued to the
+// pointer's row, and release ends the drag without leaving the tree
+// scrolled somewhere the user didn't ask for.
+func TestTreeScrollbarPressScrollsAndDrags(t *testing.T) {
+	dir := t.TempDir()
+	seedTreeFiles(t, dir, 80)
+	a := newTestApp(t, dir)
+	a.draw() // the real loop always paints before the first event
+
+	_, sy, sw, sh := a.sidebarRect()
+	barX := sw - 1
+
+	a.handleMouse(tcell.NewEventMouse(barX, sy+sh-1, tcell.Button1, 0))
+	if a.dragMode != "treescrollbar" {
+		t.Fatalf("dragMode = %q, want treescrollbar", a.dragMode)
+	}
+	bottom := a.tree.ScrollY
+	if bottom == 0 {
+		t.Fatal("pressing the bottom of the bar should scroll the tree")
+	}
+
+	// Drag back to the top of the list area.
+	a.handleMouse(tcell.NewEventMouse(barX, sy+2, tcell.Button1, 0))
+	if a.tree.ScrollY != 0 {
+		t.Fatalf("dragging to the top should return to 0, got %d", a.tree.ScrollY)
+	}
+	// The drag keeps following even once the pointer leaves the column.
+	a.handleMouse(tcell.NewEventMouse(barX-6, sy+sh-1, tcell.Button1, 0))
+	if a.tree.ScrollY != bottom {
+		t.Fatalf("drag off-column should still track the row: got %d, want %d", a.tree.ScrollY, bottom)
+	}
+
+	a.handleMouse(tcell.NewEventMouse(barX, sy+sh-1, tcell.ButtonNone, 0))
+	if a.dragMode != "" {
+		t.Fatalf("release should clear dragMode, got %q", a.dragMode)
+	}
+	if a.tree.ScrollY != bottom {
+		t.Fatalf("release must not move the tree, got %d", a.tree.ScrollY)
+	}
+}
+
+// TestSidebarThreeWayHitTestAtSameY is the fiddly one: at a single screen
+// row the sidebar has three neighbouring targets — the resize splitter,
+// the tree's scrollbar one column to its left, and the tree rows to the
+// left of that. Each must do its own thing and nothing else.
+func TestSidebarThreeWayHitTestAtSameY(t *testing.T) {
+	dir := t.TempDir()
+	seedTreeFiles(t, dir, 80)
+	a := newTestApp(t, dir)
+	a.draw()
+
+	splitX := a.splitterX()
+	_, sy, sw, sh := a.sidebarRect()
+	barX := sw - 1
+	rowX := 4
+	// Low in the list area: far enough down the bar that a click there
+	// has somewhere to scroll to, and still a real tree row.
+	y := sy + sh - 4
+
+	if barX != splitX-1 {
+		t.Fatalf("bar column %d should sit immediately left of the splitter %d", barX, splitX)
+	}
+
+	// 1. The splitter starts a resize and leaves the tree alone.
+	before := a.tree.ScrollY
+	a.handleMouse(tcell.NewEventMouse(splitX, y, tcell.Button1, 0))
+	if a.dragMode != "sidebar" {
+		t.Fatalf("splitter press: dragMode = %q, want sidebar", a.dragMode)
+	}
+	if a.tree.ScrollY != before {
+		t.Fatalf("splitter press scrolled the tree to %d", a.tree.ScrollY)
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX, y, tcell.ButtonNone, 0))
+
+	// 2. The scrollbar scrolls and opens no file.
+	openTabs := a.tabs.Len()
+	a.handleMouse(tcell.NewEventMouse(barX, y, tcell.Button1, 0))
+	if a.dragMode != "treescrollbar" {
+		t.Fatalf("bar press: dragMode = %q, want treescrollbar", a.dragMode)
+	}
+	if a.tree.ScrollY == before {
+		t.Fatal("bar press should have scrolled the tree")
+	}
+	if a.tabs.Len() != openTabs {
+		t.Fatal("bar press must not open a tree row")
+	}
+	a.handleMouse(tcell.NewEventMouse(barX, y, tcell.ButtonNone, 0))
+
+	// 3. A row click opens that file and starts no drag.
+	a.tree.ScrollY = 0
+	a.draw()
+	scrolled := a.tree.ScrollY
+	a.handleMouse(tcell.NewEventMouse(rowX, y, tcell.Button1, 0))
+	if a.dragMode != "" {
+		t.Fatalf("row press: dragMode = %q, want none", a.dragMode)
+	}
+	if a.tree.ScrollY != scrolled {
+		t.Fatalf("row press scrolled the tree to %d", a.tree.ScrollY)
+	}
+	if a.tabs.Len() != openTabs+1 {
+		t.Fatalf("row press should have opened a file, tabs %d → %d", openTabs, a.tabs.Len())
+	}
+}
+
+// TestTreeScrollbarRightClickIsNotARow: left- and right-click must agree
+// about what the bar column is. Right-clicking it opens no tree context
+// menu for the row hiding behind the bar.
+func TestTreeScrollbarRightClickIsNotARow(t *testing.T) {
+	dir := t.TempDir()
+	seedTreeFiles(t, dir, 80)
+	a := newTestApp(t, dir)
+	a.draw()
+
+	_, sy, sw, _ := a.sidebarRect()
+	y := sy + 6
+	if a.tryTreeContextClick(sw-1, y) {
+		t.Fatal("the scrollbar column is not a context-menu target")
+	}
+	if !a.tryTreeContextClick(4, y) {
+		t.Fatal("a real row still opens the context menu")
+	}
+}
+
+// TestScrollbarThumbBrightensOnDrag pins the app half of the drag
+// feedback: pressing a thumb paints it in Accent on the next frame and
+// releasing returns it to Muted, for both the editor's bar and the
+// tree's. The flag is derived from dragMode at paint time, so this also
+// proves a drag can't strand a thumb lit.
+func TestScrollbarThumbBrightensOnDrag(t *testing.T) {
+	dir := t.TempDir()
+	seedTreeFiles(t, dir, 80)
+	path := filepath.Join(dir, "long.txt")
+	if err := os.WriteFile(path, []byte(strings.Repeat("line\n", 300)), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(path)
+	a.draw()
+
+	ex, ey, ew, _ := a.editorRect()
+	editorBarX := ex + ew - 1
+	_, sy, sw, _ := a.sidebarRect()
+	treeBarX := sw - 1
+
+	// Editor bar: press the very top row so the thumb is under it.
+	a.handleMouse(tcell.NewEventMouse(editorBarX, ey, tcell.Button1, 0))
+	if r, fg := barCell(t, a, editorBarX, ey); fg != a.theme.Accent {
+		t.Fatalf("dragged editor thumb: rune %q fg %v, want Accent", r, fg)
+	}
+	a.handleMouse(tcell.NewEventMouse(editorBarX, ey, tcell.ButtonNone, 0))
+	if r, fg := barCell(t, a, editorBarX, ey); fg != a.theme.Muted {
+		t.Fatalf("released editor thumb: rune %q fg %v, want Muted", r, fg)
+	}
+
+	// Tree bar: same gesture, same language.
+	a.tree.ScrollY = 0
+	a.handleMouse(tcell.NewEventMouse(treeBarX, sy+2, tcell.Button1, 0))
+	if r, fg := barCell(t, a, treeBarX, sy+2); fg != a.theme.Accent {
+		t.Fatalf("dragged tree thumb: rune %q fg %v, want Accent", r, fg)
+	}
+	a.handleMouse(tcell.NewEventMouse(treeBarX, sy+2, tcell.ButtonNone, 0))
+	if r, fg := barCell(t, a, treeBarX, sy+2); fg != a.theme.Muted {
+		t.Fatalf("released tree thumb: rune %q fg %v, want Muted", r, fg)
+	}
+}

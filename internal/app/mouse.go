@@ -160,6 +160,15 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		return
 	}
 
+	// File-tree thumb drag: same contract as the editor's — the tree
+	// keeps following the pointer's row once the grab has started, even
+	// when the pointer leaves the bar's column.
+	if leftDown && a.dragMode == "treescrollbar" {
+		_, sy, _, _ := a.sidebarRect()
+		a.treeScrollbarTo(y - sy)
+		return
+	}
+
 	// Initial press dispatch.
 	if leftDown && a.dragMode == "" {
 		sw := a.sidebarW()
@@ -174,6 +183,14 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		case splitX >= 0 && x == splitX:
 			a.dragMode = "sidebar"
 		case sw > 0 && x < splitX:
+			// The tree's bar sits on the column just left of the
+			// splitter, so it has to be claimed before the row
+			// hit-test the rest of the sidebar falls through to.
+			if a.treeScrollbarHit(x, y) {
+				a.treeScrollbarTo(y)
+				a.dragMode = "treescrollbar"
+				return
+			}
 			a.sidebarClick(x, y)
 		case y == 0:
 			a.tabBarClick(x, y)
@@ -264,6 +281,12 @@ func (a *App) tryTreeContextClick(x, y int) bool {
 	}
 	splitX := a.splitterX()
 	if x >= splitX {
+		return false
+	}
+	// The scrollbar column is not a row. Left-click already routes it
+	// to the bar before the row hit-test; right-click has to skip it
+	// too, or the two buttons disagree about what that column is.
+	if a.treeScrollbarHit(x, y) {
 		return false
 	}
 	sx, sy, _, _ := a.sidebarRect()
@@ -599,6 +622,37 @@ func (a *App) scrollbarTo(localY int) {
 	// The thumb maps to a buffer line; land at its first visual row so a
 	// stale wrap segment from the previous anchor can't offset the jump.
 	tab.ScrollSeg = 0
+}
+
+// treeScrollbarHit reports whether (x, y) lands on the file tree's
+// scrollbar. The bar owns the tree rect's rightmost column, which is
+// the cell immediately LEFT of the resize splitter (sidebarRect is one
+// column narrower than the sidebar block) — so the splitter, the bar
+// and the tree rows occupy three distinct column ranges at any y and
+// each keeps its own clicks.
+//
+// The Git panel draws its own list over the same rect and has no tree
+// bar, so it opts out entirely.
+func (a *App) treeScrollbarHit(x, y int) bool {
+	if a.tree == nil || a.gitPanelActive {
+		return false
+	}
+	sx, sy, sw, sh := a.sidebarRect()
+	if sw <= 0 {
+		return false
+	}
+	return a.tree.ScrollbarHit(x-sx, y-sy, sw, sh)
+}
+
+// treeScrollbarTo scrolls the file tree so its thumb centers on screen
+// row y — shared by the initial press and the drag, exactly like the
+// editor's scrollbarTo. Clamping lives in the tree.
+func (a *App) treeScrollbarTo(y int) {
+	if a.tree == nil {
+		return
+	}
+	_, sy, sw, sh := a.sidebarRect()
+	a.tree.ScrollToBarRow(sw, sh, y-sy)
 }
 
 // selectWordAt selects the word under the buffer position p (or does

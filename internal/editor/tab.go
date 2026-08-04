@@ -107,6 +107,13 @@ type Tab struct {
 	ScrollSeg int
 	lastWrapW int
 
+	// ScrollbarActive is a pure presentational flag: the app sets it
+	// while the user is dragging this tab's scrollbar thumb so
+	// renderScrollbar can brighten the thumb to Accent, exactly the way
+	// drawSplitter brightens the sidebar splitter mid-drag. It never
+	// affects geometry or scroll state — see App.setScrollbarDrag.
+	ScrollbarActive bool
+
 	Styles     [][]tcell.Style
 	StyleStale bool
 	GitLines   map[int]GitLineChange

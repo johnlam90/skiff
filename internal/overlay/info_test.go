@@ -13,6 +13,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/scrollbar"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -179,5 +180,135 @@ func TestDiffLineStyle(t *testing.T) {
 		if fg != tc.want {
 			t.Fatalf("%q fg = %v, want %v", tc.line, fg, tc.want)
 		}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Body scroll indicator
+// -----------------------------------------------------------------------------
+
+// infoScreen builds the 100×12 simulation screen testInfo's geometry
+// assumes, so the drawn indicator column can be read back.
+func infoScreen(t *testing.T) tcell.SimulationScreen {
+	t.Helper()
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	t.Cleanup(scr.Fini)
+	scr.SetSize(100, 12)
+	return scr
+}
+
+// infoBarColumn draws n and reads its indicator column back across the
+// body rows.
+func infoBarColumn(t *testing.T, scr tcell.SimulationScreen, n *Info) string {
+	t.Helper()
+	n.Draw(scr)
+	scr.Show()
+	return barCol(scr, n.bar(n.rect()))
+}
+
+// TestInfo_NoIndicatorWhenBodyFits pins the no-noise half: the short
+// reports (a one-line error, a three-line summary) keep a blank padding
+// column, so the bar's presence is itself the signal.
+func TestInfo_NoIndicatorWhenBodyFits(t *testing.T) {
+	scr := infoScreen(t)
+	n, _ := testInfo(3)
+	for i := range n.Lines {
+		n.Lines[i] = "ok"
+	}
+	col := infoBarColumn(t, scr, n)
+	if strings.ContainsAny(col, string([]rune{scrollbar.Track, scrollbar.Thumb})) {
+		t.Fatalf("a 3-line report must draw no bar, got %q", col)
+	}
+}
+
+// TestInfo_IndicatorTracksScroll covers the surface this matters most
+// on: Info is where command stderr and git diff previews land, where a
+// 300-line body is ordinary. The bar has to appear, sit at the top of
+// its track at scroll 0, and follow the body down.
+func TestInfo_IndicatorTracksScroll(t *testing.T) {
+	scr := infoScreen(t)
+	n, _ := testInfo(300)
+	for i := range n.Lines {
+		n.Lines[i] = "stderr line"
+	}
+
+	top := infoBarColumn(t, scr, n)
+	if !strings.HasPrefix(top, string(scrollbar.Thumb)) || !strings.ContainsRune(top, scrollbar.Track) {
+		t.Fatalf("300 lines in a 5-row window: got %q", top)
+	}
+
+	n.ScrollBy(len(n.Lines))
+	bottom := infoBarColumn(t, scr, n)
+	if !strings.HasSuffix(bottom, string(scrollbar.Thumb)) {
+		t.Fatalf("at the end the thumb must finish the track, got %q", bottom)
+	}
+	wantStart, wantLen, ok := scrollbar.Geom(len(n.Lines), n.bodyRows(), n.Scroll())
+	if !ok {
+		t.Fatal("fixture should overflow")
+	}
+	for row, got := range []rune(bottom) {
+		want := scrollbar.Track
+		if row >= wantStart && row < wantStart+wantLen {
+			want = scrollbar.Thumb
+		}
+		if got != want {
+			t.Fatalf("bar row %d: got %q, want %q (col %q)", row, got, want, bottom)
+		}
+	}
+}
+
+// TestInfo_IndicatorIsNotDiffStyled guards the one styling trap this
+// surface has: body lines run through DiffLineStyle, so a diff preview
+// would happily paint the whole row green. The bar keeps its own
+// Subtle/Muted roles because the text is clipped two cells short of it
+// and the bar is painted afterwards.
+func TestInfo_IndicatorIsNotDiffStyled(t *testing.T) {
+	scr := infoScreen(t)
+	n, _ := testInfo(300)
+	for i := range n.Lines {
+		n.Lines[i] = "+" + strings.Repeat("y", 200)
+	}
+	n.Draw(scr)
+	scr.Show()
+
+	b := n.bar(n.rect())
+	cells, w, _ := scr.GetContents()
+	for row := range b.viewH {
+		fg, _, _ := cells[(b.top+row)*w+b.x].Style.Decompose()
+		if fg == n.Theme.GitAdded {
+			t.Fatalf("bar row %d took the diff addition color", row)
+		}
+		if fg != n.Theme.Subtle && fg != n.Theme.Muted {
+			t.Fatalf("bar row %d fg = %v, want Subtle or Muted", row, fg)
+		}
+	}
+}
+
+// TestInfo_BarClickJumpsWithoutDismissing pins the mouse contract: the
+// indicator's column scrolls and nothing else. A press that dismissed
+// the report would throw away the stderr the user was mid-way through
+// reading.
+func TestInfo_BarClickJumpsWithoutDismissing(t *testing.T) {
+	scr := infoScreen(t)
+	n, closed := testInfo(300)
+	for i := range n.Lines {
+		n.Lines[i] = "stderr line"
+	}
+	infoBarColumn(t, scr, n)
+
+	b := n.bar(n.rect())
+	n.HandleMouse(b.x, b.top+b.viewH-1, tcell.Button1)
+	if want := len(n.Lines) - n.bodyRows(); n.Scroll() != want {
+		t.Fatalf("press at the foot of the bar: scroll %d, want %d", n.Scroll(), want)
+	}
+	n.HandleMouse(b.x, b.top, tcell.Button1)
+	if n.Scroll() != 0 {
+		t.Fatalf("press at the head of the bar should return to the top, got %d", n.Scroll())
+	}
+	if *closed != 0 {
+		t.Fatalf("a bar press must not dismiss the report, closed %d times", *closed)
 	}
 }

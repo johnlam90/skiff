@@ -123,6 +123,21 @@ func (c *Confirm) buttonRow() int { return 4 + c.bodyRows() }
 // one-line confirm's geometry is byte-identical to before Body existed.
 func (c *Confirm) buttonOffset() int { return (c.frameWidth() - confirmWidth) / 2 }
 
+// bar describes the body's scroll indicator inside frame r. total is
+// len(Body), which is zero in the classic Message form — so a bar is
+// arithmetically impossible there and the pinned 54×9 geometry keeps
+// every cell it had. Draw and HandleMouse both derive the bar here, so
+// the painted column and the clickable column are the same column.
+func (c *Confirm) bar(r Rect) bodyBar {
+	return bodyBar{
+		x:      barColumn(r),
+		top:    r.Y + 4,
+		viewH:  c.bodyRows(),
+		total:  len(c.Body),
+		scroll: c.scroll,
+	}
+}
+
 // Scroll exposes the first visible body row for tests.
 func (c *Confirm) Scroll() int { return c.scroll }
 
@@ -185,8 +200,9 @@ func (c *Confirm) HandleKey(ev *tcell.EventKey) {
 	}
 }
 
-// HandleMouse: the wheel scrolls a multi-line body, hovering a button
-// highlights it, clicking activates, and clicks outside cancel.
+// HandleMouse: the wheel scrolls a multi-line body, the scroll
+// indicator's column jumps the thumb to the pressed row, hovering a
+// button highlights it, clicking activates, and clicks outside cancel.
 func (c *Confirm) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	r := c.rect()
 	if btn&tcell.WheelUp != 0 {
@@ -210,6 +226,13 @@ func (c *Confirm) HandleMouse(x, y int, btn tcell.ButtonMask) {
 		}
 	}
 	if btn&tcell.Button1 == 0 {
+		return
+	}
+	// The indicator owns its column outright — claimed before the
+	// button zones and the outside-click test so the one cell that
+	// looks like a scrollbar can never read as a dismissal.
+	if b := c.bar(r); b.hit(x, y) {
+		c.scroll = b.target(y)
 		return
 	}
 	if !r.Contains(x, y) {
@@ -245,6 +268,10 @@ func (c *Confirm) Draw(scr tcell.Screen) {
 		for i, rows := 0, c.bodyRows(); i < rows && c.scroll+i < len(c.Body); i++ {
 			drawText(scr, r.X+2, r.Y+4+i, trimRunes(c.Body[c.scroll+i], r.W-4), bodyStyle)
 		}
+		// Painted after the rows so the bar is never overwritten by a
+		// body line — the rows clip to r.W-4 and stop two cells short
+		// of it, but the paint order is the guarantee.
+		c.bar(r).draw(scr, th)
 	}
 
 	btnY := r.Y + c.buttonRow()
