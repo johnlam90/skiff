@@ -71,12 +71,45 @@ func (a *App) tabBarRect() (x, y, w, h int) {
 	return sw, 0, a.width - sw, 1
 }
 
+// editorMinRows is the fewest rows the editor body is ever handed. The
+// caret, the scrollbar, the wrap walk and every hit-test derive from the
+// editor rect, so a zero- or negative-height rect is not "no editor" —
+// it is arithmetic over cells that do not exist.
+const editorMinRows = 1
+
+// stripRowBudget is how many rows the transient strips docked under the
+// editor may take before the body would drop under editorMinRows. The
+// find bar is charged against the budget rather than being part of it:
+// it is a fixed, user-invoked row, so what comes back is what is left
+// for the flash strip to wrap onto.
+//
+// On the shortest terminal skiff runs in this never binds — minHeight is
+// 10, so even with the find bar up the budget is 6 against a
+// flashStripMaxRows of 3. That is the point: the number is derived
+// rather than assumed, so lowering minHeight or raising the strip's row
+// cap cannot quietly starve the editor, and a test can say so.
+func (a *App) stripRowBudget() int {
+	room := a.height - 2 - editorMinRows
+	if a.findOpen || a.projFindOpen {
+		room -= findBarHeight
+	}
+	if room < 0 {
+		room = 0
+	}
+	return room
+}
+
 // editorRect returns the editor body's screen rectangle (everything to the
 // right of the sidebar, between the tab bar and the status bar). Rows are
 // taken out of the bottom for every transient strip pinned there — the
 // find bar and the flash strip — because the editor's scrollbar, caret
 // and hit-testing all derive from this rect and have to describe the
 // region that is actually painted.
+//
+// The floor is not decoration. draw() refuses to paint below minHeight,
+// but the key handlers that ask for editorSize (page up/down, the wrap
+// walk) run on every event, including the ones that arrive while the
+// terminal is mid-resize and two rows tall.
 func (a *App) editorRect() (x, y, w, h int) {
 	sw := a.sidebarW()
 	h = a.height - 2
@@ -84,6 +117,9 @@ func (a *App) editorRect() (x, y, w, h int) {
 		h -= findBarHeight
 	}
 	h -= a.flashStripRows()
+	if h < editorMinRows {
+		h = editorMinRows
+	}
 	return sw, 1, a.width - sw, h
 }
 

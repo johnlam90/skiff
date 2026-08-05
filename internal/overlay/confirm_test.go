@@ -175,17 +175,33 @@ func TestConfirm_EmptyBodyKeepsClassicGeometry(t *testing.T) {
 // TestConfirm_BodyGrowsFrameAndMovesButtons pins the Body layout: the
 // frame widens to fit commands and gets one row per body line, and the
 // buttons move below the content instead of being painted over it.
+//
+// The width pin moved from a flat ConfirmBodyWidth to "as wide as the
+// terminal allows". ConfirmBodyWidth is 84 and the fixture screen is 80,
+// so the old expectation was pinning a frame whose right border and
+// scroll indicator sat in columns the screen did not have — on exactly
+// the 80-column tmux pane the trust prompt is read in.
 func TestConfirm_BodyGrowsFrameAndMovesButtons(t *testing.T) {
 	c, _ := bodyConfirm(5)
 	r := c.rect()
-	if r.W != ConfirmBodyWidth {
-		t.Fatalf("body frame width: got %d want %d", r.W, ConfirmBodyWidth)
+	if r.W != 80 {
+		t.Fatalf("body frame on an 80-column screen: got %d want 80", r.W)
+	}
+	if r.X+r.W > 80 {
+		t.Fatalf("frame runs off the screen: X=%d W=%d", r.X, r.W)
 	}
 	if r.H != confirmChromeRows+5 {
 		t.Fatalf("body frame height: got %d want %d", r.H, confirmChromeRows+5)
 	}
 	if c.buttonRow() != 9 {
 		t.Fatalf("buttons should sit below 5 body rows, got relY %d", c.buttonRow())
+	}
+
+	// Given room, it still grows to the full wide form — the clamp is a
+	// ceiling, not a new natural width.
+	c.Size = func() (int, int) { return 100, 24 }
+	if got := c.rect().W; got != ConfirmBodyWidth {
+		t.Fatalf("body frame with room to grow: got %d want %d", got, ConfirmBodyWidth)
 	}
 }
 
@@ -459,5 +475,63 @@ func TestConfirm_ClassicFormDrawsNoIndicator(t *testing.T) {
 		if got := cellAt(scr, barColumn(r), y); got != ' ' {
 			t.Fatalf("padding column row %d = %q, want a blank cell", y, got)
 		}
+	}
+}
+
+// TestConfirm_PhoneWidthKeepsFrameAndButtonsOnScreen is the minimum-size
+// case: at skiff's 40-column floor the classic 54-cell frame has to
+// narrow, taking the No / Yes pair with it. Unclamped, the frame pinned
+// to column 0 and painted its right border, its whole right-hand half and
+// the Yes button's trailing bracket into columns the terminal does not
+// have — on the destructive-action modal, of all of them.
+func TestConfirm_PhoneWidthKeepsFrameAndButtonsOnScreen(t *testing.T) {
+	const scrW, scrH = 40, 10
+	c, log := testConfirm()
+	c.Size = func() (int, int) { return scrW, scrH }
+
+	r := c.rect()
+	if r.X < 0 || r.X+r.W > scrW || r.Y < 0 || r.Y+r.H > scrH {
+		t.Fatalf("frame off screen: %+v on %dx%d", r, scrW, scrH)
+	}
+	// buttonCols measures against frameWidth and Draw paints into
+	// rect().W; a disagreement places the buttons inside a frame that
+	// does not exist.
+	if c.frameWidth() != r.W {
+		t.Fatalf("frameWidth %d but rect is %d wide", c.frameWidth(), r.W)
+	}
+	noX, yesX := c.buttonCols()
+	if noX < 1 || yesX+confirmBtnYesW > r.W-1 {
+		t.Fatalf("buttons outside the %d-cell frame: no=%d yes=%d", r.W, noX, yesX)
+	}
+	if noX+confirmBtnNoW >= yesX {
+		t.Fatalf("No and Yes overlap: no=%d yes=%d", noX, yesX)
+	}
+
+	// Painted and clickable must be the same cells — the whole reason
+	// buttonCols exists rather than two copies of the arithmetic.
+	c.HandleMouse(r.X+yesX+1, r.Y+c.buttonRow(), tcell.Button1)
+	if len(*log) != 2 || (*log)[1] != "yes" {
+		t.Fatalf("Yes click at the squeezed column: got %v", *log)
+	}
+}
+
+// TestConfirm_ShortScreenKeepsButtonRowVisible pins the height half: the
+// nine-row classic form is exactly what sets skiff's minHeight, so at ten
+// rows it must fit whole — buttons included — with the status bar's row
+// left over underneath it.
+func TestConfirm_ShortScreenKeepsButtonRowVisible(t *testing.T) {
+	const scrH = 10
+	c, _ := testConfirm()
+	c.Size = func() (int, int) { return 80, scrH }
+
+	r := c.rect()
+	if r.H != confirmHeight {
+		t.Fatalf("the classic form must keep its %d rows, got %d", confirmHeight, r.H)
+	}
+	if btnY := r.Y + c.buttonRow(); btnY >= scrH {
+		t.Fatalf("button row at %d is off a %d-row screen", btnY, scrH)
+	}
+	if r.Y+r.H > scrH-1 {
+		t.Fatalf("modal covers the status bar row: %+v on %d rows", r, scrH)
 	}
 }

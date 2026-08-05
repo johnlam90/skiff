@@ -67,10 +67,11 @@ The goals, in order:
 - **Syntax highlighting** for dozens of languages via Chroma.
 - **Action menu, filterable** — open it with the `≡` icon, right-click,
   or a double-tap of `Esc`, then just type: the filter narrows every
-  group at once ("branch" finds **Switch branch…**, and so does "sb").
-  Seven groups — File, Edit, Go, Git, View, Custom, Quit — with the git
-  verbs and the file-clipboard actions one keystroke deeper behind
-  **Git…** and **File clipboard…**. Arrows + `Enter` still walk the
+  top-level group at once ("comment" finds **Toggle line comment**, and
+  so does "tlc"). Seven groups — File, Edit, Go, Git, View, Custom,
+  Quit — with the git verbs and the file-clipboard actions one
+  keystroke deeper behind **Git…** and **File clipboard…** (each pick
+  has a filter field of its own). Arrows + `Enter` still walk the
   list; `Esc` clears the filter, a second `Esc` closes. Rows that
   can't apply right now (git verbs with no repo, edit verbs with no
   tab) are hidden rather than greyed out.
@@ -324,6 +325,25 @@ Then:
   selection (the tmux convention) — with mouse reporting on, your
   terminal never has a selection of its own, so `Cmd+C` at the
   terminal level would grab nothing. `Esc c` copies too.
+
+### Terminal size
+
+Skiff needs **40 columns × 10 rows**. Below either, the whole screen
+becomes `Window too small — please resize`, with the size you have and
+the size it needs on the line underneath, and nothing else is painted
+until the window grows back. No state is lost — the editor just refuses
+to draw a layout it can't fit.
+
+Neither number is round. Ten rows is the shortest the tallest dialogs
+get: the unsaved-changes, confirm and single-line prompt modals bottom
+out at 9 rows each — unlike the menu or a file picker, none of them has
+anything left to window away — plus the one status-bar row underneath,
+which is where the dialog's own outcome gets reported.
+Forty columns is the widest fixed button row (`[ Cancel ]`
+`[ Discard ]` `[ Save ]` is 29 cells of label and can't squeeze under
+33) plus enough label column for the `≡` menu's rows to stay
+identifiable. 40×10 is also a phone in landscape with the soft keyboard
+up, which is the smallest real terminal Skiff targets.
 
 ### Hotkeys
 

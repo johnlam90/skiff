@@ -753,14 +753,20 @@ func (a *App) flashStripCapacity() int {
 }
 
 // flashStripRows is how many rows the strip needs right now: zero when it
-// isn't showing, else the wrapped message's row count. editorRect
-// subtracts it, and that subtraction is what keeps the editor's own
-// scrollbar, caret and hit-testing inside the region actually painted.
+// isn't showing, else the wrapped message's row count, capped by what the
+// editor can spare. editorRect subtracts it, and that subtraction is what
+// keeps the editor's own scrollbar, caret and hit-testing inside the
+// region actually painted — so the cap is what makes the subtraction safe
+// rather than something editorRect has to clean up afterwards.
 func (a *App) flashStripRows() int {
 	if !a.flashStripVisible() {
 		return 0
 	}
-	return len(wrapFlashLines(a.statusMsg, a.flashStripTextWidth()))
+	n := len(wrapFlashLines(a.statusMsg, a.flashStripTextWidth()))
+	if budget := a.stripRowBudget(); n > budget {
+		n = budget
+	}
+	return n
 }
 
 // flashStripRect returns the strip's screen rectangle: the rows directly
@@ -842,27 +848,66 @@ func (a *App) drawFlashStrip() {
 	}
 }
 
-// drawTooSmall paints a centred error message when the terminal window is
+// tooSmallLines is the refusal for the current size: a label, then the
+// measurement that says what to do about it. The measurement is the
+// useful half on the device this floor exists for — a phone user cannot
+// resize a terminal, only shrink its font — so it names both what the
+// terminal is and what skiff needs.
+//
+// The label degrades to a shorter wording and is clipped by drawTooSmall
+// if even that overruns; a blank screen is the one outcome worse than a
+// truncated word. The measurement is all-or-nothing: half a size is not
+// a size, so it is dropped rather than cut.
+func (a *App) tooSmallLines() []string {
+	label := "Window too small — please resize"
+	if runeLen(label) > a.width {
+		label = "Too small"
+	}
+	out := []string{label}
+	size := fmt.Sprintf("%d×%d — needs %d×%d", a.width, a.height, minWidth, minHeight)
+	if runeLen(size) > a.width {
+		size = fmt.Sprintf("needs %d×%d", minWidth, minHeight)
+	}
+	if runeLen(size) <= a.width {
+		out = append(out, size)
+	}
+	if len(out) > a.height {
+		out = out[:a.height]
+	}
+	return out
+}
+
+// drawTooSmall paints the centred refusal when the terminal window is
 // smaller than the editor's minimum supported size.
 func (a *App) drawTooSmall() {
 	style := tcell.StyleDefault.Background(a.theme.BG).Foreground(a.theme.Error).Bold(true)
-	for cy := 0; cy < a.height; cy++ {
-		for cx := 0; cx < a.width; cx++ {
+	for cy := range a.height {
+		for cx := range a.width {
 			a.screen.SetContent(cx, cy, ' ', nil,
 				tcell.StyleDefault.Background(a.theme.BG))
 		}
 	}
-	msg := "Window too small — please resize"
-	cy := a.height / 2
-	cx := (a.width - len([]rune(msg))) / 2
-	if cx < 0 {
-		cx = 0
+	lines := a.tooSmallLines()
+	top := (a.height - len(lines)) / 2
+	if top < 0 {
+		top = 0
 	}
-	for i, r := range msg {
-		if cx+i >= a.width {
-			break
+	for i, msg := range lines {
+		// Ranging []rune, not the string: an em dash is three bytes, and
+		// a byte index used as a column pushed everything after it two
+		// cells right — which on the widths this screen appears at is
+		// the difference between centred and clipped.
+		rs := []rune(msg)
+		cx := (a.width - len(rs)) / 2
+		if cx < 0 {
+			cx = 0
 		}
-		a.screen.SetContent(cx+i, cy, r, nil, style)
+		for j, r := range rs {
+			if cx+j >= a.width {
+				break
+			}
+			a.screen.SetContent(cx+j, top+i, r, nil, style)
+		}
 	}
 	a.screen.HideCursor()
 }

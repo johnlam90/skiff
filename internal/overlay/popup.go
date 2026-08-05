@@ -37,6 +37,48 @@ type Popup struct {
 	At    Rect
 	Theme theme.Theme
 	Close func()
+
+	// scroll is the first row rendered. Non-zero only when PlacePopup had
+	// to clamp the frame — the git-extras menu is thirteen rows plus two
+	// of border, and a phone in landscape has ten.
+	scroll int
+}
+
+// visibleRows is how many item rows the frame holds: its height less the
+// two border rows.
+func (p *Popup) visibleRows() int {
+	if n := p.At.H - 2; n > 0 {
+		return n
+	}
+	return 1
+}
+
+// maxScroll is the largest first-visible-row index — zero whenever every
+// item fits, which is every popup on an ordinary terminal.
+func (p *Popup) maxScroll() int {
+	if n := len(p.Items) - p.visibleRows(); n > 0 {
+		return n
+	}
+	return 0
+}
+
+// ensureHoverVisible scrolls the window so the highlighted row is on
+// screen. Keyboard navigation is the only thing that moves the window: a
+// popup has no wheel handler, and an item the arrows can reach but the
+// frame never shows is an action the user cannot run.
+func (p *Popup) ensureHoverVisible() {
+	if p.Hover < p.scroll {
+		p.scroll = p.Hover
+	}
+	if n := p.visibleRows(); p.Hover >= p.scroll+n {
+		p.scroll = p.Hover - n + 1
+	}
+	if p.scroll > p.maxScroll() {
+		p.scroll = p.maxScroll()
+	}
+	if p.scroll < 0 {
+		p.scroll = 0
+	}
 }
 
 // PopupWidth returns the width a popup needs to show every label in
@@ -56,9 +98,14 @@ func PopupWidth(items []PopupItem, min int) int {
 
 // PlacePopup anchors a w-wide, count-row popup at click point (x, y) on
 // a scrW×scrH screen. It flips left or up when the popup would fall off
-// the right or bottom edge, and clamps to the origin.
+// the right or bottom edge, clamps the frame to the screen, and clamps
+// the origin. The height clamp is what a thirteen-row git-extras menu
+// needs on a ten-row terminal: the frame keeps its borders and windows
+// the rows instead of painting four of them into cells that do not
+// exist.
 func PlacePopup(scrW, scrH, x, y, w, count int) Rect {
-	h := count + 2
+	w = fit(w, scrW)
+	h := fit(count+2, scrH)
 	cx, cy := x, y
 	if cx+w > scrW {
 		cx = x - w + 1
@@ -84,8 +131,10 @@ func (p *Popup) HandleKey(ev *tcell.EventKey) {
 		p.Close()
 	case tcell.KeyDown:
 		p.Hover = p.nextSelectable(p.Hover, +1)
+		p.ensureHoverVisible()
 	case tcell.KeyUp:
 		p.Hover = p.nextSelectable(p.Hover, -1)
+		p.ensureHoverVisible()
 	case tcell.KeyEnter:
 		p.activate()
 	}
@@ -111,8 +160,11 @@ func (p *Popup) nextSelectable(from, dir int) int {
 func (p *Popup) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	r := p.At
 	row := -1
+	// Screen row → item index through the scroll offset: a row the frame
+	// windowed out occupies no cells, so hit-testing it would fire on
+	// whatever is painted where it used to be.
 	if x >= r.X && x < r.X+r.W && y > r.Y && y < r.Y+r.H-1 {
-		row = y - r.Y - 1
+		row = y - r.Y - 1 + p.scroll
 	}
 	if row >= 0 && row < len(p.Items) && !p.Items[row].Divider {
 		p.Hover = row
@@ -146,8 +198,13 @@ func (p *Popup) Draw(scr tcell.Screen) {
 	fillRect(scr, r.X, r.Y, r.W, r.H, bgStyle)
 	drawBorder(scr, r.X, r.Y, r.W, r.H, borderStyle)
 
-	for i, item := range p.Items {
-		cy := r.Y + 1 + i
+	for vi, n := 0, p.visibleRows(); vi < n; vi++ {
+		i := p.scroll + vi
+		if i >= len(p.Items) {
+			break
+		}
+		item := p.Items[i]
+		cy := r.Y + 1 + vi
 		if item.Divider {
 			drawHDivider(scr, r.X, cy, r.W, borderStyle)
 			continue
@@ -165,6 +222,17 @@ func (p *Popup) Draw(scr tcell.Screen) {
 			drawText(scr, r.X+2, cy, "▸", chevStyle)
 			drawClippedText(scr, r.X+4, cy, labelW, item.Label, bgStyle)
 		}
+	}
+
+	// ▲/▼ in the border rows, the same vocabulary the action menu and the
+	// form use: rows exist off-frame and the arrow keys will reach them.
+	// Painted into the chrome, so they cost the list nothing.
+	moreStyle := tcell.StyleDefault.Background(bg).Foreground(th.Accent)
+	if p.scroll > 0 {
+		drawText(scr, r.X+2, r.Y, " ▲ ", moreStyle)
+	}
+	if p.scroll < p.maxScroll() {
+		drawText(scr, r.X+2, r.Y+r.H-1, " ▼ ", moreStyle)
 	}
 	scr.HideCursor()
 }

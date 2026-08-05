@@ -1197,3 +1197,52 @@ func TestMenu_ClippedLabelRevealedByArrowKeys(t *testing.T) {
 		t.Fatalf("arrowing onto the clipped row flashed %q, want the full label", a.statusMsg)
 	}
 }
+
+// TestMenuModalRect_NarrowsBelowModalWidth is the phone case. The frame
+// used to refuse to shrink past modalWidth on the theory that content
+// which does not fit does not fit either way — but the two outcomes are
+// not the same: at skiff's 40-column floor a 48-cell frame hung its right
+// border, its whole shortcut column and the ▼ overflow marker off the
+// screen. The menu is the only route to every action in a no-Ctrl editor,
+// so it narrows instead, down to menuMinFrameWidth and never past it.
+func TestMenuModalRect_NarrowsBelowModalWidth(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, minWidth, minHeight)
+
+	x, y, w, h := a.menuModalRect()
+	if w >= modalWidth {
+		t.Fatalf("frame is %d cells on a %d-column screen; it never narrowed", w, a.width)
+	}
+	if w != a.width-2 {
+		t.Fatalf("frame should take the screen less a column of margin: got %d, want %d", w, a.width-2)
+	}
+	if w < menuMinFrameWidth {
+		t.Fatalf("frame %d fell below the %d readability floor", w, menuMinFrameWidth)
+	}
+	if x < 0 || x+w > a.width || y < 0 || y+h > a.height {
+		t.Fatalf("modal %d,%d %dx%d escapes a %dx%d screen", x, y, w, h, a.width, a.height)
+	}
+
+	// Narrowing is only worth doing if the rows stay identifiable: every
+	// built-in row must still get a label column it fits in, or an
+	// ellipsised prefix is all the menu ever shows.
+	items, _, _ := a.menuLayout()
+	for _, it := range items {
+		if menuLabelBudget(w, it) < 1 {
+			t.Fatalf("row %q gets no label column at all in a %d-cell frame", a.menuLabel(it), w)
+		}
+	}
+}
+
+// TestMenuModalRect_KeepsModalWidthWhenItFits is the no-regression half:
+// the narrowing must be forced by the terminal, never volunteered, so any
+// screen that can hold the frame gets exactly the frame it always got.
+func TestMenuModalRect_KeepsModalWidthWhenItFits(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	for _, w := range []int{modalWidth + 2, 80, 120} {
+		resizeTestApp(t, a, w, 40)
+		if _, _, got, _ := a.menuModalRect(); got != a.menuNaturalWidth() {
+			t.Fatalf("%d columns: frame %d, want the natural %d", w, got, a.menuNaturalWidth())
+		}
+	}
+}

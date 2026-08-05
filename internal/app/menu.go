@@ -27,6 +27,16 @@ import (
 	"github.com/johnlam90/skiff/internal/version"
 )
 
+// menuMinFrameWidth is the narrowest frame the modal will shrink to. Five
+// cells go to chrome the row layout cannot give up — the border, the "▸ "
+// indent, and the pad cell before the right border, which is exactly what
+// menuLabelBudget subtracts — and nineteen are left for the label, enough
+// to read the longest built-in row ("Keyboard shortcuts…") whole. Below
+// this the frame stops narrowing and clips instead, which only happens on
+// a terminal already under minWidth, where draw() has handed the screen
+// to drawTooSmall anyway.
+const menuMinFrameWidth = 5 + 19
+
 // menuModalRect returns the on-screen rectangle of the action modal,
 // centered in the window. Both dimensions are derived from the current
 // layout so adding custom actions — or a long one — grows the modal
@@ -41,13 +51,20 @@ import (
 // under the user — on every keystroke.
 func (a *App) menuModalRect() (x, y, w, h int) {
 	w = a.menuNaturalWidth()
-	// A window too narrow to hold even the base modal keeps the old
-	// behaviour — the frame overflows and the origin clamps to column 0.
-	// Shrinking below modalWidth would buy nothing: the content does not
-	// fit either way, and a frame that narrows as the terminal does would
-	// re-wrap every row on every resize.
-	if maxW := a.width - 2; w > maxW && maxW >= modalWidth {
+	// The frame narrows past modalWidth when it has to. It used to
+	// refuse, on the theory that content which does not fit does not fit
+	// either way — but the two outcomes are not equivalent: an
+	// overflowing frame hangs its right border, its whole shortcut
+	// column and the ▼ overflow marker off the edge of the screen, while
+	// a narrowed one keeps all three and lets trimRunes ellipsise the
+	// labels, which revealMenuRowLabel already flashes in full. That is
+	// what makes the menu — the only path to every action in a
+	// no-Ctrl editor — usable at phone widths.
+	if maxW := a.width - 2; w > maxW {
 		w = maxW
+	}
+	if w < menuMinFrameWidth {
+		w = menuMinFrameWidth
 	}
 	_, _, h = a.menuLayout()
 	full := a.menuNaturalHeight()

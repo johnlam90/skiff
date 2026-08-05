@@ -236,7 +236,7 @@ func TestMenuKeyboardShortcuts_OpensScrollableOverlay(t *testing.T) {
 	info.ScrollBy(len(cheatSheetLines()))
 	a.draw()
 	a.screen.Show()
-	if !screenHasText(t, a, "button and Esc Esc always work.") {
+	if !screenHasText(t, a, "Esc again closes the menu.") {
 		t.Error("scrolling never reveals the ≡ menu section")
 	}
 

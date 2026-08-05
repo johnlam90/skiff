@@ -40,8 +40,38 @@ const (
 	defaultSidebarWidth = 30
 	minSidebarWidth     = 18
 	minEditorAfterDrag  = 40
-	minWidth            = 50
-	minHeight           = 24
+
+	// minWidth / minHeight are the smallest terminal skiff will paint a
+	// UI into; below either, draw() bails to drawTooSmall. Both are the
+	// measured floor of the tallest and widest thing the editor can put
+	// on screen, not round numbers — skiff's habitat is SSH from a
+	// phone, where the soft keyboard eats half the display and the old
+	// 50x24 refused a landscape phone (92x13) and an Android one (80x10)
+	// outright.
+	//
+	// minHeight is set by the tallest FIXED-height prefab. Confirm,
+	// Dirty and Prompt are all exactly 9 rows and, unlike Info, Pick,
+	// Form and the action menu, have no windowed content to give back.
+	// Nine of the ten rows go to the modal (Centered pins it at y=0) and
+	// the tenth keeps the status bar visible underneath it — the bar is
+	// where the modal's own outcome is reported, so covering it would
+	// mean answering a prompt and never seeing the answer. Nothing else
+	// comes close: the app's own chrome needs 3 rows (tab bar, one
+	// editor row, status bar), 7 with the find bar and a full-height
+	// flash strip up; the git panel's list survives on 5; the file
+	// tree's on 4.
+	//
+	// minWidth is set by the widest fixed BUTTON row. Dirty's
+	// Cancel / Discard / Save is 29 cells of label, and with one cell of
+	// gap between neighbours and one of frame margin at each end it
+	// cannot squeeze under 33. Above that arithmetic floor the binding
+	// constraint is the action menu, whose frame is width-2: under about
+	// 38 cells its label column drops below 25 and rows start reading as
+	// unidentifiable prefixes. 40 clears both — and it is iPhone SE
+	// portrait at the default font, the narrowest real terminal we
+	// target.
+	minWidth  = 40
+	minHeight = 10
 
 	// autoHideSidebarWidth is the terminal width below which the file
 	// explorer collapses on its own. Not a taste number: it is exactly
@@ -87,12 +117,18 @@ const (
 	// of the tab bar. Tabs render starting just after it.
 	menuButtonWidth = 4
 
-	// modalWidth is the action modal's column count. Sized to comfortably
-	// fit the longest dynamic label — "Rename folder (subdir/)" with a
-	// folder name up to maxLabelSuffix runes — plus the leading "▸ "
-	// chevron and one cell of right padding. Very long custom-action
-	// labels will still clip but won't break layout. Height is computed
-	// dynamically from the visible groups — see menuLayout.
+	// modalWidth is the action modal's PREFERRED column count. Sized to
+	// comfortably fit the longest dynamic label — "Rename folder
+	// (subdir/)" with a folder name up to maxLabelSuffix runes — plus the
+	// leading "▸ " chevron and one cell of right padding. Very long
+	// custom-action labels will still clip but won't break layout.
+	//
+	// It is neither a floor nor a ceiling: menuNaturalWidth grows past it
+	// for a longer row, and menuModalRect shrinks below it on a terminal
+	// too narrow to hold it (down to menuMinFrameWidth), because a frame
+	// wider than the screen loses its right border and shortcut column
+	// entirely. Height is computed dynamically from the visible groups —
+	// see menuLayout.
 	modalWidth = 48
 
 	// maxLabelSuffix is the rune budget that newFileLabel /
@@ -211,7 +247,21 @@ type App struct {
 	// modifier into the wheel event itself. We treat a wheel event as
 	// shifted when one of those modifier-state events arrived within
 	// modifierStickyWindow. See handleMouse.
+	//
+	// That split "modifier state" report is a button-less motion event,
+	// so it only arrives under all-motion tracking — which skiff no
+	// longer leaves on (see mousemode.go). On those terminals shift +
+	// wheel therefore degrades to a plain vertical scroll unless a
+	// hover surface happens to be up. Accepted: the wheel event itself
+	// is unaffected, terminals that fold the modifier into the wheel
+	// report (the common case) are unaffected, and the alternative is
+	// flooding every SSH session to rescue one gesture on one stack.
 	lastShiftAt time.Time
+
+	// mouseFlags is the mouse-reporting mode the terminal is currently
+	// in — the cache that keeps syncMouseMode from re-emitting the same
+	// escape run on every overlay open and close. See mousemode.go.
+	mouseFlags tcell.MouseFlags
 
 	menuOpen       bool
 	hoveredMenuRow int // index into menuItems of the row under the mouse, or -1.
@@ -443,7 +493,10 @@ func New(rootDir string) (*App, error) {
 	if err := scr.Init(); err != nil {
 		return nil, err
 	}
-	scr.EnableMouse(tcell.MouseButtonEvents | tcell.MouseDragEvents | tcell.MouseMotionEvents)
+	// Baseline mouse reporting only — clicks, drags and the wheel. The
+	// all-motion mode (`?1003h`) is switched on per-overlay by
+	// syncMouseMode; see mousemode.go for why it is not the default.
+	scr.EnableMouse(mouseBaseFlags)
 	// Bracketed paste: without it, pasted text arrives as raw
 	// keystrokes and any ESC byte inside the paste arms the leader —
 	// pasting "\x1bq" would quit the editor. See handleKey's pasting
@@ -462,6 +515,7 @@ func New(rootDir string) (*App, error) {
 
 	a := &App{
 		screen:         scr,
+		mouseFlags:     mouseBaseFlags,
 		theme:          th,
 		rootDir:        rootDir,
 		tree:           tree,
@@ -517,7 +571,9 @@ func NewSingleFile(filePath string) (*App, error) {
 	if err := scr.Init(); err != nil {
 		return nil, err
 	}
-	scr.EnableMouse(tcell.MouseButtonEvents | tcell.MouseDragEvents | tcell.MouseMotionEvents)
+	// Same baseline-mouse rationale as New: no all-motion tracking
+	// until an overlay that hovers is actually up.
+	scr.EnableMouse(mouseBaseFlags)
 	// Same bracketed-paste rationale as New: pasted ESC bytes must be
 	// content, not commands.
 	scr.EnablePaste()
@@ -537,6 +593,7 @@ func NewSingleFile(filePath string) (*App, error) {
 
 	a := &App{
 		screen:         scr,
+		mouseFlags:     mouseBaseFlags,
 		theme:          th,
 		rootDir:        rootDir,
 		tree:           nil,
@@ -587,7 +644,12 @@ func (a *App) applyColorDepth() {
 	}
 }
 
-// Close releases the terminal back to the user. Always call this before exit.
+// Close releases the terminal back to the user. Always call this before
+// exit. Screen.Fini drops mouse reporting on its way out — its finalize
+// path calls enableMouse(0), which emits
+// `\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l` — so whichever mode
+// syncMouseMode last put us in, the terminal is left with no tracking
+// at all. Nothing here needs to unwind the mode by hand.
 func (a *App) Close() {
 	a.saveSession()
 	a.stopTreeRefresh()
@@ -606,6 +668,9 @@ func (a *App) Run() error {
 	// is the exact case this exists for, and tcell does not synthesise
 	// an EventResize for the initial size.
 	a.applyResponsiveSidebar()
+	// Reconcile the mouse mode against the state we booted into before
+	// the first paint; every later change rides handleEvent.
+	a.syncMouseMode()
 	a.draw()
 	a.screen.Show()
 
@@ -637,8 +702,16 @@ func (a *App) Run() error {
 	return nil
 }
 
-// handleEvent routes a tcell event to its specific handler.
+// handleEvent routes a tcell event to its specific handler, then
+// reconciles the terminal's mouse-reporting mode against whatever the
+// dispatch left on the overlay stack. Doing it here — the one funnel
+// every state change enters through — is what makes the mode
+// unstrandable: an opener that forgets to pair a call, closeAllModals
+// popping a surface out from under an action, or one overlay replacing
+// another all land on the same recomputation. See mousemode.go.
 func (a *App) handleEvent(ev tcell.Event) {
+	defer a.syncMouseMode()
+
 	switch e := ev.(type) {
 	case *tcell.EventResize:
 		a.width, a.height = a.screen.Size()

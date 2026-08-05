@@ -300,3 +300,28 @@ func TestPick_BarPressScrollsInsteadOfPicking(t *testing.T) {
 		t.Fatal("without a bar the padding column must still pick its row")
 	}
 }
+
+// TestPick_ClampsToPhoneSizedScreen pins both floors against the
+// terminal. The 26-cell minimum width is a preference — on a screen
+// narrower than that the screen has to win, or the frame's right border
+// and every row's tag column land in columns that do not exist. Same for
+// the height: a list that cannot show one row answers nothing, but it
+// still may not run past the last line of the terminal.
+func TestPick_ClampsToPhoneSizedScreen(t *testing.T) {
+	cases := [][2]int{{40, 10}, {26, 8}, {20, 7}}
+	for _, sz := range cases {
+		scrW, scrH := sz[0], sz[1]
+		p, _ := testPick()
+		p.Size = func() (int, int) { return scrW, scrH }
+		r := p.rect()
+		if r.X < 0 || r.X+r.W > scrW {
+			t.Fatalf("%dx%d: frame spans %d..%d", scrW, scrH, r.X, r.X+r.W)
+		}
+		if r.Y < 0 || r.Y+r.H > scrH {
+			t.Fatalf("%dx%d: frame spans rows %d..%d", scrW, scrH, r.Y, r.Y+r.H)
+		}
+		if p.visibleRows() < 1 {
+			t.Fatalf("%dx%d: no list rows at all", scrW, scrH)
+		}
+	}
+}

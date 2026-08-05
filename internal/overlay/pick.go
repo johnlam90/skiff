@@ -233,7 +233,7 @@ func (p *Pick) rowAt(x, y int) (idx int, inside bool) {
 // visibleRows returns how many list rows the modal shows.
 func (p *Pick) visibleRows() int {
 	r := p.rect()
-	rows := r.H - 5 // borders, title, divider, input
+	rows := r.H - pickChromeRows
 	if rows < 1 {
 		rows = 1
 	}
@@ -284,17 +284,31 @@ func (p *Pick) bar(r Rect) bodyBar {
 // against the pick from outside the package.
 func (p *Pick) Rect() Rect { return p.rect() }
 
+// pickMinWidth is the narrowest frame the list is still readable in:
+// the border and pad on each side plus about twenty cells of label.
+// Below it the modal takes the terminal instead, because a frame wider
+// than the screen loses its right border and every row's tag column.
+const pickMinWidth = 26
+
+// pickChromeRows is the non-list height: border, title, divider, the
+// filter input, and the bottom border.
+const pickChromeRows = 5
+
 // rect sizes the modal: narrow, anchored in the upper third so the
-// editor stays visible around it (preview hooks need that).
+// editor stays visible around it (preview hooks need that). Both
+// dimensions are clamped to the terminal — the minimum width is a
+// preference, not a promise, and on a phone-sized screen the screen
+// wins.
 func (p *Pick) rect() Rect {
 	scrW, scrH := p.Size()
 	w := 44
 	if w > scrW-4 {
 		w = scrW - 4
 	}
-	if w < 26 {
-		w = 26
+	if w < pickMinWidth {
+		w = pickMinWidth
 	}
+	w = fit(w, scrW)
 	visible := len(p.Items)
 	if visible > pickMaxVisible {
 		visible = pickMaxVisible
@@ -302,10 +316,16 @@ func (p *Pick) rect() Rect {
 	if visible < 1 {
 		visible = 1
 	}
-	h := visible + 5
+	h := visible + pickChromeRows
 	if h > scrH-2 {
 		h = scrH - 2
 	}
+	// One list row below the chrome, always: a frame with no room for a
+	// single match is a frame that answers nothing.
+	if h < pickChromeRows+1 {
+		h = pickChromeRows + 1
+	}
+	h = fit(h, scrH)
 	x := (scrW - w) / 2
 	y := (scrH - h) / 3
 	if x < 0 {

@@ -14,6 +14,7 @@ package app
 
 import (
 	"testing"
+	"time"
 )
 
 // TestSidebarW_ShownVsHidden verifies the sidebar width helper returns 0
@@ -164,5 +165,92 @@ func TestEditorSize(t *testing.T) {
 	w, h := a.editorSize()
 	if w != a.width-defaultSidebarWidth || h != a.height-2 {
 		t.Fatalf("editorSize: got (%d,%d)", w, h)
+	}
+}
+
+// TestStripRowBudget_LeavesRoomForEveryStrip is the fence under the
+// minimum size. minHeight, findBarHeight and flashStripMaxRows are three
+// constants in three files, and the editor only survives their sum by
+// arithmetic: on the shortest terminal skiff agrees to run, with the find
+// bar up, there must still be room for a full-height flash strip AND a
+// row of editor underneath it. Lowering minHeight past this is the
+// mistake this test exists to catch.
+func TestStripRowBudget_LeavesRoomForEveryStrip(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, minWidth, minHeight)
+	a.findOpen = true
+
+	if got := a.stripRowBudget(); got < flashStripMaxRows {
+		t.Fatalf("budget %d at %dx%d cannot hold a %d-row flash strip",
+			got, minWidth, minHeight, flashStripMaxRows)
+	}
+}
+
+// TestEditorRect_NeverStarvesUnderStrips walks every strip combination at
+// the minimum size: the rect the caret, the scrollbar and every hit-test
+// derive from must stay at least one row tall and must never describe
+// rows below the status bar.
+func TestEditorRect_NeverStarvesUnderStrips(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, minWidth, minHeight)
+
+	for _, find := range []bool{false, true} {
+		for _, msg := range []string{"", longFlash} {
+			a.findOpen = find
+			a.statusMsg, a.statusUntil = msg, time.Now().Add(time.Minute)
+			_, y, _, h := a.editorRect()
+			if h < editorMinRows {
+				t.Fatalf("find=%v flash=%v: editor height %d", find, msg != "", h)
+			}
+			if bottom := y + h + a.flashStripRows(); bottom > a.height-1 {
+				t.Fatalf("find=%v flash=%v: strips reach row %d past the status bar at %d",
+					find, msg != "", bottom, a.height-1)
+			}
+		}
+	}
+}
+
+// TestEditorRect_FloorsBelowTheMinimumSize pins the guard for the events
+// the size check does not cover. draw() bails to drawTooSmall under
+// minHeight, but keyboard handlers ask for editorSize on every keystroke
+// — including the ones that arrive while a phone is mid-rotation and the
+// terminal reports two rows. A zero or negative page height there is a
+// division and an index away from a panic.
+func TestEditorRect_FloorsBelowTheMinimumSize(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	for _, h := range []int{0, 1, 2, 3} {
+		resizeTestApp(t, a, 10, h)
+		if _, eh := a.editorSize(); eh < editorMinRows {
+			t.Fatalf("screen height %d: editor height %d", h, eh)
+		}
+	}
+}
+
+// TestSidebarPanelsSurviveTheMinimumHeight surveys the two surfaces that
+// stack a fixed prefix of rows inside the sidebar before their scrollable
+// list starts: the git panel (header, branch line, button row —
+// gitPanelListTop) and the file tree (its EXPLORER header and the project
+// root row, one fewer). The git panel is therefore the binding one, and
+// on the shortest terminal skiff runs in it must still have a list, even
+// with its keyboard hint strip docked at the bottom taking rows back.
+func TestSidebarPanelsSurviveTheMinimumHeight(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, minWidth, minHeight)
+	a.sidebarShown = true
+	a.gitPanelActive = true
+	a.gitPanelKeys = true
+
+	_, _, _, sh := a.sidebarRect()
+	if sh-gitPanelListTop < 1 {
+		t.Fatalf("a %d-row sidebar leaves no list under a %d-row header",
+			sh, gitPanelListTop)
+	}
+	listH, hint := a.gitPanelBody()
+	if listH < 1 {
+		t.Fatalf("git panel list starved to %d rows (hint took %d)", listH, len(hint))
+	}
+	if listH+len(hint) != sh-gitPanelListTop {
+		t.Fatalf("panel rows do not add up: list %d + hint %d != %d",
+			listH, len(hint), sh-gitPanelListTop)
 	}
 }

@@ -47,12 +47,13 @@ func cheatSheetLines() []string {
 	groups := leaderDisplayGroups()
 	bindings := leaderBindings()
 	help := menuHelpLines()
-	// Two intro rows, a blank + heading per group, every binding, the
+	// Three intro rows, a blank + heading per group, every binding, the
 	// spacer before the ≡ section, and the section itself.
-	lines := make([]string, 0, 2+2*len(groups)+len(bindings)+1+len(help))
+	lines := make([]string, 0, 3+2*len(groups)+len(bindings)+1+len(help))
 	lines = append(lines,
-		"No Ctrl shortcuts — Esc is the only leader.",
-		"Tap Esc, then the key — within half a second.")
+		"No Ctrl shortcuts — Esc is the",
+		"only leader. Tap Esc, then the key,",
+		"within half a second.")
 	for _, g := range groups {
 		lines = append(lines, "", g.title)
 		for _, b := range g.bindings {
@@ -74,18 +75,21 @@ func cheatSheetLines() []string {
 //
 // Lines are pre-wrapped to cheatSheetWidth: overlay.Info truncates
 // rather than wraps, and a reference that loses its last word on a
-// narrow pane fails exactly where it is needed.
+// narrow pane fails exactly where it is needed. The budget got tighter
+// when minWidth dropped to 40 — these lines are the ones a phone reads.
 func menuHelpLines() []string {
 	return []string{
 		"The ≡ menu",
-		"  Click ≡ at the top-left, or tap Esc twice.",
-		"  Type to filter every action at once: \"sb\"",
-		"  finds \"Switch branch…\". Enter runs the best",
-		"  match; Esc clears the filter, Esc again",
-		"  closes the menu.",
-		"  Right-click opens it too, but tmux and",
-		"  macOS Terminal often swallow it — the ≡",
-		"  button and Esc Esc always work.",
+		"  Click ≡ at the top-left, or tap",
+		"  Esc twice. Right-click opens it",
+		"  too, but tmux and macOS Terminal",
+		"  often swallow that — ≡ and Esc",
+		"  Esc always work.",
+		"  Type to filter every action at",
+		"  once: \"sb\" finds \"Switch",
+		"  branch…\". Enter runs the best",
+		"  match; Esc clears the filter,",
+		"  Esc again closes the menu.",
 	}
 }
 

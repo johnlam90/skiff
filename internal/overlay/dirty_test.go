@@ -226,3 +226,51 @@ func TestDirty_DrawRendersCustomLabels(t *testing.T) {
 		}
 	}
 }
+
+// TestDirty_PhoneWidthKeepsAllThreeButtonsOnScreen is the widest fixed
+// button row in the editor and therefore the surface that sets skiff's
+// minWidth: Cancel / Discard / Save is 29 cells of label in a 60-cell
+// frame, with Save pinned at column 42. On a 40-column phone the
+// unclamped frame put Save entirely off the right edge, so the only
+// button that saves your work was unreachable by mouse.
+func TestDirty_PhoneWidthKeepsAllThreeButtonsOnScreen(t *testing.T) {
+	const scrW, scrH = 40, 10
+	d, log := testDirty()
+	d.Size = func() (int, int) { return scrW, scrH }
+
+	r := d.rect()
+	if r.X < 0 || r.X+r.W > scrW || r.Y+r.H > scrH {
+		t.Fatalf("frame off screen: %+v on %dx%d", r, scrW, scrH)
+	}
+	xs, ws := d.columns()
+	for i := range xs {
+		if xs[i] < 1 || xs[i]+ws[i] > r.W-1 {
+			t.Fatalf("button %d spans %d..%d, outside the %d-cell frame", i, xs[i], xs[i]+ws[i], r.W)
+		}
+		if i > 0 && xs[i] < xs[i-1]+ws[i-1]+1 {
+			t.Fatalf("buttons %d and %d touch: %v", i-1, i, xs)
+		}
+		if got := d.buttonAtRelX(xs[i] + 1); got != i {
+			t.Fatalf("hit test at squeezed button %d returned %d", i, got)
+		}
+	}
+
+	d.HandleMouse(r.X+xs[2]+1, r.Y+5, tcell.Button1)
+	if len(*log) != 2 || (*log)[1] != "save" {
+		t.Fatalf("Save click at the squeezed column: got %v", *log)
+	}
+}
+
+// TestDirty_WideScreenKeepsPinnedColumns is the compatibility half: the
+// squeeze must engage only when the terminal forces it, so on any screen
+// that can hold 60 cells the hand-tuned columns are byte-identical to
+// what they always were.
+func TestDirty_WideScreenKeepsPinnedColumns(t *testing.T) {
+	d, _ := testDirty()
+	xs, ws := d.columns()
+	wantX := [3]int{dirtyBtnCancelX, dirtyBtnDiscardX, dirtyBtnSaveX}
+	wantW := [3]int{dirtyBtnCancelW, dirtyBtnDiscardW, dirtyBtnSaveW}
+	if xs != wantX || ws != wantW {
+		t.Fatalf("pinned columns drifted: xs=%v ws=%v", xs, ws)
+	}
+}

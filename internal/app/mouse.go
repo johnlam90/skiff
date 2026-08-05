@@ -56,6 +56,10 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	// Zellij + macOS Terminal split shift+wheel into two events: a
 	// ButtonNone+Shift "modifier state" event, then a WheelDown/Up
 	// with no modifier. We bridge them via modifierStickyWindow below.
+	// That first event is a button-less motion report, so it only
+	// reaches us under all-motion tracking — which is now scoped to
+	// hover surfaces (mousemode.go). See App.lastShiftAt for why the
+	// resulting degradation is the right trade.
 	if ev.Modifiers()&tcell.ModShift != 0 {
 		a.lastShiftAt = time.Now()
 	}

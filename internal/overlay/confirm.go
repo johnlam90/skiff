@@ -22,6 +22,12 @@ const (
 	confirmBtnNoW  = 8 // "[  No  ]"
 	confirmBtnYesX = 28
 	confirmBtnYesW = 7 // "[ Yes ]"
+
+	// confirmBtnGap is the space the pinned columns leave between No and
+	// Yes. buttonRowCols starts from it when a narrow terminal forces the
+	// pair to be re-placed, so the squeezed row keeps the spacing users
+	// know for as long as the frame can afford it.
+	confirmBtnGap = confirmBtnYesX - (confirmBtnNoX + confirmBtnNoW)
 )
 
 // ConfirmBodyWidth is the frame width a Confirm uses when it carries a
@@ -85,12 +91,34 @@ type Confirm struct {
 }
 
 // frameWidth returns the frame width: the wide form for a multi-line
-// Body, the classic 54-cell box otherwise.
+// Body, the classic 54-cell box otherwise — either way clamped to the
+// terminal, because a frame wider than the screen puts its right border
+// and the Yes button in columns that do not exist.
 func (c *Confirm) frameWidth() int {
-	if len(c.Body) == 0 {
-		return confirmWidth
+	natural := confirmWidth
+	if len(c.Body) > 0 {
+		natural = ConfirmBodyWidth
 	}
-	return ConfirmBodyWidth
+	if c.Size == nil {
+		return natural
+	}
+	w, _ := c.Size()
+	return fit(natural, w)
+}
+
+// buttonCols returns the No and Yes x offsets inside the frame. At or
+// above the classic 54 cells they are the pinned columns (shifted by
+// buttonOffset for the wide Body form), so ordinary terminals render
+// byte-identically; below it the pair is re-centered inside whatever
+// frame the screen allowed.
+func (c *Confirm) buttonCols() (noX, yesX int) {
+	fw := c.frameWidth()
+	if fw >= confirmWidth {
+		off := c.buttonOffset()
+		return off + confirmBtnNoX, off + confirmBtnYesX
+	}
+	cols := buttonRowCols(fw, confirmBtnGap, []int{confirmBtnNoW, confirmBtnYesW})
+	return cols[0], cols[1]
 }
 
 // bodyRows returns how many body rows are visible: one for the Message
@@ -214,8 +242,7 @@ func (c *Confirm) HandleMouse(x, y int, btn tcell.ButtonMask) {
 		return
 	}
 	btnY := r.Y + c.buttonRow()
-	noX := c.buttonOffset() + confirmBtnNoX
-	yesX := c.buttonOffset() + confirmBtnYesX
+	noX, yesX := c.buttonCols()
 	if x >= r.X && x < r.X+r.W && y == btnY {
 		relX := x - r.X
 		switch {
@@ -275,8 +302,9 @@ func (c *Confirm) Draw(scr tcell.Screen) {
 	}
 
 	btnY := r.Y + c.buttonRow()
-	DrawButton(scr, r.X+c.buttonOffset()+confirmBtnNoX, btnY, "[  No  ]", bg, th.Text, c.Hover == 0)
-	DrawButton(scr, r.X+c.buttonOffset()+confirmBtnYesX, btnY, "[ Yes ]", bg, th.Error, c.Hover == 1)
+	noX, yesX := c.buttonCols()
+	DrawButton(scr, r.X+noX, btnY, "[  No  ]", bg, th.Text, c.Hover == 0)
+	DrawButton(scr, r.X+yesX, btnY, "[ Yes ]", bg, th.Error, c.Hover == 1)
 	scr.HideCursor()
 }
 

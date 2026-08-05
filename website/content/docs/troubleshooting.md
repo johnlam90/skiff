@@ -84,6 +84,14 @@ That's deliberate. Below 58 columns — 18 for the narrowest useful tree plus 40
 
 `Esc t` overrides it either way, and the override sticks: reopening the explorer inside a narrow pane won't be undone by the next resize, and a panel you closed yourself is never reopened for you no matter how wide the window gets.
 
+## The whole screen says "Window too small — please resize"
+
+Skiff needs at least **40 columns × 10 rows** and refuses to paint anything below either. The second line names both sizes — `38×10 — needs 40×10` — so you can see which dimension is short; on a terminal too narrow even for that it degrades to `needs 40×10`, and the headline itself shortens to `Too small`. Nothing is lost: resize the window (or the tmux pane, or shrink the font) and the editor repaints where you left it.
+
+The two usual causes are a tmux pane split one time too many and a phone's soft keyboard, which eats rows rather than columns — see [Running over SSH](/docs/running-over-ssh/) for the phone case.
+
+Neither floor is a round number. Ten rows is the shortest the tallest dialogs get: the unsaved-changes, confirm and single-line prompt modals bottom out at 9 rows each and, unlike the menu or a file picker, none of them has anything left to window away — plus the one status-bar row underneath, which is where the dialog's own outcome gets reported. Forty columns is the widest fixed button row (`[ Cancel ] [ Discard ] [ Save ]` is 29 cells of label, and with a gap between neighbours and a margin at each end it cannot go under 33) plus enough label column for the `≡` menu's rows to stay identifiable rather than reading as prefixes.
+
 ## CJK or emoji sits one column off
 
 Skiff measures text in grapheme clusters and terminal cells with the same Unicode engine tcell uses to place a cell, so an ideograph takes two columns, a combining mark none, and a ZWJ emoji two — the caret, the selection, the find highlight and soft wrap all agree with what you see.
@@ -95,6 +103,20 @@ One class of character can still disagree with your *terminal*: the ambiguous-wi
 Skiff's palettes are authored in 24-bit color. Most modern terminals support it; some older ones default to 256-color mode. Check `tput colors` — anything less than `16777216` means truecolor isn't on. Set `COLORTERM=truecolor` in your shell rc and reconnect, and if you run tmux, start it with `tmux -2`.
 
 Below 256 colors Skiff stops relying on hue and switches to an attribute-based palette instead: reverse video for the selection and the status bar, bold for the active tab and dirty markers, underline for the current find match. That is deliberate, not a broken theme — on a 16-color `TERM` every gray in a theme collapses onto the same ANSI "bright black", so a color-only cue would be invisible. If the editor looks unexpectedly monochrome, `tput colors` is the thing to check.
+
+## Icons are missing (or show as boxes) over SSH
+
+`"icons": "auto"` asks the wrong machine. Detection runs `fc-list` and walks the standard font directories **of the machine Skiff is running on** — which, over SSH, is the server. The font that actually draws the glyphs lives on the client: your laptop's terminal emulator, or the terminal app on your phone.
+
+So both failures are normal and neither is a bug. A headless box with no fonts installed reports "no Nerd Font" and turns icons off even though your terminal would render them perfectly. A server that happens to have a Nerd Font installed for some unrelated reason turns icons on for a client that can't draw them, and you get tofu boxes.
+
+Auto-detection is structurally incapable of getting this right over SSH, so decide it yourself — on the server, in `~/.config/skiff/config.json`:
+
+```json
+{ "icons": "on" }
+```
+
+The accepted values are `"auto"` (the default), `"on"` and `"off"`; `on` and `off` bypass detection entirely, so there's no `fc-list` call and no font walk on the startup path either. Any other value is a config error Skiff flashes at startup rather than silently ignoring, so a typo tells you about itself. See [Configuration](/docs/configuration/) for the rest of the file.
 
 ## The image preview is blocky
 

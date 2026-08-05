@@ -312,3 +312,25 @@ func TestInfo_BarClickJumpsWithoutDismissing(t *testing.T) {
 		t.Fatalf("a bar press must not dismiss the report, closed %d times", *closed)
 	}
 }
+
+// TestInfo_ClampsToPhoneSizedScreen pins the report surface at skiff's
+// floor. Info is the cheat sheet and the failed-command stderr, so it is
+// the overlay most likely to be opened on the narrowest terminal someone
+// owns: its 84-cell natural frame has to collapse onto the screen, and
+// its body window has to stay inside the rows the frame actually got.
+func TestInfo_ClampsToPhoneSizedScreen(t *testing.T) {
+	const scrW, scrH = 40, 10
+	n, _ := testInfo(40)
+	n.Size = func() (int, int) { return scrW, scrH }
+
+	r := n.rect()
+	if r.X < 0 || r.X+r.W > scrW || r.Y < 0 || r.Y+r.H > scrH {
+		t.Fatalf("frame off screen: %+v on %dx%d", r, scrW, scrH)
+	}
+	if n.bodyRows() < 1 {
+		t.Fatal("no body rows at all")
+	}
+	if last := r.Y + 3 + n.bodyRows(); last > r.Y+r.H-1 {
+		t.Fatalf("body window ends at %d, past the frame's last inner row %d", last, r.Y+r.H-1)
+	}
+}

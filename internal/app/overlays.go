@@ -22,6 +22,12 @@ import (
 // surface whose state stays on App: its items are App actions and its
 // labels flex on App state (menuLayout / labelFor), so an adapter over
 // App methods is its natural — and permanent — shape.
+//
+// The stack is also what decides how much mouse reporting skiff asks
+// the terminal for: all-motion tracking (`\x1b[?1003h`) exists purely
+// so these surfaces can hover, so it is switched on while one is up
+// and off again the moment it closes. handleEvent recomputes that from
+// a.overlays after every event — see mousemode.go.
 
 // dropOverlay pops o only when it is the overlay actually on top, so a
 // dedicated closer (closeMenu) that runs after a chained open — an

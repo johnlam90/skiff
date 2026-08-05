@@ -46,11 +46,7 @@ type Info struct {
 // Height tracks the visible body rows.
 func (n *Info) rect() Rect {
 	w, h := n.Size()
-	fw := infoWidth
-	if w < fw {
-		fw = w
-	}
-	return Centered(w, h, fw, n.bodyRows()+infoChromeRows)
+	return Centered(w, h, fit(infoWidth, w), n.bodyRows()+infoChromeRows)
 }
 
 // bodyRows returns the visible body height: the screen minus chrome,

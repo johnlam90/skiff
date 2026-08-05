@@ -8,6 +8,7 @@
 package overlay
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
@@ -205,5 +206,92 @@ func TestPopup_DrawClipsLabelsToBorder(t *testing.T) {
 	}
 	if got := cellAt(scr, 5+12, 4); got == 'l' || got == 'a' || got == 'b' {
 		t.Fatalf("label leaked past the border: %q", got)
+	}
+}
+
+// gitExtrasShapedPopup is the real worst case: thirteen rows plus two of
+// border on a terminal at skiff's 40×10 floor. Nothing else in the editor
+// anchors a list this long.
+func gitExtrasShapedPopup() *Popup {
+	items := make([]PopupItem, 0, 13)
+	for i := range 13 {
+		items = append(items, PopupItem{Label: fmt.Sprintf("action %02d", i), OnPick: func() {}})
+	}
+	return &Popup{
+		Items: items,
+		Theme: theme.Default(),
+		At:    PlacePopup(40, 10, 2, 2, PopupWidth(items, 19), len(items)),
+		Close: func() {},
+	}
+}
+
+// TestPopup_ShortScreenWindowsRows pins the clamp PlacePopup grew for the
+// minimum size. Thirteen git-extras rows wanted a 15-row frame; on a
+// ten-row terminal the unclamped frame painted its last four actions —
+// and its bottom border — into cells the screen does not have, so those
+// actions were unreachable and invisible at once.
+func TestPopup_ShortScreenWindowsRows(t *testing.T) {
+	p := gitExtrasShapedPopup()
+	r := p.At
+	if r.Y < 0 || r.Y+r.H > 10 || r.X < 0 || r.X+r.W > 40 {
+		t.Fatalf("frame %+v escapes a 40x10 screen", r)
+	}
+	if p.maxScroll() == 0 {
+		t.Fatalf("precondition: 13 items in a %d-row frame should window", r.H)
+	}
+
+	// Arrow to the last item; the window must follow, and the row must be
+	// the one painted at the bottom of the frame.
+	for range len(p.Items) {
+		p.HandleKey(key(tcell.KeyDown, 0))
+	}
+	if p.Hover != len(p.Items)-1 {
+		t.Fatalf("arrows stopped at row %d of %d", p.Hover, len(p.Items)-1)
+	}
+	if p.Hover < p.scroll || p.Hover >= p.scroll+p.visibleRows() {
+		t.Fatalf("last row %d outside the window [%d,%d)", p.Hover, p.scroll, p.scroll+p.visibleRows())
+	}
+
+	scr := simScreen(t)
+	scr.SetSize(40, 10)
+	p.Draw(scr)
+	scr.Show()
+	lastY := r.Y + 1 + (p.Hover - p.scroll)
+	if got := rowRunes(scr, r.X+4, lastY, 9); got != "action 12" {
+		t.Fatalf("bottom row painted %q, want the scrolled-to action", got)
+	}
+	if got := cellAt(scr, r.X+3, r.Y); got != '▲' {
+		t.Fatalf("no scrolled-above marker in the top border, got %q", got)
+	}
+
+	// A click on that row must run item 12, not whichever item used to
+	// occupy the cell before the window moved.
+	fired := -1
+	for i := range p.Items {
+		p.Items[i].OnPick = func() { fired = i }
+	}
+	p.HandleMouse(r.X+4, lastY, tcell.Button1)
+	if fired != len(p.Items)-1 {
+		t.Fatalf("click on the bottom row fired item %d", fired)
+	}
+}
+
+// TestPopup_TallScreenNeverWindows is the no-regression half: on an
+// ordinary terminal the same popup keeps every row and paints no markers,
+// so the anchored menus look exactly as they always did.
+func TestPopup_TallScreenNeverWindows(t *testing.T) {
+	p := gitExtrasShapedPopup()
+	p.At = PlacePopup(80, 24, 2, 2, p.At.W, len(p.Items))
+	if p.At.H != len(p.Items)+2 {
+		t.Fatalf("frame height %d, want %d", p.At.H, len(p.Items)+2)
+	}
+	if p.maxScroll() != 0 {
+		t.Fatalf("nothing should be windowed out, maxScroll=%d", p.maxScroll())
+	}
+	for range len(p.Items) {
+		p.HandleKey(key(tcell.KeyDown, 0))
+	}
+	if p.scroll != 0 {
+		t.Fatalf("scroll moved to %d on a screen that fits", p.scroll)
 	}
 }

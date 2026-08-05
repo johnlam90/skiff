@@ -25,6 +25,11 @@ const (
 	promptBtnCancelW = 10 // "[ Cancel ]"
 	promptBtnOKX     = 30
 	promptBtnOKW     = 8 // "[  OK  ]"
+
+	// promptBtnGap is the space the pinned columns leave between Cancel
+	// and OK — the starting point buttonRowCols shrinks from when a
+	// narrow terminal forces the pair to be re-placed.
+	promptBtnGap = promptBtnOKX - (promptBtnCancelX + promptBtnCancelW)
 )
 
 // Prompt is the single-line text-input overlay: a centered box with a
@@ -55,11 +60,36 @@ type Prompt struct {
 	OnSubmit func(string)
 }
 
+// frameWidth returns the prompt's frame width: 54 cells, or the whole
+// terminal when it is narrower. Without the clamp the OK button lands
+// off the right edge of a phone-sized screen and the only way out of
+// the prompt is the keyboard.
+func (p *Prompt) frameWidth() int {
+	if p.Size == nil {
+		return promptWidth
+	}
+	w, _ := p.Size()
+	return fit(promptWidth, w)
+}
+
+// buttonCols returns the Cancel and OK x offsets inside the frame: the
+// pinned columns at natural width, a re-centered pair when the terminal
+// squeezed the frame. Draw and both hit-tests read it, so the painted
+// button and the clickable button are always the same cells.
+func (p *Prompt) buttonCols() (cancelX, okX int) {
+	fw := p.frameWidth()
+	if fw >= promptWidth {
+		return promptBtnCancelX, promptBtnOKX
+	}
+	cols := buttonRowCols(fw, promptBtnGap, []int{promptBtnCancelW, promptBtnOKW})
+	return cols[0], cols[1]
+}
+
 // rect computes the prompt's on-screen rectangle for the current
 // screen size.
 func (p *Prompt) rect() Rect {
 	w, h := p.Size()
-	return Centered(w, h, promptWidth, promptHeight)
+	return Centered(w, h, p.frameWidth(), promptHeight)
 }
 
 // HandleKey routes one key event: Esc cancels, Enter submits, and
@@ -81,13 +111,14 @@ func (p *Prompt) HandleKey(ev *tcell.EventKey) {
 // click in the input field repositions the cursor.
 func (p *Prompt) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	r := p.rect()
+	cancelX, okX := p.buttonCols()
 	// Hover tracking — runs on every event, button held or not.
 	if x >= r.X && x < r.X+r.W && y == r.Y+6 {
 		relX := x - r.X
 		switch {
-		case relX >= promptBtnCancelX && relX < promptBtnCancelX+promptBtnCancelW:
+		case relX >= cancelX && relX < cancelX+promptBtnCancelW:
 			p.Hover = 0
-		case relX >= promptBtnOKX && relX < promptBtnOKX+promptBtnOKW:
+		case relX >= okX && relX < okX+promptBtnOKW:
 			p.Hover = 1
 		}
 	}
@@ -101,10 +132,10 @@ func (p *Prompt) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	if y == r.Y+6 {
 		relX := x - r.X
 		switch {
-		case relX >= promptBtnCancelX && relX < promptBtnCancelX+promptBtnCancelW:
+		case relX >= cancelX && relX < cancelX+promptBtnCancelW:
 			p.cancel()
 			return
-		case relX >= promptBtnOKX && relX < promptBtnOKX+promptBtnOKW:
+		case relX >= okX && relX < okX+promptBtnOKW:
 			p.submit()
 			return
 		}
@@ -136,7 +167,10 @@ func (p *Prompt) Draw(scr tcell.Screen) {
 	bg := th.LineHL
 	mutedStyle := tcell.StyleDefault.Background(bg).Foreground(th.Muted)
 	if p.Hint != "" {
-		drawText(scr, r.X+2, r.Y+3, p.Hint, mutedStyle)
+		// Clipped, not drawn raw: drawText does no bounds checking, so a
+		// hint longer than a squeezed frame used to paint straight
+		// through the border and onto whatever sat behind the prompt.
+		drawText(scr, r.X+2, r.Y+3, trimRunes(p.Hint, r.W-4), mutedStyle)
 	}
 
 	inputStyle := tcell.StyleDefault.Background(th.BG).Foreground(th.Text)
@@ -144,8 +178,9 @@ func (p *Prompt) Draw(scr tcell.Screen) {
 	fieldWidth := (r.X + r.W - 3) - fieldStart
 	p.Field.Draw(scr, fieldStart, r.Y+4, fieldWidth, inputStyle, true)
 
-	DrawButton(scr, r.X+promptBtnCancelX, r.Y+6, "[ Cancel ]", bg, th.Text, p.Hover == 0)
-	DrawButton(scr, r.X+promptBtnOKX, r.Y+6, "[  OK  ]", bg, th.Accent, p.Hover == 1)
+	cancelX, okX := p.buttonCols()
+	DrawButton(scr, r.X+cancelX, r.Y+6, "[ Cancel ]", bg, th.Text, p.Hover == 0)
+	DrawButton(scr, r.X+okX, r.Y+6, "[  OK  ]", bg, th.Accent, p.Hover == 1)
 }
 
 // submit closes the prompt and hands the trimmed value to OnSubmit. An

@@ -54,6 +54,10 @@ internal/app/leader.go        Esc-leader table (key/action/desc/group) — the s
                               source for dispatch, cheat-strip and Esc ? sheet
 internal/app/cheatsheet.go    Esc ? shortcut reference, generated from leaderBindings()
 internal/app/mouse.go         Mouse dispatcher + drag/auto-scroll state
+internal/app/mousemode.go     How much mouse reporting to ask the terminal for:
+                              baseline is clicks/drags/wheel, and all-motion
+                              tracking (?1003h) is switched on only while a
+                              hover-sensitive overlay is up
 internal/app/menudef.go       Menu data model: rows, groups, drill-ins, filter matcher
 internal/app/menu.go          Menu behavior: filter field, nav, hit-test, drawing
 internal/app/actions.go       One handler per menu row + the custom-action runner
@@ -348,6 +352,61 @@ a selection. Demotion into an `overlay.Pick` drill-in is the other
 half: register any new drill-in in `menuDrillIns()` or the
 reachability test cannot see it, and CLAUDE.md's "every action is
 reachable from the ≡ menu" rule quietly stops holding.
+
+### `minWidth` / `minHeight` are derived floors, not taste (app.go)
+`minWidth = 40`, `minHeight = 10`; below either, `draw()` bails to
+`drawTooSmall` and paints nothing else. The numbers matter less than
+where they come from, because the next person to touch a modal is the
+one who breaks them:
+
+- **Height is set by the shortest the tallest prefabs can get.**
+  `Dirty` and `Prompt` are a fixed 9 rows; `Confirm` windows its body
+  (`bodyRows` clamps to what fits) but the chrome around it is
+  `confirmChromeRows = 8`, so it bottoms out at 9 too. Unlike `Info`,
+  `Pick`, `Form` and the action menu, none of the three can go under
+  that. Nine rows of modal plus one row of status bar underneath is
+  10. The status row is not slack: it is where the modal's own outcome
+  is reported, so a modal that covers it means answering a prompt and
+  never seeing the answer. **Adding a chrome row to any of those three
+  raises the floor** — either keep the height or give the prefab
+  something scrollable to shed instead, and say which in its comment.
+- **Width is set by the widest fixed BUTTON row.** `Dirty`'s
+  `[ Cancel ] [ Discard ] [ Save ]` is 29 cells of label; with one cell
+  of gap between neighbours and one of frame margin at each end it has
+  an arithmetic floor of 33. Above that the binding constraint is the
+  action menu: its frame is `width-2` and its label column is the frame
+  minus the 5 cells of chrome `menuLabelBudget` subtracts, and
+  `menuMinFrameWidth` (= 5 + 19) is where the frame stops narrowing and
+  starts clipping instead. Much under 40 and rows read as
+  unidentifiable prefixes. 40 clears both, and it is iPhone SE portrait
+  at the default font.
+- **The strips are checked against the floor, not assumed safe.**
+  `stripRowBudget` (layout.go) derives the find bar + flash strip
+  allowance from `a.height` so the editor rect can never come back
+  h < 1, and `TestStripRowBudget_LeavesRoomForEveryStrip` is the fence:
+  `minHeight`, `findBarHeight` and `flashStripMaxRows` live in three
+  files and only add up by arithmetic.
+
+Anything that cannot fit must degrade legibly — clamp, scroll, or
+ellipsise with the full text flashed elsewhere (`revealMenuRowLabel`) —
+never paint outside its rect. The `…AtTheMinimumSize` tests in
+draw_test.go pin the whole set — editor rect, every prefab, the menu's
+filter and scroll, the find bar and flash strip together — at
+`minWidth`/`minHeight`, with one row and one column either side.
+
+### Mouse motion is requested only while something hovers (mousemode.go)
+The baseline is `MouseButtonEvents | MouseDragEvents` (`?1000h` +
+`?1002h`): presses, releases, drags and the wheel, which is every core
+gesture. `MouseMotionEvents` (`?1003h`, an event per pointer movement
+with no button down) is added only while an overlay that gives hover
+feedback is on top. Don't put it back in the constructors "for
+simplicity": skiff's habitat is SSH, often from a phone on cellular,
+where all-motion tracking is a continuous uplink flood, and on a
+touchscreen it buys nothing because there is no hover. `wantMouseFlags`
+recomputes the answer from `a.overlays.Top()` rather than accumulating
+it, so no opener or closer has to pair its calls, and `syncMouseMode`
+caches in `a.mouseFlags` because tcell's `EnableMouse` re-emits the
+whole disable-then-enable run on every call.
 
 ### Sidebar splitter drag
 A drag is detected when a press lands at exactly `x == splitterX()`.

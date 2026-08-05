@@ -158,3 +158,44 @@ func TestPrompt_DrawPaintsChromeAndValue(t *testing.T) {
 		t.Fatalf("OK button: %q", got)
 	}
 }
+
+// TestPrompt_PhoneWidthKeepsButtonsAndHintInside covers the two ways the
+// prompt used to bleed at skiff's 40-column floor: the 54-cell frame
+// hung off the right edge, and the hint line went through drawText with
+// no bounds check at all, so a long "in some/deep/folder" subtitle
+// painted straight over the border and onto the editor behind it.
+func TestPrompt_PhoneWidthKeepsButtonsAndHintInside(t *testing.T) {
+	const scrW, scrH = 40, 10
+	p, log := testPrompt()
+	p.Size = func() (int, int) { return scrW, scrH }
+	p.Hint = "in a/deep/nested/folder/somewhere/below/root"
+
+	r := p.rect()
+	if r.X < 0 || r.X+r.W > scrW || r.Y+r.H > scrH {
+		t.Fatalf("frame off screen: %+v on %dx%d", r, scrW, scrH)
+	}
+	// frameWidth is what buttonCols measures against and rect().W is what
+	// gets painted; if they ever disagree the buttons are placed inside a
+	// frame that is not there.
+	if p.frameWidth() != r.W {
+		t.Fatalf("frameWidth %d but rect is %d wide", p.frameWidth(), r.W)
+	}
+	cancelX, okX := p.buttonCols()
+	if cancelX < 1 || okX+promptBtnOKW > r.W-1 || cancelX+promptBtnCancelW >= okX {
+		t.Fatalf("buttons outside the %d-cell frame: cancel=%d ok=%d", r.W, cancelX, okX)
+	}
+
+	scr := simScreen(t)
+	scr.SetSize(scrW, scrH)
+	p.Field.SetText("v")
+	p.Draw(scr)
+	scr.Show()
+	if got := cellAt(scr, r.X+r.W-1, r.Y+3); got != '│' {
+		t.Fatalf("hint overran the border, right edge of the hint row = %q", got)
+	}
+
+	p.HandleMouse(r.X+okX+1, r.Y+6, tcell.Button1)
+	if len(*log) != 2 || (*log)[1] != "submit:v" {
+		t.Fatalf("OK click at the squeezed column: got %v", *log)
+	}
+}

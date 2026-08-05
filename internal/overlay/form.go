@@ -55,16 +55,76 @@ type Form struct {
 	// OnSubmit receives the per-key value map. Empty fields pass
 	// through — the action author chooses whether empty means "skip".
 	OnSubmit func(map[string]string)
+
+	// scroll is the first row rendered. Non-zero only when the terminal
+	// is too short to show every row at once — a three-prompt custom
+	// action wants 13 rows and a phone in landscape has ten.
+	scroll int
 }
 
-// rect computes the form's centered rectangle; height tracks the rows.
+// frameWidth returns the form's frame width: 60 cells, or the whole
+// terminal when it is narrower, so the Submit button stays on screen.
+func (f *Form) frameWidth() int {
+	if f.Size == nil {
+		return formWidth
+	}
+	w, _ := f.Size()
+	return fit(formWidth, w)
+}
+
+// rect computes the form's centered rectangle; height tracks the rows
+// and Centered clamps it to the terminal, so a form with more rows than
+// the screen can hold windows them instead of painting its buttons into
+// cells that do not exist.
 func (f *Form) rect() Rect {
 	w, h := f.Size()
 	rows := len(f.Rows)
 	if rows < 1 {
 		rows = 1
 	}
-	return Centered(w, h, formWidth, formChromeRows+formRowHeight*rows)
+	return Centered(w, h, f.frameWidth(), formChromeRows+formRowHeight*rows)
+}
+
+// visibleRows is how many (label, input) pairs the frame can show. At
+// least one: a form the user cannot see a single field of is worse than
+// a cramped one.
+func (f *Form) visibleRows() int {
+	n := (f.rect().H - formChromeRows) / formRowHeight
+	if n < 1 {
+		n = 1
+	}
+	if n > len(f.Rows) {
+		n = len(f.Rows)
+	}
+	return n
+}
+
+// maxScroll is the largest first-visible-row index — zero whenever the
+// whole form fits, which is every ordinary terminal.
+func (f *Form) maxScroll() int {
+	if n := len(f.Rows) - f.visibleRows(); n > 0 {
+		return n
+	}
+	return 0
+}
+
+// ensureFocusVisible scrolls the window so the focused row is on screen.
+// Called from every focus change, which is the only thing that moves the
+// window: the form has no wheel or scroll keys of its own because Tab
+// already walks it end to end.
+func (f *Form) ensureFocusVisible() {
+	if f.Focus < f.scroll {
+		f.scroll = f.Focus
+	}
+	if n := f.visibleRows(); f.Focus >= f.scroll+n {
+		f.scroll = f.Focus - n + 1
+	}
+	if f.scroll > f.maxScroll() {
+		f.scroll = f.maxScroll()
+	}
+	if f.scroll < 0 {
+		f.scroll = 0
+	}
 }
 
 // Values assembles the submitted map from the rows' current state.
@@ -151,9 +211,16 @@ func (f *Form) HandleMouse(x, y int, btn tcell.ButtonMask) {
 		}
 	}
 
-	for i := range f.Rows {
+	// Only the rows the window is showing are clickable — a row scrolled
+	// out of the frame occupies no cells, so hit-testing it would fire on
+	// whatever is painted where it used to be.
+	for vi, n := 0, f.visibleRows(); vi < n; vi++ {
+		i := f.scroll + vi
+		if i >= len(f.Rows) {
+			break
+		}
 		row := &f.Rows[i]
-		rowY := r.Y + 3 + i*formRowHeight
+		rowY := r.Y + 3 + vi*formRowHeight
 		inputRow := rowY + 1
 		if y != rowY && y != inputRow {
 			continue
@@ -189,9 +256,12 @@ func (f *Form) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	}
 }
 
-// Draw renders the form: frame, one label/input pair per row — the
-// focused row's label in the accent, its input on a lifted background,
-// selects with < > chevron targets — and the button row.
+// Draw renders the form: frame, one label/input pair per visible row —
+// the focused row's label in the accent, its input on a lifted
+// background, selects with < > chevron targets — and the button row.
+// When the terminal is too short for every row, ▲/▼ markers go into the
+// divider and the bottom border (the menu's vocabulary) so the hidden
+// fields announce themselves without costing a content row.
 func (f *Form) Draw(scr tcell.Screen) {
 	r := f.rect()
 	th := f.Theme
@@ -202,16 +272,22 @@ func (f *Form) Draw(scr tcell.Screen) {
 	mutedStyle := tcell.StyleDefault.Background(bg).Foreground(th.Muted)
 
 	scr.HideCursor()
-	for i := range f.Rows {
+	for vi, n := 0, f.visibleRows(); vi < n; vi++ {
+		i := f.scroll + vi
+		if i >= len(f.Rows) {
+			break
+		}
 		row := &f.Rows[i]
-		rowY := r.Y + 3 + i*formRowHeight
+		rowY := r.Y + 3 + vi*formRowHeight
 		inputRow := rowY + 1
 
 		labelStyle := mutedStyle
 		if i == f.Focus {
 			labelStyle = titleStyle
 		}
-		drawText(scr, r.X+2, rowY, row.Label, labelStyle)
+		// Clipped: drawText has no bounds check, and a prompt label
+		// longer than a squeezed frame would paint through the border.
+		drawText(scr, r.X+2, rowY, trimRunes(row.Label, r.W-4), labelStyle)
 
 		fieldStart := r.X + 3
 		fieldEnd := r.X + r.W - 3
@@ -239,11 +315,20 @@ func (f *Form) Draw(scr tcell.Screen) {
 		row.Field.Draw(scr, fieldStart, inputRow, fieldWidth, inputStyle, i == f.Focus)
 	}
 
+	moreStyle := tcell.StyleDefault.Background(bg).Foreground(th.Accent)
+	if f.scroll > 0 {
+		drawText(scr, r.X+2, r.Y+2, " ▲ ", moreStyle)
+	}
+	if f.scroll < f.maxScroll() {
+		drawText(scr, r.X+2, r.Y+r.H-1, " ▼ ", moreStyle)
+	}
+
 	DrawButton(scr, r.X+4, r.Y+r.H-3, "[ Cancel ]", bg, th.Text, false)
 	DrawButton(scr, r.X+r.W-formBtnW-4, r.Y+r.H-3, "[ Submit ]", bg, th.Accent, true)
 }
 
-// moveFocus shifts the focused row by delta with wrap-around.
+// moveFocus shifts the focused row by delta with wrap-around, keeping
+// the new row inside the visible window.
 func (f *Form) moveFocus(delta int) {
 	n := len(f.Rows)
 	if n == 0 {
@@ -254,6 +339,7 @@ func (f *Form) moveFocus(delta int) {
 		i += n
 	}
 	f.Focus = i
+	f.ensureFocusVisible()
 }
 
 // submit closes the form and hands the collected values to OnSubmit —

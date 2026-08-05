@@ -22,8 +22,10 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/customactions"
 	"github.com/johnlam90/skiff/internal/icons"
 	"github.com/johnlam90/skiff/internal/theme"
+	"github.com/johnlam90/skiff/internal/version"
 )
 
 // TestDetectLangLabel covers the language label helper's three cases.
@@ -136,10 +138,12 @@ func TestDraw_AllPanels(t *testing.T) {
 	a.draw()
 	omits("sidebar hidden", filepath.Base(dir))
 
-	// Tiny window → the resize message replaces every panel.
+	// Tiny window → the resize message replaces every panel. At five
+	// columns even the short label is clipped, but something legible has
+	// to land: a blank red screen says nothing at all.
 	a.width, a.height = 5, 5
 	a.draw()
-	paints("tiny window", "Wind") // the message is clipped to 5 columns
+	paints("tiny window", "Too s") // "Too small", clipped to 5 columns
 	omits("tiny window", "f.txt")
 }
 
@@ -883,5 +887,258 @@ func TestTabChevrons_DropCountsOnACrampedStrip(t *testing.T) {
 	}
 	if !left.hit(left.X) || !right.hit(right.X) {
 		t.Fatal("the bare chevrons must still be click targets")
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Minimum terminal size
+// -----------------------------------------------------------------------------
+
+// minSizeApp opens a file in a terminal resized through the event loop so
+// applyResponsiveSidebar makes its own call about the explorer — which at
+// phone widths is to collapse it, exactly as it would on the device.
+func minSizeApp(t *testing.T, w, h int) *App {
+	t.Helper()
+	a := newTestApp(t, t.TempDir())
+	body := strings.Repeat("line of file text\n", 60)
+	openTestFile(t, a, a.rootDir, "small.txt", body)
+	resizeApp(t, a, w, h)
+	a.statusMsg = "" // the auto-hide flash is not what these tests measure
+	return a
+}
+
+// frameCornersOnScreen reports whether all four box-drawing corners of an
+// overlay frame landed on the screen. A frame wider or taller than the
+// terminal loses its right or bottom corners to tcell's clip, so this is
+// the end-to-end form of "the modal did not paint outside the screen".
+func frameCornersOnScreen(t *testing.T, a *App) bool {
+	t.Helper()
+	a.screen.Show()
+	cells, w, h := a.screen.(tcell.SimulationScreen).GetContents()
+	seen := map[rune]bool{}
+	for i := range w * h {
+		if rs := cells[i].Runes; len(rs) > 0 {
+			seen[rs[0]] = true
+		}
+	}
+	return seen['┌'] && seen['┐'] && seen['└'] && seen['┘']
+}
+
+// TestDraw_RunsAtTheMinimumSize is the headline: at exactly minWidth ×
+// minHeight the editor gets a real rectangle and paints into it, and the
+// refusal screen stays away. 40×10 is an Android phone in landscape with
+// the soft keyboard up — the posture the old 50×24 floor rejected
+// outright.
+func TestDraw_RunsAtTheMinimumSize(t *testing.T) {
+	a := minSizeApp(t, minWidth, minHeight)
+	a.draw()
+	a.screen.Show()
+
+	x, y, w, h := a.editorRect()
+	if w < 1 || h < 1 {
+		t.Fatalf("editor rect is empty: %dx%d", w, h)
+	}
+	if x+w > a.width || y+h > a.height-1 {
+		t.Fatalf("editor rect %d,%d %dx%d escapes a %dx%d screen", x, y, w, h, a.width, a.height)
+	}
+	if !screenHasText(t, a, "line of file text") {
+		t.Error("the editor never painted its buffer")
+	}
+	if !screenHasText(t, a, "Ln 1, Col 1") {
+		t.Error("the status bar never painted its readout")
+	}
+	if screenHasText(t, a, "Too small") || screenHasText(t, a, "please resize") {
+		t.Error("the minimum size must not be refused")
+	}
+}
+
+// TestDraw_FloorIsExactlyMinWidthByMinHeight walks the boundary in both
+// directions. One column or one row under the floor is refused; the floor
+// itself and one past it run. Pinning both sides is what stops the floor
+// drifting up again by accident.
+func TestDraw_FloorIsExactlyMinWidthByMinHeight(t *testing.T) {
+	cases := []struct {
+		w, h    int
+		refused bool
+	}{
+		{minWidth - 1, minHeight, true},
+		{minWidth, minHeight - 1, true},
+		{minWidth, minHeight, false},
+		{minWidth + 1, minHeight + 1, false},
+		{92, 13, false}, // iPhone landscape, soft keyboard up
+		{80, 10, false}, // Android landscape, soft keyboard up
+		{40, 22, false}, // iPhone SE portrait, default font
+	}
+	for _, c := range cases {
+		a := minSizeApp(t, c.w, c.h)
+		a.draw()
+		a.screen.Show()
+		refused := screenHasText(t, a, "Too small") || screenHasText(t, a, "please resize")
+		if refused != c.refused {
+			t.Errorf("%dx%d: refused=%v, want %v", c.w, c.h, refused, c.refused)
+		}
+	}
+}
+
+// TestDrawTooSmall_NamesTheTargetSize pins the refusal's content. A phone
+// user cannot drag a terminal wider; the only lever is the font size, and
+// the only way to know how far to turn it is to be told both numbers. The
+// measurement drops out rather than being cut in half when it will not
+// fit, but the label always lands — a blank red screen explains nothing.
+func TestDrawTooSmall_NamesTheTargetSize(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, minWidth-1, minHeight)
+	a.draw()
+	a.screen.Show()
+
+	want := "needs " + itoa(minWidth) + "×" + itoa(minHeight)
+	if !screenHasText(t, a, want) {
+		t.Errorf("the refusal never named %q", want)
+	}
+
+	resizeTestApp(t, a, 6, 4)
+	lines := a.tooSmallLines()
+	if len(lines) == 0 {
+		t.Fatal("a tiny screen must still say something")
+	}
+	if lines[0] != "Too small" {
+		t.Errorf("narrow label should degrade, got %q", lines[0])
+	}
+	for _, l := range lines[1:] {
+		if runeLen(l) > 6 {
+			t.Errorf("line %q overruns a 6-column screen", l)
+		}
+	}
+}
+
+// TestDraw_EveryPrefabFitsAtTheMinimumSize opens each floating surface at
+// the floor and checks two things per surface: the frame's four corners
+// are on screen (a frame bigger than the terminal loses the right or
+// bottom pair to the clip), and every control the user needs to resolve
+// it is painted. Confirm, Dirty and Prompt are the fixed 9-row prefabs
+// that set minHeight; Form is the one that has to window its rows to get
+// there.
+func TestDraw_EveryPrefabFitsAtTheMinimumSize(t *testing.T) {
+	cases := []struct {
+		name string
+		open func(*App)
+		want []string
+	}{
+		{"confirm", func(a *App) {
+			a.openConfirm("Delete file?", "This cannot be undone", nil)
+		}, []string{"[  No  ]", "[ Yes ]"}},
+		{"dirty", func(a *App) {
+			a.openDirtyClose("Unsaved changes", "Save before closing?", nil, nil)
+		}, []string{"[ Cancel ]", "[ Discard ]", "[ Save ]"}},
+		{"prompt", func(a *App) {
+			a.openPrompt("Rename file", "in the project root", "small.txt", nil)
+		}, []string{"[ Cancel ]", "[  OK  ]"}},
+		{"info", func(a *App) {
+			a.openInfo("Command output", []string{"one", "two", "three", "four", "five"})
+		}, []string{"[  OK  ]"}},
+		{"form", func(a *App) {
+			a.openForm("Copy to remote", []customactions.Prompt{
+				{Key: "HOST", Label: "Host", Type: customactions.PromptText},
+				{Key: "PATH", Label: "Remote path", Type: customactions.PromptText},
+				{Key: "MODE", Label: "Mode", Type: customactions.PromptText},
+			}, nil)
+		}, []string{"[ Cancel ]", "[ Submit ]"}},
+		{"pick", func(a *App) {
+			a.openListPick("Pick one", []listPickItem{
+				{Label: "first choice"}, {Label: "second choice"}, {Label: "third choice"},
+			}, func(*App, int) {}, nil, nil)
+		}, []string{"first choice"}},
+		{"menu", func(a *App) { a.openMenu() }, []string{"Menu", "New file", "v" + version.Version}},
+		{"cheat sheet", func(a *App) { a.menuKeyboardShortcuts() }, []string{"Esc is the", "[  OK  ]"}},
+		{"tree context", func(a *App) { a.openTreeContext(a.tree.Root, 2, 2) }, []string{"Copy rel path"}},
+		{"git extras", func(a *App) { a.openGitExtras(2, 2) }, []string{"Fetch", "▼"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := minSizeApp(t, minWidth, minHeight)
+			c.open(a)
+			a.draw()
+			a.screen.Show()
+			if !frameCornersOnScreen(t, a) {
+				t.Errorf("%s: a frame corner fell off a %dx%d screen", c.name, a.width, a.height)
+			}
+			for _, want := range c.want {
+				if !screenHasText(t, a, want) {
+					t.Errorf("%s: never painted %q", c.name, want)
+				}
+			}
+		})
+	}
+}
+
+// TestDrawMenu_FiltersAndScrollsAtTheMinimumSize proves the action menu —
+// the only route to every command in a no-Ctrl editor — is fully working
+// at the floor, not merely on screen: it narrows to a typed query, and
+// the rows a three-row content window pushes off the frame are still
+// reachable by arrow key.
+func TestDrawMenu_FiltersAndScrollsAtTheMinimumSize(t *testing.T) {
+	a := minSizeApp(t, minWidth, minHeight)
+	a.openMenu()
+
+	if a.menuMaxScroll() <= 0 {
+		t.Fatal("precondition: the menu should overflow a 10-row terminal")
+	}
+	for range 6 {
+		a.handleKey(keyEv(tcell.KeyDown, 0))
+	}
+	a.draw()
+	a.screen.Show()
+	if a.menuScroll == 0 {
+		t.Error("arrow keys never scrolled the content window")
+	}
+	if !screenHasText(t, a, "▲") || !screenHasText(t, a, "▼") {
+		t.Error("a scrolled menu must mark both hidden directions")
+	}
+
+	a.clearMenuFilter()
+	for _, r := range "wrap" {
+		a.handleKey(keyEv(tcell.KeyRune, r))
+	}
+	a.draw()
+	a.screen.Show()
+	if !screenHasText(t, a, "wrap long lines") && !screenHasText(t, a, "Unwrap long lines") {
+		t.Error("the filter never narrowed to the wrap row")
+	}
+	if screenHasText(t, a, "New file") {
+		t.Error("the filter left an unmatched row on screen")
+	}
+}
+
+// TestFlashStrip_AndFindBarShareTheFloorWithoutStarvingTheEditor is the
+// worst case the strips can produce at the minimum size: the find bar and
+// a wrapped multi-row flash both docked under the editor at once. The
+// editor has to keep rows of its own and keep painting into them, because
+// its scrollbar, caret and hit-testing all describe that rectangle.
+func TestFlashStrip_AndFindBarShareTheFloorWithoutStarvingTheEditor(t *testing.T) {
+	a := minSizeApp(t, minWidth, minHeight)
+	a.openFind()
+	a.flash(longFlash)
+	a.draw()
+	a.screen.Show()
+
+	if rows := a.flashStripRows(); rows < 2 {
+		t.Fatalf("precondition: the flash should wrap onto several rows, got %d", rows)
+	}
+	_, y, _, h := a.editorRect()
+	if h < 1 {
+		t.Fatalf("editor starved to %d rows", h)
+	}
+	if y+h+a.flashStripRows()+findBarHeight != a.height-1 {
+		t.Fatalf("rows do not add up: editor %d..%d, %d flash rows, status at %d",
+			y, y+h, a.flashStripRows(), a.height-1)
+	}
+	if !screenHasText(t, a, "line of file text") {
+		t.Error("the editor stopped painting under the strips")
+	}
+	if !screenHasText(t, a, "Find:") {
+		t.Error("the find bar is missing")
+	}
+	if !screenHasText(t, a, "Format failed") {
+		t.Error("the flash strip is missing")
 	}
 }

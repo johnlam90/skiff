@@ -174,3 +174,113 @@ func TestForm_DrawPaintsRows(t *testing.T) {
 		t.Fatalf("cancel button: %q", got)
 	}
 }
+
+// shortForm builds a three-prompt form — the shape a real custom action
+// produces — on a terminal at skiff's 40×10 floor. Its natural height is
+// 13 rows, so the frame has to window them.
+func shortForm() (*Form, *[]string) {
+	f, log := testForm()
+	f.Size = func() (int, int) { return 40, 10 }
+	f.Rows = []FormRow{
+		{Key: "HOST", Label: "Host"},
+		{Key: "PATH", Label: "Remote path"},
+		{Key: "MODE", Label: "Mode", Options: []string{"fast", "slow"}},
+	}
+	return f, log
+}
+
+// TestForm_ShortScreenWindowsRowsInsteadOfOverflowing is the case that
+// forced Form to grow a scroll offset at all: 7 chrome rows plus 2 per
+// prompt means a three-prompt action wants 13 rows, and a phone in
+// landscape with the keyboard up has ten. Unwindowed, the frame claimed
+// all 13 and the Cancel / Submit row — at r.H-3 — landed three rows below
+// the last cell of the screen, so the form could be filled in and never
+// submitted with the mouse.
+func TestForm_ShortScreenWindowsRowsInsteadOfOverflowing(t *testing.T) {
+	const scrW, scrH = 40, 10
+	f, _ := shortForm()
+
+	r := f.rect()
+	if r.X < 0 || r.X+r.W > scrW || r.Y+r.H > scrH {
+		t.Fatalf("frame off screen: %+v on %dx%d", r, scrW, scrH)
+	}
+	if btnY := r.Y + r.H - 3; btnY < r.Y+3 || btnY >= scrH {
+		t.Fatalf("button row at %d is outside the screen or over the fields", btnY)
+	}
+	if n := f.visibleRows(); n != 1 {
+		t.Fatalf("a 10-row screen shows %d field rows, want 1", n)
+	}
+	if f.maxScroll() != 2 {
+		t.Fatalf("two rows should be windowed out, maxScroll=%d", f.maxScroll())
+	}
+}
+
+// TestForm_TabScrollsHiddenRowIntoView pins the only thing that moves the
+// window: Tab. A field the user cannot reach is a field they cannot fill,
+// so focus and the viewport have to travel together — and the row that
+// arrives is the one that gets drawn and clicked.
+func TestForm_TabScrollsHiddenRowIntoView(t *testing.T) {
+	f, _ := shortForm()
+	f.HandleKey(key(tcell.KeyTab, 0))
+	f.HandleKey(key(tcell.KeyTab, 0))
+	if f.Focus != 2 {
+		t.Fatalf("two Tabs should land on row 2, got %d", f.Focus)
+	}
+	if f.scroll != 2 {
+		t.Fatalf("the window should have followed focus, scroll=%d", f.scroll)
+	}
+
+	scr := simScreen(t)
+	scr.SetSize(40, 10)
+	f.Draw(scr)
+	scr.Show()
+	r := f.rect()
+	if got := rowRunes(scr, r.X+2, r.Y+3, 4); got != "Mode" {
+		t.Fatalf("the scrolled-to row should be painted, got %q", got)
+	}
+	// ▲ in the divider says the first two rows are above the fold.
+	if got := cellAt(scr, r.X+3, r.Y+2); got != '▲' {
+		t.Fatalf("no scrolled-above marker in the divider, got %q", got)
+	}
+
+	// A click on the single visible row must focus row 2, not row 0 —
+	// the hit test walks the window, not the row list.
+	f.HandleMouse(r.X+5, r.Y+3, tcell.Button1)
+	if f.Focus != 2 {
+		t.Fatalf("click on the visible row focused %d, want 2", f.Focus)
+	}
+}
+
+// TestForm_TallScreenNeverScrolls is the no-regression half: on an
+// ordinary terminal the whole form fits, so the window must be inert and
+// the ▼ marker absent — the frame looks exactly as it always did.
+func TestForm_TallScreenNeverScrolls(t *testing.T) {
+	f, _ := shortForm()
+	f.Size = func() (int, int) { return 80, 30 }
+	if f.visibleRows() != 3 || f.maxScroll() != 0 {
+		t.Fatalf("a 30-row screen must show all 3 rows: visible=%d maxScroll=%d",
+			f.visibleRows(), f.maxScroll())
+	}
+	f.HandleKey(key(tcell.KeyTab, 0))
+	f.HandleKey(key(tcell.KeyTab, 0))
+	if f.scroll != 0 {
+		t.Fatalf("nothing to scroll, yet scroll=%d", f.scroll)
+	}
+
+	scr := simScreen(t)
+	f.Draw(scr)
+	scr.Show()
+	r := f.rect()
+	if got := cellAt(scr, r.X+3, r.Y+r.H-1); got == '▼' {
+		t.Fatal("a form that fits must not claim rows are hidden below")
+	}
+}
+
+// rowRunes reads n cells starting at (x, y) as a string.
+func rowRunes(scr tcell.SimulationScreen, x, y, n int) string {
+	out := make([]rune, 0, n)
+	for i := range n {
+		out = append(out, cellAt(scr, x+i, y))
+	}
+	return string(out)
+}

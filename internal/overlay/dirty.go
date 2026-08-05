@@ -82,28 +82,50 @@ func (d *Dirty) labels() [3]string {
 	return out
 }
 
+// frameWidth returns the modal's frame width: the natural 60 cells, or
+// the whole terminal when it is narrower. A frame wider than the screen
+// would put the Save button — the productive default — in columns that
+// do not exist, which is the worst possible thing for this particular
+// modal to lose.
+//
+// Size is nil for a bare Dirty measured outside a live screen
+// (dirtyButtonAtRelX does exactly that to expose the stock hit test);
+// with no screen to clamp against, the natural width is the answer.
+func (d *Dirty) frameWidth() int {
+	if d.Size == nil {
+		return dirtyWidth
+	}
+	w, _ := d.Size()
+	return fit(dirtyWidth, w)
+}
+
 // columns returns each button's x offset within the modal and its
-// width. The default captions keep their pinned, hand-tuned columns;
-// anything else is laid out by centering the trio with even gaps,
-// which is the only rule that stays correct for captions we have not
-// seen.
+// width. The default captions keep their pinned, hand-tuned columns as
+// long as the frame is its natural width; anything else — a relabelled
+// trio, or a terminal too narrow for 60 cells — is laid out by
+// centering the trio with even gaps inside the frame we actually got,
+// which is the only rule that stays correct for captions and widths we
+// have not seen.
 func (d *Dirty) columns() (xs, ws [3]int) {
 	labels := d.labels()
 	for i, l := range labels {
 		ws[i] = runeLen(l)
 	}
-	if labels == dirtyDefaultLabels {
+	fw := d.frameWidth()
+	if labels == dirtyDefaultLabels && fw >= dirtyWidth {
 		return [3]int{dirtyBtnCancelX, dirtyBtnDiscardX, dirtyBtnSaveX},
 			[3]int{dirtyBtnCancelW, dirtyBtnDiscardW, dirtyBtnSaveW}
 	}
 	total := ws[0] + ws[1] + ws[2]
-	gap := (dirtyWidth - 2*dirtyBtnMargin - total) / 2
+	gap := (fw - 2*dirtyBtnMargin - total) / 2
 	if gap < 1 {
 		gap = 1
 	}
-	x := (dirtyWidth - (total + 2*gap)) / 2
-	if x < 0 {
-		x = 0
+	x := (fw - (total + 2*gap)) / 2
+	// One cell in, never on the border: a button painted over the frame's
+	// left edge reads as a rendering fault rather than a control.
+	if x < 1 {
+		x = 1
 	}
 	for i := range xs {
 		xs[i] = x
@@ -115,7 +137,7 @@ func (d *Dirty) columns() (xs, ws [3]int) {
 // rect computes the dirty modal's centered rectangle.
 func (d *Dirty) rect() Rect {
 	w, h := d.Size()
-	return Centered(w, h, dirtyWidth, dirtyHeight)
+	return Centered(w, h, d.frameWidth(), dirtyHeight)
 }
 
 // HandleKey: Left/Right and Tab cycle focus across the three buttons,
