@@ -658,6 +658,80 @@ func TestMenuToggleWrap(t *testing.T) {
 	}
 }
 
+// TestMenuToggleGitignore pins the ≡ View row end to end: the tree
+// starts filtering (so the sidebar agrees with the finder), the row
+// flips it and re-reads the tree so the change is on screen immediately,
+// the label names the action it will perform, and the choice is
+// persisted to config.json. The re-read is the part worth pinning —
+// flipping the flag alone leaves the sidebar showing the old listing
+// until the next background tick.
+func TestMenuToggleGitignore(t *testing.T) {
+	cfgHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		".gitignore": "build.out\n",
+		"build.out":  "generated",
+		"main.go":    "package main",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	a := newTestApp(t, dir)
+
+	if !a.tree.HideIgnored {
+		t.Fatal("the tree should start hiding ignored entries")
+	}
+	if findTreeChild(a, "build.out") != nil {
+		t.Fatal("build.out is gitignored and must not be a row")
+	}
+	if got := a.gitignoreToggleLabel(); got != "Show ignored files" {
+		t.Fatalf("label = %q, want Show ignored files", got)
+	}
+
+	a.menuToggleGitignore()
+	if a.tree.HideIgnored {
+		t.Fatal("the toggle should turn filtering off")
+	}
+	if findTreeChild(a, "build.out") == nil {
+		t.Fatal("the toggle must re-read the tree, not just flip the flag")
+	}
+	if got := a.gitignoreToggleLabel(); got != "Hide ignored files" {
+		t.Fatalf("label after toggle = %q, want Hide ignored files", got)
+	}
+	data, err := os.ReadFile(filepath.Join(cfgHome, "skiff", "config.json"))
+	if err != nil {
+		t.Fatalf("config not written: %v", err)
+	}
+	if !strings.Contains(string(data), `"gitignore": "off"`) {
+		t.Fatalf("config missing gitignore off:\n%s", data)
+	}
+
+	a.menuToggleGitignore()
+	if !a.tree.HideIgnored || findTreeChild(a, "build.out") != nil {
+		t.Fatal("second toggle should hide the ignored file again")
+	}
+	if findTreeChild(a, "main.go") == nil {
+		t.Fatal("an unignored file must survive both directions")
+	}
+}
+
+// TestMenuToggleGitignore_NoPanicInSingleFileMode mirrors the sidebar
+// row's guard. The menu row is hidden without a tree, but the handler is
+// a plain method and must not dereference a nil tree if it is ever
+// reached another way.
+func TestMenuToggleGitignore_NoPanicInSingleFileMode(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.tree = nil
+
+	a.menuToggleGitignore()
+
+	if got := a.gitignoreToggleLabel(); got == "" {
+		t.Fatal("the label must still resolve without a tree")
+	}
+}
+
 // TestMenuSaveAndClose_GoesThroughSaveTab pins that Save & close reuses
 // the one shared save path instead of calling tab.Save() itself. The
 // observable difference is format-on-save: a project with an untrusted

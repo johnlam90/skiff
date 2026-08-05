@@ -35,6 +35,10 @@ Clicking a file is a *preview* open, so browsing costs one tab rather than one p
 
 Two rows behave unlike the rest. The `… N more` row that ends a directory over 1000 entries is inert — it has no path behind it, so a click lands on nothing; use the finder (`Esc p`) to reach files past the cap. A directory marked `(unreadable)` still toggles when clicked, it just has nothing to show: Skiff got a permission or I/O error listing it, and the label is there so it doesn't read as an empty folder.
 
+By default the tree hides whatever the project's `.gitignore` files exclude, so the sidebar and the finder agree about what counts as project noise. Flip it from `≡` → **Show ignored files** / **Hide ignored files** (the label reflects the current state); the choice persists as `"gitignore"` in `config.json`. Two deliberate exemptions. **No dot-prefixed name is ever filtered by it** — not just `.env`, `.github` and `.gitignore`, but a gitignored `.next/` or `.venv/` too. That's the price of keeping the two axes separate: what's ignored and what's hidden are different questions, and `.env` is the most commonly ignored file there is and the least acceptable one to lose. And **a file open in a tab is never hidden** — its ignored folder reappears holding just the file you're editing, not its whole contents.
+
+A symlink row is marked with a trailing `→`, and a symlinked *directory* expands like a real one (Skiff classifies through the link, not by the directory entry's own bit). A link that resolves onto one of its own ancestors renders `→ (link loop)`, draws no chevron, and never opens — a chevron onto an infinite path reads as a bug.
+
 Note: macOS Terminal + tmux often swallows Button3. Every right-click action also lives in the main `≡` menu, so you're never stuck.
 
 ## Tab bar

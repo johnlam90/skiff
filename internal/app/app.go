@@ -741,8 +741,12 @@ func (a *App) applyResponsiveSidebar() {
 }
 
 // flash sets a transient status message that displays for statusFlashFor
-// before the status bar reverts to the active file's info.
+// before the status bar reverts to the active file's info. A message too
+// long for the bar moves onto its own strip and takes a row off the
+// editor, so its expiry gets a scheduled repaint rather than waiting for
+// whatever event happens to arrive next — see scheduleFlashStripExpiry.
 func (a *App) flash(msg string) {
 	a.statusMsg = msg
 	a.statusUntil = time.Now().Add(statusFlashFor)
+	a.scheduleFlashStripExpiry()
 }

@@ -491,6 +491,46 @@ func (a *App) wrapToggleLabel() string {
 	return "Wrap long lines"
 }
 
+// menuToggleGitignore flips whether the file tree hides entries the
+// project's .gitignore files exclude, then persists the choice. The
+// refresh is what puts it on screen: the filter runs as each directory
+// is read, so the tree only changes shape on the next read.
+//
+// A persistence failure still applies the toggle in-memory — same
+// ordering as the wrap row, the view change first and the config write
+// second.
+func (a *App) menuToggleGitignore() {
+	a.closeMenu()
+	// The Esc leader can't reach this row today, but menuToggleSidebar's
+	// guard is here for the same reason: nothing in single-file mode
+	// should be able to dereference a nil tree.
+	if a.tree == nil {
+		a.flash("No file explorer in single-file mode")
+		return
+	}
+	a.tree.HideIgnored = !a.tree.HideIgnored
+	a.refreshTree()
+	a.invalidateFinder()
+	if err := userconfig.SetGitignore(userconfig.DefaultPath(), a.tree.HideIgnored); err != nil {
+		a.flash("config: " + err.Error())
+		return
+	}
+	if a.tree.HideIgnored {
+		a.flash("Hiding files the project ignores")
+	} else {
+		a.flash("Showing files the project ignores")
+	}
+}
+
+// gitignoreToggleLabel returns the row's label for the current state —
+// the action it will perform, matching the wrap and sidebar rows.
+func (a *App) gitignoreToggleLabel() string {
+	if a.tree != nil && !a.tree.HideIgnored {
+		return "Hide ignored files"
+	}
+	return "Show ignored files"
+}
+
 // menuQuit exits the editor. When any tab has unsaved changes, opens the
 // dirty-close modal so the user can pick Save (save all then quit),
 // Discard (quit anyway), or Cancel. With no dirty tabs we exit straight

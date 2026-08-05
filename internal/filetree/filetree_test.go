@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -709,7 +710,7 @@ func TestRender_ActiveFileIsBold(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	alpha := findChild(tr.Root, "alpha")
-	if err := alpha.reload(); err != nil {
+	if err := tr.reload(alpha); err != nil {
 		t.Fatalf("reload alpha: %v", err)
 	}
 	alpha.Expanded = true
@@ -759,7 +760,7 @@ func TestRender_DirtyFileUsesModifiedColor(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	alpha := findChild(tr.Root, "alpha")
-	if err := alpha.reload(); err != nil {
+	if err := tr.reload(alpha); err != nil {
 		t.Fatalf("reload alpha: %v", err)
 	}
 	alpha.Expanded = true
@@ -1401,7 +1402,7 @@ func TestRender_DirtyRowsShowStatusLetter(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	alpha := findChild(tr.Root, "alpha")
-	if err := alpha.reload(); err != nil {
+	if err := tr.reload(alpha); err != nil {
 		t.Fatalf("reload alpha: %v", err)
 	}
 	alpha.Expanded = true
@@ -1792,7 +1793,8 @@ func TestMaxDirChildren_MergeStaysBounded(t *testing.T) {
 		entries = append(entries, ScanEntry{Name: fmt.Sprintf("f%06d", i)})
 	}
 	n := &Node{Path: "/huge", Name: "huge", IsDir: true}
-	n.merge(entries)
+	tr := &Tree{Root: n, HideIgnored: true}
+	tr.merge(n, DirScan{Path: n.Path, Entries: entries})
 
 	if got := len(n.Children); got != MaxDirChildren+1 {
 		t.Fatalf("retained %d nodes for %d entries; the cap is not holding", got, total)
@@ -1811,7 +1813,7 @@ func TestMaxDirChildren_MergeStaysBounded(t *testing.T) {
 	// A second merge of the same listing must not grow the graph — the
 	// sentinel from round one is synthetic and has to be rebuilt, never
 	// carried over as a surviving dirent.
-	n.merge(entries)
+	tr.merge(n, DirScan{Path: n.Path, Entries: entries})
 	if got := len(n.Children); got != MaxDirChildren+1 {
 		t.Fatalf("re-merge grew the graph to %d nodes", got)
 	}
@@ -2070,5 +2072,437 @@ func TestTreeScrollbar_ThumbBrightensWhileDragging(t *testing.T) {
 	trackFg, _, _ := cells[(h-1)*cw+w-1].Style.Decompose()
 	if trackFg != th.Subtle {
 		t.Fatalf("track fg while dragging: got %v, want Subtle", trackFg)
+	}
+}
+
+// mkIgnoreTree builds the fixture the gitignore tests share: a project
+// whose root .gitignore excludes a build directory, a log file and a
+// dotfile, plus one ordinary source file that must survive every state.
+func mkIgnoreTree(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, ".gitignore"), "dist/\n*.log\n.env\n")
+	mustMkdir(t, filepath.Join(root, "dist"))
+	mustWrite(t, filepath.Join(root, "dist", "bundle.js"), "// built")
+	mustWrite(t, filepath.Join(root, "app.log"), "noise")
+	mustWrite(t, filepath.Join(root, "main.go"), "package main")
+	mustWrite(t, filepath.Join(root, ".env"), "SECRET=1")
+	return root
+}
+
+// mustSymlink creates a symlink for test setup. A platform that refuses
+// (Windows without developer mode) cannot express the fixture at all, so
+// the test skips rather than failing a machine for lacking a capability.
+func mustSymlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable here: %v", err)
+	}
+}
+
+// TestGitignore_HidesIgnoredEntriesUntilToggledOff is the headline
+// contract: with filtering on the sidebar answers "is this project
+// noise?" the way the finder's index already does, and with it off the
+// same directory shows everything again. The toggle is only meaningful
+// if both directions work, so both are asserted from one fixture.
+func TestGitignore_HidesIgnoredEntriesUntilToggledOff(t *testing.T) {
+	tr, err := New(mkIgnoreTree(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !tr.HideIgnored {
+		t.Fatal("filtering must default on so the tree and the finder agree out of the box")
+	}
+	for _, name := range []string{"dist", "app.log"} {
+		if findChild(tr.Root, name) != nil {
+			t.Fatalf("%q is gitignored and must not be a row", name)
+		}
+	}
+	if findChild(tr.Root, "main.go") == nil {
+		t.Fatal("main.go is not ignored and must stay visible")
+	}
+
+	tr.HideIgnored = false
+	tr.Refresh()
+	for _, name := range []string{"dist", "app.log", "main.go"} {
+		if findChild(tr.Root, name) == nil {
+			t.Fatalf("%q must come back once filtering is off", name)
+		}
+	}
+}
+
+// TestGitignore_DotfilesStayVisibleInBothStates pins the deliberate
+// split between the two axes. .env is the most commonly gitignored file
+// there is and the least acceptable one to lose over SSH, so gitignore
+// filtering never removes a dotfile — including .gitignore itself,
+// which would otherwise hide the very rule set the user is debugging.
+func TestGitignore_DotfilesStayVisibleInBothStates(t *testing.T) {
+	tr, err := New(mkIgnoreTree(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, on := range []bool{true, false} {
+		tr.HideIgnored = on
+		tr.Refresh()
+		for _, name := range []string{".env", ".gitignore"} {
+			if findChild(tr.Root, name) == nil {
+				t.Fatalf("HideIgnored=%v hid the dotfile %q", on, name)
+			}
+		}
+	}
+}
+
+// TestGitignore_NestedFileAppliesToItsSubtreeOnly is the nested-support
+// claim stated as behaviour: a rule written in src/.gitignore hides the
+// matching name below src/ and leaves the identically-named file at the
+// root alone. Getting only one of those two right is the failure mode
+// worth catching.
+func TestGitignore_NestedFileAppliesToItsSubtreeOnly(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, ".gitignore"), "*.tmp\n")
+	mustWrite(t, filepath.Join(root, "generated.go"), "root copy")
+	mustMkdir(t, filepath.Join(root, "src"))
+	mustWrite(t, filepath.Join(root, "src", ".gitignore"), "generated.go\n")
+	mustWrite(t, filepath.Join(root, "src", "generated.go"), "built")
+	mustWrite(t, filepath.Join(root, "src", "real.go"), "package src")
+	mustWrite(t, filepath.Join(root, "src", "scratch.tmp"), "x")
+
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if findChild(tr.Root, "generated.go") == nil {
+		t.Fatal("the root's generated.go is outside src/.gitignore's reach and must stay")
+	}
+	src := findChild(tr.Root, "src")
+	if src == nil {
+		t.Fatal("src/ missing")
+	}
+	tr.Toggle(src)
+
+	if findChild(src, "generated.go") != nil {
+		t.Fatal("src/.gitignore must hide src/generated.go")
+	}
+	if findChild(src, "scratch.tmp") != nil {
+		t.Fatal("the root .gitignore's *.tmp must still reach into src/")
+	}
+	if findChild(src, "real.go") == nil {
+		t.Fatal("src/real.go matches nothing and must stay visible")
+	}
+}
+
+// TestGitignore_MatcherCacheFollowsTheChildren pins the cache's one
+// invalidation rule: a directory's compiled matcher is replaced exactly
+// when its listing is. Editing .gitignore and refreshing must move the
+// filter, and an unchanged file must reuse the compiled matcher rather
+// than rebuilding a regexp per pattern line on every tick.
+func TestGitignore_MatcherCacheFollowsTheChildren(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, ".gitignore"), "a.txt\n")
+	mustWrite(t, filepath.Join(root, "a.txt"), "a")
+	mustWrite(t, filepath.Join(root, "b.txt"), "b")
+
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if findChild(tr.Root, "a.txt") != nil || findChild(tr.Root, "b.txt") == nil {
+		t.Fatal("initial state should hide a.txt only")
+	}
+
+	compiled := tr.ignoreCache[tr.Root.Path].gi
+	if compiled == nil {
+		t.Fatal("the root .gitignore should be cached after the first read")
+	}
+	tr.Refresh()
+	if tr.ignoreCache[tr.Root.Path].gi != compiled {
+		t.Fatal("unchanged .gitignore bytes must reuse the compiled matcher")
+	}
+
+	mustWrite(t, filepath.Join(root, ".gitignore"), "b.txt\n")
+	tr.Refresh()
+	if tr.ignoreCache[tr.Root.Path].gi == compiled {
+		t.Fatal("edited .gitignore must recompile")
+	}
+	if findChild(tr.Root, "a.txt") == nil {
+		t.Fatal("a.txt is no longer ignored and must reappear")
+	}
+	if findChild(tr.Root, "b.txt") != nil {
+		t.Fatal("b.txt is newly ignored and must disappear")
+	}
+
+	// Deleting the file drops the entry entirely rather than leaving a
+	// stale matcher behind.
+	if err := os.Remove(filepath.Join(root, ".gitignore")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	tr.Refresh()
+	if _, ok := tr.ignoreCache[tr.Root.Path]; ok {
+		t.Fatal("a removed .gitignore must leave no cache entry")
+	}
+	if findChild(tr.Root, "b.txt") == nil {
+		t.Fatal("b.txt must return once the rules are gone")
+	}
+}
+
+// TestGitignore_OpenTabNeverVanishes is the safety rule: the user can
+// legitimately be editing a file inside an ignored directory (a
+// generated file, a vendored copy), and the sidebar must not pretend it
+// does not exist. The ignored directory reappears carrying exactly the
+// pinned file — the rest of the build output stays filtered.
+func TestGitignore_OpenTabNeverVanishes(t *testing.T) {
+	root := mkIgnoreTree(t)
+	mustWrite(t, filepath.Join(root, "dist", "other.js"), "// also built")
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if findChild(tr.Root, "dist") != nil {
+		t.Fatal("test setup: dist/ should start hidden")
+	}
+
+	open := filepath.Join(root, "dist", "bundle.js")
+	tr.SetOpenFiles([]string{open})
+	tr.Refresh()
+
+	dist := findChild(tr.Root, "dist")
+	if dist == nil {
+		t.Fatal("the directory holding an open tab must be reachable")
+	}
+	tr.Toggle(dist)
+	if findChild(dist, "bundle.js") == nil {
+		t.Fatal("the open file must be a row")
+	}
+	if findChild(dist, "other.js") != nil {
+		t.Fatal("pinning one file must not un-ignore its whole directory")
+	}
+
+	// Reveal takes the same path from cold: it pins the target itself and
+	// re-reads the ancestors the filter had emptied.
+	fresh, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	fresh.Reveal(open, 20)
+	revealed := findChild(fresh.Root, "dist")
+	if revealed == nil || findChild(revealed, "bundle.js") == nil {
+		t.Fatal("Reveal must surface a target inside an ignored directory")
+	}
+
+	// Closing the tab un-pins it again.
+	tr.SetOpenFiles(nil)
+	tr.Refresh()
+	if findChild(tr.Root, "dist") != nil {
+		t.Fatal("dist/ should return to hidden once nothing inside it is open")
+	}
+}
+
+// TestGitignore_BackgroundScanFiltersLikeRefresh extends the split
+// refresh's equivalence contract to the filter. The 10s sweep reads
+// directories off-thread and merges on the event loop; if only the
+// synchronous path filtered, every tick would flash the build output
+// back into the sidebar.
+func TestGitignore_BackgroundScanFiltersLikeRefresh(t *testing.T) {
+	tr, err := New(mkIgnoreTree(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tr.ApplyScan(ScanDirs(tr.LoadedDirs()))
+	if findChild(tr.Root, "dist") != nil || findChild(tr.Root, "app.log") != nil {
+		t.Fatal("the background sweep must apply the same filter Refresh does")
+	}
+	if findChild(tr.Root, "main.go") == nil {
+		t.Fatal("the sweep dropped an unignored file")
+	}
+}
+
+// TestSymlinkDir_ExpandsThroughTheLink pins the fix for the dirent
+// classification bug: e.IsDir() describes the link, not its target, so a
+// symlinked package used to render as an unopenable file row. Stat
+// resolves it, and the row still says it is a link.
+func TestSymlinkDir_ExpandsThroughTheLink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	mustMkdir(t, target)
+	mustWrite(t, filepath.Join(target, "leaf.go"), "package leaf")
+	mustSymlink(t, target, filepath.Join(root, "linked"))
+	mustSymlink(t, filepath.Join(root, "nowhere"), filepath.Join(root, "broken"))
+
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	linked := findChild(tr.Root, "linked")
+	if linked == nil {
+		t.Fatal("linked/ missing")
+	}
+	if !linked.IsDir || !linked.IsLink {
+		t.Fatalf("linked should be a directory AND a link: IsDir=%v IsLink=%v", linked.IsDir, linked.IsLink)
+	}
+	tr.Toggle(linked)
+	if findChild(linked, "leaf.go") == nil {
+		t.Fatal("expanding a symlinked directory must list its target's children")
+	}
+
+	// A dangling link has no target to classify: it stays a file row
+	// rather than becoming a directory that can never be read.
+	broken := findChild(tr.Root, "broken")
+	if broken == nil {
+		t.Fatal("broken link missing from the listing")
+	}
+	if broken.IsDir {
+		t.Fatal("a dangling symlink must not be classified as a directory")
+	}
+	if !broken.IsLink {
+		t.Fatal("a dangling symlink is still a link and the row should say so")
+	}
+}
+
+// TestSymlinkLoop_TerminatesInsteadOfHanging is the regression the
+// symlink fix could easily have introduced. Following links without
+// tracking resolved ancestors makes `self -> .` and `up -> ..` recurse
+// forever on expand AND on the background sweep, so both are driven
+// here — under a wall-clock guard, because the failure mode is a hang
+// rather than a wrong answer.
+func TestSymlinkLoop_TerminatesInsteadOfHanging(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "real.go"), "package main")
+	mustSymlink(t, root, filepath.Join(root, "self"))
+	mustSymlink(t, "..", filepath.Join(root, "up"))
+
+	done := make(chan *Tree, 1)
+	go func() {
+		tr, err := New(root)
+		if err != nil {
+			done <- nil
+			return
+		}
+		for _, name := range []string{"self", "up"} {
+			if n := findChild(tr.Root, name); n != nil {
+				tr.Toggle(n)
+			}
+		}
+		// The periodic pipeline walks the same graph; a node that
+		// escaped the guard would grow the work list without bound.
+		tr.Refresh()
+		tr.ApplyScan(ScanDirs(tr.LoadedDirs()))
+		done <- tr
+	}()
+
+	var tr *Tree
+	select {
+	case tr = <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("symlink loop never terminated — the ancestor guard is not holding")
+	}
+	if tr == nil {
+		t.Fatal("New failed on the loop fixture")
+	}
+
+	for _, name := range []string{"self", "up"} {
+		n := findChild(tr.Root, name)
+		if n == nil {
+			t.Fatalf("%q missing from the listing", name)
+		}
+		if !n.Loop {
+			t.Fatalf("%q resolves onto its own ancestor chain and must be marked Loop", name)
+		}
+		if n.Expanded || len(n.Children) != 0 {
+			t.Fatalf("%q must never load children (expanded=%v, %d children)", name, n.Expanded, len(n.Children))
+		}
+	}
+	if got := len(tr.LoadedDirs()); got != 1 {
+		t.Fatalf("only the root should be loaded, got %d directories: %v", got, tr.LoadedDirs())
+	}
+	if findChild(tr.Root, "real.go") == nil {
+		t.Fatal("the loop guard must not cost the directory its real entries")
+	}
+}
+
+// TestSymlinkLoop_CatchesMutualLinks covers the case a parent-only check
+// misses: two links that each point at the other's directory look
+// innocent one hop at a time and only close the cycle two levels down.
+// Comparing against every ancestor's resolved path is what catches it.
+func TestSymlinkLoop_CatchesMutualLinks(t *testing.T) {
+	root := t.TempDir()
+	a, b := filepath.Join(root, "a"), filepath.Join(root, "b")
+	mustMkdir(t, a)
+	mustMkdir(t, b)
+	mustSymlink(t, b, filepath.Join(a, "toB"))
+	mustSymlink(t, a, filepath.Join(b, "toA"))
+
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	nodeA := findChild(tr.Root, "a")
+	if nodeA == nil {
+		t.Fatal("a/ missing")
+	}
+	tr.Toggle(nodeA)
+	toB := findChild(nodeA, "toB")
+	if toB == nil {
+		t.Fatal("a/toB missing")
+	}
+	if toB.Loop {
+		t.Fatal("a/toB points at a sibling, not an ancestor — it must stay expandable")
+	}
+	tr.Toggle(toB)
+
+	toA := findChild(toB, "toA")
+	if toA == nil {
+		t.Fatal("a/toB/toA missing")
+	}
+	if !toA.Loop {
+		t.Fatal("a/toB/toA resolves back onto ancestor a/ and must be refused")
+	}
+	tr.Toggle(toA)
+	if toA.Expanded || len(toA.Children) != 0 {
+		t.Fatal("a refused link must not open")
+	}
+}
+
+// TestRender_SymlinkRowsAreMarked checks the user-visible half: a link
+// is not silently drawn as an ordinary row, and a refused link says why
+// instead of offering a chevron onto nothing.
+func TestRender_SymlinkRowsAreMarked(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	mustMkdir(t, target)
+	mustSymlink(t, target, filepath.Join(root, "linked"))
+	mustSymlink(t, root, filepath.Join(root, "self"))
+
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tr.IconsEnabled = false
+	cells, w := renderAndCollect(t, tr, 44, 12)
+
+	linkedY := findRowY(cells, w, 12, "linked/")
+	if linkedY < 0 {
+		t.Fatal("linked/ row not rendered")
+	}
+	if !strings.Contains(rowText(cells, w, linkedY), SymlinkLabel) {
+		t.Fatalf("link row should carry %q: %q", SymlinkLabel, rowText(cells, w, linkedY))
+	}
+	if !strings.Contains(rowText(cells, w, linkedY), "▸") {
+		t.Fatalf("an openable link keeps its chevron: %q", rowText(cells, w, linkedY))
+	}
+
+	selfY := findRowY(cells, w, 12, LoopLabel)
+	if selfY < 0 {
+		t.Fatalf("the refused link must be labelled %q", LoopLabel)
+	}
+	if strings.Contains(rowText(cells, w, selfY), "▸") {
+		t.Fatalf("a link that never opens must not draw a chevron: %q", rowText(cells, w, selfY))
+	}
+	// The real directory next to it is unaffected — no stray markers.
+	targetY := findRowY(cells, w, 12, "target/")
+	if targetY < 0 {
+		t.Fatal("target/ row not rendered")
+	}
+	if strings.Contains(rowText(cells, w, targetY), SymlinkLabel) {
+		t.Fatalf("an ordinary directory must not be marked as a link: %q", rowText(cells, w, targetY))
 	}
 }

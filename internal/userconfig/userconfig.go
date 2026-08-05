@@ -11,15 +11,16 @@
 // is editor preferences. Keeping them apart means a malformed actions
 // file can't break editor settings and vice-versa.
 //
-// Schema today is intentionally tiny — one key — but the loader is
-// already wrapped in a struct so we can grow new top-level fields
-// without breaking older configs:
+// Schema today is intentionally tiny — a handful of flat keys — but the
+// loader is already wrapped in a struct so we can grow new top-level
+// fields without breaking older configs:
 //
 //	{"icons": "auto"}          // default; auto-detect Nerd Fonts on startup
 //	{"icons": "on"}            // force-on, even if detection would say no
 //	{"icons": "off"}           // force-off, even if a Nerd Font is installed
 //	{"theme": "tokyo-night"}   // any id from internal/theme's registry
 //	{"wrap": "off"}            // long lines pan sideways; "on" (default) wraps
+//	{"gitignore": "off"}       // file tree shows ignored files; "on" (default) hides them
 //
 // The loader is best-effort the same way customactions is: missing
 // file → defaults, malformed file → error returned for the app to
@@ -61,22 +62,28 @@ type Config struct {
 	// the editor's audience reads code over SSH, where sideways panning
 	// hurts the most; the menu toggle persists an "off" here.
 	Wrap bool
+	// Gitignore is whether the file tree hides entries the project's
+	// .gitignore files exclude. Defaults to on so the sidebar and the
+	// finder agree about what counts as project noise; the ≡ View row
+	// persists an "off" here for the times you need to see build output.
+	Gitignore bool
 }
 
 // Defaults returns a Config populated with the values used when no
 // config file is present (or every field in it is blank). Centralised
 // so tests and the loader can't drift from each other.
 func Defaults() Config {
-	return Config{Icons: IconsAuto, Wrap: true}
+	return Config{Icons: IconsAuto, Wrap: true, Gitignore: true}
 }
 
 // fileFormat mirrors the on-disk JSON shape. We decode into this and
 // then promote into Config so the public type doesn't have to carry
 // JSON tags or pointer fields just for "field was absent" detection.
 type fileFormat struct {
-	Icons string `json:"icons,omitempty"`
-	Theme string `json:"theme,omitempty"`
-	Wrap  string `json:"wrap,omitempty"`
+	Icons     string `json:"icons,omitempty"`
+	Theme     string `json:"theme,omitempty"`
+	Wrap      string `json:"wrap,omitempty"`
+	Gitignore string `json:"gitignore,omitempty"`
 }
 
 // DefaultPath returns the canonical config-file location:
@@ -145,19 +152,33 @@ func Load(path string) (Config, error) {
 	}
 	cfg.Theme = strings.TrimSpace(ff.Theme)
 
-	switch strings.ToLower(strings.TrimSpace(ff.Wrap)) {
-	case "":
-		// field omitted — keep default (on)
-	case "on":
-		cfg.Wrap = true
-	case "off":
-		cfg.Wrap = false
-	default:
-		return Defaults(), fmt.Errorf(
-			"%s: wrap must be \"on\" or \"off\" (got %q)", path, ff.Wrap,
-		)
+	wrap, err := parseOnOff(path, "wrap", ff.Wrap, cfg.Wrap)
+	if err != nil {
+		return Defaults(), err
 	}
+	cfg.Wrap = wrap
+
+	gi, err := parseOnOff(path, "gitignore", ff.Gitignore, cfg.Gitignore)
+	if err != nil {
+		return Defaults(), err
+	}
+	cfg.Gitignore = gi
 	return cfg, nil
+}
+
+// parseOnOff resolves one "on"/"off" key, leaving def in place when the
+// field was omitted or blank. Every boolean key goes through it so a new
+// one can't quietly invent a second spelling of the same switch.
+func parseOnOff(path, key, value string, def bool) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return def, nil
+	case "on":
+		return true, nil
+	case "off":
+		return false, nil
+	}
+	return def, fmt.Errorf("%s: %s must be \"on\" or \"off\" (got %q)", path, key, value)
 }
 
 // SetTheme persists the theme id into the config file at path,
@@ -183,6 +204,20 @@ func SetTheme(path, id string) error {
 // path, with the same create-if-needed / preserve-unknown-keys contract
 // as SetTheme.
 func SetWrap(path string, on bool) error {
+	return setOnOff(path, "wrap", on)
+}
+
+// SetGitignore persists the file tree's "hide ignored entries"
+// preference, with the same contract as SetWrap.
+func SetGitignore(path string, on bool) error {
+	return setOnOff(path, "gitignore", on)
+}
+
+// setOnOff writes one "on"/"off" key into the config file at path,
+// creating it if needed and preserving every other key — including ones
+// this version of skiff doesn't know about, so a newer config survives a
+// round-trip through an older binary.
+func setOnOff(path, key string, on bool) error {
 	if path == "" {
 		return errors.New("no config path available")
 	}
@@ -193,9 +228,9 @@ func SetWrap(path string, on bool) error {
 		_ = json.Unmarshal(data, &raw)
 	}
 	if on {
-		raw["wrap"] = "on"
+		raw[key] = "on"
 	} else {
-		raw["wrap"] = "off"
+		raw[key] = "off"
 	}
 	return writeRaw(path, raw)
 }

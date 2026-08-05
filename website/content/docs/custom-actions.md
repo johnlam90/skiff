@@ -49,9 +49,35 @@ The full set of env vars available to every action's shell:
 | `CURRENT_FILE`        | Alias of `FILE`.                                                 |
 | `CURRENT_FILE_REL`    | `FILE` relative to `PROJECT_ROOT` (empty when no tab open).      |
 
-Prompt-less actions only enable when there's a file open — their command lines almost always reference `$FILE`. Actions with `prompts` stay enabled with no tab open, since they're typically pulling something *into* the project rather than acting on what's already there.
+Custom actions are always enabled, whether or not a file is open, and whether or not they declare `prompts`. Skiff doesn't guess from the command string which ones need `$FILE` — "Upgrade Skiff" doesn't, "Open on Rager" does, and both should be one click away. An action that needs a file and is run without one fails with a real error, which lands in the info modal below; that's more honest than a row greyed out for a reason you can't see.
 
 Commands run in a background goroutine, so a slow `scp` or hanging `ssh` won't freeze the editor. Every run forces an immediate sidebar refresh, so a freshly-pulled file shows up without waiting on the auto-refresh tick. How the result is reported scales with how much there is to report: a fast, silent success just flashes in the status bar; a success that printed something or took longer than a second opens an info modal with the output (and how long it took); a failure always opens the modal with the captured `stderr`, because that is exactly the case where a one-line flash truncated the diagnostic you needed. Both modals cap the inline output and point at `actions.log` for the rest.
+
+## Quote every variable
+
+Your `command` goes to `sh -c` with the variables above in its environment, so **the shell** expands them, not Skiff. An unquoted `$FILE` is therefore word-split on spaces and then glob-expanded before your program sees a single argument. That is deliberate — `actions.json` is your own file, read only from `$XDG_CONFIG_HOME/skiff/actions.json`, so a cloned repo can't plant one — but it bites on the most ordinary input there is: a path with a space in it.
+
+The checklist:
+
+- Write `"$FILE"`, not `$FILE`. Same for `"$FILENAME"`, `"$PROJECT_ROOT"`, `"$ACTIVE_FOLDER"`, `"$ACTIVE_FOLDER_REL"`, `"$CURRENT_FILE"`, `"$CURRENT_FILE_REL"`.
+- Prompt values are the same shape and need the same quotes: a prompt with `"key": "DEST_DIR"` arrives as `$DEST_DIR` holding exactly what was typed into the modal, spaces and all.
+- Unquoted, an expansion is split into words on spaces, tabs and newlines, and each word is then matched against the filesystem as a glob — so a file named `draft [2].md` also expands wrong. Quoting stops both.
+- Quote the variable, not the tilde: `cp "$FILE" ~/backup/` works, but `cp "$FILE" "~/backup/"` looks for a directory literally named `~` — a quoted tilde is never expanded.
+- Quote command substitutions too: `cd "$(dirname "$FILE")"`, not `cd $(dirname "$FILE")`. The inner quotes protect the path, the outer ones protect the result.
+
+Worked example, with `/home/spicer/My Notes/todo.md` open:
+
+```sh
+# WRONG — sh splits the value in two and cp sees three arguments
+cp $FILE ~/backup/
+# cp: cannot stat '/home/spicer/My': No such file or directory
+# cp: cannot stat 'Notes/todo.md': No such file or directory
+
+# RIGHT — one argument, spaces and all
+cp "$FILE" ~/backup/
+```
+
+In JSON that is `{"label": "Back up", "command": "cp \"$FILE\" ~/backup/"}` — the backslashes are JSON escaping, and what `sh` receives is `cp "$FILE" ~/backup/`. Every example on this page is quoted for the same reason.
 
 ## Prompts
 
@@ -139,7 +165,7 @@ The schema is deliberately small. Anything `sh` can do, `actions.json` can do:
     },
     {
       "label": "Lint with eslint",
-      "command": "cd $(dirname \"$FILE\") && eslint \"$FILENAME\""
+      "command": "cd \"$(dirname \"$FILE\")\" && eslint \"$FILENAME\""
     },
     { "label": "Run formatter", "command": "gofmt -w \"$FILE\"" },
     { "label": "Open in Finder", "command": "open -R \"$FILE\"" },

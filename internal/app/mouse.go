@@ -381,14 +381,17 @@ func (a *App) tabBarClick(x, _ int) {
 		a.openMenu()
 		return
 	}
-	// Chevron cells scroll the strip; they sit on top of whatever tab
-	// is clipped beneath them, so they must win the hit-test.
-	stripX, stripW := a.tabStripRegion()
-	if a.tabScroll > 0 && x == stripX {
+	// The overflow badges scroll the strip; they sit on top of whatever
+	// tab is clipped beneath them, so they must win the hit-test. The
+	// geometry comes from tabChevrons — the same call drawTabBar paints
+	// from — so the count cell beside the chevron is part of the button
+	// rather than a dead cell that activates the tab underneath it.
+	leftChev, rightChev := a.tabChevrons()
+	if leftChev.hit(x) {
 		a.scrollTabStrip(-tabScrollStep)
 		return
 	}
-	if a.tabScroll < a.maxTabScroll() && x == stripX+stripW-1 {
+	if rightChev.hit(x) {
 		a.scrollTabStrip(tabScrollStep)
 		return
 	}

@@ -79,6 +79,7 @@ func (a *App) draw() {
 		a.drawFindBar()
 	}
 	a.drawStatusBar()
+	a.drawFlashStrip()
 	if a.projFindOpen {
 		a.drawProjFind()
 	}
@@ -240,11 +241,24 @@ func (a *App) drawTabBar() {
 		}
 		st := tcell.StyleDefault.Background(bg).Foreground(fg)
 		if active {
-			// On a degraded palette the active tab's BG/Text have
-			// collapsed onto the inactive ones, so Attrs.ActiveTab is
-			// the only thing left separating "focused" from "open".
-			// It is AttrNone on a truecolor palette.
-			st = st.Attributes(tcell.AttrBold | a.theme.Attrs.ActiveTab)
+			// Two markers, on purpose. Colour (BG/Text) is the primary
+			// one; the underline is the one that survives everything
+			// else. On a degraded palette the active tab's BG/Text have
+			// collapsed onto the inactive ones and Attrs.ActiveTab is
+			// all that is left — but even on a truecolor palette a
+			// crowded strip carrying an italic preview tab makes
+			// "which tab is focused?" a colour puzzle, so the rule
+			// under the tab is drawn unconditionally. It reads as the
+			// bottom edge of a raised tab, which is the thing the strip
+			// is imitating.
+			//
+			// Attributes replaces the mask outright, so Underline comes
+			// after it — and it must be Underline(true) rather than an
+			// AttrUnderline bit: the terminal driver emits the escape
+			// from the style's underline STYLE, and AttrUnderline alone
+			// leaves that at None (i.e. paints nothing).
+			st = st.Attributes(tcell.AttrBold | a.theme.Attrs.ActiveTab).
+				Underline(true)
 		}
 		// Preview tabs render in italics — the visual promise that the
 		// next tree click will replace this tab rather than add one.
@@ -286,7 +300,7 @@ func (a *App) drawTabBar() {
 			gfg := icons.ColorFor(name, false, fg)
 			gst := tcell.StyleDefault.Background(bg).Foreground(gfg)
 			if active {
-				gst = gst.Bold(true)
+				gst = gst.Bold(true).Underline(true)
 			}
 			for _, gr := range glyph {
 				if col >= tx+tw {
@@ -322,16 +336,105 @@ func (a *App) drawTabBar() {
 		}
 	}
 
-	// Overflow chevrons — the same ‹ › affordance the editor uses for
-	// clipped lines, painted over the strip's extreme cells in Accent.
-	// Each is also a click target that scrolls the strip (tabBarClick).
-	chevStyle := tcell.StyleDefault.Background(a.theme.SidebarBG).Foreground(a.theme.Accent)
-	if a.tabScroll > 0 {
-		a.screen.SetContent(stripX, ty, '‹', nil, chevStyle)
+	// Overflow badges — the same ‹ › affordance the editor uses for
+	// clipped lines, now carrying how many tabs are hidden on each side
+	// and painted in reverse video so the marker is unmistakable on a
+	// monochrome terminal too. Each badge is also the click target that
+	// scrolls the strip (tabBarClick hit-tests the same geometry).
+	chevStyle := tcell.StyleDefault.Background(a.theme.SidebarBG).
+		Foreground(a.theme.Accent).Attributes(tcell.AttrBold | tcell.AttrReverse)
+	left, right := a.tabChevrons()
+	for _, c := range [2]tabChevron{left, right} {
+		if c.Label == "" {
+			continue
+		}
+		drawAt(a.screen, c.X, ty, c.Label, chevStyle)
 	}
-	if a.tabScroll < a.maxTabScroll() {
-		a.screen.SetContent(tx+tw-1, ty, '›', nil, chevStyle)
+}
+
+// minVisibleTabCells is one minimal tab's worth of columns — pad, dirty
+// slot, a single-rune name, the × and its spacing. tabChevrons keeps at
+// least this much strip clear of its badges: a marker wide enough to bury
+// the tabs it points at defeats itself.
+const minVisibleTabCells = 8
+
+// tabChevron is one overflow badge: where it starts and what it says. An
+// empty Label means that side has nothing hidden. drawTabBar paints these
+// and tabBarClick hit-tests them, so the whole badge — chevron and count
+// together — is one click target.
+type tabChevron struct {
+	X     int
+	Label string
+}
+
+// hit reports whether screen column x lands on the badge.
+func (c tabChevron) hit(x int) bool {
+	return c.Label != "" && x >= c.X && x < c.X+runeLen(c.Label)
+}
+
+// tabOverflow counts the tabs scrolled entirely out of the strip on each
+// side. A partially visible tab is not counted: its name is on screen and
+// clicking it works, so counting it would overstate what the badge is
+// promising to reveal.
+func (a *App) tabOverflow() (left, right int) {
+	stripX, stripW := a.tabStripRegion()
+	if stripW <= 0 {
+		return 0, 0
 	}
+	for _, r := range a.layoutTabs() {
+		x0 := r.X - a.tabScroll
+		switch {
+		case x0+r.Width <= stripX:
+			left++
+		case x0 >= stripX+stripW:
+			right++
+		}
+	}
+	return left, right
+}
+
+// tabChevrons returns the two overflow badges for the current scroll
+// position. The chevron alone says "there is more"; the count says how
+// much, which is the difference between a marker the eye skips and one
+// that tells the user whether it is worth scrolling. The counts are the
+// first thing dropped when the strip is too cramped to hold them and a
+// readable tab at the same time — the chevrons themselves never are,
+// because they are the click targets.
+func (a *App) tabChevrons() (left, right tabChevron) {
+	stripX, stripW := a.tabStripRegion()
+	if stripW <= 0 {
+		return
+	}
+	showLeft := a.tabScroll > 0
+	showRight := a.tabScroll < a.maxTabScroll()
+	if !showLeft && !showRight {
+		return
+	}
+	nl, nr := a.tabOverflow()
+	leftLabel, rightLabel := "", ""
+	if showLeft {
+		leftLabel = "‹"
+		if nl > 0 {
+			leftLabel += itoa(nl)
+		}
+	}
+	if showRight {
+		rightLabel = "›"
+		if nr > 0 {
+			rightLabel = itoa(nr) + "›"
+		}
+	}
+	if runeLen(leftLabel)+runeLen(rightLabel)+minVisibleTabCells > stripW {
+		if showLeft {
+			leftLabel = "‹"
+		}
+		if showRight {
+			rightLabel = "›"
+		}
+	}
+	left = tabChevron{X: stripX, Label: leftLabel}
+	right = tabChevron{X: stripX + stripW - runeLen(rightLabel), Label: rightLabel}
+	return
 }
 
 // drawSplitter paints a 1-column vertical line at the right edge of the
@@ -409,7 +512,10 @@ func (a *App) drawEmptyEditor() {
 // or closes the tab.
 const statusConflictTag = "⚠ disk conflict "
 
-// drawStatusBar paints the bottom status bar.
+// drawStatusBar paints the bottom status bar: the right-hand group
+// (branch, pending-Esc tag, disk-conflict marker) stacked leftward from
+// the right edge, then the left-hand text clipped against whatever room
+// the group left it.
 func (a *App) drawStatusBar() {
 	sx, sy, sw, _ := a.statusRect()
 	bg := a.theme.StatusBG
@@ -428,20 +534,56 @@ func (a *App) drawStatusBar() {
 		a.screen.SetContent(cx, sy, ' ', nil, style)
 	}
 
-	// Right-side text: current git branch (plus a changed-path count when
-	// there is one) when we're inside a repo. Drawn first so the left-side
-	// text can be clipped against it and the two pieces never overlap on a
-	// narrow window. The segment doubles as the click target that opens
-	// the Git changes modal — see statusBarClick.
-	var rightWidth int
-	if right := a.statusGitSegment(); right != "" {
-		rw := len([]rune(right))
-		if rw < sw {
-			drawAt(a.screen, sx+sw-rw, sy, right, style)
-			rightWidth = rw
+	// Right-hand group first, so the left-side text can be clipped
+	// against it and the two pieces never overlap on a narrow window.
+	// The git segment doubles as the click target that opens the Git
+	// changes panel — see statusBarClick.
+	rightX := sx + sw
+	for _, seg := range a.statusRightSegments(sw) {
+		rightX -= runeLen(seg.text)
+		st := style
+		if seg.warn {
+			st = style.Foreground(a.theme.Error).
+				Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar | a.theme.Attrs.Error)
 		}
+		drawAt(a.screen, rightX, sy, seg.text, st)
 	}
 
+	drawStatusText(a.screen, sx, sy, a.statusLeftMax(sw), a.statusLeftText(), style)
+}
+
+// statusRightSegment is one piece of the status bar's right-hand group.
+type statusRightSegment struct {
+	text string
+	// warn paints the piece in Error instead of the bar's own
+	// foreground: the disk-conflict marker is a warning, not a readout.
+	warn bool
+}
+
+// statusRightSegments returns the right-hand pieces that fit in a status
+// bar sw cells wide, rightmost first: the git branch segment, the
+// pending-Esc tag, then the persistent disk-conflict marker. The order is
+// load-bearing — the transient tag sits between the two stable pieces so
+// the conflict marker never jumps around as the leader arms and expires.
+//
+// Pure, and the single source of the group's width: drawStatusBar paints
+// from it and statusLeftMax measures from it, so the room the flash is
+// clipped to and the room it is tested against cannot disagree.
+func (a *App) statusRightSegments(sw int) []statusRightSegment {
+	var segs []statusRightSegment
+	used := 0
+	add := func(text string, warn bool) {
+		w := runeLen(text)
+		// Pieces are dropped whole rather than clipped: half a branch
+		// name is worse than none, and a clipped piece would silently
+		// reclaim cells the left text was already measured against.
+		if w == 0 || used+w >= sw {
+			return
+		}
+		segs = append(segs, statusRightSegment{text: text, warn: warn})
+		used += w
+	}
+	add(a.statusGitSegment(), false)
 	// Pending-gesture tag: while an Esc is armed (leader or double-tap
 	// window still open) show "Esc…" beside the git segment — vim's
 	// showcmd idea sized for a status bar. The editor's only modifier
@@ -450,60 +592,254 @@ func (a *App) drawStatusBar() {
 	// leaderExpiryEvent posted at arming time repaints the bar so the
 	// tag also clears when the user simply abandons the Esc.
 	if !a.lastEscape.IsZero() && time.Since(a.lastEscape) < menuEscWindow {
-		tag := "Esc… "
-		tw := len([]rune(tag))
-		if tw+rightWidth < sw {
-			drawAt(a.screen, sx+sw-rightWidth-tw, sy, tag, style)
-			rightWidth += tw
-		}
+		add("Esc… ", false)
 	}
-
-	// Persistent disk-conflict marker for the active tab. Drawn after
-	// the transient Esc tag so it sits furthest left of the right-hand
-	// group and never jumps around as the leader arms and expires. It
-	// stays put until the conflict is actually resolved — see
-	// tabDiskConflict.
+	// Persistent disk-conflict marker for the active tab: dismissing the
+	// conflict overlay must not mean forgetting the conflict, so this
+	// stays up until the tab is saved, reloaded or closed.
 	if a.tabDiskConflict(a.activeTabPtr()) {
-		cw := runeLen(statusConflictTag)
-		if cw+rightWidth < sw {
-			warn := style.Foreground(a.theme.Error).
-				Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar | a.theme.Attrs.Error)
-			drawAt(a.screen, sx+sw-rightWidth-cw, sy, statusConflictTag, warn)
-			rightWidth += cw
-		}
+		add(statusConflictTag, true)
 	}
+	return segs
+}
 
-	// Left-side text: status flash, file info, or root dir.
-	var left string
-	if time.Now().Before(a.statusUntil) && a.statusMsg != "" {
-		left = " " + a.statusMsg
-	} else if tab := a.activeTabPtr(); tab != nil {
+// statusRightWidth is how many cells the right-hand group occupies.
+func (a *App) statusRightWidth(sw int) int {
+	n := 0
+	for _, seg := range a.statusRightSegments(sw) {
+		n += runeLen(seg.text)
+	}
+	return n
+}
+
+// statusLeftMax returns how many cells of a status bar sw wide are left
+// for the left-hand text, including the one cell of breathing room that
+// keeps it from visually butting up against the right-hand group.
+func (a *App) statusLeftMax(sw int) int {
+	rw := a.statusRightWidth(sw)
+	max := sw - rw
+	if rw > 0 {
+		max--
+	}
+	if max < 0 {
+		max = 0
+	}
+	return max
+}
+
+// statusLeftText is the status bar's left-hand text: the live flash, else
+// the active tab's readout, else the project root.
+//
+// A flash that moved onto its own strip is skipped here on purpose. The
+// bar then falls back to the readout the flash would have covered, so a
+// long message costs the user nothing — they read the whole sentence on
+// the strip AND keep Ln/Col — instead of trading one for the other.
+func (a *App) statusLeftText() string {
+	if a.flashActive() && !a.flashStripVisible() {
+		return " " + a.statusMsg
+	}
+	if tab := a.activeTabPtr(); tab != nil {
 		if tab.IsImage() && tab.Image != nil {
 			b := tab.Image.Bounds()
-			left = fmt.Sprintf(" %s · %d×%d · %s",
+			return fmt.Sprintf(" %s · %d×%d · %s",
 				strings.ToUpper(tab.ImageFmt), b.Dx(), b.Dy(), filepath.Base(tab.Path))
-		} else {
-			lang := detectLangLabel(tab.Path)
-			dirty := ""
-			if tab.Dirty {
-				dirty = " · ●"
-			}
-			left = fmt.Sprintf(" %s · Ln %d, Col %d · %d lines%s",
-				lang, tab.Cursor.Line+1, tab.Cursor.Col+1, tab.Buffer.LineCount(), dirty)
 		}
-	} else {
-		left = " " + filepath.Base(a.rootDir)
+		dirty := ""
+		if tab.Dirty {
+			dirty = " · ●"
+		}
+		return fmt.Sprintf(" %s · Ln %d, Col %d · %d lines%s",
+			detectLangLabel(tab.Path), tab.Cursor.Line+1, tab.Cursor.Col+1,
+			tab.Buffer.LineCount(), dirty)
 	}
-	// One cell of breathing room between left and right text so they
-	// don't visually butt up against each other on a tight terminal.
-	leftMax := sw - rightWidth
-	if rightWidth > 0 {
-		leftMax--
+	return " " + filepath.Base(a.rootDir)
+}
+
+// statusFlashRoom is how many cells the status bar can give the flash
+// message itself: its left region minus the one cell of pad
+// statusLeftText prefixes. flashStripVisible measures against this, so
+// "would this be truncated?" is answered by the same arithmetic that does
+// the truncating.
+func (a *App) statusFlashRoom() int {
+	_, _, sw, _ := a.statusRect()
+	room := a.statusLeftMax(sw) - 1
+	if room < 0 {
+		room = 0
 	}
-	if leftMax < 0 {
-		leftMax = 0
+	return room
+}
+
+// flashStripMaxRows caps how many rows a wrapped flash may take. Three is
+// enough for the messages that motivated the strip — a format error
+// quoting the formatter's stderr, a project-replace report naming the file
+// whose save failed, a git command's first line of output — and few enough
+// that something which expires in three seconds can never swallow the
+// viewport.
+const flashStripMaxRows = 3
+
+// flashExpiryEvent is posted shortly after a flash that opened the strip
+// is due to expire. It carries no action of its own — reaching the event
+// loop is the point, because Run redraws after every event and that
+// repaint hands the editor its row back. Without it the strip, and the
+// reflow it caused, would linger until the user happened to press a key.
+type flashExpiryEvent struct {
+	when time.Time
+}
+
+// When satisfies the tcell.Event interface.
+func (e *flashExpiryEvent) When() time.Time { return e.when }
+
+// scheduleFlashStripExpiry wakes the event loop just past the current
+// flash's window, but only when the flash actually opened the strip. A
+// message living entirely inside the status bar costs no layout, so
+// letting its text go stale until the next event is free — the same
+// reasoning behind the Esc tag only getting a wake-up when an Esc was
+// armed.
+func (a *App) scheduleFlashStripExpiry() {
+	if a.screen == nil || !a.flashStripVisible() {
+		return
 	}
-	drawStatusText(a.screen, sx, sy, leftMax, left, style)
+	scr := a.screen
+	time.AfterFunc(statusFlashFor+50*time.Millisecond, func() {
+		_ = scr.PostEvent(&flashExpiryEvent{when: time.Now()})
+	})
+}
+
+// flashActive reports whether a transient flash message is showing right
+// now. The status bar's left text and the flash strip both gate on it, so
+// there is exactly one definition of "a flash is up".
+func (a *App) flashActive() bool {
+	return a.statusMsg != "" && time.Now().Before(a.statusUntil)
+}
+
+// flashStripVisible reports whether the live flash needs rows of its own.
+// Two conditions: the status bar's left region is too narrow to hold the
+// message whole, and the strip can show more of it than that region can.
+//
+// The second is not a formality. The strip's advantage is not width — with
+// the sidebar hidden it is the same width as the bar — it is that it may
+// wrap onto flashStripMaxRows. So the comparison is against capacity, and
+// it genuinely fails in one shape: a very wide window whose sidebar has
+// been dragged out to its legal maximum leaves the strip about forty
+// columns while the bar keeps nearly all of them. Reflowing the editor to
+// show LESS of the message would be strictly worse.
+//
+// The too-small window is excluded because drawTooSmall owns the whole
+// screen there; that also covers the zero-size state New() flashes into
+// before Run has asked the terminal how big it is.
+func (a *App) flashStripVisible() bool {
+	if !a.flashActive() || a.width < minWidth || a.height < minHeight {
+		return false
+	}
+	room := a.statusFlashRoom()
+	return runeLen(a.statusMsg) > room && a.flashStripCapacity() > room
+}
+
+// flashStripTextWidth is how many cells of one strip row carry text: the
+// editor's own width minus the one-cell left pad that keeps the message
+// off the splitter, mirroring the pad statusLeftText prefixes.
+func (a *App) flashStripTextWidth() int {
+	w := a.width - a.sidebarW() - 1
+	if w < 0 {
+		w = 0
+	}
+	return w
+}
+
+// flashStripCapacity is the most message the strip could show: every row
+// it is allowed to take, at full width.
+func (a *App) flashStripCapacity() int {
+	return a.flashStripTextWidth() * flashStripMaxRows
+}
+
+// flashStripRows is how many rows the strip needs right now: zero when it
+// isn't showing, else the wrapped message's row count. editorRect
+// subtracts it, and that subtraction is what keeps the editor's own
+// scrollbar, caret and hit-testing inside the region actually painted.
+func (a *App) flashStripRows() int {
+	if !a.flashStripVisible() {
+		return 0
+	}
+	return len(wrapFlashLines(a.statusMsg, a.flashStripTextWidth()))
+}
+
+// flashStripRect returns the strip's screen rectangle: the rows directly
+// above the status bar, above the find bar when that is open too, and
+// aligned with the editor exactly the way findBarRect is.
+func (a *App) flashStripRect() (x, y, w, h int) {
+	sw := a.sidebarW()
+	h = a.flashStripRows()
+	y = a.height - 1 - h
+	if a.findOpen || a.projFindOpen {
+		y -= findBarHeight
+	}
+	return sw, y, a.width - sw, h
+}
+
+// wrapFlashLines breaks msg into at most flashStripMaxRows lines of w
+// cells, preferring a space break so words stay whole and falling back to
+// a hard break when a single run is wider than the strip. The last line
+// is ellipsised if the message still doesn't fit, because a strip that
+// silently drops its tail is the bug it exists to fix.
+func wrapFlashLines(msg string, w int) []string {
+	if w <= 0 || msg == "" {
+		return nil
+	}
+	rs := []rune(msg)
+	out := make([]string, 0, flashStripMaxRows)
+	for len(rs) > 0 {
+		if len(rs) <= w {
+			return append(out, string(rs))
+		}
+		if len(out) == flashStripMaxRows-1 {
+			return append(out, trimRunes(string(rs), w))
+		}
+		// rs[w] is the rune that would start the next row; when it is
+		// already a space the first w runes are whole words and the full
+		// row is usable. Only when it isn't do we hunt backwards for the
+		// last space that fits — and a run with none breaks hard.
+		cut := w
+		if rs[w] != ' ' {
+			for i := w; i > 0; i-- {
+				if rs[i-1] == ' ' {
+					cut = i
+					break
+				}
+			}
+		}
+		out = append(out, strings.TrimRight(string(rs[:cut]), " "))
+		rs = rs[cut:]
+		// Spaces at a wrap point are the break, not content.
+		for len(rs) > 0 && rs[0] == ' ' {
+			rs = rs[1:]
+		}
+	}
+	return out
+}
+
+// drawFlashStrip paints the transient flash rows above the status bar,
+// styled like the find bar and the leader strip so the three read as one
+// family of transient chrome.
+//
+// It is a strip, not an overlay (docs/adr/0001): it captures no keys, it
+// never goes on a.overlays, and the editor reflowed for it rather than
+// being covered by it.
+func (a *App) drawFlashStrip() {
+	x, y, w, h := a.flashStripRect()
+	if h <= 0 || w <= 0 || y < 1 {
+		return
+	}
+	style := tcell.StyleDefault.Background(a.theme.LineHL).
+		Foreground(a.theme.Text).Bold(true)
+	lines := wrapFlashLines(a.statusMsg, a.flashStripTextWidth())
+	for i := 0; i < h; i++ {
+		for cx := x; cx < x+w; cx++ {
+			a.screen.SetContent(cx, y+i, ' ', nil, style)
+		}
+		if i < len(lines) {
+			drawStatusText(a.screen, x+1, y+i, w-1, lines[i], style)
+		}
+	}
 }
 
 // drawTooSmall paints a centred error message when the terminal window is

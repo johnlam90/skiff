@@ -16,7 +16,8 @@ Top-level editor preferences. Optional — without it, every field uses its defa
 {
   "icons": "auto",
   "theme": "tokyo-night",
-  "wrap": "on"
+  "wrap": "on",
+  "gitignore": "on"
 }
 ```
 
@@ -25,6 +26,9 @@ Top-level editor preferences. Optional — without it, every field uses its defa
 | `icons` | `"auto"` / `"on"` / `"off"`       | `"auto"` | Toggles the Nerd Font glyphs in the file tree. `auto` checks whether a Nerd Font is installed (via `fc-list` or by walking `~/Library/Fonts` / `~/.local/share/fonts`) and turns icons on iff one is found. Pick `on` if detection misses your install; pick `off` if the glyphs render as boxes in your terminal. |
 | `theme` | any registry id (`"dracula"`, `"gruvbox-dark"`, `"nord"`, …) | `"tokyo-night"` | The active palette. Written by the `≡` → **Theme…** picker, which is the intended way to change it — pick a theme there and this key updates itself. An unknown id falls back to the default. |
 | `wrap`  | `"on"` / `"off"`                  | `"on"`   | Soft wrap for long lines. Written by `≡` → **Wrap / Unwrap long lines** (`Esc z`). With wrap off, Shift+wheel scrolls sideways. |
+| `gitignore` | `"on"` / `"off"`              | `"on"`   | Hides file-tree entries the project's `.gitignore` files exclude, so the sidebar and the finder agree on what's project noise. Written by `≡` → **Show ignored files** / **Hide ignored files**. No dot-prefixed name is ever filtered by it (a gitignored `.next/` or `.venv/` stays visible too — dotfile visibility is a separate axis), and a file open in a tab is never hidden: its ignored folder reappears holding just that file. |
+
+Scope of `gitignore`, so you know when a rule won't apply: Skiff reads the `.gitignore` files from the project root down to the directory being listed, which matches `git ls-files --exclude-standard` for the ordinary case. It does **not** read `.git/info/exclude`, `core.excludesFile`, or any global excludes, and it consults nothing above the project root. A `!negation` in a deeper file cannot un-ignore what a shallower file already excluded — the walk stops at the first level that says "ignored". Turn the key off when a rule you need isn't one of the ones it honours.
 
 The detector can only see whether the OS knows about the font — it can't tell whether your *terminal* is configured to render it. If icons turn on but show as "tofu" boxes, set `"icons": "off"` and either point your terminal at a Nerd Font or live without them.
 

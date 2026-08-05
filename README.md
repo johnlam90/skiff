@@ -172,6 +172,19 @@ The goals, in order:
   explorer hidden (Esc t shows it)"), then comes back when the window
   grows. It only restores what *it* hid: a panel you closed on purpose
   stays closed, and reopening it inside a narrow pane sticks.
+- **The tree hides what the project ignores** — entries excluded by the
+  project's `.gitignore` files are filtered out of the sidebar, so it
+  and the finder agree on what counts as noise. `≡` → **Show ignored
+  files** / **Hide ignored files** flips it and persists
+  (`{"gitignore": "off"}` in the same config file). Two exemptions, both
+  on purpose: **no** dot-prefixed name is ever filtered by it, so an
+  ignored `.next/` or `.venv/` stays visible right alongside `.env` and
+  `.github` — dotfile visibility is a separate axis, not something
+  `.gitignore` gets a vote on — and a file you have open in a tab is
+  never hidden, so its ignored folder reappears holding just the file
+  you're editing. Symlinked directories expand like real ones and are
+  marked `→`; a link that points back onto its own ancestors shows
+  `→ (link loop)` and refuses to open.
 - **Clipboard over SSH** — OSC 52, including a `tmux` passthrough so
   copy works from inside a tmux session on a remote host. One escape
   sequence can only carry so much: past 512 KiB (tmux's 1 MiB ceiling
@@ -276,12 +289,20 @@ make install        # builds and installs to $GOPATH/bin
 ```sh
 skiff              # opens the current directory
 skiff ~/code/app   # opens a specific project root
-skiff main.go      # opens a file (project root = its parent dir)
+skiff main.go      # opens one file — single-file mode, no sidebar
 skiff main.go:42   # …opened at line 42
 skiff new-file.go  # creates the file on first save (vim-style)
 skiff --version    # print version and exit
 skiff --help       # print short usage
 ```
+
+One directory or one file, and a flag has to come first. A second path
+is refused by name (`skiff: unexpected argument: "b.go"`) rather than
+quietly dropped — open the rest from the tree or the finder (`Esc p`)
+once the editor is up. `skiff main.go` deliberately skips the file tree
+and the project index entirely: you asked for one file, so Skiff never
+walks the directory around it. Point it at a directory when you want the
+sidebar.
 
 Then:
 
@@ -601,9 +622,17 @@ Each entry needs:
 
 - **`label`** — the menu text (kept under ~30 chars; long labels clip
   inside the modal).
-- **`command`** — handed to `sh -c` with two env variables exported:
-  - `FILE` — absolute path of the active tab's file
+- **`command`** — handed to `sh -c` with the editor-state env
+  variables exported:
+  - `FILE` — absolute path of the active tab's file (empty with no tab)
   - `FILENAME` — basename of the same file
+  - `PROJECT_ROOT` — absolute path of the project root
+  - `ACTIVE_FOLDER` — absolute path of the sidebar's active folder
+  - `ACTIVE_FOLDER_REL` — that folder relative to `PROJECT_ROOT`
+  - `CURRENT_FILE` / `CURRENT_FILE_REL` — `FILE`, absolute and relative
+- **`prompts`** *(optional)* — input fields collected in a form modal
+  before the command runs; each value is exported under its own `key`.
+  See [the docs page](https://johnlam90.github.io/skiff/docs/custom-actions/).
 
 > **`$HOME` and `~` gotcha for two-hop SSH:** the command runs in a
 > shell on the *Skiff host* (the remote box you SSH'd into). So
@@ -613,13 +642,39 @@ Each entry needs:
 > `$FILENAME` is expanded locally (you want that — it's a filename),
 > but `~` is sent literally and rager's shell expands it on arrival.
 
-The action only enables when there's a file open. Commands run in a
+Actions are always enabled, with or without a file open — Skiff doesn't
+guess from the command string which ones need `$FILE`. Commands run in a
 background goroutine, so a slow `scp` or hanging `ssh` won't freeze
 the editor. A quick, silent run just flashes in the status bar; a
 failure always opens a modal with the captured stderr (a one-line
 flash truncated exactly the diagnostics you needed), and so does a
 success that printed something or took longer than a second — with a
 pointer to the full log below.
+
+### Quote every variable
+
+`command` goes to `sh -c` with those variables in the environment, so
+**the shell** expands them, not Skiff. An unquoted `$FILE` is word-split
+on spaces and then glob-expanded before your program sees one argument.
+That shell power is the point — `actions.json` is your own file, read
+only from `$XDG_CONFIG_HOME/skiff/actions.json`, so a cloned repo can't
+plant one — but it bites on the most ordinary input there is: a path
+with a space.
+
+- Write `"$FILE"`, never bare `$FILE`. Same for every variable above,
+  and for every prompt value (`"$DEST_DIR"`).
+- Unquoted, a value splits on spaces/tabs/newlines and each piece is
+  then matched as a glob, so `draft [2].md` breaks too.
+- Quote the variable, not the tilde: `cp "$FILE" ~/backup/` works;
+  `"~/backup/"` looks for a directory literally named `~`.
+- Quote command substitutions as well: `cd "$(dirname "$FILE")"`.
+
+With `/home/spicer/My Notes/todo.md` open:
+
+```sh
+cp $FILE ~/backup/     # WRONG — cp gets "/home/spicer/My" and "Notes/todo.md"
+cp "$FILE" ~/backup/   # RIGHT — one argument, spaces and all
+```
 
 ### Debugging — every run is logged
 
@@ -688,7 +743,7 @@ line, you can put it in `actions.json`:
 
 ```json
 { "label": "Send to ChatGPT", "command": "cat \"$FILE\" | pbcopy && open https://chat.openai.com/" }
-{ "label": "Lint with eslint", "command": "cd $(dirname \"$FILE\") && eslint \"$FILENAME\"" }
+{ "label": "Lint with eslint", "command": "cd \"$(dirname \"$FILE\")\" && eslint \"$FILENAME\"" }
 { "label": "Run formatter",    "command": "gofmt -w \"$FILE\"" }
 ```
 
@@ -838,7 +893,7 @@ them while still making it one click to opt a project in.
 │   ├── clipboard/            # OSC 52 clipboard with tmux passthrough
 │   ├── customactions/        # Loader for ~/.config/skiff/actions.json
 │   ├── format/               # Format-on-save config + trust store
-│   ├── userconfig/           # ~/.config/skiff/config.json (icons, theme, wrap)
+│   ├── userconfig/           # ~/.config/skiff/config.json (icons, theme, wrap, gitignore)
 │   ├── icons/                # Nerd Font detection + per-file glyphs
 │   ├── theme/                # 26 palettes + the low-color fallback
 │   └── version/              # Single-line version constant

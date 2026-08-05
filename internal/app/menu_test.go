@@ -66,10 +66,14 @@ func TestMenuModalRect_Centered(t *testing.T) {
 	a.width, a.height = 120, 60
 	x, y, w, h := a.menuModalRect()
 	_, _, expectedH := a.menuLayout()
-	if w != modalWidth || h != expectedH {
-		t.Fatalf("modal size: got (%d,%d), want (%d,%d)", w, h, modalWidth, expectedH)
+	expectedW := a.menuNaturalWidth()
+	if w != expectedW || h != expectedH {
+		t.Fatalf("modal size: got (%d,%d), want (%d,%d)", w, h, expectedW, expectedH)
 	}
-	if x != (a.width-modalWidth)/2 || y != (a.height-expectedH)/2 {
+	if expectedW < modalWidth {
+		t.Fatalf("modal width %d fell below the %d floor", expectedW, modalWidth)
+	}
+	if x != (a.width-expectedW)/2 || y != (a.height-expectedH)/2 {
 		t.Fatalf("modal origin off-center: (%d,%d)", x, y)
 	}
 }
@@ -1075,5 +1079,121 @@ func TestMenuOverlay_FieldIsTheOverlayPackageOne(t *testing.T) {
 	f.SetText("x")
 	if f.Text() != "x" {
 		t.Fatal("menuFilter must be an overlay.Field")
+	}
+}
+
+// longCustomAction is a user-named custom action wide enough that it
+// cannot fit the base modal — the actions.json case that motivated the
+// grow-or-reveal fix.
+const longCustomAction = "Deploy staging, run migrations and tail the deploy log"
+
+// TestMenuModalRect_GrowsForLongLabelClampsToScreen pins both halves of
+// the width rule: a wide terminal lets the frame grow until the label
+// fits, and a narrow one clamps it inside the screen instead of painting
+// past the edge.
+func TestMenuModalRect_GrowsForLongLabelClampsToScreen(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.customActions = []customactions.Action{{Label: longCustomAction, Command: "true"}}
+
+	resizeTestApp(t, a, 120, 40)
+	_, _, wide, _ := a.menuModalRect()
+	row := menuItemByLabel(t, a, longCustomAction)
+	if menuLabelBudget(wide, row) < runeLen(longCustomAction) {
+		t.Fatalf("modal width %d still clips the label on a 120-col terminal", wide)
+	}
+
+	resizeTestApp(t, a, 60, 40)
+	x, _, narrow, _ := a.menuModalRect()
+	if narrow > a.width-2 {
+		t.Fatalf("modal width %d overflows a %d-column terminal", narrow, a.width)
+	}
+	if x+narrow > a.width {
+		t.Fatalf("modal spans [%d,%d) past the %d-column screen", x, x+narrow, a.width)
+	}
+}
+
+// TestDrawMenu_LongLabelNeverPaintsPastTheFrame is the regression test for
+// the bleed: a shortcut-less row got no width budget at all and drawAt
+// does no bounds checking, so a long custom-action label painted straight
+// through the right border and onto the editor underneath.
+func TestDrawMenu_LongLabelNeverPaintsPastTheFrame(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 60, 40)
+	a.customActions = []customactions.Action{{Label: longCustomAction, Command: "true"}}
+	a.openMenu()
+	a.draw()
+	a.screen.Show()
+
+	mx, my, mw, _ := a.menuModalRect()
+	row := menuItemByLabel(t, a, longCustomAction)
+	line := []rune(screenLine(a.screen.(tcell.SimulationScreen), my+row.relY))
+	// The border cell is the tell: drawAt has no bounds checking, so an
+	// unbudgeted label overwrites it on its way onto the editor.
+	if got := line[mx+mw-1]; got != '│' {
+		t.Fatalf("right border overwritten by the label: %q", got)
+	}
+	budget := menuLabelBudget(mw, row)
+	if budget >= runeLen(longCustomAction) {
+		t.Fatalf("precondition: 60 columns should not fit the label (budget %d)", budget)
+	}
+	want := trimRunes(longCustomAction, budget)
+	if got := string(line[mx+4 : mx+4+runeLen(want)]); got != want {
+		t.Fatalf("row label = %q, want it clipped to %q", got, want)
+	}
+	if !strings.HasSuffix(want, "…") {
+		t.Fatalf("a clipped label must show it was clipped: %q", want)
+	}
+}
+
+// TestMenu_ClippedLabelRevealedOnHover is the recourse half of the fix:
+// when the terminal is too narrow for the frame to grow, pointing at the
+// row flashes the whole label so it is never an unidentifiable prefix. A
+// row that fits must stay silent — otherwise every hover would stomp the
+// status bar.
+func TestMenu_ClippedLabelRevealedOnHover(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 60, 40)
+	a.customActions = []customactions.Action{{Label: longCustomAction, Command: "true"}}
+	a.openMenu()
+
+	mx, my, _, _ := a.menuModalRect()
+	long := menuItemByLabel(t, a, longCustomAction)
+	quit := menuItemByLabel(t, a, "Quit editor")
+
+	a.statusMsg = ""
+	a.updateMenuHover(mx+5, my+quit.relY)
+	if a.statusMsg != "" {
+		t.Fatalf("a row that fits must not flash, got %q", a.statusMsg)
+	}
+
+	a.updateMenuHover(mx+5, my+long.relY)
+	if a.statusMsg != longCustomAction {
+		t.Fatalf("hovering the clipped row flashed %q, want the full label", a.statusMsg)
+	}
+
+	// Re-entering the same row must not re-arm the flash on every motion
+	// event — only a change of row reveals.
+	a.statusMsg = ""
+	a.updateMenuHover(mx+6, my+long.relY)
+	if a.statusMsg != "" {
+		t.Fatalf("staying on the row re-flashed: %q", a.statusMsg)
+	}
+}
+
+// TestMenu_ClippedLabelRevealedByArrowKeys covers the keyboard route to
+// the same recourse: skiff is mouse-first but lives over SSH, where there
+// may be no mouse to hover with.
+func TestMenu_ClippedLabelRevealedByArrowKeys(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 60, 40)
+	a.customActions = []customactions.Action{{Label: longCustomAction, Command: "true"}}
+	a.openMenu()
+	a.menuFilter.SetText("deploy")
+	a.menuFilterChanged()
+
+	a.statusMsg = ""
+	a.handleMenuKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	if a.statusMsg != longCustomAction {
+		t.Fatalf("arrowing onto the clipped row flashed %q, want the full label", a.statusMsg)
 	}
 }

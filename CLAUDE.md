@@ -43,7 +43,8 @@ features, make sure they're reachable from the main menu first.
 ## Architecture map
 
 ```
-main.go                       Entry — parses optional rootDir / file[:line] arg
+main.go                       Entry — one optional rootDir / file[:line] arg;
+                              extra arguments are refused, never dropped
 internal/app/app.go           App struct + New/NewSingleFile, Run, handleEvent, flash
 internal/app/layout.go        All screen geometry: panel rects + splitter clamping
 internal/app/draw.go          The render pass + tab-strip layout
@@ -81,7 +82,10 @@ internal/editor/bracket.go    Bracket match under the caret (+ the render decisi
 internal/filetree/filetree.go Lazy tree, identity-preserving refresh, hit-test,
                               render — plus the per-directory child cap
                               (MaxDirChildren + "… N more" sentinel), the
-                              ReadErr "(unreadable)" mark, and the sidebar's
+                              ReadErr "(unreadable)" mark, .gitignore-aware
+                              filtering (HideIgnored + the per-directory
+                              matcher cache), symlink resolution with
+                              ancestor-loop refusal, and the sidebar's
                               own scrollbar column
 internal/scrollbar/           The one definition of a scrollbar: thumb
                               geometry, its click inverse, and the Track/
@@ -117,7 +121,8 @@ internal/git/                 Git process boundary: Repo over a Runner
 internal/git/ref.go           SafeRef: refuses refs git would read as an option
 internal/clipboard/clipboard.go OSC 52 to /dev/tty with tmux passthrough wrap,
                               capped at MaxPayloadBytes (ErrTooLarge above it)
-internal/userconfig/userconfig.go ~/.config/skiff/config.json (icons, theme, wrap)
+internal/userconfig/userconfig.go ~/.config/skiff/config.json (icons, theme,
+                              wrap, gitignore)
 internal/icons/icons.go       Nerd Font detection (deadline-bounded) + glyphs
 internal/theme/theme.go       Default Tokyo Night palette + contrast helpers
 internal/theme/palettes.go    Theme registry — 25 druk-ported palettes + ByID
@@ -422,11 +427,17 @@ loops forever.
 - `Ctrl+` editor shortcuts (they fight tmux/terminals — that's the
   whole reason the action menu exists).
 - A config *system*. Skiff is opinionated: `~/.config/skiff/config.json`
-  exists but stays a flat file of tiny keys (`icons`, `theme`, `wrap`)
-  — no plugin manifests, no per-key UI beyond a picker, no dotfile
-  sprawl.
+  exists but stays a flat file of tiny keys (`icons`, `theme`, `wrap`,
+  `gitignore`) — no plugin manifests, no per-key UI beyond a picker, no
+  dotfile sprawl.
 - CGO dependencies. The whole point is one static binary.
 - Tree-sitter. We use Chroma intentionally — pure Go, no setup.
+- A multi-file command line. `skiff a.go b.go` is an error naming
+  `b.go`, not two tabs: a file argument means single-file mode (no
+  sidebar, no index), and N files would force a project root out of the
+  arguments' common ancestor — `/` or `$HOME` for `skiff pkg/a.go
+  ../other/b.go`. The tree and the finder (`Esc p`) are the designed way
+  to open the second file. See the doc comment on `resolveArgs`.
 - Cross-repo release tokens. The `homebrew-skiff` tap repo mirrors
   `Formula/skiff.rb` from here via its own pull-sync cron — don't
   "simplify" that into a PAT-based push from this repo's CI.

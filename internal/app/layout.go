@@ -72,15 +72,18 @@ func (a *App) tabBarRect() (x, y, w, h int) {
 }
 
 // editorRect returns the editor body's screen rectangle (everything to the
-// right of the sidebar, between the tab bar and the status bar). When the
-// find bar is open, one row is taken out of the bottom — the bar is
-// pinned directly above the status bar.
+// right of the sidebar, between the tab bar and the status bar). Rows are
+// taken out of the bottom for every transient strip pinned there — the
+// find bar and the flash strip — because the editor's scrollbar, caret
+// and hit-testing all derive from this rect and have to describe the
+// region that is actually painted.
 func (a *App) editorRect() (x, y, w, h int) {
 	sw := a.sidebarW()
 	h = a.height - 2
 	if a.findOpen || a.projFindOpen {
 		h -= findBarHeight
 	}
+	h -= a.flashStripRows()
 	return sw, 1, a.width - sw, h
 }
 

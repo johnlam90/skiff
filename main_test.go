@@ -8,8 +8,11 @@
 package main
 
 import (
+	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -170,4 +173,161 @@ func TestResolveArgs_HelpFlag(t *testing.T) {
 			t.Errorf("flag %q: action = %q, want help", flag, got.Action)
 		}
 	}
+}
+
+// TestResolveArgs_ExtraArgsRefused pins the chosen multi-argument
+// behaviour: a second path is an error, not a silently dropped tab. The
+// message must name every argument being refused, because a user who
+// can't see what was dropped can't tell the difference between "refused"
+// and "opened somewhere I haven't looked yet".
+func TestResolveArgs_ExtraArgsRefused(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(first, []byte("package main"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	got := resolveArgs([]string{first, "b.go", "c.go"})
+	if got.Err == nil {
+		t.Fatal("extra arguments should be refused, got no error")
+	}
+	if got.Action == actionEdit {
+		t.Fatalf("action: got %q, want the zero action (no editor start)", got.Action)
+	}
+	msg := got.Err.Error()
+	for _, want := range []string{"b.go", "c.go", "arguments"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q should mention %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "flags must come first") {
+		t.Errorf("plain paths should not get the flag hint: %q", msg)
+	}
+}
+
+// TestResolveArgs_ExtraArgSingularNamesIt covers the one-extra case: the
+// noun goes singular and the argument is quoted so a name with spaces
+// reads unambiguously.
+func TestResolveArgs_ExtraArgSingularNamesIt(t *testing.T) {
+	got := resolveArgs([]string{".", "some file.go"})
+	if got.Err == nil {
+		t.Fatal("extra argument should be refused, got no error")
+	}
+	msg := got.Err.Error()
+	if !strings.Contains(msg, `"some file.go"`) {
+		t.Errorf("error %q should quote the refused argument", msg)
+	}
+	if strings.Contains(msg, "arguments:") {
+		t.Errorf("single extra argument should use the singular noun: %q", msg)
+	}
+}
+
+// TestResolveArgs_MisplacedFlagIsRefused is the fix for `skiff main.go
+// --version` quietly editing main.go and dropping the flag. The flag is
+// still position-sensitive, but now it's reported instead of ignored,
+// and the message says where flags belong.
+func TestResolveArgs_MisplacedFlagIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(target, []byte("package main"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	got := resolveArgs([]string{target, "--version"})
+	if got.Err == nil {
+		t.Fatal("trailing --version should be refused, got no error")
+	}
+	if got.OpenFile != "" {
+		t.Errorf("no file should be queued when the line is refused, got %q", got.OpenFile)
+	}
+	if !strings.Contains(got.Err.Error(), "flags must come first") {
+		t.Errorf("error %q should tell the user where flags go", got.Err)
+	}
+}
+
+// TestResolveArgs_FlagWithTrailingArgsRefused keeps the rule uniform in
+// the other direction: `skiff --version junk` must not print a version
+// and pretend "junk" was never typed.
+func TestResolveArgs_FlagWithTrailingArgsRefused(t *testing.T) {
+	for _, flag := range []string{"--version", "--help"} {
+		got := resolveArgs([]string{flag, "junk"})
+		if got.Err == nil {
+			t.Errorf("%s junk: want an error, got action %q", flag, got.Action)
+		}
+	}
+}
+
+// TestPrintHelpMatchesBehaviour guards the specific lie this change
+// removed: help used to claim a file argument's parent "becomes the
+// project root", when main actually enters single-file mode with no
+// sidebar and no project index.
+func TestPrintHelpMatchesBehaviour(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	stdout := os.Stdout
+	os.Stdout = w
+	printHelp()
+	_ = w.Close()
+	os.Stdout = stdout
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	help := buf.String()
+	for _, want := range []string{"single-file mode", "no sidebar", "Extra arguments are refused"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help should mention %q:\n%s", want, help)
+		}
+	}
+	if strings.Contains(help, "becomes the project root") {
+		t.Errorf("help still claims a file's parent becomes the project root:\n%s", help)
+	}
+}
+
+// TestMainExitCodes runs the real binary because exit status is main's
+// behaviour, not resolveArgs' — the refusal has to actually be
+// non-zero for `skiff a.go b.go && …` in a script to stop.
+func TestMainExitCodes(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not on PATH; can't build the binary under test")
+	}
+	bin := filepath.Join(t.TempDir(), "skiff-under-test")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
+
+	t.Run("extra args exit 1", func(t *testing.T) {
+		cmd := exec.Command(bin, "a.go", "b.go")
+		out, err := cmd.CombinedOutput()
+		if cmd.ProcessState.ExitCode() != 1 {
+			t.Fatalf("exit code: got %d, want 1 (err %v, output %s)", cmd.ProcessState.ExitCode(), err, out)
+		}
+		if !strings.Contains(string(out), "b.go") {
+			t.Errorf("stderr should name the refused argument, got %q", out)
+		}
+	})
+
+	t.Run("version exits 0", func(t *testing.T) {
+		out, err := exec.Command(bin, "--version").CombinedOutput()
+		if err != nil {
+			t.Fatalf("--version: %v\n%s", err, out)
+		}
+		if !strings.HasPrefix(string(out), "skiff ") {
+			t.Errorf("--version output: got %q", out)
+		}
+	})
+
+	t.Run("help exits 0", func(t *testing.T) {
+		out, err := exec.Command(bin, "--help").CombinedOutput()
+		if err != nil {
+			t.Fatalf("--help: %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "Usage:") {
+			t.Errorf("--help output: got %q", out)
+		}
+	})
 }

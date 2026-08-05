@@ -15,9 +15,16 @@ From any directory:
 ```sh
 skiff              # opens the current directory as the project root
 skiff ~/code/app   # opens a specific project root
-skiff main.go      # opens that file (project root = its parent dir)
+skiff main.go      # opens that one file — single-file mode, no sidebar
 skiff new-file.go  # creates the file on first save (vim-style)
 ```
+
+One directory or one file per invocation, with any flag first. A second
+path is refused by name rather than silently dropped — once the editor
+is up, the tree and the finder (`Esc p`) are how you open the rest. And
+`skiff main.go` means *just* that file: no sidebar, no project index, no
+walk of the surrounding directory. Pass a directory when you want the
+full project view.
 
 <figure class="screenshot-figure">
   <img

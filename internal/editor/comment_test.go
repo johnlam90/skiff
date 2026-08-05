@@ -32,8 +32,9 @@ func TestLineCommentPrefix_CommonExtensions(t *testing.T) {
 	}
 }
 
-// TestToggleLineComment_CommentsSelectedLines checks the headline path:
-// every selected non-blank line gets a comment marker at column zero.
+// TestToggleLineComment_CommentsSelectedLines checks the headline path: every
+// selected non-blank line gets a comment marker at the block's shared indent,
+// which is column zero here because the block's shallowest line is flush left.
 func TestToggleLineComment_CommentsSelectedLines(t *testing.T) {
 	tab := commentTestTab("main.go", "package main\nfunc main() {\n\tprintln(\"x\")\n}\n")
 	tab.Anchor = Position{Line: 1, Col: 0}
@@ -103,6 +104,143 @@ func TestToggleLineComment_MixedSelectionCommentsAllLines(t *testing.T) {
 	want := "// // one\n\n//   two"
 	if got := tab.Buffer.String(); got != want {
 		t.Fatalf("buffer:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+// TestToggleLineComment_IndentedLineKeepsIndentBeforeMarker is the fix for the
+// marker landing at column zero on an indented line and stranding the
+// indentation behind it ("//\tprintln" instead of "\t// println").
+func TestToggleLineComment_IndentedLineKeepsIndentBeforeMarker(t *testing.T) {
+	tab := commentTestTab("main.go", "func main() {\n\tprintln(\"x\")\n}\n")
+	tab.Cursor = Position{Line: 1, Col: 3}
+	tab.Anchor = tab.Cursor
+
+	changed, ok := tab.ToggleLineComment()
+
+	if !ok || !changed {
+		t.Fatalf("ToggleLineComment() = %v, %v; want changed and ok", changed, ok)
+	}
+	want := "func main() {\n\t// println(\"x\")\n}\n"
+	if got := tab.Buffer.String(); got != want {
+		t.Fatalf("buffer:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+// TestToggleLineComment_MixedIndentAlignsToShallowestIndent pins the chosen
+// rule for a mixed-indent block: one shared marker column (the block's
+// shallowest indent) rather than a per-line indent-relative marker, so the
+// commented region stays rectangular and the deeper lines keep their extra
+// indentation verbatim after the marker.
+func TestToggleLineComment_MixedIndentAlignsToShallowestIndent(t *testing.T) {
+	tab := commentTestTab("main.go", "\tif x {\n\t\tdo()\n\t}\n")
+	tab.Anchor = Position{Line: 0, Col: 0}
+	tab.Cursor = Position{Line: 2, Col: 2}
+
+	changed, ok := tab.ToggleLineComment()
+
+	if !ok || !changed {
+		t.Fatalf("ToggleLineComment() = %v, %v; want changed and ok", changed, ok)
+	}
+	want := "\t// if x {\n\t// \tdo()\n\t// }\n"
+	if got := tab.Buffer.String(); got != want {
+		t.Fatalf("buffer:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+// TestToggleLineComment_BlankLinesInsideSelectionStayBare guards the
+// pre-existing rule that only non-blank lines get a marker, now that the
+// marker column is derived from the block's non-blank lines.
+func TestToggleLineComment_BlankLinesInsideSelectionStayBare(t *testing.T) {
+	tab := commentTestTab("main.go", "    a\n\n  \n    b\n")
+	tab.SelectAll()
+
+	changed, ok := tab.ToggleLineComment()
+
+	if !ok || !changed {
+		t.Fatalf("ToggleLineComment() = %v, %v; want changed and ok", changed, ok)
+	}
+	want := "    // a\n\n  \n    // b\n"
+	if got := tab.Buffer.String(); got != want {
+		t.Fatalf("buffer:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+// TestToggleLineComment_RoundTripRestoresOriginalBytes is the reversibility
+// contract the shallowest-indent rule exists to keep: comment then uncomment
+// must hand back the original bytes for every indentation shape.
+func TestToggleLineComment_RoundTripRestoresOriginalBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{"flush left", "one\ntwo\n"},
+		{"uniform tabs", "\tone\n\ttwo\n"},
+		{"mixed depth", "  one\n      two\n    three\n"},
+		{"tab vs space indent", "\tone\n    two\n"},
+		{"blank lines inside", "    one\n\n\n    two\n"},
+		{"already commented", "// one\n  two\n"},
+		{"trailing whitespace kept", "  one   \n    two\t\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tab := commentTestTab("main.go", tc.text)
+			tab.SelectAll()
+			if changed, ok := tab.ToggleLineComment(); !ok || !changed {
+				t.Fatalf("comment pass = %v, %v; want changed and ok", changed, ok)
+			}
+			tab.SelectAll()
+			if changed, ok := tab.ToggleLineComment(); !ok || !changed {
+				t.Fatalf("uncomment pass = %v, %v; want changed and ok", changed, ok)
+			}
+			if got := tab.Buffer.String(); got != tc.text {
+				t.Fatalf("round trip:\n%q\nwant:\n%q", got, tc.text)
+			}
+		})
+	}
+}
+
+// TestToggleLineComment_UncommentsLegacyColumnZeroComments keeps files written
+// by older builds — marker at column zero, indentation stranded behind it —
+// uncommenting back to their exact original bytes.
+func TestToggleLineComment_UncommentsLegacyColumnZeroComments(t *testing.T) {
+	tab := commentTestTab("main.go", "//     four spaces\n// \ttabbed\n")
+	tab.SelectAll()
+
+	changed, ok := tab.ToggleLineComment()
+
+	if !ok || !changed {
+		t.Fatalf("ToggleLineComment() = %v, %v; want changed and ok", changed, ok)
+	}
+	want := "    four spaces\n\ttabbed\n"
+	if got := tab.Buffer.String(); got != want {
+		t.Fatalf("buffer:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+// TestBlockIndent_SharedPrefixOnly pins the helper that picks the marker
+// column: it is a literal byte prefix of every non-blank line, so a tab-vs-
+// space mixture correctly collapses to column zero instead of inventing an
+// indent that is not actually there.
+func TestBlockIndent_SharedPrefixOnly(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{"uniform", []string{"    a", "    b"}, "    "},
+		{"nested", []string{"  a", "      b"}, "  "},
+		{"flush left member", []string{"a", "    b"}, ""},
+		{"tabs vs spaces", []string{"\ta", "    b"}, ""},
+		{"blank lines ignored", []string{"  a", "", "\t", "    b"}, "  "},
+		{"all blank", []string{"", "   "}, ""},
+		{"single line", []string{"\t\ta"}, "\t\t"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := blockIndent(tc.lines, 0, len(tc.lines)-1); got != tc.want {
+				t.Fatalf("blockIndent() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

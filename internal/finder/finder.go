@@ -19,10 +19,11 @@ package finder
 //     one running at a time, gated by a mutex + state machine.
 //     A second Rebuild call while one is in flight is a no-op.
 //
-//   - Search is fully synchronous over the (small) in-memory slice.
-//     Even at the index cap (200k entries) a full scoring pass
-//     runs in ~30ms on a modern laptop, well under one frame at
-//     any reasonable refresh rate. No need to background it.
+//   - Search is fully synchronous over the in-memory slice: one
+//     scoring pass plus a bounded top-N selection, no full sort of
+//     the match list. Even at the index cap (200k entries) that is
+//     tens of milliseconds, well under one frame at any reasonable
+//     refresh rate. No need to background it.
 //
 //   - The whole thing is built around the case where the user
 //     opens the modal *before* the first build completes. We
@@ -30,7 +31,6 @@ package finder
 //     stays responsive instead of blocking on a 200ms walk.
 
 import (
-	"sort"
 	"sync"
 	"sync/atomic"
 )
@@ -190,25 +190,48 @@ func (f *Finder) Search(query string, limit int) []Result {
 		return out
 	}
 
-	results := make([]Result, 0, 64)
+	// Bounded top-N selection, not "score everything then sort". The index
+	// cap is 200k paths and this runs on the input path of every keystroke,
+	// so sorting tens of thousands of matches to paint ten rows was the
+	// dominant cost over SSH. Insertion into a fixed-size sorted window
+	// beats container/heap at limit=10: the overwhelmingly common case
+	// (candidate loses to the worst kept row) costs exactly one compare,
+	// and the window is already in final order so there is no drain pass.
+	top := make([]Result, 0, limit)
 	for _, p := range paths {
 		score, idx := Score(query, p)
 		if score == 0 {
 			continue
 		}
-		results = append(results, Result{Path: p, Score: score, MatchedIndexes: idx})
-	}
-	sort.SliceStable(results, func(i, j int) bool {
-		if results[i].Score != results[j].Score {
-			return results[i].Score > results[j].Score
+		cand := Result{Path: p, Score: score, MatchedIndexes: idx}
+		// Walk back over the rows cand outranks and stop at the first row
+		// it does not — inserting *after* equals is what reproduces
+		// sort.SliceStable's tie order for rows equal on score and path.
+		i := len(top)
+		for i > 0 && rankBefore(cand, top[i-1]) {
+			i--
 		}
-		// Stable secondary order: alphabetical path. Without it,
-		// "near-tie" results would shuffle on every keystroke and
-		// the user couldn't keep their place.
-		return results[i].Path < results[j].Path
-	})
-	if len(results) > limit {
-		results = results[:limit]
+		if i >= limit {
+			continue
+		}
+		if len(top) < limit {
+			top = append(top, cand)
+		}
+		copy(top[i+1:], top[i:])
+		top[i] = cand
 	}
-	return results
+	return top
+}
+
+// rankBefore reports whether a outranks b under the finder's ordering:
+// score descending, ties broken by alphabetical path. Equal rows compare
+// false in both directions, which is what leaves the selection stable.
+func rankBefore(a, b Result) bool {
+	if a.Score != b.Score {
+		return a.Score > b.Score
+	}
+	// Stable secondary order: alphabetical path. Without it, "near-tie"
+	// results would shuffle on every keystroke and the user couldn't keep
+	// their place.
+	return a.Path < b.Path
 }

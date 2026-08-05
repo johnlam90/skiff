@@ -105,6 +105,13 @@ func (a *App) loadUserConfig() {
 	}
 	if a.tree != nil {
 		a.tree.IconsEnabled = icons.Resolve(cfg.Icons)
+		// filetree.New already read the root with filtering on (the
+		// config default), so only a config that disagrees costs a
+		// re-read.
+		if a.tree.HideIgnored != cfg.Gitignore {
+			a.tree.HideIgnored = cfg.Gitignore
+			a.tree.Refresh()
+		}
 	}
 	if cfg.Theme != "" {
 		a.applyTheme(cfg.Theme, false)
@@ -129,6 +136,7 @@ func (a *App) refreshTree() {
 	if a.tree == nil {
 		return
 	}
+	a.tree.SetOpenFiles(a.openTabDiskPaths())
 	a.tree.Refresh()
 }
 
@@ -205,11 +213,16 @@ func (a *App) refreshTreeAsync() {
 		return
 	}
 	a.treeScanInFlight = true
+	paths := a.openTabDiskPaths()
 	var dirs []string
 	if a.tree != nil {
+		// The sweep's listings are filtered against this set when they
+		// land, so it has to be current before the work list is taken —
+		// a tab opened inside an ignored directory must not blink out of
+		// the sidebar on the next tick.
+		a.tree.SetOpenFiles(paths)
 		dirs = a.tree.LoadedDirs()
 	}
-	paths := a.openTabDiskPaths()
 	gen := a.treeScanGen
 	scr := a.screen
 	// The session payload is captured here for the same reason the path

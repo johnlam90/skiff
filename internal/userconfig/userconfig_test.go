@@ -325,3 +325,99 @@ func TestSetThemeWritesAtomically(t *testing.T) {
 		t.Fatalf("expected only config.json in the config dir, got %v", names)
 	}
 }
+
+// TestLoadGitignore covers the gitignore key's whole contract: absent
+// defaults to on (the sidebar hides ignored files out of the box, so it
+// agrees with the finder), "on"/"off" parse case-insensitively, and a
+// typo is reported rather than silently swallowed. Same shape as the
+// wrap key because both now share parseOnOff — this is what would catch
+// that helper drifting for one key and not the other.
+func TestLoadGitignore(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name    string
+		json    string
+		want    bool
+		wantErr bool
+	}{
+		{"absent defaults on", `{"icons": "on"}`, true, false},
+		{"explicit on", `{"gitignore": "on"}`, true, false},
+		{"explicit off", `{"gitignore": "off"}`, false, false},
+		{"case insensitive", `{"gitignore": "OFF"}`, false, false},
+		{"typo errors", `{"gitignore": "nope"}`, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, "gi-"+strings.ReplaceAll(tc.name, " ", "-")+".json")
+			if err := os.WriteFile(path, []byte(tc.json), 0644); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			cfg, err := Load(path)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if cfg.Gitignore != tc.want {
+				t.Fatalf("Gitignore = %v, want %v", cfg.Gitignore, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadGitignoreErrorNamesItsOwnKey guards the one thing sharing
+// parseOnOff could plausibly break: a bad gitignore value must not be
+// reported as a bad wrap value.
+func TestLoadGitignoreErrorNamesItsOwnKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"gitignore": "yes"}`), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected an error for gitignore=yes")
+	}
+	if !strings.Contains(err.Error(), "gitignore must be") {
+		t.Fatalf("error should name the gitignore key, got %v", err)
+	}
+}
+
+// TestSetGitignorePreservesOtherKeys pins the round-trip: unknown keys
+// and the neighbouring wrap key survive, the file is created when
+// missing, and the value reads back through Load. A toggle that dropped
+// the user's theme would be worse than not persisting at all.
+func TestSetGitignorePreservesOtherKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	seed := `{"theme": "nord", "wrap": "off", "future-key": 7}`
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := SetGitignore(path, false); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	for _, want := range []string{`"gitignore": "off"`, `"wrap": "off"`, `"theme": "nord"`, `"future-key": 7`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("missing %s in:\n%s", want, data)
+		}
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load after set: %v", err)
+	}
+	if cfg.Gitignore {
+		t.Fatal("Gitignore should read back false")
+	}
+	if cfg.Wrap {
+		t.Fatal("SetGitignore must not disturb the wrap key")
+	}
+
+	// Fresh-file creation, and flipping back to on round-trips too.
+	fresh := filepath.Join(dir, "sub", "config.json")
+	if err := SetGitignore(fresh, true); err != nil {
+		t.Fatalf("fresh set: %v", err)
+	}
+	cfg, err = Load(fresh)
+	if err != nil || !cfg.Gitignore {
+		t.Fatalf("fresh load: %+v %v", cfg, err)
+	}
+}

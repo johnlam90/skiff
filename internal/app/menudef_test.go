@@ -48,13 +48,17 @@ var preRedesignMenuActions = []string{
 
 // postRedesignMenuActions is everything the redesign-era menu ADDED to
 // the catalog: the two drill-in doors, the navigation rows, the
-// disk-conflict escape hatch shipped alongside it, and the shortcut
-// reference. Listing them explicitly is what makes the catalog test a
-// two-way pin — a stray new row has to be declared here on purpose.
+// disk-conflict escape hatch shipped alongside it, the shortcut
+// reference, and the tree's ignored-file toggle. Listing them explicitly
+// is what makes the catalog test a two-way pin — a stray new row has to
+// be declared here on purpose.
 var postRedesignMenuActions = []string{
 	"Git…", "File clipboard…",
 	"Go to matching bracket", "Move to previous word", "Move to next word",
 	"Resolve disk conflict…", "Refresh file tree", "Keyboard shortcuts…",
+	// Both forms of the one toggle whose default the tree owns, so the
+	// pin doesn't quietly depend on which way that default points.
+	"Show ignored files", "Hide ignored files",
 }
 
 // menuCatalog flattens every built-in row the ≡ menu can reach — the top
@@ -115,21 +119,21 @@ func drillInItemByLabel(t *testing.T, a *App, label string) menuItemDef {
 
 // TestMenuLayout_EmptySession pins the headline claim of the redesign:
 // with no tab, no repo and no custom actions the menu collapses to the
-// nine rows that can actually do something — New file, the two project
-// searches, the five view rows and Quit — and the whole modal is 17
+// ten rows that can actually do something — New file, the two project
+// searches, the six view rows and Quit — and the whole modal is 18
 // cells tall, well inside an 80×24 tmux split.
 func TestMenuLayout_EmptySession(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.customActions = nil
 	items, dividers, h := a.menuLayout()
 
-	if h != 17 {
-		t.Errorf("modalHeight = %d, want 17", h)
+	if h != 18 {
+		t.Errorf("modalHeight = %d, want 18", h)
 	}
-	if got := len(items); got != 9 {
-		t.Errorf("item count = %d, want 9; got %v", got, menuLabels(a, items))
+	if got := len(items); got != 10 {
+		t.Errorf("item count = %d, want 10; got %v", got, menuLabels(a, items))
 	}
-	wantDiv := []int{3, 5, 8, 14}
+	wantDiv := []int{3, 5, 8, 15}
 	if len(dividers) != len(wantDiv) {
 		t.Fatalf("dividers = %v, want %v", dividers, wantDiv)
 	}
@@ -385,8 +389,8 @@ func TestMenuLayout_WithCustomActions(t *testing.T) {
 	}
 	items, _, h := a.menuLayout()
 
-	if h != 20 { // 17 + 2 items + 1 divider
-		t.Errorf("modalHeight = %d, want 20", h)
+	if h != 21 { // 18 + 2 items + 1 divider
+		t.Errorf("modalHeight = %d, want 21", h)
 	}
 	// Custom actions should be the second-to-last and third-to-last
 	// rows, with Quit as the final row.
@@ -657,4 +661,53 @@ func containsSidebarToggle(items []menuItemDef, a *App) bool {
 		}
 	}
 	return false
+}
+
+// TestMenuLabelBudget_InvertsRowWidth is the invariant that keeps the
+// modal's sizing and drawMenu's clipping from drifting apart: the width a
+// row asks for is exactly the width at which its label stops being
+// clipped. Break the pair and either the modal grows a column short (every
+// row ellipsised at full width) or a column long (dead space forever).
+func TestMenuLabelBudget_InvertsRowWidth(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	rows := []menuItemDef{
+		{label: "Save", shortcut: "Esc s"},
+		{label: "Theme…"},
+		{label: "A rather long user-named custom action", shortcut: "Esc %"},
+		{label: "x"},
+	}
+	for _, it := range rows {
+		want := runeLen(a.menuLabel(it))
+		w := a.menuRowWidth(it)
+		if got := menuLabelBudget(w, it); got != want {
+			t.Errorf("%q: budget at its own width = %d, want %d", it.label, got, want)
+		}
+		if got := menuLabelBudget(w-1, it); got >= want {
+			t.Errorf("%q: one column narrower must clip, budget = %d", it.label, got)
+		}
+	}
+}
+
+// TestMenuNaturalWidth_GrowsForLongLabel pins the "let the modal grow"
+// half of the long-label fix: a user-named custom action wider than the
+// base frame widens it enough to render whole, and a menu of ordinary rows
+// never shrinks below modalWidth.
+func TestMenuNaturalWidth_GrowsForLongLabel(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.customActions = nil
+	if got := a.menuNaturalWidth(); got != modalWidth {
+		t.Fatalf("default menu width = %d, want the %d floor", got, modalWidth)
+	}
+
+	long := "Deploy the staging environment and tail the logs"
+	a.customActions = []customactions.Action{{Label: long, Command: "true"}}
+	w := a.menuNaturalWidth()
+	if w <= modalWidth {
+		t.Fatalf("width %d did not grow for a %d-rune label", w, runeLen(long))
+	}
+	row := menuItemByLabel(t, a, long)
+	if got := menuLabelBudget(w, row); got < runeLen(long) {
+		t.Fatalf("grown width %d still clips the label (budget %d < %d)",
+			w, got, runeLen(long))
+	}
 }

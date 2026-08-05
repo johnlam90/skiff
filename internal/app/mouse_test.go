@@ -688,6 +688,35 @@ func TestTabBar_ClickMapsThroughScroll(t *testing.T) {
 	}
 }
 
+// TestTabBarClick_CountCellIsPartOfTheChevron pins the overflow badge as
+// one button: the hidden-tab count sits beside the chevron on top of a
+// clipped tab, so a click there has to scroll the strip like the chevron
+// does rather than activating whatever tab is painted underneath it.
+func TestTabBarClick_CountCellIsPartOfTheChevron(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	openManyTabs(t, a, dir, 6)
+	a.tabScroll = a.maxTabScroll()
+
+	left, _ := a.tabChevrons()
+	if runeLen(left.Label) < 2 {
+		t.Fatalf("precondition: want a counted badge, got %q", left.Label)
+	}
+	countX := left.X + runeLen(left.Label) - 1
+	before, wasActive := a.tabScroll, a.tabs.ActiveIndex()
+
+	a.drawTabBar() // stores lastTabRects, so a stray hit would activate a tab
+	a.tabBarClick(countX, 0)
+
+	if a.tabScroll >= before {
+		t.Fatalf("clicking the count cell should scroll (scroll %d -> %d)", before, a.tabScroll)
+	}
+	if a.tabs.ActiveIndex() != wasActive {
+		t.Fatalf("the count cell activated tab %d instead of scrolling", a.tabs.ActiveIndex())
+	}
+}
+
 // TestDragRelease_CopiesSelection pins select-to-copy, the tmux/herdr
 // convention: releasing a mouse drag that produced a selection puts it
 // on the clipboard. With mouse reporting on, the terminal/multiplexer

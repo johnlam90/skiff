@@ -110,6 +110,13 @@ func (t *Tab) ToggleLineComment() (changed bool, ok bool) {
 	}
 	uncomment := t.linesAreCommented(start, end, prefix)
 
+	// Commenting aligns every marker to the block's shared indent so the
+	// region stays rectangular; see commentLine for the rationale.
+	indent := ""
+	if !uncomment {
+		indent = blockIndent(t.Buffer.Lines, start, end)
+	}
+
 	t.pushUndo(undoGroupStructural)
 	for i := start; i <= end; i++ {
 		line := t.Buffer.Lines[i]
@@ -120,7 +127,7 @@ func (t *Tab) ToggleLineComment() (changed bool, ok bool) {
 			t.Buffer.Lines[i] = uncommentLine(line, prefix)
 			continue
 		}
-		t.Buffer.Lines[i] = commentLine(line, prefix)
+		t.Buffer.Lines[i] = commentLine(line, prefix, indent)
 	}
 	t.Cursor = t.Buffer.Clamp(t.Cursor)
 	t.Anchor = t.Buffer.Clamp(t.Anchor)
@@ -171,10 +178,55 @@ func hasNonBlankLine(lines []string, start, end int) bool {
 	return false
 }
 
-// commentLine inserts prefix at column zero, leaving the line's existing
-// indentation untouched after the marker.
-func commentLine(line, prefix string) string {
-	return prefix + " " + line
+// blockIndent returns the longest common leading-whitespace prefix shared by
+// every non-blank line in the inclusive range, or "" when they share none.
+// Comparing the raw whitespace bytes rather than a visual column keeps the
+// answer meaningful for tab/space mixtures: two lines only share an indent
+// when they literally start with the same bytes, so the prefix we hand to
+// commentLine is always a real prefix of every line it will be applied to.
+func blockIndent(lines []string, start, end int) string {
+	common := ""
+	first := true
+	for i := start; i <= end; i++ {
+		line := lines[i]
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		indent, _ := splitIndent(line)
+		if first {
+			common, first = indent, false
+			continue
+		}
+		common = commonPrefix(common, indent)
+		if common == "" {
+			break
+		}
+	}
+	return common
+}
+
+// commonPrefix returns the longest byte prefix shared by a and b.
+func commonPrefix(a, b string) string {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	i := 0
+	for i < n && a[i] == b[i] {
+		i++
+	}
+	return a[:i]
+}
+
+// commentLine inserts prefix after indent, which is the comment column shared
+// by every line of the toggled block (see blockIndent). Anchoring the whole
+// block to its shallowest indent rather than to each line's own indent is what
+// every mainstream editor does, and it buys two things: the commented region
+// stays visually rectangular, and the toggle is exactly reversible, because
+// the deeper lines keep their extra indentation verbatim after the marker.
+// indent must be a prefix of line; blank lines are never passed here.
+func commentLine(line, prefix, indent string) string {
+	return indent + prefix + " " + strings.TrimPrefix(line, indent)
 }
 
 // uncommentLine removes prefix, plus one following space if present, from

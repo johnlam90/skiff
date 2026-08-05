@@ -186,6 +186,11 @@ func viewMenuGroup() []menuItemDef {
 	return []menuItemDef{
 		{shortcut: "Esc t", action: (*App).menuToggleSidebar, enabled: alwaysTrue, labelFor: (*App).sidebarToggleLabel, visible: (*App).hasTree},
 		{shortcut: "Esc z", action: (*App).menuToggleWrap, enabled: alwaysTrue, labelFor: (*App).wrapToggleLabel},
+		// No leader binding: the tree's ignored-file filter is a
+		// once-in-a-while decision, not a gesture worth spending one of
+		// the 26 leader runes on. Reachability lives in the menu, which
+		// is the rule CLAUDE.md actually cares about.
+		{action: (*App).menuToggleGitignore, enabled: alwaysTrue, labelFor: (*App).gitignoreToggleLabel, visible: (*App).hasTree},
 		// The 10s auto-refresh covers local edits; the manual row is for
 		// the cases the ticker can't win — an NFS or sshfs mount where
 		// the walk is slow enough that "I know it changed, look again"
@@ -370,6 +375,53 @@ func (a *App) menuLayout() (items []menuItemDef, dividers []int, modalHeight int
 func (a *App) menuNaturalHeight() int {
 	_, _, h := layoutMenuGroups(a.menuGroups())
 	return h
+}
+
+// menuRowWidth is the modal width row it needs to render its label
+// untruncated: the "▸ " indent drawMenu paints at mx+4, the label itself,
+// one cell of right pad, and — when the row carries one — the two-cell gap
+// plus the right-aligned shortcut column.
+//
+// The exact inverse of menuLabelBudget. Keeping the pair adjacent is the
+// point: the width the modal asks for and the width drawMenu clips to are
+// one calculation, so a row is truncated only when the screen genuinely
+// refused the columns.
+func (a *App) menuRowWidth(it menuItemDef) int {
+	w := 5 + runeLen(a.menuLabel(it))
+	if it.shortcut != "" {
+		w += 3 + runeLen(it.shortcut)
+	}
+	return w
+}
+
+// menuLabelBudget returns how many cells row it's label may occupy inside
+// a modal mw cells wide. The inverse of menuRowWidth.
+func menuLabelBudget(mw int, it menuItemDef) int {
+	b := mw - 5
+	if it.shortcut != "" {
+		b -= 3 + runeLen(it.shortcut)
+	}
+	return b
+}
+
+// menuNaturalWidth is the width the current row set wants: wide enough
+// for its longest label, floored at modalWidth so the frame never shrinks
+// below the shape users know. menuModalRect clamps it to the terminal.
+//
+// Computed from the UNFILTERED row set for the same reason
+// menuNaturalHeight is: the modal's origin derives from its width, so
+// sizing to the match set would slide the frame sideways on every
+// keystroke, dragging the filter caret out from under the user.
+func (a *App) menuNaturalWidth() int {
+	w := modalWidth
+	for _, g := range a.menuGroups() {
+		for _, it := range g {
+			if need := a.menuRowWidth(it); need > w {
+				w = need
+			}
+		}
+	}
+	return w
 }
 
 // matchMenuGroups narrows every group down to the rows matching q and

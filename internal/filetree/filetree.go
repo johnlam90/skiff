@@ -10,9 +10,27 @@
 // expanded, so opening the editor on a huge repo is still instant. The tree
 // also keeps a flat list of "currently visible" rows so that hit-testing a
 // click against rendered rows is O(1).
+//
+// What the tree shows is decided on three independent axes, and keeping
+// them separate is the point:
+//
+//   - shouldHide is a small fixed list of universal noise (.git,
+//     node_modules, editor metadata). Never configurable.
+//   - Dotfiles are always visible, only muted. Reading .env, .github and
+//     .gitignore over SSH is the job; see drawNodeRow's colour cascade.
+//   - HideIgnored filters entries the project's own .gitignore files
+//     exclude, so the sidebar agrees with the finder's index. On by
+//     default, persisted in config.json, and deliberately blind to
+//     dotfiles — see ignoreChain for the nested-.gitignore rules the
+//     tree honours and the ones it does not.
+//
+// Symlinks are classified through the link (a directory link expands
+// like a directory) and marked in the row. A link whose target is
+// already an ancestor is refused rather than followed — see Node.loops.
 package filetree
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +38,7 @@ import (
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
+	gitignore "github.com/sabhiram/go-gitignore"
 
 	"github.com/johnlam90/skiff/internal/icons"
 	"github.com/johnlam90/skiff/internal/scrollbar"
@@ -37,6 +56,31 @@ type Node struct {
 	Expanded bool
 	Loaded   bool
 	Children []*Node
+
+	// Parent is the directory this entry was merged into — nil on the
+	// root. It exists for one reason: the symlink-loop check has to walk
+	// the resolved paths of every ancestor, and a graph that only points
+	// downwards cannot answer "have I already been here".
+	Parent *Node
+
+	// IsLink marks an entry that is a symbolic link. IsDir is resolved
+	// *through* the link (Stat, not the dirent's own type), so a
+	// symlinked directory expands like any other — which is exactly why
+	// the two are separate bits: the row still has to say it is a link.
+	IsLink bool
+
+	// Real is this entry's path with symlinks resolved. Ordinary entries
+	// derive it from the parent's Real by string join (no syscall);
+	// symlinked directories get filepath.EvalSymlinks. Empty when
+	// resolution failed, which the loop check reads as "unknown".
+	Real string
+
+	// Loop marks a symlinked directory whose target is already on its own
+	// ancestor chain — `a -> ..` and friends. Such a node renders as a
+	// link that cannot be opened and never loads children, which is what
+	// stops both the expand path and the 10s background sweep from
+	// walking forever.
+	Loop bool
 
 	// ReadErr records the most recent failed read of this directory —
 	// permissions, a vanished path, an I/O error. Without it an
@@ -69,6 +113,22 @@ const EmptyFolderLabel = "(folder is empty)"
 // difference between "empty" and "I could not look" has to survive a
 // monochrome terminal and a colourblind reader.
 const UnreadableLabel = "(unreadable)"
+
+// SymlinkLabel is the marker appended to a row whose entry is a symbolic
+// link. Same reasoning as UnreadableLabel: "this row is not where it
+// says it is" has to survive a monochrome terminal, so it is a glyph in
+// the label rather than a colour.
+const SymlinkLabel = "→"
+
+// LoopLabel joins SymlinkLabel on a link whose target is already an
+// ancestor of the row. The row deliberately loses its chevron too — the
+// alternative, a chevron that opens onto nothing, reads as a bug.
+const LoopLabel = "(link loop)"
+
+// gitignoreName is the per-directory ignore file the tree honours. Only
+// this name: .git/info/exclude and core.excludesFile are git
+// configuration the tree deliberately does not read (see ignoreChain).
+const gitignoreName = ".gitignore"
 
 // MaxDirChildren caps how many entries of one directory the tree
 // retains. The sidebar is a navigation aid, not a file manager — past a
@@ -148,11 +208,55 @@ type Tree struct {
 	// only the existing chevron (the legacy look) — important for
 	// terminals or fonts that can't render the private-use glyphs.
 	IconsEnabled bool
+
+	// HideIgnored filters .gitignore'd entries out of the tree so the
+	// sidebar and the finder (which has always filtered through
+	// go-gitignore) answer "is this project noise?" the same way.
+	// Defaults to on; App.loadUserConfig overrides it from config.json's
+	// "gitignore" key and the ≡ View row flips it.
+	//
+	// Flipping it only changes what the NEXT directory read keeps, so a
+	// caller that wants the change on screen must follow it with
+	// Refresh. Dotfiles are exempt — see ignoreChain.
+	HideIgnored bool
+
+	// openFiles is the set of absolute paths the app has open in tabs.
+	// Nothing on the way to one of them is ever hidden by HideIgnored:
+	// a file the user is editing must stay reachable in the sidebar even
+	// when the project ignores its whole directory. Replaced wholesale
+	// by SetOpenFiles on every refresh, so closing a tab un-pins it.
+	openFiles map[string]struct{}
+
+	// ignoreCache holds one compiled .gitignore per directory that has
+	// one, keyed by the directory's absolute path. Entries are written
+	// by merge, which is the same moment that directory's children are
+	// replaced — the matcher and the listing it filters can never be
+	// from different reads. Directories without a .gitignore hold no
+	// entry at all, so the map is sized by the project's ignore-file
+	// count rather than its directory count; an entry for a directory
+	// that later leaves the tree lingers until the process exits, which
+	// is a handful of strings and not worth a sweep to reclaim.
+	ignoreCache map[string]ignoreEntry
+}
+
+// ignoreEntry is one directory's compiled .gitignore alongside the bytes
+// it was compiled from. Keeping the source bytes lets merge skip the
+// regex compilation (go-gitignore builds one regexp per pattern line)
+// whenever a re-read hands back an unchanged file, which is every tick
+// on every project that isn't actively editing its .gitignore.
+type ignoreEntry struct {
+	raw []byte
+	gi  *gitignore.GitIgnore
 }
 
 // New creates a tree rooted at root and pre-loads its top-level children so
 // the user sees something immediately. Hidden entries (dotfiles) are kept
 // because they're often what people actually want to inspect over SSH.
+//
+// Gitignore filtering starts on, matching config.json's default, so the
+// very first render already agrees with the finder. The root's Real is
+// resolved once here and every descendant derives from it, which is what
+// keeps the symlink-loop check syscall-free below the root.
 func New(root string) (*Tree, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -165,21 +269,58 @@ func New(root string) (*Tree, error) {
 	if !info.IsDir() {
 		return nil, os.ErrInvalid
 	}
-	n := &Node{Path: abs, Name: filepath.Base(abs), IsDir: true, Expanded: true}
-	if err := loadChildren(n); err != nil {
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		real = abs
+	}
+	n := &Node{Path: abs, Name: filepath.Base(abs), IsDir: true, Expanded: true, Real: real}
+	t := &Tree{Root: n, HideIgnored: true, ignoreCache: map[string]ignoreEntry{}}
+	if err := t.loadChildren(n); err != nil {
 		return nil, err
 	}
-	return &Tree{Root: n}, nil
+	return t, nil
+}
+
+// SetOpenFiles records the absolute paths the app currently has open in
+// tabs. Gitignore filtering never removes an entry on the way to one of
+// them, so opening a file inside an ignored directory makes that
+// directory appear rather than leaving the user editing a file with no
+// row in the sidebar. Only that path is exempt, though — the directory
+// reappears carrying the open file, not its whole build output. Call it
+// before a refresh; the next directory read is what acts on it.
+func (t *Tree) SetOpenFiles(paths []string) {
+	if len(paths) == 0 {
+		t.openFiles = nil
+		return
+	}
+	set := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		set[filepath.Clean(p)] = struct{}{}
+	}
+	t.openFiles = set
+}
+
+// pin adds one absolute path to the open-files set without waiting for
+// the app's next SetOpenFiles. Reveal uses it so the directory read it
+// is about to do already knows the target must survive the filter.
+func (t *Tree) pin(path string) {
+	if t.openFiles == nil {
+		t.openFiles = map[string]struct{}{}
+	}
+	t.openFiles[filepath.Clean(path)] = struct{}{}
 }
 
 // loadChildren is the lazy-load entry point used the first time a directory
 // is expanded. It defers to reload, which knows how to merge fresh disk
 // state with whatever (if anything) we already had cached.
-func loadChildren(n *Node) error {
+func (t *Tree) loadChildren(n *Node) error {
 	if !n.IsDir || n.Loaded {
 		return nil
 	}
-	return n.reload()
+	return t.reload(n)
 }
 
 // reload re-reads the directory's children from disk and replaces n.Children
@@ -191,26 +332,42 @@ func loadChildren(n *Node) error {
 // throughout the package ignore this error (an expand or a refresh has
 // nowhere to report it), and without the mark the row would render as a
 // plain empty directory.
-func (n *Node) reload() error {
-	if !n.IsDir {
+//
+// A node marked Loop is refused outright: reading it would list the same
+// directory its own ancestor already occupies, and doing so on every
+// expand and every background tick is how a `a -> ..` symlink turns into
+// an infinite tree.
+func (t *Tree) reload(n *Node) error {
+	if !n.IsDir || n.Loop {
 		return nil
 	}
-	entries, err := os.ReadDir(n.Path)
-	if err != nil {
-		n.ReadErr = err
-		return err
+	ds := readDir(n.Path)
+	if ds.Err != nil {
+		n.ReadErr = ds.Err
+		return ds.Err
 	}
-	n.merge(scanEntries(entries))
+	t.merge(n, ds)
 	return nil
 }
 
-// ScanEntry is all the merge needs from a dirent: the name and whether
-// it is a directory. Reducing os.DirEntry to this is what lets a
-// directory listing cross a goroutine boundary — an os.DirEntry can lazily
-// stat behind Info(), a ScanEntry cannot.
+// ScanEntry is all the merge needs from a dirent: the name, whether it
+// is a directory, and — for symlinks — where it actually points.
+// Reducing os.DirEntry to this is what lets a directory listing cross a
+// goroutine boundary: an os.DirEntry can lazily stat behind Info(), a
+// ScanEntry cannot.
 type ScanEntry struct {
 	Name  string
 	IsDir bool
+
+	// IsLink marks a symlinked entry. IsDir above is the *target's*
+	// answer, resolved by the scan, so a symlinked directory arrives at
+	// the merge already classified as a directory.
+	IsLink bool
+
+	// Real is the symlink target's fully resolved path, filled only for
+	// symlinked directories — the only entries a loop can be built out
+	// of. Empty when the link is broken or resolution failed.
+	Real string
 }
 
 // DirScan is one directory's freshly-read contents. Err records a read
@@ -220,18 +377,69 @@ type DirScan struct {
 	Path    string
 	Entries []ScanEntry
 	Err     error
+
+	// Ignore is the raw bytes of this directory's own .gitignore, or nil
+	// when it has none. It rides along with the listing so the merge can
+	// refresh the compiled matcher without an event-loop file read, and
+	// so the matcher and the entries it filters always come from the
+	// same moment on disk.
+	Ignore []byte
+}
+
+// readDir performs one directory's worth of disk work: the ReadDir, the
+// per-entry symlink resolution, and the directory's own .gitignore bytes
+// when the listing shows there is one. Everything latency-prone about a
+// refresh lives here, which is why ScanDirs can run it on a background
+// goroutine and Tree.reload can share the exact same code path.
+func readDir(path string) DirScan {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return DirScan{Path: path, Err: err}
+	}
+	scan := DirScan{Path: path, Entries: scanEntries(path, entries)}
+	// Only read the ignore file when the listing we already have proves
+	// it exists — the alternative is a failing open per directory per
+	// tick, which over NFS is the same cost as the ReadDir itself.
+	for _, e := range entries {
+		if e.Name() == gitignoreName && !e.IsDir() {
+			scan.Ignore, _ = os.ReadFile(filepath.Join(path, gitignoreName))
+			break
+		}
+	}
+	return scan
 }
 
 // scanEntries reduces a ReadDir result to the fields the merge uses,
 // dropping the names the tree refuses to show while we're already
 // walking the list.
-func scanEntries(entries []os.DirEntry) []ScanEntry {
+//
+// A symlink costs two extra syscalls (Stat to classify through the link,
+// EvalSymlinks to name the target) and an ordinary entry costs none, so
+// the price is paid only by the directories that actually contain links.
+// Classifying with the dirent's own IsDir would report the link rather
+// than its target and render every symlinked package as an unopenable
+// file row.
+func scanEntries(dir string, entries []os.DirEntry) []ScanEntry {
 	out := make([]ScanEntry, 0, len(entries))
 	for _, e := range entries {
-		if shouldHide(e.Name()) {
+		name := e.Name()
+		if shouldHide(name) {
 			continue
 		}
-		out = append(out, ScanEntry{Name: e.Name(), IsDir: e.IsDir()})
+		se := ScanEntry{Name: name, IsDir: e.IsDir()}
+		if e.Type()&os.ModeSymlink != 0 {
+			se.IsLink = true
+			full := filepath.Join(dir, name)
+			// A broken link stats as an error and stays a file row;
+			// there is nothing to open and nothing to loop through.
+			if info, err := os.Stat(full); err == nil && info.IsDir() {
+				se.IsDir = true
+				if real, err := filepath.EvalSymlinks(full); err == nil {
+					se.Real = real
+				}
+			}
+		}
+		out = append(out, se)
 	}
 	return out
 }
@@ -240,7 +448,14 @@ func scanEntries(entries []os.DirEntry) []ScanEntry {
 // child Nodes by pointer so their Expanded state and loaded
 // grandchildren live on. This is the half of a refresh that mutates the
 // node graph the renderer walks, so it must run on the main thread —
-// see Tree.ApplyScan.
+// see Tree.ApplyScan. It is also the only writer of the ignore cache,
+// which is what keeps that cache main-thread-only and lock-free.
+//
+// Order matters: the directory's own .gitignore is recompiled from the
+// scan's bytes first, then the listing is filtered against the ancestor
+// chain, then sorted, then capped. Filtering before the cap is
+// deliberate — MaxDirChildren should count rows the user can see, not
+// the build output that was about to be dropped anyway.
 //
 // Entries are sorted (and truncated to MaxDirChildren) before any Node
 // is allocated, so expanding a directory with 100k entries costs 1000
@@ -251,7 +466,10 @@ func scanEntries(entries []os.DirEntry) []ScanEntry {
 //
 // A successful merge clears ReadErr: this is the point where a
 // directory that was unreadable last tick proves it is readable again.
-func (n *Node) merge(entries []ScanEntry) {
+func (t *Tree) merge(n *Node, ds DirScan) {
+	t.cacheIgnore(n.Path, ds.Ignore)
+	entries := t.filterIgnored(n.Path, ds.Entries)
+
 	sort.SliceStable(entries, func(i, j int) bool {
 		if entries[i].IsDir != entries[j].IsDir {
 			return entries[i].IsDir
@@ -274,25 +492,231 @@ func (n *Node) merge(entries []ScanEntry) {
 
 	children := make([]*Node, 0, len(entries)+1)
 	for _, e := range entries {
-		if old, ok := existing[e.Name]; ok && old.IsDir == e.IsDir {
-			children = append(children, old)
-			continue
+		child, ok := existing[e.Name]
+		// A name that swapped kind — file to directory, or plain entry
+		// to symlink — is a different thing wearing the same label, so
+		// it gets a fresh node rather than inheriting stale state.
+		if !ok || child.IsDir != e.IsDir || child.IsLink != e.IsLink {
+			child = &Node{
+				Path:   filepath.Join(n.Path, e.Name),
+				Name:   e.Name,
+				IsDir:  e.IsDir,
+				IsLink: e.IsLink,
+			}
 		}
-		children = append(children, &Node{
-			Path:  filepath.Join(n.Path, e.Name),
-			Name:  e.Name,
-			IsDir: e.IsDir,
-		})
+		child.Parent = n
+		child.Real = resolvedPath(n, e)
+		// Recomputed every merge because an ancestor's own link target
+		// can change under us; the check is pure string work.
+		child.Loop = child.IsDir && child.IsLink && child.loops()
+		children = append(children, child)
 	}
 	if hidden > 0 {
 		children = append(children, &Node{
 			Name:     fmt.Sprintf(moreRowFormat, hidden),
 			Sentinel: true,
+			Parent:   n,
 		})
 	}
 	n.Children = children
 	n.Loaded = true
 	n.ReadErr = nil
+}
+
+// resolvedPath returns the fully-resolved path of entry e inside parent
+// dir. Symlinked directories carry the answer the scan already paid for;
+// everything else derives it from the parent by string join, so the deep
+// interior of a project costs no syscalls at all.
+func resolvedPath(parent *Node, e ScanEntry) string {
+	if e.Real != "" {
+		return e.Real
+	}
+	if parent.Real == "" {
+		return ""
+	}
+	return filepath.Join(parent.Real, e.Name)
+}
+
+// loops reports whether expanding n would re-enter a directory already
+// sitting on n's own ancestor chain. Both shapes count: a link straight
+// back to an ancestor (`a -> ..`) and a link to a directory that
+// *contains* one (which is the same cycle one level up). Comparing
+// resolved paths rather than link paths is what catches the mutual case,
+// where two links point at each other's parents and no single hop looks
+// suspicious.
+func (n *Node) loops() bool {
+	if n.Real == "" {
+		return false
+	}
+	for a := n.Parent; a != nil; a = a.Parent {
+		if a.Real == "" {
+			continue
+		}
+		if a.Real == n.Real || strings.HasPrefix(a.Real, n.Real+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// cacheIgnore refreshes the compiled matcher for dir from the bytes the
+// scan read out of its .gitignore. This is the cache's only invalidation
+// rule, and it is deliberately the rule the node children already
+// follow: a directory's matcher is replaced at exactly the moment its
+// listing is. A directory with no ignore file holds no entry, so the
+// map's size tracks the project's real ignore-file count rather than its
+// directory count.
+//
+// Unchanged bytes reuse the compiled matcher. go-gitignore builds one
+// regexp per pattern line, and re-paying that every ten seconds for a
+// file nobody edited is the one cost here worth avoiding.
+func (t *Tree) cacheIgnore(dir string, raw []byte) {
+	if len(raw) == 0 {
+		delete(t.ignoreCache, dir)
+		return
+	}
+	if t.ignoreCache == nil {
+		t.ignoreCache = map[string]ignoreEntry{}
+	}
+	if old, ok := t.ignoreCache[dir]; ok && bytes.Equal(old.raw, raw) {
+		return
+	}
+	t.ignoreCache[dir] = ignoreEntry{
+		raw: raw,
+		gi:  gitignore.CompileIgnoreLines(strings.Split(string(raw), "\n")...),
+	}
+}
+
+// ignoreLevel is one .gitignore's matcher plus the prefix that turns a
+// name inside the directory being filtered into a path relative to that
+// .gitignore's own directory — the only form git patterns are written
+// against.
+type ignoreLevel struct {
+	prefix string
+	gi     *gitignore.GitIgnore
+}
+
+// ignoreChain returns the matchers that apply inside dir, deepest first.
+//
+// Nested .gitignore files are supported for the whole chain from the
+// project root down to dir, so a rule in src/.gitignore applies below
+// src/ and nowhere else. That is what git does, and therefore what
+// `git ls-files --exclude-standard` — the finder's primary index path —
+// already reflects, which is why the tree matches it rather than the
+// finder's root-only non-git fallback.
+//
+// The limits, stated plainly because a half-answer is worse than none:
+// .git/info/exclude, core.excludesFile and any global excludes are git
+// configuration the tree does not read; nothing above the project root
+// is consulted; and a "!" negation in a deeper file cannot un-ignore
+// what a shallower file already ignored, because the walk stops at the
+// first level that says "ignored". Git permits that last case only when
+// no parent directory is itself excluded, and honouring it would mean
+// rebuilding cross-file pattern precedence on top of a library that
+// reports one boolean per file.
+func (t *Tree) ignoreChain(dir string) []ignoreLevel {
+	if len(t.ignoreCache) == 0 || t.Root == nil {
+		return nil
+	}
+	var levels []ignoreLevel
+	prefix := ""
+	for d := dir; ; {
+		if e, ok := t.ignoreCache[d]; ok && e.gi != nil {
+			levels = append(levels, ignoreLevel{prefix: prefix, gi: e.gi})
+		}
+		if d == t.Root.Path {
+			break
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			break // walked past the project without meeting its root
+		}
+		prefix = filepath.Base(d) + "/" + prefix
+		d = parent
+	}
+	return levels
+}
+
+// filterIgnored drops the entries of dir that the project's .gitignore
+// files exclude. Returns the input untouched when filtering is off or no
+// ignore file applies, so the overwhelmingly common directory allocates
+// nothing and pays one map lookup per ancestor.
+func (t *Tree) filterIgnored(dir string, entries []ScanEntry) []ScanEntry {
+	if !t.HideIgnored || len(entries) == 0 {
+		return entries
+	}
+	chain := t.ignoreChain(dir)
+	if len(chain) == 0 {
+		return entries
+	}
+	pinned := t.pinnedNames(dir)
+	out := make([]ScanEntry, 0, len(entries))
+	for _, e := range entries {
+		if !ignoredByChain(chain, e, pinned) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// ignoredByChain reports whether e is excluded by any level of chain,
+// with two carve-outs that are the whole reason this is not a one-liner.
+//
+// Dotfiles are never filtered. Showing .env, .github and .gitignore
+// itself is a standing decision for SSH work — they render muted, not
+// hidden — and gitignore membership is a separate axis from dotfile
+// visibility; .env is the most commonly ignored file there is and the
+// least acceptable one to lose. Anything under pinned is exempt too: it
+// is on the path to a file the user has open in a tab.
+//
+// Directory entries are tested with a trailing slash so a `dist/`
+// pattern — which git means as "directories only" — matches, while a
+// plain `dist` pattern still does.
+func ignoredByChain(chain []ignoreLevel, e ScanEntry, pinned map[string]struct{}) bool {
+	if strings.HasPrefix(e.Name, ".") {
+		return false
+	}
+	if _, ok := pinned[e.Name]; ok {
+		return false
+	}
+	rel := e.Name
+	if e.IsDir {
+		rel += "/"
+	}
+	for _, lv := range chain {
+		if lv.gi.MatchesPath(lv.prefix + rel) {
+			return true
+		}
+	}
+	return false
+}
+
+// pinnedNames returns the immediate child names of dir that lead to a
+// file the app has open. Computed once per directory read rather than
+// once per entry: the open-tab set is small and the entry list is not.
+func (t *Tree) pinnedNames(dir string) map[string]struct{} {
+	if len(t.openFiles) == 0 {
+		return nil
+	}
+	prefix := dir + string(filepath.Separator)
+	var names map[string]struct{}
+	for p := range t.openFiles {
+		if !strings.HasPrefix(p, prefix) {
+			continue
+		}
+		seg := p[len(prefix):]
+		if i := strings.IndexRune(seg, filepath.Separator); i >= 0 {
+			seg = seg[:i]
+		}
+		if seg == "" {
+			continue
+		}
+		if names == nil {
+			names = make(map[string]struct{}, len(t.openFiles))
+		}
+		names[seg] = struct{}{}
+	}
+	return names
 }
 
 // Refresh re-reads every directory in the tree that has been loaded at
@@ -304,7 +728,7 @@ func (n *Node) merge(entries []ScanEntry) {
 // periodic background refresh uses LoadedDirs / ScanDirs / ApplyScan
 // instead so the ReadDir walk doesn't land on the event loop.
 func (t *Tree) Refresh() {
-	refreshNode(t.Root)
+	t.refreshNode(t.Root)
 }
 
 // refreshNode is Tree.Refresh's recursive worker. It reloads only
@@ -313,13 +737,13 @@ func (t *Tree) Refresh() {
 // carrying a ReadErr, which never got its first successful read and is
 // exactly the node whose mark should clear the moment it becomes
 // readable again.
-func refreshNode(n *Node) {
+func (t *Tree) refreshNode(n *Node) {
 	if !n.IsDir || (!n.Loaded && n.ReadErr == nil) {
 		return
 	}
-	_ = n.reload()
+	_ = t.reload(n)
 	for _, c := range n.Children {
-		refreshNode(c)
+		t.refreshNode(c)
 	}
 }
 
@@ -336,7 +760,10 @@ func (t *Tree) LoadedDirs() []string {
 
 // collectLoadedDirs is LoadedDirs' recursive worker. It mirrors
 // refreshNode's guard, marked-but-unloaded directories included, so the
-// background sweep retries them and clears the mark on its own.
+// background sweep retries them and clears the mark on its own. A Loop
+// node is never Loaded, so it never reaches the sweep's work list — the
+// same guard that stops the synchronous expand also keeps a `a -> ..`
+// link from handing the background goroutine an endless path list.
 func collectLoadedDirs(n *Node, paths *[]string) {
 	if n == nil || !n.IsDir || (!n.Loaded && n.ReadErr == nil) {
 		return
@@ -350,18 +777,14 @@ func collectLoadedDirs(n *Node, paths *[]string) {
 // ScanDirs reads each directory in paths and returns the listings. It
 // touches no Node and no Tree field, which is the whole point: this is
 // the expensive, latency-prone half of a refresh (one ReadDir per loaded
-// directory, brutal over NFS) and it is safe to run on a background
+// directory, plus the symlink resolution and .gitignore read each one
+// needs, brutal over NFS) and it is safe to run on a background
 // goroutine while the renderer walks the tree. Hand the result to
 // Tree.ApplyScan on the main thread.
 func ScanDirs(paths []string) []DirScan {
 	scans := make([]DirScan, 0, len(paths))
 	for _, p := range paths {
-		entries, err := os.ReadDir(p)
-		if err != nil {
-			scans = append(scans, DirScan{Path: p, Err: err})
-			continue
-		}
-		scans = append(scans, DirScan{Path: p, Entries: scanEntries(entries)})
+		scans = append(scans, readDir(p))
 	}
 	return scans
 }
@@ -382,13 +805,13 @@ func (t *Tree) ApplyScan(scans []DirScan) {
 	for _, s := range scans {
 		byPath[s.Path] = s
 	}
-	applyScanNode(t.Root, byPath)
+	t.applyScanNode(t.Root, byPath)
 }
 
 // applyScanNode is ApplyScan's recursive worker. It walks the live graph
 // rather than the scan list because the graph is the authority on what
 // is still Loaded and still reachable.
-func applyScanNode(n *Node, byPath map[string]DirScan) {
+func (t *Tree) applyScanNode(n *Node, byPath map[string]DirScan) {
 	if n == nil || !n.IsDir || (!n.Loaded && n.ReadErr == nil) {
 		return
 	}
@@ -396,11 +819,11 @@ func applyScanNode(n *Node, byPath map[string]DirScan) {
 		if scan.Err != nil {
 			n.ReadErr = scan.Err
 		} else {
-			n.merge(scan.Entries)
+			t.merge(n, scan)
 		}
 	}
 	for _, c := range n.Children {
-		applyScanNode(c, byPath)
+		t.applyScanNode(c, byPath)
 	}
 }
 
@@ -716,8 +1139,12 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 	// Build the left chunk (indent + chevron + space) and right chunk
 	// (name, with a trailing slash for dirs). Both render in rowStyle;
 	// only the glyph between them gets its own colour.
+	//
+	// A looping link is drawn without a chevron: it is a directory the
+	// tree will never open, and a chevron that expands onto nothing
+	// reads as a bug rather than as a decision.
 	var prefix, suffix string
-	if item.Node.IsDir {
+	if item.Node.IsDir && !item.Node.Loop {
 		chev := "▸"
 		if item.Node.Expanded {
 			chev = "▾"
@@ -727,6 +1154,15 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 	} else {
 		prefix = " " + indent + "  "
 		suffix = item.Node.Name
+		if item.Node.IsDir {
+			suffix += "/"
+		}
+	}
+	if item.Node.IsLink {
+		suffix += " " + SymlinkLabel
+		if item.Node.Loop {
+			suffix += " " + LoopLabel
+		}
 	}
 	if unreadable {
 		suffix += " " + UnreadableLabel
@@ -865,13 +1301,15 @@ func (t *Tree) HitTest(localX, localY int) (*Node, bool) {
 }
 
 // Toggle expands or collapses a directory node, lazily loading its children
-// the first time it is expanded.
+// the first time it is expanded. A link whose target is already an
+// ancestor never opens — it renders chevron-less for exactly that
+// reason, so the click has nothing to act on.
 func (t *Tree) Toggle(n *Node) {
-	if !n.IsDir {
+	if !n.IsDir || n.Loop {
 		return
 	}
 	if !n.Expanded {
-		_ = loadChildren(n)
+		_ = t.loadChildren(n)
 	}
 	n.Expanded = !n.Expanded
 }
@@ -899,6 +1337,13 @@ func (t *Tree) Scroll(delta int) {
 // directory the tree refuses to show (e.g. .git). viewH is the row count the
 // renderer will hand Render's list area; pass 0 to expand ancestors without
 // scrolling (used when the sidebar is hidden).
+//
+// The target is pinned before the walk starts, so a path inside a
+// gitignored directory reveals rather than dead-ends: each missing
+// component triggers one re-read of its parent, which now keeps the
+// entry because it leads somewhere the user is going. That re-read also
+// covers the plain stale case — a file created outside the editor
+// between ticks.
 func (t *Tree) Reveal(path string, viewH int) {
 	if t.Root == nil {
 		return
@@ -914,6 +1359,7 @@ func (t *Tree) Reveal(path string, viewH int) {
 	if rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
 		return
 	}
+	t.pin(abs)
 	parts := strings.Split(filepath.ToSlash(rel), "/")
 
 	// Walk every directory component, lazily loading + expanding each so the
@@ -921,28 +1367,22 @@ func (t *Tree) Reveal(path string, viewH int) {
 	// itself; it doesn't need expanding — revealing is about visibility, not
 	// auto-opening directories.
 	n := t.Root
-	for i := 0; i < len(parts)-1; i++ {
-		if !n.Loaded {
-			_ = loadChildren(n)
-		}
-		child := childByName(n, parts[i])
+	for i := range len(parts) - 1 {
+		child := t.descend(n, parts[i])
 		if child == nil {
 			return // hidden or gone — can't descend further
 		}
 		if !child.Expanded {
 			child.Expanded = true
 			if !child.Loaded {
-				_ = loadChildren(child)
+				_ = t.loadChildren(child)
 			}
 		}
 		n = child
 	}
 
 	// Find the target row among its parent's children so we can scroll to it.
-	if !n.Loaded {
-		_ = loadChildren(n)
-	}
-	target := childByName(n, parts[len(parts)-1])
+	target := t.descend(n, parts[len(parts)-1])
 	if target == nil {
 		return
 	}
@@ -1027,8 +1467,7 @@ func (t *Tree) ExpandDirs(rels []string) {
 			if part == "" || part == "." {
 				continue
 			}
-			_ = loadChildren(n)
-			child := childByName(n, part)
+			child := t.descend(n, part)
 			if child == nil || !child.IsDir {
 				ok = false
 				break
@@ -1037,9 +1476,28 @@ func (t *Tree) ExpandDirs(rels []string) {
 		}
 		if ok && n != t.Root {
 			n.Expanded = true
-			_ = loadChildren(n)
+			_ = t.loadChildren(n)
 		}
 	}
+}
+
+// descend returns the child of n named name, loading n's children first
+// and re-reading them once when the name isn't there. The retry is what
+// lets a pinned path inside a gitignored directory surface: the entry
+// was filtered out of the last listing, and only a fresh read — taken
+// now that the path is pinned — can bring it back. Costs one extra
+// ReadDir per genuinely absent component, which is the case that was
+// about to return nil anyway.
+func (t *Tree) descend(n *Node, name string) *Node {
+	_ = t.loadChildren(n)
+	if child := childByName(n, name); child != nil {
+		return child
+	}
+	if n.Loop {
+		return nil
+	}
+	_ = t.reload(n)
+	return childByName(n, name)
 }
 
 // childByName returns the direct child of n named name, or nil when no such

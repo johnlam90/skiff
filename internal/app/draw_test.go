@@ -16,6 +16,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -566,5 +567,321 @@ func TestDrawTabBar_CloseButtonEmphasis(t *testing.T) {
 		} else if fg != a.theme.Subtle {
 			t.Fatalf("inactive tab × fg = %v, want Subtle (recedes)", fg)
 		}
+	}
+}
+
+// TestWrapFlashLines covers the strip's wrap helper: a message that fits
+// stays one line, a long one breaks on spaces rather than mid-word, a
+// single over-long run breaks hard, and anything past the row cap is
+// ellipsised instead of silently dropped.
+func TestWrapFlashLines(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+		w    int
+		want []string
+	}{
+		{"fits", "Saved", 20, []string{"Saved"}},
+		{"exact", "Saved", 5, []string{"Saved"}},
+		{"word break", "Saved main.go to disk", 10, []string{"Saved", "main.go to", "disk"}},
+		{"hard break", "aaaaaaaaaa", 4, []string{"aaaa", "aaaa", "aa"}},
+		{"cap ellipsises", "aaaaaaaaaaaaaaaaaaaa", 4, []string{"aaaa", "aaaa", "aaa…"}},
+		{"zero width", "Saved", 0, nil},
+		{"empty", "", 10, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := wrapFlashLines(c.msg, c.w)
+			if len(got) != len(c.want) {
+				t.Fatalf("wrapFlashLines(%q, %d) = %q, want %q", c.msg, c.w, got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("line %d = %q, want %q (all %q)", i, got[i], c.want[i], got)
+				}
+			}
+			if len(got) > flashStripMaxRows {
+				t.Fatalf("%d rows exceeds the %d-row cap", len(got), flashStripMaxRows)
+			}
+		})
+	}
+}
+
+// longFlash is a save-report-shaped message too wide for a narrow status
+// bar — the case where clipping hides exactly the part the user needs.
+const longFlash = "Format failed: gofmt exited 2 — internal/app/draw.go:412:1: expected declaration, found '}'"
+
+// narrowFlashApp is the shape a tmux split on a laptop actually produces:
+// a terminal under autoHideSidebarWidth, resized through the event loop so
+// applyResponsiveSidebar collapses the explorer for its own reasons rather
+// than the test poking sidebarShown. That leaves the status bar as wide as
+// it will ever be here — which is precisely when a clipped flash is the
+// user's only copy of the message.
+func narrowFlashApp(t *testing.T) *App {
+	t.Helper()
+	a := newTestApp(t, t.TempDir())
+	resizeApp(t, a, autoHideSidebarWidth-2, 24)
+	if a.sidebarShown {
+		t.Fatal("precondition: the explorer should have auto-collapsed")
+	}
+	return a
+}
+
+// TestFlashStrip_LongFlashTakesItsOwnRow is the headline behavior: a
+// message the status bar would clip moves onto a transient row above it,
+// the editor reflows to make space, and the bar goes back to the file
+// readout instead of showing half a sentence.
+func TestFlashStrip_LongFlashTakesItsOwnRow(t *testing.T) {
+	a := narrowFlashApp(t)
+	openTestFile(t, a, a.rootDir, "reflow.go", "package p\n")
+
+	_, _, _, before := a.editorRect()
+	a.flash(longFlash)
+
+	rows := a.flashStripRows()
+	if rows < 2 {
+		t.Fatalf("a %d-rune message on 60 columns should wrap, got %d row(s)",
+			runeLen(longFlash), rows)
+	}
+	_, _, _, after := a.editorRect()
+	if after != before-rows {
+		t.Fatalf("editor height %d -> %d, want a drop of exactly %d rows",
+			before, after, rows)
+	}
+
+	a.draw()
+	a.screen.Show()
+	scr := a.screen.(tcell.SimulationScreen)
+	_, sy, _, _ := a.flashStripRect()
+	var painted string
+	for i := 0; i < rows; i++ {
+		painted += strings.TrimSpace(screenLine(scr, sy+i)) + " "
+	}
+	// Every word of the message has to be readable somewhere on the strip
+	// — that is the whole contract, and it is what clipping broke.
+	for _, word := range strings.Fields(longFlash) {
+		if !strings.Contains(painted, word) {
+			t.Fatalf("word %q missing from the strip: %q", word, painted)
+		}
+	}
+	// The bar underneath must carry the file readout, not a clipped copy.
+	bar := screenLine(scr, a.height-1)
+	if !strings.Contains(bar, "Ln 1, Col 1") {
+		t.Fatalf("status bar should fall back to the file readout, got %q", bar)
+	}
+}
+
+// TestFlashStrip_RowGoesAwayWhenFlashExpires pins the other half of the
+// reflow: the editor gets its row back the moment the flash's window
+// closes, and nothing stale is left painted on it.
+func TestFlashStrip_RowGoesAwayWhenFlashExpires(t *testing.T) {
+	a := narrowFlashApp(t)
+	a.flash(longFlash)
+	if a.flashStripRows() == 0 {
+		t.Fatal("precondition: the long flash should have opened the strip")
+	}
+	_, _, _, withStrip := a.editorRect()
+	_, sy, _, _ := a.flashStripRect()
+
+	// Expire the window the way statusFlashFor does, without sleeping.
+	a.statusUntil = time.Now().Add(-time.Millisecond)
+
+	if got := a.flashStripRows(); got != 0 {
+		t.Fatalf("expired flash still claims %d row(s)", got)
+	}
+	_, _, _, restored := a.editorRect()
+	if restored <= withStrip {
+		t.Fatalf("editor height stayed at %d after expiry (was %d with the strip)",
+			restored, withStrip)
+	}
+
+	a.draw()
+	a.screen.Show()
+	line := screenLine(a.screen.(tcell.SimulationScreen), sy)
+	if strings.Contains(line, "gofmt") {
+		t.Fatalf("expired strip is still painted: %q", line)
+	}
+}
+
+// TestFlashStrip_ShortFlashStaysInTheStatusBar keeps the strip rare: the
+// overwhelming majority of flashes fit the bar, and stealing an editor row
+// for them would be a permanent tax for a three-second message.
+func TestFlashStrip_ShortFlashStaysInTheStatusBar(t *testing.T) {
+	a := narrowFlashApp(t)
+	a.flash("Saved")
+
+	if a.flashStripVisible() {
+		t.Fatal("a five-rune message does not need its own row")
+	}
+	a.draw()
+	a.screen.Show()
+	if bar := screenLine(a.screen.(tcell.SimulationScreen), a.height-1); !strings.Contains(bar, "Saved") {
+		t.Fatalf("short flash should stay in the bar, got %q", bar)
+	}
+}
+
+// TestFlashStrip_SkippedWhenItWouldShowLess is the guard against a
+// pointless reflow. The strip's edge is that it can wrap onto three rows,
+// so it usually beats the bar even at equal width — but drag the sidebar
+// out to its legal maximum on a wide terminal and the strip is left ~40
+// columns while the bar keeps nearly all of them. Reflowing the editor to
+// show LESS of the message is strictly worse, so the strip stays shut.
+func TestFlashStrip_SkippedWhenItWouldShowLess(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 120, 40)
+	a.resizeSidebar(a.width) // clamps to the widest legal sidebar
+	a.flash(strings.Repeat("x", 130))
+
+	if a.flashStripCapacity() > a.statusFlashRoom() {
+		t.Fatalf("precondition: strip capacity (%d) should not beat the bar (%d)",
+			a.flashStripCapacity(), a.statusFlashRoom())
+	}
+	if a.flashStripVisible() {
+		t.Fatal("the strip must not open when it would show less than the bar")
+	}
+	if _, _, _, h := a.editorRect(); h != a.height-2 {
+		t.Fatalf("editor reflowed for a strip that never opened: h = %d", h)
+	}
+}
+
+// TestFlashStrip_StacksAboveTheFindBar pins the bottom-chrome order: the
+// find bar keeps the row directly above the status bar (its documented
+// home, and where find_test.go looks for it) and the flash strip stacks on
+// top of it, with the editor reflowing for both.
+func TestFlashStrip_StacksAboveTheFindBar(t *testing.T) {
+	a := narrowFlashApp(t)
+	openTestFile(t, a, a.rootDir, "stack.go", "package p\n")
+	a.openFind()
+	a.flash(longFlash)
+
+	_, fy, _, _ := a.findBarRect()
+	_, sy, _, sh := a.flashStripRect()
+	if sy+sh != fy {
+		t.Fatalf("strip rows [%d,%d) should end exactly at the find bar row %d", sy, sy+sh, fy)
+	}
+	_, ey, _, eh := a.editorRect()
+	if ey+eh != sy {
+		t.Fatalf("editor [%d,%d) should end where the strip starts (%d)", ey, ey+eh, sy)
+	}
+}
+
+// TestFlashStrip_NotAnOverlay pins ADR-0001 for the new strip: it reflows
+// the editor rather than floating over it, so it never reaches the overlay
+// stack (which would give it the keyboard), and a click on its row falls
+// through instead of being captured — the caret stays where it was and no
+// drag is armed, exactly as with the find bar.
+func TestFlashStrip_NotAnOverlay(t *testing.T) {
+	a := narrowFlashApp(t)
+	openTestFile(t, a, a.rootDir, "adr.go", "package p\nsecond\nthird\n")
+	a.flash(longFlash)
+	if !a.flashStripVisible() {
+		t.Fatal("precondition: the strip should be up")
+	}
+	if a.overlays.IsOpen() || a.anyModalOpen() {
+		t.Fatal("the flash strip must not be an overlay")
+	}
+
+	tab := a.activeTabPtr()
+	before := tab.Cursor
+	_, sy, _, _ := a.flashStripRect()
+	a.handleMouse(tcell.NewEventMouse(a.sidebarW()+2, sy, tcell.Button1, tcell.ModNone))
+	if tab.Cursor != before {
+		t.Fatalf("a click on the strip moved the caret %v -> %v", before, tab.Cursor)
+	}
+	if a.dragMode != "" {
+		t.Fatalf("a click on the strip armed drag mode %q", a.dragMode)
+	}
+}
+
+// TestDrawTabBar_ActiveTabUnderlined pins the colour-independent focus
+// marker: the active tab's cells carry a solid underline (and inactive
+// ones do not), so "which tab am I in?" survives a monochrome terminal and
+// a strip crowded with italic preview tabs.
+func TestDrawTabBar_ActiveTabUnderlined(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	openManyTabs(t, a, dir, 3)
+	// Assert on the monochrome palette too: that is the case where colour
+	// carries nothing at all.
+	for _, mono := range []bool{false, true} {
+		if mono {
+			a.theme = theme.Degrade(a.theme, 2)
+		}
+		a.drawTabBar()
+		a.screen.Show()
+		cells, _, _ := a.screen.(tcell.SimulationScreen).GetContents()
+		for _, r := range a.lastTabRects {
+			// Row 0 of a flat cell buffer indexes straight by column.
+			st := cells[r.X].Style
+			active := r.Index == a.tabs.ActiveIndex()
+			// GetUnderlineStyle, not the attribute bit: the terminal
+			// driver emits the escape from the underline STYLE, so an
+			// AttrUnderline with a None style paints nothing.
+			if ul := st.GetUnderlineStyle() != tcell.UnderlineStyleNone; ul != active {
+				t.Fatalf("mono=%v tab %d: underlined=%v, want %v", mono, r.Index, ul, active)
+			}
+			_, _, attrs := st.Decompose()
+			if got := attrs&tcell.AttrUnderline != 0; got != active {
+				t.Fatalf("mono=%v tab %d: underline attribute=%v, want %v",
+					mono, r.Index, got, active)
+			}
+		}
+	}
+}
+
+// TestTabChevrons_CountHiddenTabs pins the overflow badge: scrolled to the
+// end of a crowded strip it names how many tabs are off-screen to the
+// left, and only tabs that are entirely hidden are counted — a partially
+// visible tab is still clickable, so counting it would overstate the
+// promise.
+func TestTabChevrons_CountHiddenTabs(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	openManyTabs(t, a, dir, 6)
+
+	a.tabScroll = a.maxTabScroll()
+	left, right := a.tabChevrons()
+	if right.Label != "" {
+		t.Fatalf("no right badge expected at max scroll, got %q", right.Label)
+	}
+	nl, _ := a.tabOverflow()
+	if nl == 0 {
+		t.Fatal("precondition: scrolling to the end should hide tabs on the left")
+	}
+	if want := "‹" + itoa(nl); left.Label != want {
+		t.Fatalf("left badge = %q, want %q", left.Label, want)
+	}
+
+	a.drawTabBar()
+	a.screen.Show()
+	row := []rune(screenLine(a.screen.(tcell.SimulationScreen), 0))
+	if got := string(row[left.X : left.X+runeLen(left.Label)]); got != left.Label {
+		t.Fatalf("painted badge = %q, want %q", got, left.Label)
+	}
+}
+
+// TestTabChevrons_DropCountsOnACrampedStrip keeps the badge from eating
+// the tabs it points at: when the strip can't hold both counts and a
+// readable tab, the counts go and the clickable chevrons stay.
+func TestTabChevrons_DropCountsOnACrampedStrip(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	openManyTabs(t, a, dir, 12)
+	a.tabScroll = a.maxTabScroll() / 2 // hidden on both sides
+
+	if nl, nr := a.tabOverflow(); nl == 0 || nr == 0 {
+		t.Fatalf("precondition: want tabs hidden both ways, got %d/%d", nl, nr)
+	}
+	// Squeeze the strip until the badges no longer earn their counts.
+	a.sidebarWidth = a.width - menuButtonWidth - minVisibleTabCells - 1
+	left, right := a.tabChevrons()
+	if left.Label != "‹" || right.Label != "›" {
+		t.Fatalf("cramped strip badges = %q / %q, want the bare chevrons",
+			left.Label, right.Label)
+	}
+	if !left.hit(left.X) || !right.hit(right.X) {
+		t.Fatal("the bare chevrons must still be click targets")
 	}
 }

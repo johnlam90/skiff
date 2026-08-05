@@ -28,18 +28,27 @@ import (
 )
 
 // menuModalRect returns the on-screen rectangle of the action modal,
-// centered in the window. Height is derived from the current layout
-// so adding custom actions grows the modal automatically — but it is
-// clamped to the screen (one row of margin) so a short terminal can
-// scroll the overflow instead of losing the bottom rows, Quit first.
+// centered in the window. Both dimensions are derived from the current
+// layout so adding custom actions — or a long one — grows the modal
+// automatically, and both are clamped to the screen (one row / column of
+// margin) so a short or narrow terminal scrolls and clips the overflow
+// instead of painting outside itself.
 //
-// The origin comes from the UNFILTERED height (menuNaturalHeight) while
-// the height comes from the filtered one: the frame then shrinks from
-// the bottom as a query narrows the list, instead of re-centering — and
-// jumping the title and the filter caret out from under the user — on
-// every keystroke.
+// The origin comes from the UNFILTERED size (menuNaturalWidth /
+// menuNaturalHeight) while the height comes from the filtered layout: the
+// frame then shrinks from the bottom as a query narrows the list, instead
+// of re-centering — and jumping the title and the filter caret out from
+// under the user — on every keystroke.
 func (a *App) menuModalRect() (x, y, w, h int) {
-	w = modalWidth
+	w = a.menuNaturalWidth()
+	// A window too narrow to hold even the base modal keeps the old
+	// behaviour — the frame overflows and the origin clamps to column 0.
+	// Shrinking below modalWidth would buy nothing: the content does not
+	// fit either way, and a frame that narrows as the terminal does would
+	// re-wrap every row on every resize.
+	if maxW := a.width - 2; w > maxW && maxW >= modalWidth {
+		w = maxW
+	}
 	_, _, h = a.menuLayout()
 	full := a.menuNaturalHeight()
 	if maxH := a.height - 2; full > maxH {
@@ -189,6 +198,11 @@ func (a *App) menuMoveSelection(dir int) {
 		if items[idx].enabled(a) {
 			a.hoveredMenuRow = idx
 			a.ensureMenuRowVisible(idx)
+			// An arrow key is an explicit "show me this row", so it
+			// reveals unconditionally — even when the wrap landed back on
+			// the row already selected, which is what a single-match
+			// filter does.
+			a.revealMenuRowLabel(idx)
 			return
 		}
 	}
@@ -388,27 +402,63 @@ func (a *App) menuFileClipboard() { a.openMenuDrillIn(fileClipDrillIn()) }
 
 // updateMenuHover sets hoveredMenuRow to the index of the enabled menu row
 // at (x, y), or to -1 when the mouse is over a disabled row, a divider, the
-// title, or anywhere outside the modal.
+// title, or anywhere outside the modal. Landing on a new row also reveals
+// its label when the modal had to clip it — gated on the row actually
+// changing, because this runs on every motion event.
 func (a *App) updateMenuHover(x, y int) {
-	a.hoveredMenuRow = -1
+	prev := a.hoveredMenuRow
+	a.hoveredMenuRow = a.menuRowAt(x, y)
+	if a.hoveredMenuRow >= 0 && a.hoveredMenuRow != prev {
+		a.revealMenuRowLabel(a.hoveredMenuRow)
+	}
+}
+
+// menuRowAt returns the index of the enabled menu row under (x, y), or -1
+// for a disabled row, a chrome row, or anywhere outside the modal.
+func (a *App) menuRowAt(x, y int) int {
 	mx, my, mw, mh := a.menuModalRect()
 	if x < mx || x >= mx+mw || y < my || y >= my+mh {
-		return
+		return -1
 	}
 	// Chrome rows (title, filter, divider, borders) never hover; the
 	// content region maps through the scroll offset like the click
 	// hit-test.
 	if y < my+menuContentY || y > my+mh-2 {
-		return
+		return -1
 	}
 	relY := y - my + a.menuScroll
 	items, _, _ := a.menuLayout()
 	for i, item := range items {
 		if item.relY == relY && item.enabled(a) {
-			a.hoveredMenuRow = i
-			return
+			return i
 		}
 	}
+	return -1
+}
+
+// revealMenuRowLabel flashes the full label of the row at idx, but only
+// when the modal genuinely had to clip it. On a wide terminal the frame
+// grows instead (menuNaturalWidth) so this never fires; when the terminal
+// itself is the constraint, a row reading as an unidentifiable prefix is
+// the failure this recovers from — a user-named custom action is the
+// common case.
+//
+// The status bar is the cheapest surface that costs the modal no layout,
+// and it is the same trick the git panel uses to decode its compact button
+// ladder. A label longer than the bar rides the flash strip, so even the
+// pathological 100-rune action name is fully readable.
+func (a *App) revealMenuRowLabel(idx int) {
+	items, _, _ := a.menuLayout()
+	if idx < 0 || idx >= len(items) {
+		return
+	}
+	it := items[idx]
+	label := a.menuLabel(it)
+	_, _, mw, _ := a.menuModalRect()
+	if runeLen(label) <= menuLabelBudget(mw, it) {
+		return
+	}
+	a.flash(label)
 }
 
 // drawMenuButton paints the ≡ icon in the leftmost cells of the tab bar.
@@ -553,16 +603,18 @@ func (a *App) drawMenu() {
 			chevStyle = mutedStyle
 			shortcutStyle = mutedStyle
 		}
-		label := a.menuLabel(item)
+		// Every row is clipped to menuLabelBudget, shortcut or not.
+		// Without a shortcut there used to be no budget at all and
+		// drawAt does no bounds checking, so a long custom-action label
+		// painted straight through the right border and onto the editor
+		// underneath. trimRunes leaves an ellipsis; hovering or selecting
+		// the row flashes the whole thing (revealMenuRowLabel).
+		label := trimRunes(a.menuLabel(item), menuLabelBudget(mw, item))
 		drawAt(a.screen, mx+2, cy, "▸", chevStyle)
-		if item.shortcut == "" {
-			drawAt(a.screen, mx+4, cy, label, labelStyle)
-			continue
-		}
-		shortcutX := mx + mw - 2 - runeLen(item.shortcut)
-		label = trimRunes(label, shortcutX-(mx+4)-2)
 		drawAt(a.screen, mx+4, cy, label, labelStyle)
-		drawAt(a.screen, shortcutX, cy, item.shortcut, shortcutStyle)
+		if item.shortcut != "" {
+			drawAt(a.screen, mx+mw-2-runeLen(item.shortcut), cy, item.shortcut, shortcutStyle)
+		}
 	}
 	if len(items) == 0 {
 		drawAt(a.screen, mx+4, my+menuContentY, "no matches", mutedStyle)
