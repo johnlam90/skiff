@@ -1324,3 +1324,38 @@ func TestGitPanelScrollbar_KeepsClearOfTheHintStrip(t *testing.T) {
 		}
 	}
 }
+
+// TestGitPanelScrollbar_ThumbBrightensWhileDragging pins the panel bar
+// into the same idle/active language the splitter, the editor bar and
+// the tree bar already speak: Muted at rest, Accent under the hand. The
+// colour is derived from dragMode at paint time rather than latched on
+// press, so a drag that ends through some other route cannot leave a
+// thumb lit with nothing grabbing it — the second half of this test is
+// what pins that.
+func TestGitPanelScrollbar_ThumbBrightensWhileDragging(t *testing.T) {
+	a := gitPanelApp(t, 80)
+	a.draw()
+	_, sy, sw, _ := a.sidebarRect()
+	listH, _ := a.gitPanelBody()
+	barX, ok := a.gitPanelBar(sw, listH)
+	if !ok {
+		t.Fatal("fixture should draw a bar")
+	}
+	thumbY := sy + gitPanelListTop
+
+	if r, fg := barCell(t, a, barX, thumbY); r != scrollbar.Thumb || fg != a.theme.Muted {
+		t.Fatalf("idle thumb: got %q/%v, want %q/%v", r, fg, scrollbar.Thumb, a.theme.Muted)
+	}
+
+	a.handleMouse(tcell.NewEventMouse(barX, thumbY, tcell.Button1, 0))
+	if r, fg := barCell(t, a, barX, thumbY); r != scrollbar.Thumb || fg != a.theme.Accent {
+		t.Fatalf("dragged thumb: got %q/%v, want %q/%v", r, fg, scrollbar.Thumb, a.theme.Accent)
+	}
+
+	// Not via release: an overlay stealing the drag is exactly the
+	// route a latched flag would get wrong.
+	a.dragMode = ""
+	if _, fg := barCell(t, a, barX, thumbY); fg != a.theme.Muted {
+		t.Fatalf("thumb stayed lit after the drag ended, fg %v", fg)
+	}
+}

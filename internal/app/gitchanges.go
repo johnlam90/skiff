@@ -432,15 +432,10 @@ func (a *App) gitPanelClick(x, y int) {
 		return
 	}
 	listH, _ := a.gitPanelBody()
-	// The bar owns the panel's rightmost column, so it has to be
-	// claimed before the row hit-test everything below falls through
-	// to — otherwise a press on the thumb opens the diff of whatever
-	// row happens to sit behind it. Branch line (y 1), button row
-	// (y 2) and the hint strip below the list are outside its span.
-	if a.gitPanelBarHit(x, y) {
-		a.gitPanelScrollToBar(y)
-		return
-	}
+	// The bar's own column is claimed by handleMouse's press dispatch,
+	// one owner and one place, exactly as the file tree's is — see
+	// gitPanelScrollbarHit. By the time a press reaches here it is not
+	// on the thumb, so the row hit-test below can run unguarded.
 	idx := a.gitPanelScroll + y - gitPanelListTop
 	if y < gitPanelListTop || y-gitPanelListTop >= listH || idx < 0 || idx >= len(a.gitPanelRows) {
 		return
@@ -515,14 +510,23 @@ func (a *App) gitPanelScrollToBar(y int) {
 // column x: the same shaded track and solid thumb the file tree and the
 // editor draw, on the sidebar's own background so the column reads as
 // part of the panel rather than as a hole in it.
+//
+// The thumb brightens to Accent while the user drags it, the same
+// idle/active language the splitter and the other two bars use. Like
+// them the flag is derived from dragMode at paint time, never latched,
+// so a drag that ends through some other route can't strand it lit.
 func (a *App) drawGitPanelBar(x, top, listH int) {
 	thumbStart, thumbLen, ok := scrollbar.Geom(len(a.gitPanelRows), listH, a.gitPanelScroll)
 	if !ok {
 		return
 	}
+	thumbFg := a.theme.Muted
+	if a.dragMode == "gitpanelscrollbar" {
+		thumbFg = a.theme.Accent
+	}
 	bg := a.theme.SidebarBG
 	trackStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Subtle)
-	thumbStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
+	thumbStyle := tcell.StyleDefault.Background(bg).Foreground(thumbFg)
 	for row := range listH {
 		r, st := scrollbar.Track, trackStyle
 		if row >= thumbStart && row < thumbStart+thumbLen {

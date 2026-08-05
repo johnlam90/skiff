@@ -169,6 +169,13 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		return
 	}
 
+	// Git-panel thumb drag: the change list is the sidebar's other
+	// mode, so its bar gets the same grab contract as the tree's.
+	if leftDown && a.dragMode == "gitpanelscrollbar" {
+		a.gitPanelScrollbarTo(y)
+		return
+	}
+
 	// Initial press dispatch.
 	if leftDown && a.dragMode == "" {
 		sw := a.sidebarW()
@@ -183,12 +190,19 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		case splitX >= 0 && x == splitX:
 			a.dragMode = "sidebar"
 		case sw > 0 && x < splitX:
-			// The tree's bar sits on the column just left of the
-			// splitter, so it has to be claimed before the row
-			// hit-test the rest of the sidebar falls through to.
+			// The tree's bar and the Git panel's sit on the column
+			// just left of the splitter — whichever panel is up, that
+			// column has to be claimed before the row hit-test the
+			// rest of the sidebar falls through to. Only one of the
+			// two can hit: each opts out when its panel is hidden.
 			if a.treeScrollbarHit(x, y) {
 				a.treeScrollbarTo(y)
 				a.dragMode = "treescrollbar"
+				return
+			}
+			if a.gitPanelScrollbarHit(x, y) {
+				a.gitPanelScrollbarTo(y)
+				a.dragMode = "gitpanelscrollbar"
 				return
 			}
 			a.sidebarClick(x, y)
@@ -653,6 +667,34 @@ func (a *App) treeScrollbarTo(y int) {
 	}
 	_, sy, sw, sh := a.sidebarRect()
 	a.tree.ScrollToBarRow(sw, sh, y-sy)
+}
+
+// gitPanelScrollbarHit reports whether a screen-space press at (x, y)
+// landed on the Git panel's scroll indicator. The panel's own geometry
+// helpers work in sidebar-local cells (the whole panel is drawn that
+// way), so this is the screen-space wrapper the mouse dispatcher needs
+// — the tree-side mirror of the same conversion.
+//
+// Opts out when the explorer is up, exactly as treeScrollbarHit opts
+// out when the panel is: the two share a column and only one of them
+// is ever painted on it.
+func (a *App) gitPanelScrollbarHit(x, y int) bool {
+	if !a.gitPanelActive {
+		return false
+	}
+	sx, sy, _, _ := a.sidebarRect()
+	return a.gitPanelBarHit(x-sx, y-sy)
+}
+
+// gitPanelScrollbarTo scrolls the change list so its thumb centers on
+// screen row y — shared by the initial press and the drag, so a grab
+// and a click can never disagree about where the thumb lands.
+func (a *App) gitPanelScrollbarTo(y int) {
+	if !a.gitPanelActive {
+		return
+	}
+	_, sy, _, _ := a.sidebarRect()
+	a.gitPanelScrollToBar(y - sy)
 }
 
 // selectWordAt selects the word under the buffer position p (or does

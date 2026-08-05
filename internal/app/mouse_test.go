@@ -944,6 +944,90 @@ func TestSidebarThreeWayHitTestAtSameY(t *testing.T) {
 	}
 }
 
+// TestGitPanelScrollbarPressScrollsAndDrags: the change list's bar is a
+// grab handle, not just a click target. It is the sidebar's other panel,
+// so it gets the identical contract to the tree's — press jumps and arms
+// "gitpanelscrollbar", the drag stays glued to the pointer's row even
+// once it wanders off the column, and release ends the drag where the
+// user left it.
+func TestGitPanelScrollbarPressScrollsAndDrags(t *testing.T) {
+	a := gitPanelApp(t, 80)
+	a.draw() // the real loop always paints before the first event
+
+	_, sy, sw, _ := a.sidebarRect()
+	listH, _ := a.gitPanelBody()
+	barX, ok := a.gitPanelBar(sw, listH)
+	if !ok {
+		t.Fatal("fixture should draw a bar")
+	}
+	lastRow := sy + gitPanelListTop + listH - 1
+
+	a.handleMouse(tcell.NewEventMouse(barX, lastRow, tcell.Button1, 0))
+	if a.dragMode != "gitpanelscrollbar" {
+		t.Fatalf("dragMode = %q, want gitpanelscrollbar", a.dragMode)
+	}
+	bottom := a.gitPanelScroll
+	if bottom == 0 {
+		t.Fatal("pressing the bottom of the bar should scroll the list")
+	}
+
+	// Drag back to the first list row.
+	a.handleMouse(tcell.NewEventMouse(barX, sy+gitPanelListTop, tcell.Button1, 0))
+	if a.gitPanelScroll != 0 {
+		t.Fatalf("dragging to the top should return to 0, got %d", a.gitPanelScroll)
+	}
+	// Off-column motion still tracks the row — that is the whole point
+	// of a grab, and the click-only version could not do it.
+	a.handleMouse(tcell.NewEventMouse(barX-6, lastRow, tcell.Button1, 0))
+	if a.gitPanelScroll != bottom {
+		t.Fatalf("drag off-column should still track the row: got %d, want %d", a.gitPanelScroll, bottom)
+	}
+
+	a.handleMouse(tcell.NewEventMouse(barX, lastRow, tcell.ButtonNone, 0))
+	if a.dragMode != "" {
+		t.Fatalf("release should clear dragMode, got %q", a.dragMode)
+	}
+	if a.gitPanelScroll != bottom {
+		t.Fatalf("release must not move the list, got %d", a.gitPanelScroll)
+	}
+	if a.overlays.IsOpen() {
+		t.Fatal("a bar drag must never open a diff")
+	}
+}
+
+// TestGitPanelScrollbarDragDoesNotStageOrOpen: dragging the thumb sweeps
+// the pointer across every row in the list, so the drag must stay in its
+// own mode the entire time. If a motion event ever fell through to the
+// panel's row hit-test it would stage checkboxes or open diffs by the
+// dozen.
+func TestGitPanelScrollbarDragDoesNotStageOrOpen(t *testing.T) {
+	a := gitPanelApp(t, 80)
+	a.draw()
+
+	_, sy, sw, _ := a.sidebarRect()
+	listH, _ := a.gitPanelBody()
+	barX, ok := a.gitPanelBar(sw, listH)
+	if !ok {
+		t.Fatal("fixture should draw a bar")
+	}
+
+	a.handleMouse(tcell.NewEventMouse(barX, sy+gitPanelListTop, tcell.Button1, 0))
+	for row := range listH {
+		a.handleMouse(tcell.NewEventMouse(barX, sy+gitPanelListTop+row, tcell.Button1, 0))
+	}
+	a.handleMouse(tcell.NewEventMouse(barX, sy+gitPanelListTop, tcell.ButtonNone, 0))
+
+	if len(a.gitCommitChecks) != 0 {
+		t.Fatalf("the drag staged %d rows", len(a.gitCommitChecks))
+	}
+	if a.overlays.IsOpen() {
+		t.Fatal("the drag opened an overlay")
+	}
+	if a.gitPanelSelected != 0 {
+		t.Fatalf("the drag moved the selection to %d", a.gitPanelSelected)
+	}
+}
+
 // TestTreeScrollbarRightClickIsNotARow: left- and right-click must agree
 // about what the bar column is. Right-clicking it opens no tree context
 // menu for the row hiding behind the bar.
