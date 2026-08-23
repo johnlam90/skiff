@@ -147,17 +147,25 @@ func (a *App) menuGitNewWorktree() {
 }
 
 // openWorktreeBranchPick opens the create-flow branch picker: a
-// "New branch…" row on top, then every branch the switch picker sees.
+// "New branch…" row on top, then every branch except the current one —
+// the current branch is already checked out in the main worktree, and
+// git refuses to check it out in a second one.
 func (a *App) openWorktreeBranchPick(names []string) {
+	candidates := make([]string, 0, len(names))
+	for _, n := range names {
+		if n != a.gitSnap.Branch {
+			candidates = append(candidates, n)
+		}
+	}
 	items := []listPickItem{{Label: "New branch…", Tag: "from HEAD"}}
-	items = append(items, branchPickItems(names, a.gitSnap.Branch)...)
+	items = append(items, branchPickItems(candidates, "")...)
 	a.openListPick("New worktree — branch", items,
 		func(app *App, i int) {
 			var newBranch string
 			if i == 0 {
 				newBranch = "new"
 			} else {
-				newBranch = names[i-1]
+				newBranch = candidates[i-1]
 			}
 			app.askWorktreePath(newBranch)
 		}, nil, nil)
@@ -181,15 +189,17 @@ func (a *App) askWorktreePath(branch string) {
 		})
 }
 
-// defaultWorktreePath suggests ../<repo name> — the sibling-directory
-// convention most worktree workflows settle on. A repo at the
-// filesystem root has no usable parent, so the prompt starts empty.
+// defaultWorktreePath suggests a sibling directory next to the main
+// checkout — the convention most worktree workflows settle on. The
+// sibling takes the repo's own name plus a -wt suffix: the bare name is
+// the main checkout's directory and can never be the target. A repo at
+// the filesystem root has no usable parent, so the prompt starts empty.
 func (a *App) defaultWorktreePath() string {
 	parent := filepath.Dir(a.rootDir)
 	if parent == a.rootDir || parent == string(filepath.Separator) {
 		return ""
 	}
-	return filepath.Join(parent, filepath.Base(a.rootDir))
+	return filepath.Join(parent, filepath.Base(a.rootDir)+"-wt")
 }
 
 // doGitNewWorktree validates the inputs, builds the command, and runs it.
