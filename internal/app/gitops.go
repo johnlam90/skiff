@@ -89,6 +89,18 @@ func (a *App) handleGitOpDone(e *gitOpDoneEvent) {
 			func(app *App) {
 				app.runGitOp("Force delete", "Deleted "+name, false, []string{"branch", "-D", "--", name})
 			})
+	case e.label == "Remove worktree" && a.gitWorktreeTarget != "" &&
+		strings.Contains(e.output, "contains modified or untracked files"):
+		// A plain remove refused uncommitted work — force is a second
+		// confirm, mirroring the branch-delete ladder.
+		path := a.gitWorktreeTarget
+		a.gitWorktreeTarget = ""
+		a.openConfirm("Worktree not clean",
+			path+" has uncommitted or untracked files. Force remove?",
+			func(app *App) {
+				app.runGitOp("Force remove worktree", "Removed worktree", false,
+					[]string{"worktree", "remove", "--force", "--", path})
+			})
 	default:
 		lines := []string{explainGit(e.output), ""}
 		lines = append(lines, splitNonEmptyLines(e.output)...)
@@ -152,6 +164,12 @@ func explainGit(output string) string {
 		return "couldn't reach origin — check network / credentials"
 	case strings.Contains(low, "would be overwritten by checkout"):
 		return "uncommitted changes are in the way — commit or stash first"
+	case strings.Contains(low, "already checked out at"):
+		return "that branch is checked out in another worktree — remove or switch it first"
+	case strings.Contains(low, "already exists"):
+		return "that path or branch already exists — pick another"
+	case strings.Contains(low, "is locked"):
+		return "that worktree is locked — unlock it first (git worktree unlock)"
 	default:
 		return "git reported an error:"
 	}
@@ -358,6 +376,8 @@ func (a *App) handleBranchList(e *branchListEvent) {
 		a.openDeleteBranchPick(e.names)
 	case "base":
 		a.openComparePick(e.names)
+	case "worktree":
+		a.openWorktreeBranchPick(e.names)
 	}
 }
 
@@ -713,6 +733,10 @@ func (a *App) openGitExtras(x, y int) {
 		{Label: "Merge branch…", OnPick: func() { a.menuGitMergeBranch() }},
 		{Label: "Rename branch…", OnPick: func() { a.menuGitRenameBranch() }},
 		{Label: "Delete branch…", OnPick: func() { a.menuGitDeleteBranch() }},
+		{Divider: true},
+		{Label: "New worktree…", OnPick: func() { a.menuGitNewWorktree() }},
+		{Label: "List worktrees", OnPick: func() { a.menuGitListWorktrees() }},
+		{Label: "Remove worktree…", OnPick: func() { a.menuGitRemoveWorktree() }},
 		{Divider: true},
 		{Label: "Stash changes", OnPick: func() { a.menuGitStash() }},
 		{Label: "Pop stash", OnPick: func() { a.menuGitStashPop() }},

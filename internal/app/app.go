@@ -458,12 +458,13 @@ type App struct {
 	// one-at-a-time mutation gate, the commit checkbox set (absent =
 	// checked), the panel's keyboard/walk selection, and the panel row
 	// the open diff came from (-1 = diff not from the panel).
-	gitOpBusy        bool
-	gitCommitChecks  map[string]bool
-	gitPanelSelected int
-	diffPanelRow     int
-	gitDeleteTarget  string // branch mid-delete, for the force-delete offer
-	diffBase         string // compare-against ref; "" = HEAD (the default)
+	gitOpBusy         bool
+	gitCommitChecks   map[string]bool
+	gitPanelSelected  int
+	diffPanelRow      int
+	gitDeleteTarget   string // branch mid-delete, for the force-delete offer
+	gitWorktreeTarget string // worktree mid-remove, for the force-remove offer
+	diffBase          string // compare-against ref; "" = HEAD (the default)
 
 	// The diff viewer is a bespoke overlay (diffview.go's diffOverlay)
 	// that owns its transient state. diffBase and diffPanelRow stay here:
@@ -763,9 +764,10 @@ func (a *App) handleEvent(ev tcell.Event) {
 	case *fileOpDoneEvent:
 		a.handleFileOpDone(e)
 	case *fileOpProgressEvent:
-		a.handleFileOpProgress(e)
 	case *branchListEvent:
 		a.handleBranchList(e)
+	case *worktreeListEvent:
+		a.handleWorktreeList(e)
 	}
 }
 
