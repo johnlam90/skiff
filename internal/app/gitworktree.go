@@ -195,6 +195,7 @@ func (a *App) defaultWorktreePath() string {
 // doGitNewWorktree validates the inputs, builds the command, and runs it.
 // An existing branch is checked out as-is; a new branch is created from
 // HEAD; a remote-tracking pick creates the tracking local, mirroring
+// gitSwitchCmds.
 func (a *App) doGitNewWorktree(path, branch string, newBranch bool) {
 	abs, err := filepath.Abs(path)
 	if err != nil || abs == "" || strings.HasPrefix(abs, "-") {
