@@ -103,13 +103,18 @@ func TestGitWorktreeAddCmds_HardensArgv(t *testing.T) {
 	}
 }
 
-// TestDefaultWorktreePath pins the sibling-directory suggestion and the
-// root-of-filesystem fallback (no usable parent).
+// TestDefaultWorktreePath pins the sibling-directory suggestion (repo
+// name plus a -wt suffix — the bare name is the main checkout's own
+// directory and can never be the target) and the root-of-filesystem
+// fallback (no usable parent).
 func TestDefaultWorktreePath(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	want := filepath.Join(filepath.Dir(a.rootDir), filepath.Base(a.rootDir))
+	want := filepath.Join(filepath.Dir(a.rootDir), filepath.Base(a.rootDir)+"-wt")
 	if got := a.defaultWorktreePath(); got != want {
 		t.Fatalf("default path: got %q, want %q", got, want)
+	}
+	if got := a.defaultWorktreePath(); got == a.rootDir {
+		t.Fatalf("default path must never be the main checkout's own dir: %q", got)
 	}
 	root := string(filepath.Separator)
 	a.rootDir = root
@@ -120,6 +125,8 @@ func TestDefaultWorktreePath(t *testing.T) {
 
 // TestMenuGitNewWorktree_EndToEnd drives the whole create flow: branch
 // picker, path prompt, real `worktree add`, and the worktree on disk.
+// The current branch is excluded from the picker (it is already checked
+// out in the main worktree), so row 1 is the side branch.
 func TestMenuGitNewWorktree_EndToEnd(t *testing.T) {
 	requireGit(t)
 	dir := initRepo(t)
@@ -131,7 +138,8 @@ func TestMenuGitNewWorktree_EndToEnd(t *testing.T) {
 	a := newTestApp(t, dir)
 	a.menuGitNewWorktree()
 	waitListPick(t, a)
-	// Row 0 is "New branch…"; the current branch (main) is the next row.
+	// Row 0 is "New branch…"; the current branch (main) is excluded, so
+	// row 1 is the side branch.
 	pickChoose(t, a, 1)
 	if !promptIsOpen(a) {
 		t.Fatal("path prompt should open after the branch pick")
@@ -144,8 +152,8 @@ func TestMenuGitNewWorktree_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("worktree list: %v", err)
 	}
-	if !strings.Contains(out, "branch refs/heads/main") {
-		t.Fatalf("worktree should check out main:\n%s", out)
+	if !strings.Contains(out, "branch refs/heads/side") {
+		t.Fatalf("worktree should check out side:\n%s", out)
 	}
 }
 
