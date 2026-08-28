@@ -12,7 +12,11 @@
 
 package theme
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/gdamore/tcell/v2"
+)
 
 // TestRegistryIdentity pins the registry shape: the default leads,
 // ids are unique, and ByID round-trips every entry.
@@ -115,6 +119,37 @@ func TestPortedPalettesAreCorrectedNotHandEdited(t *testing.T) {
 	}
 	if corrected == 0 {
 		t.Fatal("no palette needed correcting; readable() is no longer load-bearing")
+	}
+}
+
+// TestOffshoreCharacter pins what makes the hand-tuned Offshore palette
+// itself rather than one more dark port: a deep navy background (blue
+// leads, everything dark), a status bar that sits in the background's
+// own family instead of being a bright accent chip, and Muted text held
+// to the default theme's 4.5:1 bar — Offshore is hand-tuned like Tokyo
+// Night, so it doesn't get the looser ported-palette floor.
+func TestOffshoreCharacter(t *testing.T) {
+	th, ok := ByID("offshore")
+	if !ok {
+		t.Fatal("offshore missing from the registry")
+	}
+	r, g, b := th.BG.RGB()
+	if !(b > r && b > g) {
+		t.Errorf("BG %02x%02x%02x is not navy: blue must lead", r, g, b)
+	}
+	if r > 0x40 || g > 0x40 || b > 0x40 {
+		t.Errorf("BG %02x%02x%02x is not dark enough for the deep-navy look", r, g, b)
+	}
+	if ratio := ContrastRatio(th.StatusBG, th.BG); ratio > 1.5 {
+		t.Errorf("status bar contrasts %.2f with BG — an accent chip, not the understated bar", ratio)
+	}
+	for _, surface := range []struct {
+		name string
+		bg   tcell.Color
+	}{{"BG", th.BG}, {"SidebarBG", th.SidebarBG}} {
+		if ratio := ContrastRatio(th.Muted, surface.bg); ratio < 4.5 {
+			t.Errorf("Muted on %s: %.2f < 4.5", surface.name, ratio)
+		}
 	}
 }
 

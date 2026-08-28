@@ -48,6 +48,7 @@ var registry = []Entry{
 	{ID: "kanagawa-lotus", Name: "Kanagawa Lotus", Build: themeKanagawaLotus},
 	{ID: "kanagawa-wave", Name: "Kanagawa Wave", Build: themeKanagawaWave},
 	{ID: "nord", Name: "Nord", Build: themeNord},
+	{ID: "offshore", Name: "Offshore", Build: themeOffshore},
 	{ID: "one-dark", Name: "One Dark", Build: themeOneDark},
 	{ID: "rose-pine-dawn", Name: "Rosé Pine Dawn", Build: themeRosePineDawn},
 	{ID: "rose-pine-moon", Name: "Rosé Pine Moon", Build: themeRosePineMoon},
@@ -786,6 +787,51 @@ func themeNord() Theme {
 		SynOperator: tcell.NewRGBColor(0x81, 0xa1, 0xc1),
 		SynPunct:    tcell.NewRGBColor(0xec, 0xef, 0xf4),
 		SynConstant: tcell.NewRGBColor(0xb4, 0x8e, 0xad),
+	}
+}
+
+// themeOffshore is skiff's second hand-tuned palette (not a druk
+// port): a deep-navy review-tool look — near-black blue surfaces,
+// slate-indigo chrome, violet/teal/peach syntax. Unlike every other
+// dark theme here its status bar is NOT an accent chip: it stays in
+// the background's own family so the frame recedes and the code
+// carries all the color. Muted is held to the default theme's 4.5:1
+// bar (TestOffshoreCharacter), not the looser ported floor.
+func themeOffshore() Theme {
+	return Theme{
+		BG:          tcell.NewRGBColor(0x0e, 0x15, 0x21),
+		SidebarBG:   tcell.NewRGBColor(0x0b, 0x11, 0x1c),
+		StatusBG:    tcell.NewRGBColor(0x0b, 0x11, 0x1c),
+		StatusFg:    tcell.NewRGBColor(0x8b, 0x9b, 0xc4),
+		LineHL:      tcell.NewRGBColor(0x16, 0x20, 0x2f),
+		Text:        tcell.NewRGBColor(0xd0, 0xdc, 0xf5),
+		Muted:       tcell.NewRGBColor(0x7c, 0x8c, 0xb4),
+		Subtle:      tcell.NewRGBColor(0x4a, 0x58, 0x78),
+		Accent:      tcell.NewRGBColor(0x82, 0xaa, 0xff),
+		AccentSoft:  tcell.NewRGBColor(0xc0, 0x99, 0xff),
+		Selection:   tcell.NewRGBColor(0x1f, 0x2d, 0x4d),
+		Modified:    tcell.NewRGBColor(0xec, 0xc4, 0x8d),
+		Error:       tcell.NewRGBColor(0xee, 0x6d, 0x85),
+		GitModified: tcell.NewRGBColor(0x82, 0xaa, 0xff),
+		GitAdded:    tcell.NewRGBColor(0x7f, 0xd8, 0x8f),
+		GitDeleted:  tcell.NewRGBColor(0xee, 0x6d, 0x85),
+		GitRenamed:  tcell.NewRGBColor(0x7f, 0xdb, 0xca),
+		GitMixed:    tcell.NewRGBColor(0xc0, 0x99, 0xff),
+		FindMatch:   tcell.NewRGBColor(0x53, 0x43, 0x22),
+		FindCurrent: tcell.NewRGBColor(0xec, 0xc4, 0x8d),
+		FolderColor: tcell.NewRGBColor(0x82, 0xaa, 0xff),
+		FileColor:   tcell.NewRGBColor(0xb6, 0xc2, 0xe0),
+		SynKeyword:  tcell.NewRGBColor(0xc0, 0x99, 0xff),
+		SynString:   tcell.NewRGBColor(0xec, 0xc4, 0x8d),
+		SynNumber:   tcell.NewRGBColor(0xf7, 0x8c, 0x6c),
+		SynComment:  tcell.NewRGBColor(0x62, 0x79, 0xa3),
+		SynFunction: tcell.NewRGBColor(0x82, 0xaa, 0xff),
+		SynType:     tcell.NewRGBColor(0x7f, 0xdb, 0xca),
+		SynBuiltin:  tcell.NewRGBColor(0xee, 0x6d, 0x85),
+		SynVariable: tcell.NewRGBColor(0xd0, 0xdc, 0xf5),
+		SynOperator: tcell.NewRGBColor(0x89, 0xdd, 0xff),
+		SynPunct:    tcell.NewRGBColor(0xa8, 0xb6, 0xd8),
+		SynConstant: tcell.NewRGBColor(0xf7, 0x8c, 0x6c),
 	}
 }
 
