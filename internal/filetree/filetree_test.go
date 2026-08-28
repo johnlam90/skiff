@@ -1240,17 +1240,20 @@ func TestReveal_ScrollsWhenTargetBelowViewport(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	// Open the nested chain so the flat list has the deep row at a
-	// non-zero index, then keep the viewport pinned at the top.
+	// non-zero index, then keep the viewport pinned at the top. One
+	// Toggle is the whole setup: a/b is a single-child chain, so
+	// expanding a opens b with it.
 	a := findChild(tr.Root, "a")
 	tr.Toggle(a)
 	b := findChild(a, "b")
-	tr.Toggle(b)
 	deepNode := findChild(b, "deep.go")
 	wantIdx := tr.flatIndexOf(deepNode)
 	tr.ScrollY = 0
 
+	// One-row viewport: the a/b chain row occupies it, so the target
+	// (row 1) is genuinely below the fold and must trigger the scroll.
 	deep := filepath.Join(root, "a", "b", "deep.go")
-	tr.Reveal(deep, 2) // tiny viewport so the target is well below it
+	tr.Reveal(deep, 1)
 
 	if tr.ScrollY != wantIdx {
 		t.Fatalf("ScrollY: got %d, want %d", tr.ScrollY, wantIdx)
@@ -2504,5 +2507,263 @@ func TestRender_SymlinkRowsAreMarked(t *testing.T) {
 	}
 	if strings.Contains(rowText(cells, w, targetY), SymlinkLabel) {
 		t.Fatalf("an ordinary directory must not be marked as a link: %q", rowText(cells, w, targetY))
+	}
+}
+
+// mkChain builds root/{a/b/c/inner.txt, top.txt}: a three-directory
+// single-child chain plus a root-level sibling file — the fixture the
+// compact-folder tests share.
+func mkChain(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, "a"))
+	mustMkdir(t, filepath.Join(root, "a", "b"))
+	mustMkdir(t, filepath.Join(root, "a", "b", "c"))
+	mustWrite(t, filepath.Join(root, "a", "b", "c", "inner.txt"), "x")
+	mustWrite(t, filepath.Join(root, "top.txt"), "t")
+	return root
+}
+
+// TestFlattenInto_CompactsSingleDirChain is the core compact-folders
+// behavior: a directory whose only child is another directory folds
+// into one row carrying the joined path, anchored on the deepest node,
+// with the deepest dir's children rendered directly beneath it.
+func TestFlattenInto_CompactsSingleDirChain(t *testing.T) {
+	leaf := &Node{Name: "inner.txt"}
+	c := &Node{Name: "c", IsDir: true, Loaded: true, Expanded: true, Children: []*Node{leaf}}
+	b := &Node{Name: "b", IsDir: true, Loaded: true, Expanded: true, Children: []*Node{c}}
+	a := &Node{Name: "a", IsDir: true, Loaded: true, Expanded: true, Children: []*Node{b}}
+
+	var out []flatNode
+	flattenInto(a, 0, &out)
+
+	if len(out) != 2 {
+		t.Fatalf("expected chain row + leaf, got %d rows", len(out))
+	}
+	if out[0].Node != c || out[0].Top != a || out[0].Display != "a/b/c" {
+		t.Fatalf("chain row wrong: %+v", out[0])
+	}
+	if out[1].Node != leaf || out[1].Depth != 1 {
+		t.Fatalf("leaf should sit directly under the chain row: %+v", out[1])
+	}
+}
+
+// TestFlattenInto_ChainStopsAtUnloadedDir gates compaction on
+// knowledge: a directory whose children were never read cannot claim
+// to have exactly one — the chain ends at the last loaded link, so a
+// stale claim can never fold a dir whose siblings just haven't been
+// seen yet.
+func TestFlattenInto_ChainStopsAtUnloadedDir(t *testing.T) {
+	c := &Node{Name: "c", IsDir: true}
+	b := &Node{Name: "b", IsDir: true, Loaded: false, Children: []*Node{c}}
+	a := &Node{Name: "a", IsDir: true, Loaded: true, Children: []*Node{b}}
+
+	var out []flatNode
+	flattenInto(a, 0, &out)
+
+	if len(out) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(out))
+	}
+	if out[0].Node != b || out[0].Display != "a/b" {
+		t.Fatalf("chain should stop at the unloaded dir: %+v", out[0])
+	}
+}
+
+// TestFlattenInto_SiblingBreaksChain: two children means no chain —
+// the dir renders alone and its children indent under it as before.
+func TestFlattenInto_SiblingBreaksChain(t *testing.T) {
+	b := &Node{Name: "b", IsDir: true}
+	x := &Node{Name: "x.txt"}
+	a := &Node{Name: "a", IsDir: true, Loaded: true, Expanded: true, Children: []*Node{b, x}}
+
+	var out []flatNode
+	flattenInto(a, 0, &out)
+
+	if len(out) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(out))
+	}
+	if out[0].Node != a || out[0].Display != "" {
+		t.Fatalf("row 0 should be plain a: %+v", out[0])
+	}
+}
+
+// TestFlattenInto_FileChildDoesNotCompact: a single child that is a
+// file keeps the dir as an ordinary row — only dir-into-dir folds.
+func TestFlattenInto_FileChildDoesNotCompact(t *testing.T) {
+	f := &Node{Name: "only.txt"}
+	a := &Node{Name: "a", IsDir: true, Loaded: true, Expanded: true, Children: []*Node{f}}
+
+	var out []flatNode
+	flattenInto(a, 0, &out)
+
+	if len(out) != 2 || out[0].Node != a || out[0].Display != "" {
+		t.Fatalf("file child must not fold: %+v", out)
+	}
+}
+
+// TestFlattenInto_LinksNeverJoinChains: a symlink keeps its own row in
+// both directions — a link is never absorbed as a chain segment (its
+// "(symlink)" label would vanish mid-path) and a link never absorbs
+// its child.
+func TestFlattenInto_LinksNeverJoinChains(t *testing.T) {
+	linkChild := &Node{Name: "b", IsDir: true, IsLink: true}
+	a := &Node{Name: "a", IsDir: true, Loaded: true, Children: []*Node{linkChild}}
+	var out []flatNode
+	flattenInto(a, 0, &out)
+	if len(out) != 1 || out[0].Node != a || out[0].Display != "" {
+		t.Fatalf("link child must not be absorbed: %+v", out)
+	}
+
+	plain := &Node{Name: "d", IsDir: true}
+	link := &Node{Name: "l", IsDir: true, IsLink: true, Loaded: true, Children: []*Node{plain}}
+	out = out[:0]
+	flattenInto(link, 0, &out)
+	if len(out) != 1 || out[0].Node != link || out[0].Display != "" {
+		t.Fatalf("a link must not absorb its child: %+v", out)
+	}
+}
+
+// TestToggle_ExpandsChainToDeepest pins the one-click contract: expanding
+// a dir that turns out to head a single-child chain loads and expands
+// every link down to the deepest, so the compact row appears open after
+// one click instead of demanding a click per segment.
+func TestToggle_ExpandsChainToDeepest(t *testing.T) {
+	root := mkChain(t)
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a := findChild(tr.Root, "a")
+	tr.Toggle(a)
+
+	b := findChild(a, "b")
+	if b == nil || !b.Loaded || !b.Expanded {
+		t.Fatalf("b should be loaded+expanded after the chain toggle: %+v", b)
+	}
+	c := findChild(b, "c")
+	if c == nil || !c.Loaded || !c.Expanded {
+		t.Fatalf("c should be loaded+expanded after the chain toggle: %+v", c)
+	}
+}
+
+// TestFlatIndexOf_FindsDirFoldedIntoChain: a directory that no longer
+// has its own row still resolves to the chain row that contains it —
+// otherwise revealing it would silently fail to scroll.
+func TestFlatIndexOf_FindsDirFoldedIntoChain(t *testing.T) {
+	tr, err := New(mkChain(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a := findChild(tr.Root, "a")
+	tr.Toggle(a)
+	b := findChild(a, "b")
+	c := findChild(b, "c")
+
+	ci := tr.flatIndexOf(c)
+	if ci < 0 {
+		t.Fatal("deepest chain dir must be indexable")
+	}
+	if bi := tr.flatIndexOf(b); bi != ci {
+		t.Fatalf("mid-chain dir should resolve to the chain row: got %d, want %d", bi, ci)
+	}
+	if ai := tr.flatIndexOf(a); ai != ci {
+		t.Fatalf("chain top should resolve to the chain row: got %d, want %d", ai, ci)
+	}
+}
+
+// TestRender_CompactChainShowsJoinedPath: the screen shows one
+// "a/b/c/" row with the expanded chevron, and no standalone "b/" row —
+// the visual half of the compact-folders contract.
+func TestRender_CompactChainShowsJoinedPath(t *testing.T) {
+	tr, err := New(mkChain(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tr.Toggle(findChild(tr.Root, "a"))
+
+	cells, w := renderAndCollect(t, tr, 40, 20)
+	if !findRowWithBoth(cells, w, 20, "a/b/c/", '▾') {
+		t.Fatal("expected an expanded chain row showing a/b/c/")
+	}
+	for y := 0; y < 20; y++ {
+		row := rowText(cells, w, y)
+		if strings.Contains(row, "b/") && !strings.Contains(row, "a/b/c/") {
+			t.Fatalf("mid-chain dir must not get its own row: %q", row)
+		}
+	}
+}
+
+// TestRender_ActiveFolderInsideChainHighlights: making a folded-away
+// mid-chain dir the active folder must light up the chain row that
+// contains it — the row is that dir's only representation on screen.
+func TestRender_ActiveFolderInsideChainHighlights(t *testing.T) {
+	tr, err := New(mkChain(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a := findChild(tr.Root, "a")
+	tr.Toggle(a)
+	b := findChild(a, "b")
+	tr.ActiveFolder = b.Path
+
+	cells, w := renderAndCollect(t, tr, 40, 20)
+	y := findRowY(cells, w, 20, "a/b/c/")
+	if y < 0 {
+		t.Fatal("chain row not rendered")
+	}
+	fg, _, attrs := cells[y*w+2].Style.Decompose()
+	if fg != theme.Default().Accent || attrs&tcell.AttrBold == 0 {
+		t.Fatalf("chain row must show the active-folder highlight: fg=%v attrs=%v", fg, attrs)
+	}
+}
+
+// TestReveal_FileInsideCompactChain: revealing a file whose ancestors
+// fold into a chain must land the viewport on the file's actual row —
+// the scroll math has to agree with the compacted render order.
+func TestReveal_FileInsideCompactChain(t *testing.T) {
+	root := mkChain(t)
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tr.ScrollY = 9 // far past the handful of real rows
+	tr.Reveal(filepath.Join(root, "a", "b", "c", "inner.txt"), 2)
+
+	a := findChild(tr.Root, "a")
+	b := findChild(a, "b")
+	c := findChild(b, "c")
+	inner := findChild(c, "inner.txt")
+	idx := tr.flatIndexOf(inner)
+	if idx < 0 {
+		t.Fatal("revealed file must be indexable")
+	}
+	if tr.ScrollY != idx {
+		t.Fatalf("viewport should scroll to the revealed row: ScrollY=%d, want %d", tr.ScrollY, idx)
+	}
+}
+
+// TestRender_DotDirChainRendersMuted: a chain headed by a dot-dir reads
+// as metadata exactly like a standalone dot-dir — the mute keys off the
+// label the user sees, not the deepest segment's name.
+func TestRender_DotDirChainRendersMuted(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, ".config"))
+	mustMkdir(t, filepath.Join(root, ".config", "app"))
+	mustWrite(t, filepath.Join(root, ".config", "app", "cfg.txt"), "x")
+	mustWrite(t, filepath.Join(root, "main.go"), "package m")
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tr.Toggle(findChild(tr.Root, ".config"))
+
+	cells, w := renderAndCollect(t, tr, 40, 20)
+	y := findRowY(cells, w, 20, ".config/app/")
+	if y < 0 {
+		t.Fatal("dot chain row not rendered")
+	}
+	fg, _, _ := cells[y*w+2].Style.Decompose()
+	if fg != theme.Default().Muted {
+		t.Fatalf("dot chain row fg = %v, want Muted", fg)
 	}
 }

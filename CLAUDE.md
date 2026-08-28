@@ -89,7 +89,10 @@ internal/filetree/filetree.go Lazy tree, identity-preserving refresh, hit-test,
                               ReadErr "(unreadable)" mark, .gitignore-aware
                               filtering (HideIgnored + the per-directory
                               matcher cache), symlink resolution with
-                              ancestor-loop refusal, and the sidebar's
+                              ancestor-loop refusal, VS Code-style
+                              compact folder chains (single-child dir
+                              runs fold into one "a/b/c" row anchored on
+                              the deepest dir), and the sidebar's
                               own scrollbar column
 internal/scrollbar/           The one definition of a scrollbar: thumb
                               geometry, its click inverse, and the Track/

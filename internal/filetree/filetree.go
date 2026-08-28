@@ -846,24 +846,108 @@ func shouldHide(name string) bool {
 }
 
 // flatNode pairs a Node with its render depth so the renderer can indent
-// without re-walking the tree.
+// without re-walking the tree. A row that folds a single-child directory
+// chain (VS Code's "compact folders") anchors on the chain's DEEPEST
+// node — every interaction (toggle, active-folder, file ops, git
+// letter) acts there — while Top and Display remember what was folded
+// in so hit-independent consumers (the active-folder highlight,
+// flatIndexOf) can still see the hidden middle dirs.
 type flatNode struct {
 	Node  *Node
 	Depth int
+
+	// Top is the shallowest directory folded into this row; equal to
+	// Node on an ordinary row.
+	Top *Node
+
+	// Display is the joined "a/b/c" label of a folded chain, empty on
+	// an ordinary row (render then falls back to Node.Name).
+	Display string
 }
 
 // flattenInto appends node into out. If node is an expanded directory, it
-// recursively appends its children at depth+1.
+// recursively appends its children at depth+1. A run of directories in
+// which each is the next one's only entry folds into a single row
+// (VS Code's "compact folders"): the row anchors on the deepest dir,
+// carries the joined "a/b/c" label, and that deepest dir's expansion
+// state decides whether children follow. Folding is knowledge-gated by
+// compactChild, so a dir whose listing was never read keeps its own row
+// until a load proves it heads a chain.
 func flattenInto(n *Node, depth int, out *[]flatNode) {
 	if n == nil {
 		return
 	}
-	*out = append(*out, flatNode{Node: n, Depth: depth})
+	top := n
+	display := ""
+	for {
+		c := compactChild(n)
+		if c == nil {
+			break
+		}
+		if display == "" {
+			display = n.Name
+		}
+		display += "/" + c.Name
+		n = c
+	}
+	*out = append(*out, flatNode{Node: n, Depth: depth, Top: top, Display: display})
 	if n.IsDir && n.Expanded {
 		for _, c := range n.Children {
 			flattenInto(c, depth+1, out)
 		}
 	}
+}
+
+// compactChild returns the sole child that dir n folds over in a
+// compact-folders chain, or nil when n keeps its own row. Extension
+// demands knowledge and plainness at both ends: n's listing must have
+// been read (an unread dir cannot claim to have exactly one entry), and
+// neither end may be a symlink — a link's "(symlink)"/"(loop)" label
+// must stay on a row of its own, never vanish mid-path. The sentinel
+// check is defensive: today a capped listing always has many children,
+// but the fold must not depend on that staying true.
+func compactChild(n *Node) *Node {
+	if !n.IsDir || !n.Loaded || n.IsLink || len(n.Children) != 1 {
+		return nil
+	}
+	c := n.Children[0]
+	if !c.IsDir || c.IsLink || c.Sentinel {
+		return nil
+	}
+	return c
+}
+
+// containsPath reports whether path names this row's node or any
+// directory folded into its chain. Ordinary rows reduce to one
+// comparison; chain rows re-walk the same links flattenInto folded, so
+// the two can never disagree about what a row contains.
+func (f flatNode) containsPath(path string) bool {
+	if path == "" || f.Node == nil {
+		return false
+	}
+	if f.Top == nil {
+		return f.Node.Path == path
+	}
+	for n := f.Top; n != nil; n = compactChild(n) {
+		if n.Path == path {
+			return true
+		}
+		if n == f.Node {
+			return false
+		}
+	}
+	return false
+}
+
+// flatten builds the renderer's visible row list from the root's
+// children. Render and flatIndexOf both come through here, so the
+// scroll math and the painted rows can never disagree about row order.
+func (t *Tree) flatten() []flatNode {
+	flat := make([]flatNode, 0, 128)
+	for _, c := range t.Root.Children {
+		flattenInto(c, 0, &flat)
+	}
+	return flat
 }
 
 // listHeaderRows is how many rows of a tree render rect sit above the
@@ -931,10 +1015,7 @@ func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 	drawChangeLetter(scr, x, y+1, w, rootChange, rootStyle)
 
 	// Build the flat list of visible rows from the root's children.
-	flat := make([]flatNode, 0, 128)
-	for _, c := range t.Root.Children {
-		flattenInto(c, 0, &flat)
-	}
+	flat := t.flatten()
 	t.flatCount = len(flat)
 
 	listOff, listH := listArea(h)
@@ -979,7 +1060,7 @@ func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 			continue
 		}
 		item := flat[idx]
-		active := item.Node.Path == t.ActiveFile || (item.Node.IsDir && item.Node.Path == t.ActiveFolder)
+		active := item.Node.Path == t.ActiveFile || (item.Node.IsDir && item.containsPath(t.ActiveFolder))
 		change := t.changeKind(item.Node)
 		drawNodeRow(scr, th, x, listTop+row, rowW, item, active, change, t.IconsEnabled)
 		visible = append(visible, item.Node)
@@ -1116,13 +1197,21 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 	// Active/dirty deliberately override the dotfile dimming — a
 	// modified .env or the active .github/ folder is still the most
 	// important thing on the row.
+	// A chain row shows the folded "a/b/c" label instead of the node's
+	// own name; the dotfile check below keys off this displayed label,
+	// so ".config/app" reads as metadata exactly like ".config" would.
+	name := item.Node.Name
+	if item.Display != "" {
+		name = item.Display
+	}
+
 	var fg tcell.Color
 	if item.Node.IsDir {
 		fg = th.FolderColor
 	} else {
 		fg = th.FileColor
 	}
-	if strings.HasPrefix(item.Node.Name, ".") || unreadable {
+	if strings.HasPrefix(name, ".") || unreadable {
 		fg = th.Muted
 	}
 	if active {
@@ -1150,10 +1239,10 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 			chev = "▾"
 		}
 		prefix = " " + indent + chev + " "
-		suffix = item.Node.Name + "/"
+		suffix = name + "/"
 	} else {
 		prefix = " " + indent + "  "
-		suffix = item.Node.Name
+		suffix = name
 		if item.Node.IsDir {
 			suffix += "/"
 		}
@@ -1312,6 +1401,33 @@ func (t *Tree) Toggle(n *Node) {
 		_ = t.loadChildren(n)
 	}
 	n.Expanded = !n.Expanded
+	if n.Expanded {
+		t.expandChain(n)
+	}
+}
+
+// maxChainProbe caps how many single-child directories one expand click
+// will load ahead. 32 folds any real src/main/java/... nesting while
+// bounding the IO a pathological tree can demand from a single click.
+const maxChainProbe = 32
+
+// expandChain loads and expands the single-child directory run under a
+// just-expanded dir, so a compact chain opens to its deepest link in
+// one click — without this, each click would only lengthen the folded
+// label by one segment. Interaction-time IO only: Render never loads,
+// so an unclicked dir still costs nothing.
+func (t *Tree) expandChain(n *Node) {
+	for range maxChainProbe {
+		c := compactChild(n)
+		if c == nil {
+			return
+		}
+		if !c.Loaded {
+			_ = t.loadChildren(c)
+		}
+		c.Expanded = true
+		n = c
+	}
 }
 
 // Scroll moves the file tree's viewport by delta rows (negative = up).
@@ -1402,30 +1518,16 @@ func (t *Tree) Reveal(path string, viewH int) {
 	t.ScrollY = idx
 }
 
-// flatIndexOf returns the row index of target in the renderer's flat list
-// (the same pre-order walk Render builds via flattenInto), or -1 when target
-// isn't currently visible. Mirrors the render order exactly so the index we
-// scroll to is the row the user actually sees.
+// flatIndexOf returns the row index of target in the renderer's flat
+// list, or -1 when target isn't currently visible. It builds the list
+// with the very flattenInto walk Render uses — sharing the walk is what
+// keeps reveal-scrolling and the render agreeing about row positions —
+// and a directory folded into a compact chain resolves to the chain row
+// that contains it, since that row is the dir's only presence on screen.
 func (t *Tree) flatIndexOf(target *Node) int {
-	idx := 0
-	var walk func(n *Node) bool
-	walk = func(n *Node) bool {
-		if n == target {
-			return true
-		}
-		idx++
-		if n.IsDir && n.Expanded {
-			for _, c := range n.Children {
-				if walk(c) {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	for _, c := range t.Root.Children {
-		if walk(c) {
-			return idx
+	for i, f := range t.flatten() {
+		if f.Node == target || (target.IsDir && f.containsPath(target.Path)) {
+			return i
 		}
 	}
 	return -1
