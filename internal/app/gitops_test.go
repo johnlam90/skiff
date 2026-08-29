@@ -49,6 +49,19 @@ func porcelain(t *testing.T, dir string) string {
 	return string(out)
 }
 
+// skipInShortMode gates the git suite's end-to-end tests behind -short:
+// every test that calls this forks one or more real git processes
+// (requireGit + initRepo, or dirtyRepoApp which wraps both), which is
+// the "genuinely slow" half of the package's test count -short exists
+// to skip. Called before requireGit(t)/dirtyRepoApp(t) so a -short run
+// needs neither the extra wall-clock nor git on PATH.
+func skipInShortMode(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("forks real git processes — slow; run without -short")
+	}
+}
+
 // TestExplainGit_Mappings pins the headline for each recognised
 // failure shape — the sentence is the UX, so it's worth locking down.
 func TestExplainGit_Mappings(t *testing.T) {
@@ -87,6 +100,7 @@ func TestGitCommitCmds(t *testing.T) {
 // TestGitPushCmds_UpstreamVsNot: a branch's first push sets the
 // upstream; later pushes are plain.
 func TestGitPushCmds_UpstreamVsNot(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
@@ -110,6 +124,7 @@ func TestGitPushCmds_UpstreamVsNot(t *testing.T) {
 // sequence and checks the other stays uncommitted — the path scoping
 // is the whole point of the checkbox column.
 func TestCommitEndToEnd(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	one := filepath.Join(dir, "one.txt")
@@ -135,6 +150,7 @@ func TestCommitEndToEnd(t *testing.T) {
 // TestUndoAndStashEndToEnd drives reset --soft and stash push/pop
 // through the same sequences the menu actions use.
 func TestUndoAndStashEndToEnd(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	f := filepath.Join(dir, "a.txt")
@@ -167,6 +183,7 @@ func TestUndoAndStashEndToEnd(t *testing.T) {
 // TestGitSwitchCmds_Tracking pins druk's remote-pick rule: the first
 // switch to origin/x creates a tracking local x, the second reuses it.
 func TestGitSwitchCmds_Tracking(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
@@ -217,6 +234,7 @@ func TestGitSwitchCmds_HardensRefArgv(t *testing.T) {
 // fails with git's own "no upstream" message — an honest error beats
 // running an option we didn't write.
 func TestGitPushCmds_UnsafeBranchDropsThePositional(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
@@ -235,6 +253,7 @@ func TestGitPushCmds_UnsafeBranchDropsThePositional(t *testing.T) {
 // until cleared, so a hostile ref has to be refused at the door rather
 // than at four call sites that would each have to remember.
 func TestSetDiffBase_RejectsUnsafeRef(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
@@ -254,6 +273,7 @@ func TestSetDiffBase_RejectsUnsafeRef(t *testing.T) {
 // TestGitBranchNames filters HEAD noise, hides remote spellings of
 // local branches, and puts the current branch first.
 func TestGitBranchNames(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
@@ -286,6 +306,7 @@ func TestGitBranchNames(t *testing.T) {
 // flashes, a rejected push offers the pull-then-push confirm, any
 // other failure opens the info modal with the explainer headline.
 func TestHandleGitOpDone_Routing(t *testing.T) {
+	skipInShortMode(t)
 	a, _, _ := dirtyRepoApp(t)
 
 	a.gitOpBusy = true
@@ -319,6 +340,7 @@ func TestHandleGitOpDone_Routing(t *testing.T) {
 // toggle writes explicit false, a second flips it back, and
 // checkedChangePaths honours the set.
 func TestToggleCommitCheck_AndCheckedPaths(t *testing.T) {
+	skipInShortMode(t)
 	a, modified, untracked := dirtyRepoApp(t)
 	a.toggleGitPanel()
 	if got := len(a.checkedChangePaths()); got != 2 {
@@ -339,6 +361,7 @@ func TestToggleCommitCheck_AndCheckedPaths(t *testing.T) {
 // synchronously: prompt opens with the file count, and submitting a
 // message runs the real commit (waiting out the async op).
 func TestMenuGitCommit_OpensPromptAndCommits(t *testing.T) {
+	skipInShortMode(t)
 	a, _, _ := dirtyRepoApp(t)
 	a.menuGitCommit()
 	if p := promptPrefab(t, a); p.Title != "Commit message" {
@@ -396,6 +419,7 @@ func waitListPick(t *testing.T, a *App) {
 // TestGitMergeBranchEndToEnd merges a side branch through the picker
 // flow and checks its file lands on the current branch.
 func TestGitMergeBranchEndToEnd(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	writeFileT(t, filepath.Join(dir, "base.txt"), "b\n")
@@ -429,6 +453,7 @@ func TestGitMergeBranchEndToEnd(t *testing.T) {
 // unmerged branch fails, the handler offers force delete, accepting it
 // runs -D and the branch is gone.
 func TestGitDeleteBranchForceOffer(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	writeFileT(t, filepath.Join(dir, "base.txt"), "b\n")
@@ -465,6 +490,7 @@ func TestGitDeleteBranchForceOffer(t *testing.T) {
 // TestGitRenameBranchEndToEnd renames the current branch via the
 // prompt flow.
 func TestGitRenameBranchEndToEnd(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
@@ -488,6 +514,7 @@ func TestGitRenameBranchEndToEnd(t *testing.T) {
 // follows the base (a committed-but-different file shows up), the
 // gutter diffs against the base, and committing is gated off.
 func TestDiffBaseStatusAndGuard(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	f := filepath.Join(dir, "a.txt")
@@ -522,6 +549,7 @@ func TestDiffBaseStatusAndGuard(t *testing.T) {
 // sets the base, picking HEAD (row 0) clears it, and picking the
 // current branch degrades to HEAD.
 func TestComparePickSetsAndClearsBase(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")

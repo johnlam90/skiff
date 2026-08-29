@@ -19,6 +19,9 @@ import (
 // "not a repo" is IsRepo=false on the value, not an empty branch
 // string a caller has to interpret.
 func TestStatus_NonRepoIsExplicit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("forks a real git process — slow; run without -short")
+	}
 	snap := Open(t.TempDir()).Status("")
 	if snap.IsRepo {
 		t.Fatal("a plain directory must report IsRepo=false")
@@ -208,6 +211,9 @@ func TestStatus_CompareAgainstBase(t *testing.T) {
 // badges, but only the first is worth telling a user about, so the
 // Snapshot has to carry the difference.
 func TestStatus_GitMissingIsDistinguishable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("the second assertion forks a real git process — slow; run without -short")
+	}
 	fake := &Fake{}
 	fake.Script("rev-parse --show-toplevel", "", fmt.Errorf("%w: exec: \"git\"", ErrGitMissing))
 	if snap := OpenWith("/repo", fake).Status(""); !snap.GitMissing || snap.IsRepo {
