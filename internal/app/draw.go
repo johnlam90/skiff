@@ -75,15 +75,19 @@ func (a *App) draw() {
 		a.drawEmptyEditor()
 	}
 
-	if a.findOpen {
-		a.drawFindBar()
-	}
 	a.drawStatusBar()
 	a.drawFlashStrip()
-	if a.projFind.findOpen {
-		a.drawProjFind()
+	// The docked strip paints into the rows layout already took off the
+	// editor for it, after the status bar so a bar's own caret is the
+	// last cursor call of the frame. The leader cheat-strip is the one
+	// strip that never takes the slot — it overlays instead of
+	// reflowing, so it only paints when nothing else is docked (see
+	// leaderStrip).
+	if a.strip != nil {
+		a.strip.draw(a.stripRect())
+	} else {
+		leaderStrip{a: a}.draw(a.stripRect())
 	}
-	a.drawLeaderStrip()
 
 	// The overlay stack paints last so the open overlay sits above
 	// everything — at most one is ever up (Open replaces), so there is
@@ -775,16 +779,14 @@ func (a *App) flashStripRows() int {
 }
 
 // flashStripRect returns the strip's screen rectangle: the rows directly
-// above the status bar, above the find bar when that is open too, and
-// aligned with the editor exactly the way findBarRect is.
+// above the status bar, above the docked strip when one is up too, and
+// aligned with the editor exactly the way stripRect is. It stacks on
+// stripRect rather than re-deriving the bar's row, so the flash can
+// never be painted onto the find bar's cells.
 func (a *App) flashStripRect() (x, y, w, h int) {
-	sw := a.sidebarW()
 	h = a.flashStripRows()
-	y = a.height - 1 - h
-	if a.findOpen || a.projFind.findOpen {
-		y -= findBarHeight
-	}
-	return sw, y, a.width - sw, h
+	r := a.stripRect()
+	return r.x, r.y - h, r.w, h
 }
 
 // wrapFlashLines breaks msg into at most flashStripMaxRows lines of w

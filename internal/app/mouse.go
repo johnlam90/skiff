@@ -66,15 +66,17 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	}
 
 	// The overlay on the stack absorbs all mouse input — same routing
-	// truth as the keyboard. The project-find strip comes next: it has
-	// real mouse targets (result rows, fold arrows) unlike the find bar,
-	// which deliberately passes mouse through to the editor (ADR-0001).
+	// truth as the keyboard. The docked strip comes next, and it is the
+	// strip that decides: the project-find panel consumes the event (it
+	// has real targets — result rows, fold arrows), while the find bar
+	// answers false and lets the press reach the editor underneath
+	// (ADR-0001's pass-through, now the adapter's answer rather than an
+	// absent branch here).
 	if ov := a.overlays.Top(); ov != nil {
 		ov.HandleMouse(x, y, btn)
 		return
 	}
-	if a.projFind.findOpen {
-		a.handleProjFindMouse(x, y, btn)
+	if a.strip != nil && a.strip.handleMouse(x, y, btn) {
 		return
 	}
 

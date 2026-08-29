@@ -178,7 +178,7 @@ func TestEditorSize(t *testing.T) {
 func TestStripRowBudget_LeavesRoomForEveryStrip(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	resizeTestApp(t, a, minWidth, minHeight)
-	a.findOpen = true
+	a.strip = &findStrip{a: a}
 
 	if got := a.stripRowBudget(); got < flashStripMaxRows {
 		t.Fatalf("budget %d at %dx%d cannot hold a %d-row flash strip",
@@ -196,7 +196,10 @@ func TestEditorRect_NeverStarvesUnderStrips(t *testing.T) {
 
 	for _, find := range []bool{false, true} {
 		for _, msg := range []string{"", longFlash} {
-			a.findOpen = find
+			a.strip = nil
+			if find {
+				a.strip = &findStrip{a: a}
+			}
 			a.statusMsg, a.statusUntil = msg, time.Now().Add(time.Minute)
 			_, y, _, h := a.editorRect()
 			if h < editorMinRows {

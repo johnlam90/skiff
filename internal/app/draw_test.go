@@ -758,7 +758,7 @@ func TestFlashStrip_StacksAboveTheFindBar(t *testing.T) {
 	a.openFind()
 	a.flash(longFlash)
 
-	_, fy, _, _ := a.findBarRect()
+	fy := a.stripRect().y
 	_, sy, _, sh := a.flashStripRect()
 	if sy+sh != fy {
 		t.Fatalf("strip rows [%d,%d) should end exactly at the find bar row %d", sy, sy+sh, fy)

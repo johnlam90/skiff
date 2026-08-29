@@ -54,14 +54,14 @@ type projFindRow struct {
 // projFindState bundles the project-wide content-search panel and the
 // replace state riding it, moved out of App so the subsystem's fields
 // have a compiler-visible boundary. Held on App as the named field
-// projFind (named, not embedded: embedding would promote findOpen onto
-// App and collide with the in-file find bar's field of the same name).
+// projFind. Whether the panel is *open* is not in here: that is the
+// strip slot's answer (projFindOpen), so the panel and the find bar
+// cannot both believe they own the bottom row.
 type projFindState struct {
 	// Project-wide content search (see projfind.go). query is the same
 	// overlay.Field the prompt, form and finder use — it owns the text,
 	// the caret and the field's horizontal window; the panel owns only
 	// which field has the keyboard.
-	findOpen      bool
 	query         overlay.Field
 	findMatches   []search.Match
 	findTruncated bool
@@ -86,6 +86,52 @@ type projFindState struct {
 	sweep asyncjob.Job[projFindResult]
 }
 
+// projFindStrip is the project-find panel's face on the strip slot
+// (strip.go). It is an adapter over App methods, not a state bundle:
+// unlike the find bar, whose whole state is the two fields it draws,
+// this panel's state is read from outside the strip — a background
+// sweep is started from the query and lands its results against the
+// generation counter — so it keeps the compiler-visible boundary it
+// already has in projFindState and the strip stays the routing face
+// over it. Same shape, and the same reason, as menuOverlay.
+type projFindStrip struct{ a *App }
+
+// rows is findBarHeight: only the query bar is docked. The results are
+// painted over the editor rect on purpose — a panel that reserved rows
+// for them would reflow the editor away to nothing on a long hit list.
+func (p projFindStrip) rows() int { return findBarHeight }
+
+// handleKey hands the keystroke to the panel, which owns the keyboard
+// while it is up.
+func (p projFindStrip) handleKey(ev *tcell.EventKey) { p.a.handleProjFindKey(ev) }
+
+// handleMouse consumes every event: unlike the find bar's deliberate
+// pass-through, this strip has real mouse targets — mode chips on the
+// bar, fold arrows and match rows in the results over the editor — and
+// a click anywhere else dismisses it. The editor underneath is covered
+// by the results, so there is nothing there to click through to.
+func (p projFindStrip) handleMouse(x, y int, btn tcell.ButtonMask) bool {
+	p.a.handleProjFindMouse(x, y, btn)
+	return true
+}
+
+// draw paints the results over the editor and the query bar into the
+// rect layout reserved for it.
+func (p projFindStrip) draw(r rect) { p.a.drawProjFind(r) }
+
+// close forgets the query and the results and retires any in-flight
+// sweep — the panel's teardown, run by dropStrip whichever route
+// emptied the slot.
+func (p projFindStrip) close() { p.a.projFindTeardown() }
+
+// projFindOpen reports whether the project-find panel owns the strip
+// slot. The slot is the open flag; there is no second boolean to drift
+// out of step with it.
+func (a *App) projFindOpen() bool {
+	_, ok := a.strip.(projFindStrip)
+	return ok
+}
+
 // menuFindInProject is the ≡ menu / Esc-F entry point.
 func (a *App) menuFindInProject() {
 	a.closeMenu()
@@ -100,7 +146,7 @@ func (a *App) openProjFind() {
 		return
 	}
 	a.closeAllModals()
-	a.projFind.findOpen = true
+	a.strip = projFindStrip{a: a}
 	a.projFind.query = overlay.Field{}
 	a.projFind.findMatches = nil
 	a.projFind.findTruncated = false
@@ -110,10 +156,23 @@ func (a *App) openProjFind() {
 	a.resetProjReplace()
 }
 
-// closeProjFind dismisses the panel and forgets the query — same
-// "Esc means done" contract as the in-file find bar.
+// closeProjFind dismisses the panel — same "Esc means done" contract as
+// the in-file find bar. Dropping the slot is the whole gesture; the
+// state reset rides projFindTeardown, so every route out of the panel
+// (Esc, a click outside, an overlay opening over it) goes through one
+// teardown instead of a hand-picked subset. It drops the slot only when
+// the panel owns it, so a stray call can't dismiss the find bar.
 func (a *App) closeProjFind() {
-	a.projFind.findOpen = false
+	if a.projFindOpen() {
+		a.dropStrip()
+	}
+}
+
+// projFindTeardown forgets the query and the results and invalidates
+// any in-flight sweep. Called by the strip's close hook, never
+// directly — the slot has to be empty first or a sweep landing during
+// the reset could paint into a panel that is on its way out.
+func (a *App) projFindTeardown() {
 	a.projFind.query = overlay.Field{}
 	a.projFind.findMatches = nil
 	a.projFind.findTruncated = false
@@ -181,7 +240,7 @@ func projFindDebounceWait(ctx context.Context) bool {
 // resets the cursor. Superseded runs never reach here — the job drops
 // them.
 func (a *App) handleProjFindDone(r projFindResult, err error) {
-	if err != nil || !a.projFind.findOpen {
+	if err != nil || !a.projFindOpen() {
 		return
 	}
 	a.projFind.findMatches = r.matches
@@ -363,12 +422,14 @@ func (a *App) handleProjFindMouse(x, y int, btn tcell.ButtonMask) {
 		return
 	}
 	// Bar row: chip clicks toggle a mode and re-run the query; other
-	// spots keep focus and do nothing.
-	if y == a.height-2 && x >= ex {
+	// spots keep focus and do nothing. The row comes from stripRect —
+	// the same formula the bar was painted with — so the hit-test can
+	// never drift off the cells the user is looking at.
+	bar := a.stripRect()
+	if y == bar.y && x >= bar.x {
 		label := " Search project: "
 		for _, c := range a.projFindChips(runeLen(label)) {
-			sw := a.sidebarW()
-			if x >= sw+c.x0 && x < sw+c.x1 {
+			if x >= bar.x+c.x0 && x < bar.x+c.x1 {
 				*c.on = !*c.on
 				a.projFindQueryChanged()
 				return
@@ -406,12 +467,9 @@ func (a *App) handleProjFindMouse(x, y int, btn tcell.ButtonMask) {
 //	<editor area>   ▾ internal/app/app.go (12)
 //	                  123: the matched line text
 //	<bar row>        Search project: query     37 matches in 4 files
-func (a *App) drawProjFind() {
-	if !a.projFind.findOpen {
-		return
-	}
+func (a *App) drawProjFind(r rect) {
 	a.drawProjFindResults()
-	a.drawProjFindBar()
+	a.drawProjFindBar(r)
 }
 
 // drawProjFindResults paints the grouped match list over the editor area.
@@ -524,10 +582,10 @@ func (a *App) projFindChips(labelEnd int) []projFindChip {
 	return out
 }
 
-// drawProjFindBar paints the query input row above the status bar.
-func (a *App) drawProjFindBar() {
-	sw := a.sidebarW()
-	bx, by, bw := sw, a.height-2, a.width-sw
+// drawProjFindBar paints the query input row into the rect layout
+// reserved for the strip.
+func (a *App) drawProjFindBar(r rect) {
+	bx, by, bw := r.x, r.y, r.w
 	bg := a.theme.LineHL
 	barStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
 	labelStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true)

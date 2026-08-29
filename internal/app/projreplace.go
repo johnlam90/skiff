@@ -301,7 +301,7 @@ func (a *App) handleProjReplaceDone(r projReplaceResult, _ error) {
 			strings.Join(r.bufSaveFailed, ", "))
 	}
 	a.refreshTreeNow()
-	if a.projFind.findOpen {
+	if a.projFindOpen() {
 		a.projFindQueryChanged()
 	}
 	a.flash(msg)

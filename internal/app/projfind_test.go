@@ -33,7 +33,7 @@ func projFindApp(t *testing.T, root string) *App {
 	a := newTestApp(t, root)
 	a.finder = finder.New(root)
 	a.openProjFind()
-	if !a.projFind.findOpen {
+	if !a.projFindOpen() {
 		t.Fatal("panel should be open")
 	}
 	return a
@@ -119,7 +119,7 @@ func TestProjFindEnterOpensAtLine(t *testing.T) {
 
 	a.projFind.findSelected = 2 // second match row of a.go (header, m0, m1)
 	a.projFindActivate()
-	if a.projFind.findOpen {
+	if a.projFindOpen() {
 		t.Fatal("activation should close the panel")
 	}
 	tab := a.activeTabPtr()
@@ -139,7 +139,7 @@ func TestProjFindActivateHeaderFolds(t *testing.T) {
 
 	a.projFind.findSelected = 0
 	a.projFindActivate()
-	if !a.projFind.findOpen {
+	if !a.projFindOpen() {
 		t.Fatal("folding must not close the panel")
 	}
 	if !a.projFind.findFolded["a.go"] {
@@ -158,7 +158,7 @@ func TestProjFindEscCloses(t *testing.T) {
 	a.projFind.findMatches = fakeMatches()
 
 	a.closeProjFind()
-	if a.projFind.findOpen || a.projFind.query.Text() != "" || a.projFind.findMatches != nil {
+	if a.projFindOpen() || a.projFind.query.Text() != "" || a.projFind.findMatches != nil {
 		t.Fatal("close should clear the panel state")
 	}
 }
@@ -215,7 +215,7 @@ func TestProjFindMouseClickOnMatchRowOpensFile(t *testing.T) {
 	ex, ey, _, _ := a.editorRect()
 	a.handleMouse(tcell.NewEventMouse(ex+2, ey+1, tcell.Button1, tcell.ModNone))
 
-	if a.projFind.findOpen {
+	if a.projFindOpen() {
 		t.Fatal("clicking a match row should close the panel")
 	}
 	tab := a.activeTabPtr()
@@ -242,7 +242,7 @@ func TestProjFindMouseClickOnHeaderFolds(t *testing.T) {
 	// rows[0] is the a.go header at scrollY 0, so its row is exactly ey.
 	a.handleMouse(tcell.NewEventMouse(ex+2, ey, tcell.Button1, tcell.ModNone))
 
-	if !a.projFind.findOpen {
+	if !a.projFindOpen() {
 		t.Fatal("folding via mouse must not close the panel")
 	}
 	if !a.projFind.findFolded["a.go"] {
@@ -270,7 +270,7 @@ func TestProjFindMouseClickBelowLastRowIsNoop(t *testing.T) {
 	}
 	a.handleMouse(tcell.NewEventMouse(ex+2, ey+10, tcell.Button1, tcell.ModNone))
 
-	if !a.projFind.findOpen {
+	if !a.projFindOpen() {
 		t.Fatal("a click below the last row must not close the panel")
 	}
 	if a.projFind.findSelected != beforeSelected {

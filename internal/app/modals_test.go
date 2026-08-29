@@ -597,38 +597,45 @@ func TestDirtyTabCount(t *testing.T) {
 } // TestDirtyButtonAtRelX_HitsAndMisses pins the geometry helper so the
 // TestCloseAllModals_ClearsReplaceState pins the full find/replace
 // teardown. Opening a modal over a find-with-replace used to reset only
-// the find fields, leaving the replace row armed (replaceOpen,
-// findFocusReplace, stale text) for the next Esc-g and the tab's match
-// highlights painted under the modal. closeAllModals must tear down the
-// whole family, exactly like closeFind.
+// the find fields, leaving the replace row armed (replaceOpen, focus,
+// stale text) for the next Esc-g and the tab's match highlights painted
+// under the modal. closeAllModals empties the strip slot, so the whole
+// family goes with the bar that held it — and the next Esc-f builds a
+// pristine one rather than inheriting what the last one left.
 func TestCloseAllModals_ClearsReplaceState(t *testing.T) {
 	a := seedFindApp(t, "foo bar foo\n")
 	a.openFind()
 	for _, r := range "foo" {
-		a.handleFindKey(keyEv(tcell.KeyRune, r))
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
 	}
-	a.handleFindKey(keyEv(tcell.KeyTab, 0)) // grow + focus the replace field
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyTab, 0)) // grow + focus the replace field
 	for _, r := range strings.Repeat("q", 80) {
-		a.handleFindKey(keyEv(tcell.KeyRune, r))
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
 	}
 	// The caret window only slides on a draw, and it is part of what
 	// has to be torn down.
-	a.drawFindBar()
-	if a.replaceField.Scroll() == 0 {
+	findBarOf(t, a).draw(a.stripRect())
+	if findBarOf(t, a).replace.Scroll() == 0 {
 		t.Fatal("precondition: a long replacement should have scrolled the field")
 	}
 
 	a.closeAllModals()
 
-	if a.replaceOpen || a.findFocusReplace {
-		t.Fatal("replace row must not stay armed after closeAllModals")
-	}
-	if a.replaceField.Text() != "" || a.replaceField.Cursor != 0 || a.replaceField.Scroll() != 0 {
-		t.Fatalf("replace field state leaked: value=%q cursor=%d scroll=%d",
-			a.replaceField.Text(), a.replaceField.Cursor, a.replaceField.Scroll())
+	if a.strip != nil {
+		t.Fatalf("closeAllModals must empty the strip slot, got %T", a.strip)
 	}
 	if tab := a.activeTabPtr(); tab != nil && tab.FindQuery != "" {
 		t.Fatalf("tab find highlights leaked: %q", tab.FindQuery)
+	}
+
+	a.openFind()
+	s := findBarOf(t, a)
+	if s.replaceOpen || s.focusReplace {
+		t.Fatal("replace row must not stay armed across a teardown")
+	}
+	if s.replace.Text() != "" || s.replace.Cursor != 0 || s.replace.Scroll() != 0 {
+		t.Fatalf("replace field state leaked: value=%q cursor=%d scroll=%d",
+			s.replace.Text(), s.replace.Cursor, s.replace.Scroll())
 	}
 }
 
@@ -652,7 +659,7 @@ func TestAnyModalOpen_ListPickIsOverlay(t *testing.T) {
 func TestAnyModalOpen_FindStripIsNotOverlay(t *testing.T) {
 	a := seedFindApp(t, "hello\n")
 	a.openFind()
-	if !a.findOpen {
+	if !a.findBarOpen() {
 		t.Fatal("precondition: find bar should be open")
 	}
 	if a.anyModalOpen() {
@@ -669,7 +676,7 @@ func TestAnyModalOpen_FindStripIsNotOverlay(t *testing.T) {
 // bar has exactly one (closeFind), and closeAllModals must use it.
 func TestCloseAllModals_TearsDownProjectFindThroughOnePath(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	a.projFind.findOpen = true
+	a.strip = projFindStrip{a: a}
 	a.projFind.query.SetText("query")
 	a.projFind.findTruncated = true
 	a.projFind.findFolded = map[string]bool{"a.go": true}
@@ -687,10 +694,10 @@ func TestCloseAllModals_TearsDownProjectFindThroughOnePath(t *testing.T) {
 
 	a.closeAllModals()
 
-	if a.projFind.findOpen || a.projFind.query.Text() != "" || a.projFind.query.Cursor != 0 ||
+	if a.projFindOpen() || a.projFind.query.Text() != "" || a.projFind.query.Cursor != 0 ||
 		a.projFind.findTruncated || a.projFind.findFolded != nil {
 		t.Fatalf("panel state survived: open=%v value=%q cursor=%d truncated=%v folded=%v",
-			a.projFind.findOpen, a.projFind.query.Text(), a.projFind.query.Cursor,
+			a.projFindOpen(), a.projFind.query.Text(), a.projFind.query.Cursor,
 			a.projFind.findTruncated, a.projFind.findFolded)
 	}
 	if a.projFind.replaceOpen || a.projFind.replace.Text() != "" || a.projFind.replace.Cursor != 0 || a.projFind.focusReplace {
