@@ -14,6 +14,7 @@ package editor
 
 import (
 	"bytes"
+	"errors"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -115,6 +116,52 @@ func TestDecodeImageFile_Errors(t *testing.T) {
 	_, _, err := decodeImageFile(bogus)
 	if err == nil {
 		t.Fatal("expected error decoding non-image bytes")
+	}
+}
+
+// TestDecodeImageFile_RefusesHugeDimensions crafts a GIF whose Logical
+// Screen Descriptor declares 65535×65535 pixels — decodable by
+// image.DecodeConfig without ever touching image data, so a few bytes on
+// disk can otherwise trick decodeImageFile into allocating a ~17 GB RGBA
+// raster. decodeImageFile must refuse via ErrImageTooLarge before ever
+// calling the real image.Decode.
+func TestDecodeImageFile_RefusesHugeDimensions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "huge.gif")
+	// 6-byte signature, then width/height uint16 LE (65535 x 65535), then
+	// a packed byte with no global color table (0x00), background color
+	// index, and pixel aspect ratio — a complete, valid Logical Screen
+	// Descriptor with no image data required to decode its dimensions.
+	hdr := append([]byte("GIF89a"), 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00)
+	if err := os.WriteFile(path, hdr, 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, _, err := decodeImageFile(path); !errors.Is(err, ErrImageTooLarge) {
+		t.Fatalf("want ErrImageTooLarge, got %v", err)
+	}
+}
+
+// TestDecodeImageFile_RefusesOversizeFile pins the byte-size half of the
+// guard: a file whose size alone exceeds maxOpenBytes must be refused
+// before any decode is attempted, the same way NewTab's text path stats
+// before it reads. The file is sparse (Truncate, no real writes) so the
+// test stays fast.
+func TestDecodeImageFile_RefusesOversizeFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "huge.png")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := f.Truncate(maxOpenBytes + 1); err != nil {
+		f.Close()
+		t.Fatalf("truncate: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, _, err := decodeImageFile(path); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("want ErrFileTooLarge, got %v", err)
 	}
 }
 

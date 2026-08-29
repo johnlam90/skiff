@@ -29,11 +29,13 @@
 package editor
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	_ "image/gif"  // register decoder so image.Decode handles .gif
 	_ "image/jpeg" // register decoder so image.Decode handles .jpg / .jpeg
 	_ "image/png"  // register decoder so image.Decode handles .png
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,16 +64,61 @@ func isImageExt(path string) bool {
 	return false
 }
 
+// maxImagePixels caps the decoded raster. The preview renders into a
+// terminal grid of at most a few hundred cells per side, so nothing
+// legitimate needs more than a large camera photo (~48 MP ≈ 192 MB of
+// RGBA) — while a crafted header can request an arbitrary allocation
+// from a tiny file. Multiplication is safe: both dims are decoded from
+// fixed-width fields far below overflow range.
+const maxImagePixels = 48_000_000
+
+// ErrImageTooLarge marks a refusal to decode an image whose declared
+// dimensions exceed maxImagePixels — a guard against decode bombs, not
+// a judgment about the file. Callers flash it like ErrFileTooLarge.
+var ErrImageTooLarge = errors.New("image dimensions too large to preview")
+
 // decodeImageFile opens path, decodes whatever image format the magic
 // bytes advertise, and returns the image plus the format name (handy
 // for the status bar). Errors are wrapped with the basename so the
 // flash message is useful.
+//
+// Two guards run before the real decode, both cheap relative to the
+// full raster they protect against: a Stat against maxOpenBytes (the
+// same cap NewTab applies to text, so an oversize image can't sneak
+// past the size gate the way it used to), then an image.DecodeConfig
+// probe against maxImagePixels — a header-only read that catches a
+// tiny file whose declared dimensions would otherwise make image.Decode
+// allocate an arbitrarily large raster on the event loop.
 func decodeImageFile(path string) (image.Image, string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, "", err
 	}
 	defer f.Close()
+
+	if info, statErr := f.Stat(); statErr == nil {
+		if info.Size() > maxOpenBytes {
+			return nil, "", fmt.Errorf("%s is %s (limit %s): %w",
+				filepath.Base(path), mibString(info.Size()), mibString(maxOpenBytes),
+				ErrFileTooLarge)
+		}
+	}
+
+	cfg, _, err := image.DecodeConfig(f)
+	if err != nil {
+		return nil, "", fmt.Errorf("decode %s: %w", filepath.Base(path), err)
+	}
+	if int64(cfg.Width)*int64(cfg.Height) > maxImagePixels {
+		return nil, "", fmt.Errorf("%s: %dx%d pixels: %w",
+			filepath.Base(path), cfg.Width, cfg.Height, ErrImageTooLarge)
+	}
+
+	// DecodeConfig consumed the header; rewind before the real decode
+	// re-reads it in full.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, "", fmt.Errorf("decode %s: %w", filepath.Base(path), err)
+	}
+
 	img, format, err := image.Decode(f)
 	if err != nil {
 		return nil, "", fmt.Errorf("decode %s: %w", filepath.Base(path), err)

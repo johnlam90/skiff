@@ -274,6 +274,42 @@ func detectLineEnding(data []byte) LineEnding {
 	return LineEndingLF
 }
 
+// readTextFile is the single gate every text buffer fills through: it
+// stats path against maxOpenBytes before reading (the guard must not be
+// paid for by the read), reads, and refuses content looksBinary rejects.
+// A missing file returns empty data and a zero mtime — NewTab treats that
+// as a brand-new buffer; Reload's callers stat again via reloadFromDisk
+// and error earlier since a reload target that vanished is itself a
+// failure.
+func readTextFile(path string) (data []byte, mtime time.Time, err error) {
+	// Stat first: the size guard exists to avoid reading the file, so it
+	// cannot be paid for by reading it. The same call supplies the
+	// on-disk mtime the app compares against to detect external edits —
+	// a missing file leaves it as the zero value, which callers handle
+	// explicitly.
+	if info, statErr := os.Stat(path); statErr == nil {
+		if info.Size() > maxOpenBytes {
+			return nil, time.Time{}, fmt.Errorf("%s is %s (limit %s): %w",
+				filepath.Base(path), mibString(info.Size()), mibString(maxOpenBytes),
+				ErrFileTooLarge)
+		}
+		mtime = info.ModTime()
+	}
+	b, readErr := os.ReadFile(path)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return nil, time.Time{}, readErr
+	}
+	if looksBinary(b) {
+		// A text buffer must never load binary content: every
+		// downstream stage — Chroma lexing, per-rune style grids,
+		// soft-wrap math — scales with line length, and binary data
+		// has pathological "lines". Opening a large zip used to
+		// freeze the editor outright.
+		return nil, time.Time{}, fmt.Errorf("%s: %w", filepath.Base(path), ErrBinaryFile)
+	}
+	return b, mtime, nil
+}
+
 // NewTab opens path and returns a Tab. If the file does not exist, the tab
 // is created with an empty buffer that will be written on first save —
 // matching what most editors do when you "open" a brand-new file path.
@@ -286,32 +322,11 @@ func NewTab(path string) (*Tab, error) {
 	var data []byte
 	var mtime time.Time
 	if path != "" {
-		// Stat first: the size guard exists to avoid reading the file,
-		// so it cannot be paid for by reading it. The same call supplies
-		// the on-disk mtime the app compares against to detect external
-		// edits — a missing file leaves it as the zero value, which the
-		// reconcile loop handles explicitly.
-		if info, statErr := os.Stat(path); statErr == nil {
-			if info.Size() > maxOpenBytes {
-				return nil, fmt.Errorf("%s is %s (limit %s): %w",
-					filepath.Base(path), mibString(info.Size()), mibString(maxOpenBytes),
-					ErrFileTooLarge)
-			}
-			mtime = info.ModTime()
-		}
-		b, err := os.ReadFile(path)
-		if err != nil && !os.IsNotExist(err) {
+		d, m, err := readTextFile(path)
+		if err != nil {
 			return nil, err
 		}
-		if looksBinary(b) {
-			// A text buffer must never load binary content: every
-			// downstream stage — Chroma lexing, per-rune style grids,
-			// soft-wrap math — scales with line length, and binary data
-			// has pathological "lines". Opening a large zip used to
-			// freeze the editor outright.
-			return nil, fmt.Errorf("%s: %w", filepath.Base(path), ErrBinaryFile)
-		}
-		data = b
+		data, mtime = d, m
 	}
 	t := &Tab{
 		Path:       path,
@@ -414,19 +429,27 @@ func (t *Tab) Save() error {
 	return nil
 }
 
-// reloadFromDisk re-reads the file from disk into the buffer. Cursor and
-// anchor are clamped to the new content (so the user keeps roughly their
-// place instead of getting snapped to line 0); ScrollY is left alone and
-// gets clamped on the next render. Dirty is cleared and the syntax cache
-// is invalidated. It does NOT touch undo history — that decision belongs
-// to the caller, which is why Reload and ReloadKeepHistory both wrap this
-// and differ only in what they do to the stacks afterwards.
+// reloadFromDisk re-reads the file from disk into the buffer, through the
+// same readTextFile gate NewTab uses: a file that grew past maxOpenBytes
+// or turned binary since it was opened (a `git checkout`/`make` swapping
+// in a build artifact at the same path) is refused exactly like a first
+// open would be, and — since the gate runs before any field on t is
+// touched — a refusal leaves the existing buffer completely intact. The
+// separate up-front Stat exists only to turn a vanished file into an
+// error; readTextFile tolerates a missing path (that's what lets NewTab
+// treat one as a brand-new buffer), but a reload target disappearing is
+// a failure, not a fresh start. Cursor and anchor are clamped to the new
+// content (so the user keeps roughly their place instead of getting
+// snapped to line 0); ScrollY is left alone and gets clamped on the next
+// render. Dirty is cleared and the syntax cache is invalidated. It does
+// NOT touch undo history — that decision belongs to the caller, which is
+// why Reload and ReloadKeepHistory both wrap this and differ only in what
+// they do to the stacks afterwards.
 func (t *Tab) reloadFromDisk() error {
-	data, err := os.ReadFile(t.Path)
-	if err != nil {
+	if _, err := os.Stat(t.Path); err != nil {
 		return err
 	}
-	info, err := os.Stat(t.Path)
+	data, mtime, err := readTextFile(t.Path)
 	if err != nil {
 		return err
 	}
@@ -436,7 +459,7 @@ func (t *Tab) reloadFromDisk() error {
 	t.Anchor = t.Cursor // drop any selection — line indices may have shifted.
 	t.Dirty = false
 	t.DiskGone = false
-	t.Mtime = info.ModTime()
+	t.Mtime = mtime
 	t.StyleStale = true
 	t.cursorMoved = true
 	return nil

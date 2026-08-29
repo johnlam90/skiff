@@ -570,6 +570,93 @@ func TestReload_StillClearsHistory(t *testing.T) {
 	}
 }
 
+// TestReload_RefusesGrownFile pins the shared read gate: a file that grew
+// past maxOpenBytes since it was opened must be refused by both reload
+// variants, and — since a refusal must leave no partial state — the
+// buffer has to still hold exactly what was there before the reload was
+// attempted.
+func TestReload_RefusesGrownFile(t *testing.T) {
+	for _, variant := range []struct {
+		name   string
+		reload func(*Tab) error
+	}{
+		{"Reload", (*Tab).Reload},
+		{"ReloadKeepHistory", (*Tab).ReloadKeepHistory},
+	} {
+		t.Run(variant.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "x.txt")
+			if err := os.WriteFile(path, []byte("original"), 0644); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			tab, err := NewTab(path)
+			if err != nil {
+				t.Fatalf("NewTab: %v", err)
+			}
+
+			// Grow the file past the cap externally — sparse, so the test
+			// doesn't actually write 32 MiB to disk.
+			f, err := os.OpenFile(path, os.O_WRONLY, 0644)
+			if err != nil {
+				t.Fatalf("reopen: %v", err)
+			}
+			if err := f.Truncate(maxOpenBytes + 1); err != nil {
+				f.Close()
+				t.Fatalf("truncate: %v", err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+
+			if err := variant.reload(tab); !errors.Is(err, ErrFileTooLarge) {
+				t.Fatalf("want ErrFileTooLarge, got %v", err)
+			}
+			if got := tab.Buffer.String(); got != "original" {
+				t.Fatalf("buffer mutated by refused reload: %q", got)
+			}
+		})
+	}
+}
+
+// TestReload_RefusesNowBinaryFile pins that a file which turned binary
+// after it was opened — e.g. `git checkout` swapping in a build artifact
+// at the same path — is refused by both reload variants, and that the
+// refusal leaves the tab's existing buffer untouched rather than partly
+// applying the new (rejected) content.
+func TestReload_RefusesNowBinaryFile(t *testing.T) {
+	for _, variant := range []struct {
+		name   string
+		reload func(*Tab) error
+	}{
+		{"Reload", (*Tab).Reload},
+		{"ReloadKeepHistory", (*Tab).ReloadKeepHistory},
+	} {
+		t.Run(variant.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "x.txt")
+			if err := os.WriteFile(path, []byte("original"), 0644); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			tab, err := NewTab(path)
+			if err != nil {
+				t.Fatalf("NewTab: %v", err)
+			}
+
+			data := append([]byte("PK\x03\x04"), make([]byte, 64)...)
+			if err := os.WriteFile(path, data, 0644); err != nil {
+				t.Fatalf("rewrite: %v", err)
+			}
+
+			if err := variant.reload(tab); !errors.Is(err, ErrBinaryFile) {
+				t.Fatalf("want ErrBinaryFile, got %v", err)
+			}
+			if got := tab.Buffer.String(); got != "original" {
+				t.Fatalf("buffer mutated by refused reload: %q", got)
+			}
+		})
+	}
+}
+
 // TestTab_HasSelection_AndSelectionText covers the selection accessors for
 // (a) no selection, (b) anchor before cursor, (c) anchor after cursor.
 func TestTab_HasSelection_AndSelectionText(t *testing.T) {
@@ -1995,6 +2082,35 @@ func TestNewTab_OpensFileUnderCap(t *testing.T) {
 	}
 	if !tab.Mtime.Equal(info.ModTime()) {
 		t.Fatalf("mtime = %v, want %v", tab.Mtime, info.ModTime())
+	}
+}
+
+// TestNewTab_ImageOverSizeCapRefused pins that NewTab's image branch is
+// covered by the same size cap as the text path, even though the branch
+// still runs first — decodeImageFile carries its own Stat guard (see
+// image.go), so a sparse oversize file named like an image is refused
+// without ever attempting a decode. Naming it x.png rather than x.txt is
+// the point: the image extension routes into newImageTab before any of
+// NewTab's own text-path guards would see the file at all.
+func TestNewTab_ImageOverSizeCapRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.png")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := f.Truncate(maxOpenBytes + 1); err != nil {
+		f.Close()
+		t.Fatalf("truncate: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	tab, err := NewTab(path)
+	if !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("want ErrFileTooLarge, got %v", err)
+	}
+	if tab != nil {
+		t.Fatal("a refused open must not hand back a tab")
 	}
 }
 
