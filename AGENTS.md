@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Skiff is a Go terminal editor module at `github.com/johnlam90/skiff`; the CLI entry point is `main.go` and the binary is `skiff`. Core packages live under `internal/`: `app` owns the event loop and rendering, `editor` owns buffers/tabs/editing behavior, `filetree` manages the sidebar tree, and supporting packages cover clipboard, formatting, icons, config, theme, finder, and versioning. Tests sit beside source files as `*_test.go`. Website assets and docs live in `website/` as a Hugo + Tailwind site. Release packaging includes `Formula/skiff.rb`, `install.sh`, and samples under `samples/`.
+Skiff is a Go terminal editor module at `github.com/johnlam90/skiff`; the CLI entry point is `main.go` and the binary is `skiff`. Core packages live under `internal/`: `app` owns the event loop and rendering, `editor` owns buffers/tabs/editing behavior, `filetree` manages the sidebar tree, and supporting packages cover clipboard, formatting, icons, config, theme, finder, and versioning. Tests sit beside source files as `*_test.go`. Website assets and docs live in `website/` as a Hugo + Tailwind site. Release packaging includes `Formula/skiff.rb` and `install.sh`.
 
 ## Build, Test, and Development Commands
 

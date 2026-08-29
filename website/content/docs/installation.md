@@ -85,10 +85,10 @@ For the masochists, the contributors, and anyone behind a corporate firewall:
 ```sh
 git clone https://github.com/johnlam90/skiff.git
 cd skiff
-make install   # builds and installs to $GOPATH/bin
+make install   # builds and installs to /usr/local/bin (may need sudo)
 ```
 
-Requires Go 1.22 or later. CGO is off by default — the build is fully static.
+Requires Go 1.24 or later (the `go` directive in `go.mod` is the source of truth). CGO is off by default — the build is fully static.
 
 ## Uninstall (manual)
 

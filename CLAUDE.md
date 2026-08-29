@@ -467,7 +467,7 @@ overlay follow.
 make run          # go run . in current dir
 make build        # build to ./bin/skiff
 make build-linux  # cross-compile linux/amd64
-make install      # go install to $GOPATH/bin
+make install      # install to /usr/local/bin (may need sudo)
 make tidy         # go mod tidy
 make clean        # rm -rf bin
 ```

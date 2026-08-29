@@ -201,8 +201,8 @@ The goals, in order:
 - **Format on save** — opt-in per-project via `.skiff/format.json`
   with a first-run trust prompt so cloning a repo never silently
   executes its commands. See [Format on save](#format-on-save).
-- **Single binary, no CGO** — cross-compiled for macOS, Linux, and
-  Windows on amd64 and arm64.
+- **Single binary, no CGO** — cross-compiled for macOS and Linux
+  (amd64 + arm64) and Windows (amd64).
 
 <img width="2504" height="1726" alt="CleanShot 2026-04-29 at 23 32 22@2x" src="https://github.com/user-attachments/assets/d0dca3da-5ba7-474d-852e-832acde90ca4" />
 
@@ -276,8 +276,9 @@ of `curl` or `wget`, and one of `sha256sum` or `shasum`.
 
 ### Other platforms (manual binary install)
 
-Pre-built binaries for Linux, macOS, and Windows (amd64 + arm64) are
-attached to every [GitHub Release](https://github.com/johnlam90/skiff/releases).
+Pre-built binaries for Linux and macOS (amd64 + arm64) and Windows
+(amd64) are attached to every
+[GitHub Release](https://github.com/johnlam90/skiff/releases).
 Download the archive for your OS/arch, extract it, and drop the
 `skiff` binary somewhere on your `$PATH`.
 
@@ -286,7 +287,7 @@ Download the archive for your OS/arch, extract it, and drop the
 ```sh
 git clone https://github.com/johnlam90/skiff.git
 cd skiff
-make install        # builds and installs to $GOPATH/bin
+make install        # builds and installs to /usr/local/bin (may need sudo)
 ```
 
 ## Usage
@@ -961,9 +962,9 @@ finding blocks the tag — and then:
    back to `main` with `[skip ci]`.
 3. Tags `v<x.y.z>` and pushes the tag.
 4. [GoReleaser](https://goreleaser.com/) cross-compiles for
-   linux/darwin/windows × amd64/arm64, attaches archives to a GitHub
-   Release, and pushes an updated formula into `Formula/skiff.rb`
-   on this same repo.
+   linux/darwin (amd64 + arm64) and windows/amd64, attaches archives
+   to a GitHub Release, and pushes an updated formula into
+   `Formula/skiff.rb` on this same repo.
 
 No PAT, no separate tap repo — the default workflow `GITHUB_TOKEN` is
 enough since the formula lives in the source repo.
