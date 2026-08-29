@@ -15,6 +15,11 @@ package app
 // mode is picked per draw, so resizing the terminal reflows the diff
 // live.
 //
+// The pairing itself is not here: internal/diff turns a patch into rows
+// and this file paints them, so the same layout serves a `git diff` and
+// a dirty buffer measured against disk. What stays is presentation —
+// geometry, tints, syntax styles, scrolling, buttons.
+//
 // Reached from the Git panel (click a change row) and the editor's
 // gutter markers (click a colored bar). [ Open file ] — when the file
 // still exists — jumps to the first changed line; Esc, Close, or a
@@ -27,6 +32,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/johnlam90/skiff/internal/diff"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/git"
@@ -48,50 +54,17 @@ const (
 	diffNoGutter = 5
 )
 
-// diffRowKind classifies one aligned row of the side-by-side layout.
-type diffRowKind int
-
-const (
-	// diffRowContext is an unchanged line present on both sides.
-	diffRowContext diffRowKind = iota
-	// diffRowChange holds a deletion (left), an addition (right), or a
-	// modification (both) — a zero line number marks the missing side.
-	diffRowChange
-	// diffRowHunk is an @@ hunk header spanning the full width.
-	diffRowHunk
-	// diffRowFile is a file boundary in a multi-file diff (a commit
-	// diff from the history views) — the file's path spans the width.
-	diffRowFile
-)
-
-// span is a half-open rune range [Start, End) inside a line. The zero
-// value means "no range".
-type span struct {
-	Start, End int
-}
-
-// diffRow is one display row of the side-by-side diff. LeftNo/RightNo
-// are 1-based file line numbers; 0 means that side is blank for this
-// row (a pure addition or deletion). Hunk rows carry the header text
-// in Left. LeftEmph/RightEmph mark the intra-line changed span on
-// paired modification rows (see annotateDiffSpans).
-type diffRow struct {
-	Kind            diffRowKind
-	LeftNo, RightNo int
-	Left, Right     string
-	LeftEmph        span
-	RightEmph       span
-}
-
-// diffOverlay is the diff viewer's overlay: the raw and aligned diff,
-// precomputed context styles, scroll state, and the button focus. It is
-// bespoke — it needs the App for the git-panel diff walk, file opening,
-// and theme — and its state dies with it.
+// diffOverlay is the diff viewer's overlay: the paired rows and their
+// unified rendering, precomputed context styles, scroll state, and the
+// button focus. It is bespoke — it needs the App for the git-panel diff
+// walk, file opening, and theme — and its state dies with it.
 type diffOverlay struct {
-	app      *App
-	title    string
-	raw      []string
-	rows     []diffRow
+	app   *App
+	title string
+	// unified is the patch written back out as diff text — the body of
+	// the narrow layout, where there is no room for two columns.
+	unified  []string
+	rows     []diff.Row
 	openPath string
 	maxLen   int
 	scroll   int
@@ -107,37 +80,6 @@ type diffOverlay struct {
 	tinted bool
 	// hover is the focused button: 0 = Close, 1 = Open file.
 	hover int
-}
-
-// diffSpan locates the changed portion of a modified line pair: the
-// longest common prefix and suffix are unchanged, and whatever sits
-// between differs. Returns the differing rune spans of old and new.
-// The suffix never overlaps the prefix, so a pure insertion yields an
-// empty span on the old side at the insertion point.
-func diffSpan(old, new []rune) (oldSpan, newSpan span) {
-	p := 0
-	for p < len(old) && p < len(new) && old[p] == new[p] {
-		p++
-	}
-	s := 0
-	for s < len(old)-p && s < len(new)-p && old[len(old)-1-s] == new[len(new)-1-s] {
-		s++
-	}
-	return span{Start: p, End: len(old) - s}, span{Start: p, End: len(new) - s}
-}
-
-// annotateDiffSpans stamps intra-line emphasis spans onto paired
-// modification rows — the word-level highlight that makes "which
-// characters moved" readable at a glance. One-sided rows (pure
-// additions/deletions) are left alone: the whole line is the change.
-func annotateDiffSpans(rows []diffRow) {
-	for i := range rows {
-		r := &rows[i]
-		if r.Kind != diffRowChange || r.LeftNo == 0 || r.RightNo == 0 {
-			continue
-		}
-		r.LeftEmph, r.RightEmph = diffSpan([]rune(r.Left), []rune(r.Right))
-	}
 }
 
 // diffLoadKind names which surface asked for a diff. The two differ
@@ -164,7 +106,7 @@ type diffLoadEvent struct {
 	kind    diffLoadKind
 	title   string
 	tabPath string
-	lines   []string
+	patch   diff.Patch
 }
 
 // When satisfies the tcell.Event interface.
@@ -182,7 +124,7 @@ func (e *diffLoadEvent) When() time.Time { return e.when }
 // discrete, low-rate gesture bounded by git's own read deadline, so the
 // newest click winning matters more than capping concurrency; the
 // generation check in handleDiffLoaded is what makes that safe.
-func (a *App) requestDiff(kind diffLoadKind, title, tabPath string, load func(*git.Repo) []string) {
+func (a *App) requestDiff(kind diffLoadKind, title, tabPath string, load func(*git.Repo) diff.Patch) {
 	a.diffLoadGen++
 	gen := a.diffLoadGen
 	repo := a.readRepo()
@@ -191,14 +133,14 @@ func (a *App) requestDiff(kind diffLoadKind, title, tabPath string, load func(*g
 	// away, and a click that paints nothing reads as a dropped click.
 	a.flash("Loading diff…")
 	a.safeGo("diff-load", func() {
-		lines := load(repo)
+		patch := load(repo)
 		_ = scr.PostEvent(&diffLoadEvent{
 			when:    time.Now(),
 			gen:     gen,
 			kind:    kind,
 			title:   title,
 			tabPath: tabPath,
-			lines:   lines,
+			patch:   patch,
 		})
 	})
 }
@@ -218,7 +160,7 @@ func (a *App) handleDiffLoaded(e *diffLoadEvent) {
 	if tab == nil || tab.Path != e.tabPath {
 		return
 	}
-	if len(e.lines) == 0 {
+	if e.patch.Empty() {
 		switch e.kind {
 		case diffLoadHunk:
 			a.openInfo("Git change", []string{"No git diff found for this line."})
@@ -229,7 +171,7 @@ func (a *App) handleDiffLoaded(e *diffLoadEvent) {
 	}
 	// The file is already open in front of the user, so the diff view
 	// gets no [ Open file ] button — Close is the only way out.
-	a.openDiffView(e.title, e.lines, "", e.tabPath)
+	a.openDiffView(e.title, e.patch, "", e.tabPath)
 }
 
 // menuDiffFile is the ≡ menu entry that opens the active tab's own
@@ -253,7 +195,7 @@ func (a *App) menuDiffFile() {
 		}
 	}
 	base, path, untracked := a.diffBase, tab.Path, kind == filetree.GitChangeAdded
-	a.requestDiff(diffLoadFile, "Diff · "+title, tab.Path, func(repo *git.Repo) []string {
+	a.requestDiff(diffLoadFile, "Diff · "+title, tab.Path, func(repo *git.Repo) diff.Patch {
 		return repoFileDiff(repo, base, path, untracked)
 	})
 }
@@ -278,21 +220,22 @@ func (a *App) hasDiffableTab() bool {
 // what the user came for, look identical either way.
 const diffHighlightCap = 4000
 
-// openDiffView shows the diff modal. raw is the unified `git diff`
-// output, one line per entry — kept verbatim for the narrow layout and
-// parsed into aligned rows for the wide one. openPath, when non-empty,
-// arms the [ Open file ] button with that file; deleted files pass ""
-// and get a lone [ Close ]. langPath names the file for syntax
-// highlighting — it may point at a path that no longer exists (deleted
-// files); only its extension matters.
-func (a *App) openDiffView(title string, raw []string, openPath, langPath string) {
+// openDiffView shows the diff modal. p is the parsed diff — whether it
+// came from `git diff` or from a buffer measured against what is on
+// disk, the modal sees the same model: diff.Rows pairs it for the wide
+// layout and diffBodyLines writes it back out for the narrow one.
+// openPath, when non-empty, arms the [ Open file ] button with that
+// file; deleted files pass "" and get a lone [ Close ]. langPath names
+// the file for syntax highlighting — it may point at a path that no
+// longer exists (deleted files); only its extension matters.
+func (a *App) openDiffView(title string, p diff.Patch, openPath, langPath string) {
 	a.closeAllModals()
-	d := &diffOverlay{app: a, title: title, raw: raw, openPath: openPath}
-	d.rows = parseSideBySideDiff(raw)
-	annotateDiffSpans(d.rows)
+	d := &diffOverlay{app: a, title: title, openPath: openPath}
+	d.rows = diff.Rows(p)
+	d.unified = diffBodyLines(p)
 	d.leftStyles, d.rightStyles = diffSideStyles(d.rows, langPath, a.theme)
 	d.tints, d.tinted = a.theme.DiffTints()
-	d.maxLen = diffLongestLine(d.raw, d.rows)
+	d.maxLen = diffLongestLine(d.unified, d.rows)
 	if openPath != "" {
 		d.hover = 1 // focus Open file so Enter is the fast path
 	}
@@ -306,14 +249,14 @@ func (a *App) openDiffView(title string, raw []string, openPath, langPath string
 // different text left and right), joined so multi-line tokens survive;
 // precomputing at open keeps the per-draw cost at zero — draws happen
 // on every mouse-motion event. Hunk and file rows stay nil.
-func diffSideStyles(rows []diffRow, langPath string, th theme.Theme) (left, right [][]tcell.Style) {
+func diffSideStyles(rows []diff.Row, langPath string, th theme.Theme) (left, right [][]tcell.Style) {
 	if langPath == "" || len(rows) == 0 || len(rows) > diffHighlightCap {
 		return nil, nil
 	}
-	side := func(text func(diffRow) string) [][]tcell.Style {
+	side := func(text func(diff.Row) string) [][]tcell.Style {
 		src := make([]string, len(rows))
 		for i, r := range rows {
-			if r.Kind == diffRowHunk || r.Kind == diffRowFile {
+			if r.Kind == diff.RowHunk || r.Kind == diff.RowFile {
 				continue
 			}
 			src[i] = text(r)
@@ -321,7 +264,7 @@ func diffSideStyles(rows []diffRow, langPath string, th theme.Theme) (left, righ
 		grid := editor.Highlight(langPath, strings.Join(src, "\n"), th)
 		styles := make([][]tcell.Style, len(rows))
 		for i, r := range rows {
-			if (r.Kind != diffRowContext && r.Kind != diffRowChange) || i >= len(grid) {
+			if (r.Kind != diff.RowContext && r.Kind != diff.RowChange) || i >= len(grid) {
 				continue
 			}
 			// Re-background onto the modal surface — Highlight styles
@@ -335,13 +278,13 @@ func diffSideStyles(rows []diffRow, langPath string, th theme.Theme) (left, righ
 		}
 		return styles
 	}
-	left = side(func(r diffRow) string {
+	left = side(func(r diff.Row) string {
 		if r.LeftNo > 0 {
 			return r.Left
 		}
 		return ""
 	})
-	right = side(func(r diffRow) string {
+	right = side(func(r diff.Row) string {
 		if r.RightNo > 0 {
 			return r.Right
 		}
@@ -352,9 +295,9 @@ func diffSideStyles(rows []diffRow, langPath string, th theme.Theme) (left, righ
 
 // diffLongestLine returns the widest content line in either layout,
 // bounding how far the diff can scroll horizontally.
-func diffLongestLine(raw []string, rows []diffRow) int {
+func diffLongestLine(unified []string, rows []diff.Row) int {
 	longest := 0
-	for _, l := range raw {
+	for _, l := range unified {
 		if n := runeLen(l); n > longest {
 			longest = n
 		}
@@ -471,39 +414,18 @@ func (d *diffOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
 // runDiffOpenFile fires the Open file button: close the modal first
 // (capture-then-close, same as confirmYes) and jump to the diff's own
 // first changed line. The target line comes from d.rows — the diff
-// overlay's already-parsed aligned rows — never from tab.GitLines: the
+// overlay's own paired rows — never from tab.GitLines: the
 // tab's async gutter markers may still be nil right after open (plan
 // 009 took the inline `git diff` off the tab-open path), and the diff
 // overlay already has everything it needs without another git call.
 func (d *diffOverlay) openFileButton() {
 	a := d.app
 	path := d.openPath
-	line := firstChangedLine(d.rows)
+	line := diff.FirstChanged(d.rows)
 	a.closeAllModals()
 	if path != "" {
 		a.OpenFileAtLine(path, line)
 	}
-}
-
-// firstChangedLine returns the aligned diff's own answer to "what's the
-// first thing that changed" — the file line the Open file button jumps
-// to. RightNo (the new-file line number) is preferred; a pure deletion
-// has no right side, so LeftNo is the fallback. Both are 1-based, the
-// same convention OpenFileAtLine expects. Returns 0 (no jump target)
-// when rows carries no change row at all.
-func firstChangedLine(rows []diffRow) int {
-	for _, r := range rows {
-		if r.Kind != diffRowChange {
-			continue
-		}
-		if r.RightNo > 0 {
-			return r.RightNo
-		}
-		if r.LeftNo > 0 {
-			return r.LeftNo
-		}
-	}
-	return 0
 }
 
 // scrollDiff nudges the body viewport by delta rows, clamped to the
@@ -551,12 +473,12 @@ func (d *diffOverlay) sideBySide() bool {
 }
 
 // diffBodyCount returns how many body rows the active layout has:
-// aligned rows side-by-side, raw diff lines unified.
+// aligned rows side-by-side, unified diff lines otherwise.
 func (d *diffOverlay) bodyCount() int {
 	if d.sideBySide() {
 		return len(d.rows)
 	}
-	return len(d.raw)
+	return len(d.unified)
 }
 
 // diffVisibleRows returns how many body rows fit in the modal.
@@ -585,8 +507,8 @@ func (d *diffOverlay) modalRect() (x, y, w, h int) {
 		maxBody = 3
 	}
 	body := len(d.rows)
-	if len(d.raw) > body {
-		body = len(d.raw)
+	if len(d.unified) > body {
+		body = len(d.unified)
 	}
 	if body > maxBody {
 		body = maxBody
@@ -664,13 +586,13 @@ func (d *diffOverlay) Draw(scr tcell.Screen) {
 	} else {
 		for i := 0; i < visible; i++ {
 			idx := d.scroll + i
-			if idx >= len(d.raw) {
+			if idx >= len(d.unified) {
 				break
 			}
 			// Style from the full line (the +/-/@ prefix), display from
 			// the scrolled slice — so sideways scrolling never changes
 			// a line's color.
-			line := d.raw[idx]
+			line := d.unified[idx]
 			st := overlay.DiffLineStyle(a.theme, bg, line)
 			drawAt(scr, bodyX, my+3+i, sliceRunes(line, d.scrollX, bodyW), st)
 		}
@@ -696,12 +618,12 @@ func (d *diffOverlay) drawRowSideBySide(scr tcell.Screen, x, y, w, idx int) {
 	a := d.app
 	row := d.rows[idx]
 	bg := a.theme.LineHL
-	if row.Kind == diffRowFile {
+	if row.Kind == diff.RowFile {
 		fileStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true)
 		drawAt(scr, x, y, sliceRunes("▸ "+row.Left, 0, w), fileStyle)
 		return
 	}
-	if row.Kind == diffRowHunk {
+	if row.Kind == diff.RowHunk {
 		hunkStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.AccentSoft).Bold(true)
 		drawAt(scr, x, y, sliceRunes(row.Left, 0, w), hunkStyle)
 		return
@@ -720,7 +642,7 @@ func (d *diffOverlay) drawRowSideBySide(scr tcell.Screen, x, y, w, idx int) {
 	if idx < len(d.rightStyles) {
 		rctx = d.rightStyles[idx]
 	}
-	changed := row.Kind == diffRowChange
+	changed := row.Kind == diff.RowChange
 	d.drawSide(scr, x, y, leftW, row.LeftNo, row.Left, changed,
 		a.theme.GitDeleted, d.tints.DelRow, d.tints.DelEmph, row.LeftEmph, lctx)
 	d.drawSide(scr, rightX, y, rightW, row.RightNo, row.Right, changed,
@@ -736,7 +658,7 @@ func (d *diffOverlay) drawRowSideBySide(scr tcell.Screen, x, y, w, idx int) {
 // palettes (no tints) the legacy painting stands: the Git change color
 // as foreground, reverse video over the emphasis span. The horizontal
 // scroll offset slides the text only; gutters stay put.
-func (d *diffOverlay) drawSide(scr tcell.Screen, x, y, w, lineNo int, text string, changed bool, changeColor, rowTint, emphTint tcell.Color, emph span, ctx []tcell.Style) {
+func (d *diffOverlay) drawSide(scr tcell.Screen, x, y, w, lineNo int, text string, changed bool, changeColor, rowTint, emphTint tcell.Color, emph diff.Span, ctx []tcell.Style) {
 	a := d.app
 	if lineNo == 0 {
 		return // blank side of a pure addition or deletion — the gap says "nothing was here"
@@ -793,113 +715,53 @@ func sliceRunes(s string, offset, w int) string {
 	return string(runes)
 }
 
-// parseSideBySideDiff converts unified `git diff` output into aligned
-// two-column rows: context lines occupy both sides, each run of
-// deletions pairs line-for-line with the following run of additions
-// (the standard hunk shape for a modification), and leftovers become
-// one-sided rows. File headers (diff --git, index, ---, +++) are
-// dropped — the modal title already names the file. Pure, so tests can
-// feed it captured diffs without a repo.
-func parseSideBySideDiff(raw []string) []diffRow {
-	type numbered struct {
-		no   int
-		text string
-	}
-	var rows []diffRow
-	var dels, adds []numbered
-	oldNo, newNo := 0, 0
-	inHunk := false
-
-	flush := func() {
-		n := len(dels)
-		if len(adds) > n {
-			n = len(adds)
+// diffBodyLines writes a patch back out as unified-diff text — the body
+// of the narrow layout, which shows the diff the way `git diff` prints
+// it when the terminal is too narrow for two columns. Nothing parses
+// this back: it is the display form of a model that is already parsed,
+// which is exactly the round trip this editor no longer makes.
+//
+// A file that carries paths gets git's framing above its hunks, because
+// that is what the loader's own output looked like and what a reader of
+// `git diff` expects. A buffer measured against disk carries none — the
+// two sides are one file, and the modal title already names it.
+func diffBodyLines(p diff.Patch) []string {
+	var out []string
+	for _, f := range p.Files {
+		old, new := f.OldPath, f.NewPath
+		if old == "" {
+			old = f.Path()
 		}
-		for i := 0; i < n; i++ {
-			row := diffRow{Kind: diffRowChange}
-			if i < len(dels) {
-				row.LeftNo, row.Left = dels[i].no, dels[i].text
-			}
-			if i < len(adds) {
-				row.RightNo, row.Right = adds[i].no, adds[i].text
-			}
-			rows = append(rows, row)
+		if new == "" {
+			new = f.Path()
 		}
-		dels, adds = nil, nil
-	}
-
-	for _, line := range raw {
-		if strings.HasPrefix(line, "diff --git ") {
-			// A new file starts (commit diffs from the history views
-			// concatenate several). Close out the previous file and
-			// mark the boundary so the reader knows where they are.
-			flush()
-			inHunk = false
-			rows = append(rows, diffRow{Kind: diffRowFile, Left: diffGitPath(line)})
-			continue
+		if f.Path() != "" {
+			out = append(out, "diff --git a/"+old+" b/"+new,
+				"--- "+devNullOr(f.OldPath, "a/"),
+				"+++ "+devNullOr(f.NewPath, "b/"))
 		}
-		if strings.HasPrefix(line, "@@ ") {
-			flush()
-			oldStart, _, newStart, _, ok := parseHunkHeader(line)
-			if !ok {
-				continue
-			}
-			oldNo, newNo = oldStart, newStart
-			inHunk = true
-			rows = append(rows, diffRow{Kind: diffRowHunk, Left: line})
-			continue
+		if f.Binary {
+			out = append(out, "Binary files a/"+old+" and b/"+new+" differ")
 		}
-		if !inHunk {
-			continue // file headers before the first hunk
-		}
-		switch {
-		case strings.HasPrefix(line, "-"):
-			dels = append(dels, numbered{no: oldNo, text: line[1:]})
-			oldNo++
-		case strings.HasPrefix(line, "+"):
-			adds = append(adds, numbered{no: newNo, text: line[1:]})
-			newNo++
-		case strings.HasPrefix(line, `\`):
-			// "\ No newline at end of file" — metadata, not content.
-			continue
-		default:
-			flush()
-			text := strings.TrimPrefix(line, " ")
-			rows = append(rows, diffRow{Kind: diffRowContext, LeftNo: oldNo, RightNo: newNo, Left: text, Right: text})
-			oldNo++
-			newNo++
-		}
-	}
-	flush()
-	// A single-file diff doesn't need to announce its one file — the
-	// modal title already names it. Only multi-file diffs keep their
-	// boundary rows.
-	fileRows := 0
-	for _, r := range rows {
-		if r.Kind == diffRowFile {
-			fileRows++
-		}
-	}
-	if fileRows == 1 {
-		trimmed := rows[:0]
-		for _, r := range rows {
-			if r.Kind != diffRowFile {
-				trimmed = append(trimmed, r)
+		for _, h := range f.Hunks {
+			out = append(out, h.Header())
+			for _, ln := range h.Lines {
+				out = append(out, string(ln.Kind.Marker())+ln.Text)
+				if ln.NoNewline {
+					out = append(out, `\ No newline at end of file`)
+				}
 			}
 		}
-		rows = trimmed
 	}
-	return rows
+	return out
 }
 
-// diffGitPath extracts the file path from a "diff --git a/X b/Y"
-// boundary line, preferring the b side (the file's current name after
-// a rename). Falls back to the raw line when the format surprises us —
-// better an ugly header than a missing one.
-func diffGitPath(line string) string {
-	rest := strings.TrimPrefix(line, "diff --git ")
-	if idx := strings.LastIndex(rest, " b/"); idx >= 0 {
-		return rest[idx+len(" b/"):]
+// devNullOr renders one `---`/`+++` operand. An empty path is the side
+// that does not exist — a file being created or deleted — and git spells
+// that /dev/null rather than leaving the operand blank.
+func devNullOr(path, prefix string) string {
+	if path == "" {
+		return "/dev/null"
 	}
-	return rest
+	return prefix + path
 }

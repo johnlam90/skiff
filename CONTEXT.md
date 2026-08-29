@@ -101,6 +101,14 @@ set of changed paths — feeding every git-aware surface (tree badges,
 gutter, status bar, git panel).
 _Avoid_: git status (that's the command, not the model)
 
+**Patch**:
+One parsed diff — files, each with hunks, each with lines that know
+their old and new line numbers. Both producers build the same shape:
+`git diff` output parsed, or a dirty buffer measured against what is on
+disk. Nothing renders a patch to text in order to read it back.
+_Avoid_: diff output, diff lines (that is the display form, not the
+model)
+
 **Git panel**:
 The sidebar's second mode: the list of changed files with their change
 kinds, replacing the explorer tree while active. Mouse-first, but it can

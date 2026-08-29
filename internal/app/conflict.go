@@ -30,24 +30,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"time"
 
+	"github.com/johnlam90/skiff/internal/diff"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/overlay"
 )
-
-// diffContextLines is how many unchanged lines surround each hunk in the
-// buffer-vs-disk diff. Three is what `git diff` uses, and the diff
-// viewer's side-by-side layout was tuned against that shape.
-const diffContextLines = 3
-
-// diffPairCap bounds the LCS table the line differ allocates. Beyond it
-// the changed region is emitted as one coarse replace-everything hunk:
-// a 1000x1000 table is already 4 MB, and a conflict that large is one
-// the user will resolve by choosing a side, not by reading pairs.
-const diffPairCap = 1_000_000
 
 // noteDiskConflict records that path is in conflict at the given disk
 // mtime, which is what suppresses re-prompting on the next tick.
@@ -176,8 +164,11 @@ func (a *App) openConflictDiff(tab *editor.Tab) {
 	// the way the buffer side was — same CRLF handling, same trailing
 	// newline rule. Anything else invents differences.
 	disk := editor.NewBuffer(string(data)).Lines
-	lines := unifiedDiff(disk, tab.Buffer.Lines)
-	if len(lines) == 0 {
+	// diff.Lines builds hunks straight from the two line slices. This
+	// used to render them as `git diff` text purely so the diff view's
+	// own parser could read them back; both sides now speak the model.
+	f := diff.Lines(disk, tab.Buffer.Lines)
+	if len(f.Hunks) == 0 {
 		// Mtime moved but the contents match — someone touched the
 		// file or wrote it back byte-identical. Nothing to resolve.
 		a.clearDiskConflict(tab.Path)
@@ -186,198 +177,5 @@ func (a *App) openConflictDiff(tab *editor.Tab) {
 	}
 	// No [ Open file ] button: the file is already open in front of
 	// the user — that is the entire problem.
-	a.openDiffView("Disk vs buffer · "+name, lines, "", tab.Path)
-}
-
-// diffOp is one line of a line-level diff: kind is ' ' for context,
-// '-' for a line only on the old side, '+' for one only on the new.
-type diffOp struct {
-	kind byte
-	text string
-}
-
-// unifiedDiff renders old and new as `git diff`-shaped unified output,
-// one string per line, ready for openDiffView. Returns nil when the two
-// sides are identical.
-//
-// There is no git process involved here — the two sides are a buffer in
-// memory and a file we just read — so the diff is computed locally. The
-// common prefix and suffix are peeled off first, which is what keeps the
-// expensive part small in the case this exists for: another pane
-// rewrote a few lines of a long file.
-func unifiedDiff(old, new []string) []string {
-	pre := 0
-	for pre < len(old) && pre < len(new) && old[pre] == new[pre] {
-		pre++
-	}
-	suf := 0
-	for suf < len(old)-pre && suf < len(new)-pre &&
-		old[len(old)-1-suf] == new[len(new)-1-suf] {
-		suf++
-	}
-	midOld, midNew := old[pre:len(old)-suf], new[pre:len(new)-suf]
-	if len(midOld) == 0 && len(midNew) == 0 {
-		return nil
-	}
-
-	ops := make([]diffOp, 0, len(old)+len(new))
-	for _, l := range old[:pre] {
-		ops = append(ops, diffOp{' ', l})
-	}
-	ops = append(ops, alignLines(midOld, midNew)...)
-	for _, l := range old[len(old)-suf:] {
-		ops = append(ops, diffOp{' ', l})
-	}
-	return unifiedHunks(ops, diffContextLines)
-}
-
-// alignLines pairs up the differing middles of two files. Small regions
-// get a real longest-common-subsequence alignment; oversized ones (see
-// diffPairCap) collapse to "delete all of this, add all of that", which
-// is still a truthful diff and costs no memory.
-func alignLines(old, new []string) []diffOp {
-	if len(old) == 0 || len(new) == 0 || len(old)*len(new) > diffPairCap {
-		ops := make([]diffOp, 0, len(old)+len(new))
-		for _, l := range old {
-			ops = append(ops, diffOp{'-', l})
-		}
-		for _, l := range new {
-			ops = append(ops, diffOp{'+', l})
-		}
-		return ops
-	}
-
-	n, m := len(old), len(new)
-	stride := m + 1
-	// dp[i*stride+j] is the LCS length of old[i:] and new[j:]. int32
-	// halves the table against int on 64-bit and cannot overflow: the
-	// cap above keeps both dimensions well under 2^31.
-	dp := make([]int32, (n+1)*stride)
-	for i := n - 1; i >= 0; i-- {
-		for j := m - 1; j >= 0; j-- {
-			switch {
-			case old[i] == new[j]:
-				dp[i*stride+j] = dp[(i+1)*stride+j+1] + 1
-			case dp[(i+1)*stride+j] >= dp[i*stride+j+1]:
-				dp[i*stride+j] = dp[(i+1)*stride+j]
-			default:
-				dp[i*stride+j] = dp[i*stride+j+1]
-			}
-		}
-	}
-
-	ops := make([]diffOp, 0, n+m)
-	i, j := 0, 0
-	for i < n && j < m {
-		switch {
-		case old[i] == new[j]:
-			ops = append(ops, diffOp{' ', old[i]})
-			i++
-			j++
-		case dp[(i+1)*stride+j] >= dp[i*stride+j+1]:
-			// Deletions before additions on a tie: a modified line then
-			// reads as "-old" immediately followed by "+new", which is
-			// the shape parseSideBySideDiff pairs into one row.
-			ops = append(ops, diffOp{'-', old[i]})
-			i++
-		default:
-			ops = append(ops, diffOp{'+', new[j]})
-			j++
-		}
-	}
-	for ; i < n; i++ {
-		ops = append(ops, diffOp{'-', old[i]})
-	}
-	for ; j < m; j++ {
-		ops = append(ops, diffOp{'+', new[j]})
-	}
-	return ops
-}
-
-// unifiedHunks turns a full-file op list into unified-diff text: only
-// the changed regions survive, each padded with context lines and
-// introduced by an @@ header. Regions closer together than twice the
-// context are merged so the output never repeats a line.
-func unifiedHunks(ops []diffOp, context int) []string {
-	// Line numbers each op sits at, precomputed so hunk headers don't
-	// have to re-walk the list.
-	oldNo := make([]int, len(ops))
-	newNo := make([]int, len(ops))
-	o, n := 1, 1
-	for k, op := range ops {
-		oldNo[k], newNo[k] = o, n
-		switch op.kind {
-		case ' ':
-			o++
-			n++
-		case '-':
-			o++
-		case '+':
-			n++
-		}
-	}
-
-	var out []string
-	k := 0
-	for k < len(ops) {
-		if ops[k].kind == ' ' {
-			k++
-			continue
-		}
-		start := k - context
-		if start < 0 {
-			start = 0
-		}
-		// Extend through every change reachable within 2*context
-		// unchanged lines; anything further away earns its own hunk.
-		end := k
-		for scan := k; scan < len(ops); scan++ {
-			if ops[scan].kind != ' ' {
-				end = scan
-				continue
-			}
-			if scan-end > 2*context {
-				break
-			}
-		}
-		stop := end + context + 1
-		if stop > len(ops) {
-			stop = len(ops)
-		}
-
-		oldCount, newCount := 0, 0
-		for _, op := range ops[start:stop] {
-			if op.kind != '+' {
-				oldCount++
-			}
-			if op.kind != '-' {
-				newCount++
-			}
-		}
-		out = append(out, hunkHeader(oldNo[start], oldCount, newNo[start], newCount))
-		for _, op := range ops[start:stop] {
-			out = append(out, string(op.kind)+op.text)
-		}
-		k = stop
-	}
-	return out
-}
-
-// hunkHeader formats an @@ line. A zero-length side is reported at the
-// line before it, which is what `git diff` does and what keeps the
-// numbers in the diff viewer's gutter honest.
-func hunkHeader(oldStart, oldCount, newStart, newCount int) string {
-	side := func(start, count int) string {
-		if count == 0 {
-			start--
-		}
-		return strconv.Itoa(start) + "," + strconv.Itoa(count)
-	}
-	var b strings.Builder
-	b.WriteString("@@ -")
-	b.WriteString(side(oldStart, oldCount))
-	b.WriteString(" +")
-	b.WriteString(side(newStart, newCount))
-	b.WriteString(" @@")
-	return b.String()
+	a.openDiffView("Disk vs buffer · "+name, diff.Patch{Files: []diff.File{f}}, "", tab.Path)
 }

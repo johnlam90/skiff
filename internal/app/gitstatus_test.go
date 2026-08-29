@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/johnlam90/skiff/internal/diff"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
 )
@@ -188,7 +189,7 @@ func TestApplyGitStatus_UpdatesOpenTabGutters(t *testing.T) {
 
 // TestLoadGitFileDiff_DeletedFile pins the loader the Git changes modal
 // leans on for deleted rows: the full diff against HEAD, including the
-// removed content, comes back as display lines.
+// removed content, comes back as a parsed patch.
 func TestLoadGitFileDiff_DeletedFile(t *testing.T) {
 	requireGit(t)
 	repo := initRepo(t)
@@ -200,12 +201,15 @@ func TestLoadGitFileDiff_DeletedFile(t *testing.T) {
 		t.Fatalf("remove: %v", err)
 	}
 
-	lines := loadGitFileDiff(repo, "", path, false)
-	if len(lines) == 0 {
+	patch := loadGitFileDiff(repo, "", path, false)
+	if patch.Empty() {
 		t.Fatal("deleted file should produce a diff")
 	}
-	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "-farewell") {
+	f := patch.Files[0]
+	if !f.IsDeleted || f.Path() != "gone.txt" {
+		t.Fatalf("deleted file: IsDeleted=%v path=%q", f.IsDeleted, f.Path())
+	}
+	if joined := strings.Join(diffBodyLines(patch), "\n"); !strings.Contains(joined, "-farewell") {
 		t.Fatalf("diff should contain the removed line, got:\n%s", joined)
 	}
 }
@@ -220,26 +224,29 @@ func TestLoadGitFileDiff_UntrackedFallsBackToNoIndex(t *testing.T) {
 	fresh := filepath.Join(repo, "fresh.txt")
 	writeFileT(t, fresh, "hello\n")
 
-	lines := loadGitFileDiff(repo, "", fresh, true)
-	if joined := strings.Join(lines, "\n"); !strings.Contains(joined, "+hello") {
+	patch := loadGitFileDiff(repo, "", fresh, true)
+	if patch.Empty() || !patch.Files[0].IsNew {
+		t.Fatalf("untracked file should read as brand new, got %+v", patch)
+	}
+	if joined := strings.Join(diffBodyLines(patch), "\n"); !strings.Contains(joined, "+hello") {
 		t.Fatalf("untracked diff should show the file as added, got:\n%s", joined)
 	}
 }
 
 // TestLoadGitFileDiff_Degrades confirms the best-effort contract: a
-// non-repo, empty arguments, and a clean file all yield nil rather than
-// an error the UI would have to route somewhere. The clean-file case
-// doubly matters now that untracked=true has a fallback — a tracked,
-// unchanged file must never be painted as brand new.
+// non-repo, empty arguments, and a clean file all yield an empty patch
+// rather than an error the UI would have to route somewhere. The
+// clean-file case doubly matters now that untracked=true has a fallback
+// — a tracked, unchanged file must never be painted as brand new.
 func TestLoadGitFileDiff_Degrades(t *testing.T) {
-	if got := loadGitFileDiff(t.TempDir(), "", "x.txt", false); got != nil {
-		t.Fatalf("non-repo diff = %v, want nil", got)
+	if got := loadGitFileDiff(t.TempDir(), "", "x.txt", false); !got.Empty() {
+		t.Fatalf("non-repo diff = %v, want nothing", got)
 	}
-	if got := loadGitFileDiff("", "", "x.txt", false); got != nil {
-		t.Fatalf("empty root diff = %v, want nil", got)
+	if got := loadGitFileDiff("", "", "x.txt", false); !got.Empty() {
+		t.Fatalf("empty root diff = %v, want nothing", got)
 	}
-	if got := loadGitFileDiff(t.TempDir(), "", "", true); got != nil {
-		t.Fatalf("empty path diff = %v, want nil", got)
+	if got := loadGitFileDiff(t.TempDir(), "", "", true); !got.Empty() {
+		t.Fatalf("empty path diff = %v, want nothing", got)
 	}
 	requireGit(t)
 	repo := initRepo(t)
@@ -247,8 +254,8 @@ func TestLoadGitFileDiff_Degrades(t *testing.T) {
 	writeFileT(t, clean, "steady\n")
 	gitRun(t, repo, "add", "clean.txt")
 	gitRun(t, repo, "commit", "-m", "init")
-	if got := loadGitFileDiff(repo, "", clean, false); got != nil {
-		t.Fatalf("clean file diff = %v, want nil", got)
+	if got := loadGitFileDiff(repo, "", clean, false); !got.Empty() {
+		t.Fatalf("clean file diff = %v, want nothing", got)
 	}
 }
 
@@ -319,10 +326,16 @@ func TestLoadGitStatus_FromSubdirectory(t *testing.T) {
 	}
 }
 
-// TestParseGitDiffLines maps unified hunk ranges to zero-based gutter rows.
-func TestParseGitDiffLines(t *testing.T) {
-	diff := []byte("@@ -2,0 +3,2 @@\n+a\n+b\n@@ -8,2 +10,2 @@\n-old\n+new\n@@ -20,2 +21,0 @@\n-old\n")
-	got := parseGitDiffLines(diff)
+// TestGutterMarks_MapsHunkRangesToRows pins the one piece of the gutter
+// path that stayed in app: turning a parsed hunk's ranges into the
+// editor's per-line markers — added, modified, and the anchor row a
+// pure deletion is drawn at.
+func TestGutterMarks_MapsHunkRangesToRows(t *testing.T) {
+	p, err := diff.Parse([]byte("@@ -2,0 +3,2 @@\n+a\n+b\n@@ -8,2 +10,2 @@\n-old\n+new\n@@ -20,2 +21,0 @@\n-old\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := gutterMarks(p.Files[0].Hunks)
 	if got[2] != editor.GitLineAdded || got[3] != editor.GitLineAdded {
 		t.Fatalf("added markers wrong: %v", got)
 	}
@@ -334,20 +347,27 @@ func TestParseGitDiffLines(t *testing.T) {
 	}
 }
 
-// TestParseGitHunkPreview_ReturnsClickedHunk keeps gutter-click previews scoped
-// to the hunk covering the clicked changed line.
-func TestParseGitHunkPreview_ReturnsClickedHunk(t *testing.T) {
-	diff := []byte("diff --git a/a.go b/a.go\n@@ -1,2 +1,2 @@\n old context\n-old\n+new\n@@ -20,1 +20,2 @@\n keep\n+added\n")
-	got := parseGitHunkPreview(diff, 20)
-	if len(got) == 0 {
+// TestHunkCovering_ReturnsClickedHunk keeps gutter-click previews scoped
+// to the hunk covering the clicked changed line — the marker names one
+// line, so showing the whole file's diff around it would bury the answer.
+func TestHunkCovering_ReturnsClickedHunk(t *testing.T) {
+	p, err := diff.Parse([]byte("diff --git a/a.go b/a.go\n@@ -1,2 +1,2 @@\n old context\n-old\n+new\n@@ -20,1 +20,2 @@\n keep\n+added\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := hunkCovering(p, 20)
+	if got.Empty() {
 		t.Fatal("expected hunk preview")
 	}
-	joined := strings.Join(got, "\n")
+	joined := strings.Join(diffBodyLines(got), "\n")
 	if !strings.Contains(joined, "+added") {
 		t.Fatalf("expected clicked hunk, got %q", joined)
 	}
 	if strings.Contains(joined, "-old") {
 		t.Fatalf("preview included wrong hunk: %q", joined)
+	}
+	if !hunkCovering(p, 500).Empty() {
+		t.Fatal("a line no hunk claims should preview nothing")
 	}
 }
 
@@ -954,28 +974,5 @@ func TestCollectGitStatus_CarriesIsDirForUntrackedDirs(t *testing.T) {
 	}
 	if res.isDir[filepath.Join(repo, "doomed.txt")] {
 		t.Fatal("a deleted path must never be flagged as a directory")
-	}
-}
-
-// TestUnquoteGitPath covers the C-style quoting git applies to header
-// paths with control or non-ASCII bytes — the escapes quote.c emits,
-// octal included — plus the malformed shapes that must fail closed
-// (empty string) rather than mis-attribute a section.
-func TestUnquoteGitPath(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{`"b/plain.txt"`, "b/plain.txt"},
-		{`"b/qu\totes.txt"`, "b/qu\totes.txt"},
-		{`"b/back\\slash"`, `b/back\slash`},
-		{`"b/dq\".txt"`, `b/dq".txt`},
-		{`"b/na\303\257ve.txt"`, "b/naïve.txt"},
-		{`b/notquoted`, ""},
-		{`"unterminated`, ""},
-		{`"bad\q"`, ""},
-		{`"bad\30"`, ""},
-	}
-	for _, c := range cases {
-		if got := unquoteGitPath(c.in); got != c.want {
-			t.Fatalf("unquoteGitPath(%q) = %q, want %q", c.in, got, c.want)
-		}
 	}
 }

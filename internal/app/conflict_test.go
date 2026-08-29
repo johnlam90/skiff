@@ -5,10 +5,12 @@
 // Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 // =============================================================================
 
-// Tests for conflict.go — the dirty-buffer-versus-changed-file prompt and
-// the local line differ behind its Diff button. The behavioural tests all
-// drive the real reconcile tick, because "does the tick nag me again?" is
-// the actual question the feature answers.
+// Tests for conflict.go — the dirty-buffer-versus-changed-file prompt
+// and what its Diff button opens. The differ itself now lives in
+// internal/diff, where both producers share it; what is pinned here is
+// the decision the prompt makes. The behavioural tests all drive the
+// real reconcile tick, because "does the tick nag me again?" is the
+// actual question the feature answers.
 
 package app
 
@@ -215,7 +217,7 @@ func TestConflictDiff_OpensDiffViewAgainstDisk(t *testing.T) {
 	if !ok {
 		t.Fatalf("Diff should open the diff viewer; top = %T", a.overlays.Top())
 	}
-	joined := strings.Join(dv.raw, "\n")
+	joined := strings.Join(dv.unified, "\n")
 	if !strings.Contains(joined, "-THEIRS") || !strings.Contains(joined, "+MINE") {
 		t.Fatalf("diff should show disk as old and buffer as new:\n%s", joined)
 	}
@@ -262,109 +264,6 @@ func TestTabDiskConflict_RequiresDirtyBuffer(t *testing.T) {
 	}
 	if a.tabDiskConflict(nil) {
 		t.Fatal("nil tab must be safe")
-	}
-}
-
-// TestUnifiedDiff_HunkShape pins the differ's output format: real @@
-// headers with the right line numbers, context around the change, and
-// nothing emitted for identical inputs. parseSideBySideDiff consumes
-// this, so the shape is a contract.
-func TestUnifiedDiff_HunkShape(t *testing.T) {
-	if got := unifiedDiff([]string{"a", "b"}, []string{"a", "b"}); got != nil {
-		t.Fatalf("identical inputs should diff to nothing, got %v", got)
-	}
-
-	old := []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"}
-	new := []string{"1", "2", "3", "4", "CHANGED", "6", "7", "8", "9"}
-	got := unifiedDiff(old, new)
-	want := []string{
-		"@@ -2,7 +2,7 @@",
-		" 2", " 3", " 4", "-5", "+CHANGED", " 6", " 7", " 8",
-	}
-	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("diff =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
-	}
-
-	// The diff viewer must be able to parse it back into aligned rows.
-	rows := parseSideBySideDiff(got)
-	var paired bool
-	for _, r := range rows {
-		if r.Kind == diffRowChange && r.Left == "5" && r.Right == "CHANGED" {
-			paired = true
-		}
-	}
-	if !paired {
-		t.Fatalf("diff viewer did not pair the modification: %+v", rows)
-	}
-}
-
-// TestUnifiedDiff_SeparateHunks checks that distant changes get their
-// own @@ header rather than dragging the whole file in as context.
-func TestUnifiedDiff_SeparateHunks(t *testing.T) {
-	old := make([]string, 40)
-	for i := range old {
-		old[i] = "line"
-	}
-	new := append([]string(nil), old...)
-	new[2] = "top"
-	new[37] = "bottom"
-
-	got := unifiedDiff(old, new)
-	headers := 0
-	for _, l := range got {
-		if strings.HasPrefix(l, "@@ ") {
-			headers++
-		}
-	}
-	if headers != 2 {
-		t.Fatalf("want two hunks for two distant changes, got %d:\n%s", headers, strings.Join(got, "\n"))
-	}
-	if len(got) >= len(old) {
-		t.Fatalf("hunks should be far smaller than the file, got %d lines", len(got))
-	}
-}
-
-// TestUnifiedDiff_PureInsertAndDelete covers the one-sided cases and the
-// zero-count hunk header git emits for them.
-func TestUnifiedDiff_PureInsertAndDelete(t *testing.T) {
-	added := unifiedDiff([]string{"a"}, []string{"a", "b"})
-	if strings.Join(added, "|") != "@@ -1,1 +1,2 @@| a|+b" {
-		t.Fatalf("insert diff = %v", added)
-	}
-	removed := unifiedDiff([]string{"a", "b"}, []string{"a"})
-	if strings.Join(removed, "|") != "@@ -1,2 +1,1 @@| a|-b" {
-		t.Fatalf("delete diff = %v", removed)
-	}
-	emptied := unifiedDiff([]string{"a"}, nil)
-	if strings.Join(emptied, "|") != "@@ -1,1 +0,0 @@|-a" {
-		t.Fatalf("emptied diff = %v", emptied)
-	}
-}
-
-// TestAlignLines_OversizedFallsBackToBlockReplace pins the memory guard:
-// past diffPairCap the differ stops building an LCS table and emits a
-// coarse but honest replace-everything alignment.
-func TestAlignLines_OversizedFallsBackToBlockReplace(t *testing.T) {
-	n := 1200 // 1200^2 > diffPairCap
-	old := make([]string, n)
-	new := make([]string, n)
-	for i := range old {
-		old[i] = "old"
-		new[i] = "new"
-	}
-	ops := alignLines(old, new)
-	if len(ops) != 2*n {
-		t.Fatalf("block replace should emit every line twice, got %d", len(ops))
-	}
-	for _, op := range ops[:n] {
-		if op.kind != '-' {
-			t.Fatalf("first half should be deletions, saw %q", op.kind)
-		}
-	}
-	for _, op := range ops[n:] {
-		if op.kind != '+' {
-			t.Fatalf("second half should be additions, saw %q", op.kind)
-		}
 	}
 }
 

@@ -26,6 +26,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/diff"
 	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/overlay"
 )
@@ -90,13 +91,13 @@ func loadGitLog(rootDir, path string, limit int) []gitLogEntry {
 // current input reaches the refused class, but the gate is what stands
 // between a future caller — or a format-string change upstream — and a
 // repo-supplied string landing on git's argv as an option.
-func loadGitCommitDiff(rootDir, sha, path string) []string {
+func loadGitCommitDiff(rootDir, sha, path string) diff.Patch {
 	if rootDir == "" {
-		return nil
+		return diff.Patch{}
 	}
 	safe, err := git.SafeRef(sha)
 	if err != nil {
-		return nil
+		return diff.Patch{}
 	}
 	args := []string{"show", "--format=", safe, "--"}
 	if path != "" {
@@ -104,9 +105,10 @@ func loadGitCommitDiff(rootDir, sha, path string) []string {
 	}
 	out, err := git.Output(rootDir, args...)
 	if err != nil || len(out) == 0 {
-		return nil
+		return diff.Patch{}
 	}
-	return strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	p, _ := diff.Parse(out)
+	return p
 }
 
 // gitLogOverlay is the commit-history overlay: the loaded entries and
@@ -168,8 +170,8 @@ func (g *gitLogOverlay) activate() {
 	}
 	a := g.app
 	entry := g.entries[g.selected]
-	lines := loadGitCommitDiff(a.rootDir, entry.SHA, g.path)
-	if len(lines) == 0 {
+	patch := loadGitCommitDiff(a.rootDir, entry.SHA, g.path)
+	if patch.Empty() {
 		// Merge commits and rename-only commits can produce no diff
 		// for this path — say so rather than opening an empty modal.
 		a.flash("No diff for commit " + entry.SHA)
@@ -182,7 +184,7 @@ func (g *gitLogOverlay) activate() {
 		langPath = g.path
 	}
 	// openDiffView closes this overlay via closeAllModals.
-	a.openDiffView(title, lines, "", langPath)
+	a.openDiffView(title, patch, "", langPath)
 }
 
 // HandleKey routes keyboard input while the overlay is open.

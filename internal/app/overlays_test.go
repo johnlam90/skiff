@@ -55,7 +55,7 @@ func TestOpeners_PushOverlayStack(t *testing.T) {
 			a.openListPick("T", []listPickItem{{Label: "one"}}, nil, nil, nil)
 		}},
 		{"finder", nil, func(a *App) { a.openFinder() }},
-		{"diff", nil, func(a *App) { a.openDiffView("T", []string{"+x"}, "", "") }},
+		{"diff", nil, func(a *App) { a.openDiffView("T", patchOf("@@ -1,0 +1,1 @@", "+x"), "", "") }},
 		// openGitLog refuses to open with no commits, so it needs a real
 		// repo with history — initRepo skips when git isn't installed.
 		{"gitLog", initRepoWithCommit,
