@@ -792,7 +792,7 @@ func TestDragRelease_NonEditorDragDoesNotCopy(t *testing.T) {
 }
 
 // TestHandleMouse_FindBarPressDoesNotArmEditorDrag pins the press-branch
-// regression: dragMode used to be set to "editor" for every left press in
+// regression: dragMode used to be set to dragEditor for every left press in
 // the middle band of the screen, whether or not the press actually landed
 // on text. With the find bar open the editor rect shrinks by a row, so the
 // bar's own row falls inside that band — editorPress correctly no-ops
@@ -828,7 +828,7 @@ func TestHandleMouse_FindBarPressDoesNotArmEditorDrag(t *testing.T) {
 // TestHandleMouse_EmptyEditorPressDoesNotArmEditorDrag covers the other
 // half of the same bug: with no tab open there is no caret to place, so a
 // press in the empty editor body must leave the drag state alone rather
-// than parking a stale "editor" drag that survives until the next release.
+// than parking a stale dragEditor state that survives until the next release.
 func TestHandleMouse_EmptyEditorPressDoesNotArmEditorDrag(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 
@@ -869,9 +869,9 @@ func barCell(t *testing.T, a *App, x, y int) (rune, tcell.Color) {
 
 // TestTreeScrollbarPressScrollsAndDrags: the sidebar's bar is a real
 // mouse target. Pressing near its bottom jumps the tree there and enters
-// the "treescrollbar" drag mode, dragging keeps the listing glued to the
-// pointer's row, and release ends the drag without leaving the tree
-// scrolled somewhere the user didn't ask for.
+// dragTreeScrollbar, dragging keeps the listing glued to the pointer's
+// row, and release ends the drag without leaving the tree scrolled
+// somewhere the user didn't ask for.
 func TestTreeScrollbarPressScrollsAndDrags(t *testing.T) {
 	dir := t.TempDir()
 	seedTreeFiles(t, dir, 80)
@@ -976,7 +976,7 @@ func TestSidebarThreeWayHitTestAtSameY(t *testing.T) {
 // TestGitPanelScrollbarPressScrollsAndDrags: the change list's bar is a
 // grab handle, not just a click target. It is the sidebar's other panel,
 // so it gets the identical contract to the tree's — press jumps and arms
-// "gitpanelscrollbar", the drag stays glued to the pointer's row even
+// dragGitPanelScrollbar, the drag stays glued to the pointer's row even
 // once it wanders off the column, and release ends the drag where the
 // user left it.
 func TestGitPanelScrollbarPressScrollsAndDrags(t *testing.T) {
