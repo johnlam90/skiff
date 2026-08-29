@@ -90,6 +90,11 @@ type Confirm struct {
 	scroll int
 }
 
+// BodyTextWidth returns the usable text width for Body rows at the
+// confirm's current frame width — what callers should wrap consent
+// text to, so a narrow terminal wraps instead of truncating.
+func (c *Confirm) BodyTextWidth() int { return c.frameWidth() - 4 }
+
 // frameWidth returns the frame width: the wide form for a multi-line
 // Body, the classic 54-cell box otherwise — either way clamped to the
 // terminal, because a frame wider than the screen puts its right border
