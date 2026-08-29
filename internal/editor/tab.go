@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -231,6 +232,14 @@ const maxOpenBytes = 32 << 20
 // so the user can tell "seen and declined" from "missing".
 var ErrFileTooLarge = errors.New("file is too large to open")
 
+// ErrNotUTF8 marks a refusal to open content that is not valid UTF-8.
+// The buffer edits text through rune slices, and Go maps invalid bytes
+// to U+FFFD on decode — so editing any line holding such bytes would
+// silently rewrite them on save. Refusing at the door is the same
+// tradeoff as ErrBinaryFile: skiff edits UTF-8 text, and says so
+// instead of corrupting quietly.
+var ErrNotUTF8 = errors.New("not valid UTF-8 — convert the file to UTF-8 to edit it")
+
 // mibString renders a byte count as MiB for the too-large message.
 // Sizes that trip the cap are only ever discussed in MiB, so a full
 // unit ladder would be dead code.
@@ -306,6 +315,13 @@ func readTextFile(path string) (data []byte, mtime time.Time, err error) {
 		// has pathological "lines". Opening a large zip used to
 		// freeze the editor outright.
 		return nil, time.Time{}, fmt.Errorf("%s: %w", filepath.Base(path), ErrBinaryFile)
+	}
+	if !utf8.Valid(b) {
+		// Checked after the binary probe on purpose: a zip or other
+		// binary blob is also invalid UTF-8, and it should still be
+		// reported as "binary", not "not UTF-8" — the binary message
+		// is the more accurate one for that content.
+		return nil, time.Time{}, fmt.Errorf("%s: %w", filepath.Base(path), ErrNotUTF8)
 	}
 	return b, mtime, nil
 }
