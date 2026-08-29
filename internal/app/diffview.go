@@ -88,15 +88,23 @@ type diffRow struct {
 // bespoke — it needs the App for the git-panel diff walk, file opening,
 // and theme — and its state dies with it.
 type diffOverlay struct {
-	app       *App
-	title     string
-	raw       []string
-	rows      []diffRow
-	rowStyles [][]tcell.Style
-	openPath  string
-	maxLen    int
-	scroll    int
-	scrollX   int
+	app      *App
+	title    string
+	raw      []string
+	rows     []diffRow
+	openPath string
+	maxLen   int
+	scroll   int
+	scrollX  int
+	// leftStyles/rightStyles are the per-side Chroma grids — each side
+	// of a modified pair holds different text, so each gets its own
+	// lex (see diffSideStyles). nil when highlighting is off.
+	leftStyles, rightStyles [][]tcell.Style
+	// tints are the palette's derived changed-row backgrounds; tinted
+	// is false on low-color palettes, where drawSide keeps the legacy
+	// colored-foreground painting instead.
+	tints  theme.DiffTints
+	tinted bool
 	// hover is the focused button: 0 = Close, 1 = Open file.
 	hover int
 }
@@ -282,7 +290,8 @@ func (a *App) openDiffView(title string, raw []string, openPath, langPath string
 	d := &diffOverlay{app: a, title: title, raw: raw, openPath: openPath}
 	d.rows = parseSideBySideDiff(raw)
 	annotateDiffSpans(d.rows)
-	d.rowStyles = diffContextStyles(d.rows, langPath, a.theme)
+	d.leftStyles, d.rightStyles = diffSideStyles(d.rows, langPath, a.theme)
+	d.tints, d.tinted = a.theme.DiffTints()
 	d.maxLen = diffLongestLine(d.raw, d.rows)
 	if openPath != "" {
 		d.hover = 1 // focus Open file so Enter is the fast path
@@ -290,42 +299,55 @@ func (a *App) openDiffView(title string, raw []string, openPath, langPath string
 	a.overlays.Open(d)
 }
 
-// diffContextStyles precomputes Chroma syntax styles for the diff's
-// context rows, one []tcell.Style per rune, nil for rows that keep git
-// coloring (changes, hunks). The whole diff is lexed as one source so
-// multi-line tokens survive; precomputing at open keeps the per-draw
-// cost at zero — draws happen on every mouse-motion event.
-func diffContextStyles(rows []diffRow, langPath string, th theme.Theme) [][]tcell.Style {
+// diffSideStyles precomputes Chroma syntax styles for BOTH columns of
+// the diff, one []tcell.Style per rune per row — context and changed
+// rows alike, since changed rows now paint syntax colors over their
+// tint. Each side is lexed as its own source (a modified pair holds
+// different text left and right), joined so multi-line tokens survive;
+// precomputing at open keeps the per-draw cost at zero — draws happen
+// on every mouse-motion event. Hunk and file rows stay nil.
+func diffSideStyles(rows []diffRow, langPath string, th theme.Theme) (left, right [][]tcell.Style) {
 	if langPath == "" || len(rows) == 0 || len(rows) > diffHighlightCap {
-		return nil
+		return nil, nil
 	}
-	src := make([]string, len(rows))
-	for i, r := range rows {
-		if r.Kind == diffRowHunk || r.Kind == diffRowFile {
-			src[i] = ""
-			continue
+	side := func(text func(diffRow) string) [][]tcell.Style {
+		src := make([]string, len(rows))
+		for i, r := range rows {
+			if r.Kind == diffRowHunk || r.Kind == diffRowFile {
+				continue
+			}
+			src[i] = text(r)
 		}
+		grid := editor.Highlight(langPath, strings.Join(src, "\n"), th)
+		styles := make([][]tcell.Style, len(rows))
+		for i, r := range rows {
+			if (r.Kind != diffRowContext && r.Kind != diffRowChange) || i >= len(grid) {
+				continue
+			}
+			// Re-background onto the modal surface — Highlight styles
+			// carry the editor's background. drawSide swaps in the row
+			// tint for changed rows at draw time.
+			row := make([]tcell.Style, len(grid[i]))
+			for j, st := range grid[i] {
+				row[j] = st.Background(th.LineHL)
+			}
+			styles[i] = row
+		}
+		return styles
+	}
+	left = side(func(r diffRow) string {
+		if r.LeftNo > 0 {
+			return r.Left
+		}
+		return ""
+	})
+	right = side(func(r diffRow) string {
 		if r.RightNo > 0 {
-			src[i] = r.Right
-		} else {
-			src[i] = r.Left
+			return r.Right
 		}
-	}
-	grid := editor.Highlight(langPath, strings.Join(src, "\n"), th)
-	styles := make([][]tcell.Style, len(rows))
-	for i, r := range rows {
-		if r.Kind != diffRowContext || i >= len(grid) {
-			continue
-		}
-		// Re-background onto the modal surface — Highlight styles carry
-		// the editor's background.
-		row := make([]tcell.Style, len(grid[i]))
-		for j, st := range grid[i] {
-			row[j] = st.Background(th.LineHL)
-		}
-		styles[i] = row
-	}
-	return styles
+		return ""
+	})
+	return left, right
 }
 
 // diffLongestLine returns the widest content line in either layout,
@@ -639,10 +661,11 @@ func (d *diffOverlay) Draw(scr tcell.Screen) {
 }
 
 // drawDiffRowSideBySide paints one aligned row: two line-number
-// gutters, two text columns, and a vertical rule between them. The
-// changed side takes the Git add/delete color; blank sides stay empty
-// so pure insertions and deletions read as gaps, the way VS Code
-// renders them. idx indexes diffRows/diffRowStyles.
+// gutters, two text columns, and a vertical rule between them. Changed
+// sides take their Git tint (or the legacy add/delete foreground on
+// low-color palettes); blank sides stay empty so pure insertions and
+// deletions read as gaps, the way VS Code renders them. idx indexes
+// diffRows and both per-side style grids.
 func (d *diffOverlay) drawRowSideBySide(scr tcell.Screen, x, y, w, idx int) {
 	a := d.app
 	row := d.rows[idx]
@@ -664,31 +687,44 @@ func (d *diffOverlay) drawRowSideBySide(scr tcell.Screen, x, y, w, idx int) {
 	sepStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Subtle)
 	scr.SetContent(x+leftW+1, y, '│', nil, sepStyle)
 
-	var ctx []tcell.Style
-	if idx < len(d.rowStyles) {
-		ctx = d.rowStyles[idx]
+	var lctx, rctx []tcell.Style
+	if idx < len(d.leftStyles) {
+		lctx = d.leftStyles[idx]
+	}
+	if idx < len(d.rightStyles) {
+		rctx = d.rightStyles[idx]
 	}
 	changed := row.Kind == diffRowChange
-	d.drawSide(scr, x, y, leftW, row.LeftNo, row.Left, changed, a.theme.GitDeleted, row.LeftEmph, ctx)
-	d.drawSide(scr, rightX, y, rightW, row.RightNo, row.Right, changed, a.theme.GitAdded, row.RightEmph, ctx)
+	d.drawSide(scr, x, y, leftW, row.LeftNo, row.Left, changed,
+		a.theme.GitDeleted, d.tints.DelRow, d.tints.DelEmph, row.LeftEmph, lctx)
+	d.drawSide(scr, rightX, y, rightW, row.RightNo, row.Right, changed,
+		a.theme.GitAdded, d.tints.AddRow, d.tints.AddEmph, row.RightEmph, rctx)
 }
 
 // drawDiffSide paints one half of a side-by-side row: a muted line
-// number (blank when the side has none), then the text rune by rune —
-// Chroma styles for context lines, the Git change color for changed
-// ones, and reverse video over the intra-line span that actually
-// differs on paired modifications. The horizontal scroll offset slides
-// the text only; gutters stay put.
-func (d *diffOverlay) drawSide(scr tcell.Screen, x, y, w, lineNo int, text string, changed bool, changeColor tcell.Color, emph span, ctx []tcell.Style) {
+// number (blank when the side has none), then the text rune by rune.
+// A changed side gets the full-width row tint — gutter, text, and
+// trailing pad — with Chroma syntax colors on top and the louder
+// emphasis tint under the intra-line span that actually differs, so
+// the diff reads like highlighted code on a wash. On low-color
+// palettes (no tints) the legacy painting stands: the Git change color
+// as foreground, reverse video over the emphasis span. The horizontal
+// scroll offset slides the text only; gutters stay put.
+func (d *diffOverlay) drawSide(scr tcell.Screen, x, y, w, lineNo int, text string, changed bool, changeColor, rowTint, emphTint tcell.Color, emph span, ctx []tcell.Style) {
 	a := d.app
 	if lineNo == 0 {
-		return // blank side of a pure addition or deletion
+		return // blank side of a pure addition or deletion — the gap says "nothing was here"
 	}
 	bg := a.theme.LineHL
+	tinted := changed && d.tinted
+	if tinted {
+		bg = rowTint
+		fillRect(scr, x, y, w, 1, tcell.StyleDefault.Background(bg))
+	}
 	noStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
 	base := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
-	if changed {
-		base = tcell.StyleDefault.Background(bg).Foreground(changeColor)
+	if changed && !tinted {
+		base = base.Foreground(changeColor)
 	}
 	no := itoa(lineNo)
 	drawAt(scr, x+diffNoGutter-1-runeLen(no)-1, y, no+" ", noStyle)
@@ -703,11 +739,15 @@ func (d *diffOverlay) drawSide(scr tcell.Screen, x, y, w, lineNo int, text strin
 			break
 		}
 		st := base
-		if !changed && i < len(ctx) {
-			st = ctx[i]
+		if i < len(ctx) && (!changed || tinted) {
+			st = ctx[i].Background(bg)
 		}
 		if changed && emph.End > emph.Start && i >= emph.Start && i < emph.End {
-			st = st.Reverse(true)
+			if tinted {
+				st = st.Background(emphTint)
+			} else {
+				st = st.Reverse(true)
+			}
 		}
 		scr.SetContent(x+diffNoGutter+col, y, runes[i], nil, st)
 	}

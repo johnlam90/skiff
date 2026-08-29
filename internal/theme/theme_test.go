@@ -274,3 +274,49 @@ func TestReadable_OnlyTouchesStatusFg(t *testing.T) {
 		t.Fatal("readable() changed a field other than StatusFg")
 	}
 }
+
+// TestBlend_MixesChannelsLinearly pins the blend math the diff tints
+// are derived from: the endpoints return the inputs untouched and the
+// midpoint averages every channel.
+func TestBlend_MixesChannelsLinearly(t *testing.T) {
+	a := tcell.NewRGBColor(0, 0, 0)
+	b := tcell.NewRGBColor(100, 200, 40)
+	if got := Blend(a, b, 0); got != a {
+		t.Fatalf("mix 0 should return the first color, got %v", got)
+	}
+	if got := Blend(a, b, 1); got != b {
+		t.Fatalf("mix 1 should return the second color, got %v", got)
+	}
+	r, g, bl := Blend(a, b, 0.5).RGB()
+	if r != 50 || g != 100 || bl != 20 {
+		t.Fatalf("midpoint should average channels, got %d %d %d", r, g, bl)
+	}
+}
+
+// TestDiffTints_DerivedFromPalette pins how the diff surfaces get their
+// changed-row backgrounds: a whisper of the Git change hue blended over
+// the modal surface for the row, a louder mix over the intra-line span,
+// and nothing at all on a low-color palette — blending hues the
+// terminal will round anyway produces mush, so callers keep their
+// attribute-based painting there.
+func TestDiffTints_DerivedFromPalette(t *testing.T) {
+	th := Default()
+	tints, ok := th.DiffTints()
+	if !ok {
+		t.Fatal("a truecolor palette must yield tints")
+	}
+	if tints.DelRow != Blend(th.LineHL, th.GitDeleted, diffRowMix) {
+		t.Fatalf("DelRow should blend GitDeleted over LineHL at diffRowMix, got %v", tints.DelRow)
+	}
+	if tints.AddEmph != Blend(th.LineHL, th.GitAdded, diffEmphMix) {
+		t.Fatalf("AddEmph should blend GitAdded over LineHL at diffEmphMix, got %v", tints.AddEmph)
+	}
+	if tints.DelEmph == tints.DelRow || tints.AddEmph == tints.AddRow {
+		t.Fatal("the emphasis tint must be louder than the row tint")
+	}
+	low := th
+	low.LowColor = true
+	if _, ok := low.DiffTints(); ok {
+		t.Fatal("low-color palettes must opt out of tinting")
+	}
+}

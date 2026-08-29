@@ -189,15 +189,15 @@ func TestMenuFileHistory_ScopesToActiveTab(t *testing.T) {
 	if !diffIsOpen(a) || !strings.Contains(diffOv(t, a).title, "b.txt") {
 		t.Fatalf("diff should open scoped to b.txt, title %q", diffOv(t, a).title)
 	}
-	// Precomputed context styles exist only when a non-empty langPath
-	// reached openDiffView — one style row per diff row.
+	// Precomputed syntax styles exist only when a non-empty langPath
+	// reached openDiffView — one style row per diff row, per side.
 	d := diffOv(t, a)
 	if len(d.rows) == 0 {
 		t.Fatal("diff should have rows to style")
 	}
-	if len(d.rowStyles) != len(d.rows) {
-		t.Fatalf("diff should carry %s's syntax styles: got %d style rows for %d diff rows",
-			filepath.Base(bFile), len(d.rowStyles), len(d.rows))
+	if len(d.leftStyles) != len(d.rows) || len(d.rightStyles) != len(d.rows) {
+		t.Fatalf("diff should carry %s's syntax styles on both sides: got %d/%d style rows for %d diff rows",
+			filepath.Base(bFile), len(d.leftStyles), len(d.rightStyles), len(d.rows))
 	}
 }
 

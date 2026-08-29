@@ -168,3 +168,46 @@ func TestRegistryAccessorsAgree(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryThemeDiffTintsReadable fences the derived diff tints across
+// the whole registry, stating the derivation's contract: a ROW tint may
+// spend at most 8% of the contrast its surface already affords, and
+// never dips under 4.0 when the palette can afford 4.0 (Solarized
+// can't — its body text starts at 3.6:1, and the tint must not be
+// blamed for that). An EMPHASIS tint buys loudness with a bounded
+// contrast cost — it spans only the few glyphs that differ — so it gets
+// an absolute 2.5 floor plus the guarantee that it actually differs
+// from its row tint, which is its entire job.
+func TestEveryThemeDiffTintsReadable(t *testing.T) {
+	for _, e := range List() {
+		th := e.Build()
+		tints, ok := th.DiffTints()
+		if !ok {
+			t.Errorf("%s: truecolor palette must yield diff tints", e.ID)
+			continue
+		}
+		affordable := ContrastRatio(th.Text, th.LineHL) * 0.92
+		if affordable > 4.0 {
+			affordable = 4.0
+		}
+		for _, bg := range []struct {
+			name string
+			c    tcell.Color
+		}{{"DelRow", tints.DelRow}, {"AddRow", tints.AddRow}} {
+			if r := ContrastRatio(th.Text, bg.c); r < affordable-0.01 {
+				t.Errorf("%s: Text on %s contrast %.2f < affordable %.2f", e.ID, bg.name, r, affordable)
+			}
+		}
+		for _, bg := range []struct {
+			name string
+			c    tcell.Color
+		}{{"DelEmph", tints.DelEmph}, {"AddEmph", tints.AddEmph}} {
+			if r := ContrastRatio(th.Text, bg.c); r < 2.5 {
+				t.Errorf("%s: Text on %s contrast %.2f < 2.5", e.ID, bg.name, r)
+			}
+		}
+		if tints.DelEmph == tints.DelRow || tints.AddEmph == tints.AddRow {
+			t.Errorf("%s: emphasis tint must differ from its row tint", e.ID)
+		}
+	}
+}
