@@ -80,7 +80,7 @@ func (a *App) draw() {
 	}
 	a.drawStatusBar()
 	a.drawFlashStrip()
-	if a.projFindOpen {
+	if a.projFind.findOpen {
 		a.drawProjFind()
 	}
 	a.drawLeaderStrip()
@@ -781,7 +781,7 @@ func (a *App) flashStripRect() (x, y, w, h int) {
 	sw := a.sidebarW()
 	h = a.flashStripRows()
 	y = a.height - 1 - h
-	if a.findOpen || a.projFindOpen {
+	if a.findOpen || a.projFind.findOpen {
 		y -= findBarHeight
 	}
 	return sw, y, a.width - sw, h

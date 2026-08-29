@@ -28,7 +28,7 @@ func (a *App) leaderStripVisible() bool {
 	if a.lastEscape.IsZero() || time.Since(a.lastEscape) >= doubleEscWindow {
 		return false
 	}
-	if a.overlays.IsOpen() || a.findOpen || a.projFindOpen {
+	if a.overlays.IsOpen() || a.findOpen || a.projFind.findOpen {
 		return false
 	}
 	return true

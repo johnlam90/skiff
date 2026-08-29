@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -57,8 +58,41 @@ func (e *projFindDoneEvent) When() time.Time { return e.when }
 type projFindRow struct {
 	IsHeader bool
 	Path     string
-	MatchIdx int // index into projFindMatches; -1 for headers
+	MatchIdx int // index into projFind.findMatches; -1 for headers
 	Count    int // header only: matches in this file
+}
+
+// projFindState bundles the project-wide content-search panel and the
+// replace state riding it, moved out of App so the subsystem's fields
+// have a compiler-visible boundary. Held on App as the named field
+// projFind (named, not embedded: embedding would promote findOpen onto
+// App and collide with the in-file find bar's field of the same name).
+type projFindState struct {
+	// Project-wide content search (see projfind.go).
+	findOpen      bool
+	findValue     []rune
+	findCursor    int
+	findScroll    int
+	findGen       int // generation counter; stale sweeps are dropped
+	findBusy      bool
+	findMatches   []search.Match
+	findTruncated bool
+	findSelected  int
+	findScrollY   int
+	findFolded    map[string]bool
+	findLiveGen   atomic.Int64 // latest gen, readable from sweep goroutines
+	findMatchCase bool
+	findWholeWord bool
+	findRegex     bool
+
+	// Project-wide replace riding the panel (see projreplace.go). The
+	// X ranges are stamped by drawProjFindBar for the mouse handler.
+	replaceOpen                    bool
+	replaceValue                   []rune
+	replaceCursor                  int
+	focusReplace                   bool
+	replaceFieldX0, replaceFieldX1 int
+	replaceAllX0, replaceAllX1     int
 }
 
 // menuFindInProject is the ≡ menu / Esc-F entry point.
@@ -75,52 +109,52 @@ func (a *App) openProjFind() {
 		return
 	}
 	a.closeAllModals()
-	a.projFindOpen = true
-	a.projFindValue = nil
-	a.projFindCursor = 0
-	a.projFindScroll = 0
-	a.projFindMatches = nil
-	a.projFindTruncated = false
-	a.projFindBusy = false
-	a.projFindSelected = 0
-	a.projFindScrollY = 0
-	a.projFindFolded = map[string]bool{}
+	a.projFind.findOpen = true
+	a.projFind.findValue = nil
+	a.projFind.findCursor = 0
+	a.projFind.findScroll = 0
+	a.projFind.findMatches = nil
+	a.projFind.findTruncated = false
+	a.projFind.findBusy = false
+	a.projFind.findSelected = 0
+	a.projFind.findScrollY = 0
+	a.projFind.findFolded = map[string]bool{}
 	a.resetProjReplace()
 }
 
 // closeProjFind dismisses the panel and forgets the query — same
 // "Esc means done" contract as the in-file find bar.
 func (a *App) closeProjFind() {
-	a.projFindOpen = false
-	a.projFindValue = nil
-	a.projFindCursor = 0
-	a.projFindScroll = 0
-	a.projFindMatches = nil
-	a.projFindTruncated = false
-	a.projFindBusy = false
-	a.projFindFolded = nil
+	a.projFind.findOpen = false
+	a.projFind.findValue = nil
+	a.projFind.findCursor = 0
+	a.projFind.findScroll = 0
+	a.projFind.findMatches = nil
+	a.projFind.findTruncated = false
+	a.projFind.findBusy = false
+	a.projFind.findFolded = nil
 	a.resetProjReplace()
 	// Invalidate any in-flight sweep.
-	a.projFindGen++
+	a.projFind.findGen++
 }
 
 // projFindQueryChanged kicks a background sweep for the current input.
 // Every call bumps the generation; the done-handler drops results from
 // older generations, so fast typing never renders stale hits.
 func (a *App) projFindQueryChanged() {
-	a.projFindGen++
-	gen := a.projFindGen
-	query := string(a.projFindValue)
+	a.projFind.findGen++
+	gen := a.projFind.findGen
+	query := string(a.projFind.findValue)
 	if strings.TrimSpace(query) == "" {
-		a.projFindMatches = nil
-		a.projFindTruncated = false
-		a.projFindBusy = false
-		a.projFindSelected = 0
-		a.projFindScrollY = 0
+		a.projFind.findMatches = nil
+		a.projFind.findTruncated = false
+		a.projFind.findBusy = false
+		a.projFind.findSelected = 0
+		a.projFind.findScrollY = 0
 		return
 	}
-	a.projFindBusy = true
-	a.projFindLiveGen.Store(int64(gen))
+	a.projFind.findBusy = true
+	a.projFind.findLiveGen.Store(int64(gen))
 	// Debounce: the sweep starts only after the typing pauses — every
 	// keystroke on a big repo used to launch (and then discard) a full
 	// disk walk.
@@ -134,16 +168,16 @@ func (a *App) projFindQueryChanged() {
 // keystroke superseded it. The sweep itself also polls the live
 // generation so an in-flight walk abandons as soon as it is stale.
 func (a *App) handleProjFindKick(e *projFindKickEvent) {
-	if !a.projFindOpen || e.gen != a.projFindGen {
+	if !a.projFind.findOpen || e.gen != a.projFind.findGen {
 		return
 	}
 	gen := e.gen
-	query := string(a.projFindValue)
+	query := string(a.projFind.findValue)
 	files := a.finder.Files()
 	root := a.rootDir
 	scr := a.screen
-	live := &a.projFindLiveGen
-	matchCase, wholeWord, regex := a.projFindMatchCase, a.projFindWholeWord, a.projFindRegex
+	live := &a.projFind.findLiveGen
+	matchCase, wholeWord, regex := a.projFind.findMatchCase, a.projFind.findWholeWord, a.projFind.findRegex
 	a.safeGo("project-find", func() {
 		opts := search.DefaultOptions()
 		opts.Cancelled = func() bool { return live.Load() != int64(gen) }
@@ -156,14 +190,14 @@ func (a *App) handleProjFindKick(e *projFindKickEvent) {
 // handleProjFindDone lands a finished sweep: stale generations are
 // dropped, current ones replace the result set and reset the cursor.
 func (a *App) handleProjFindDone(e *projFindDoneEvent) {
-	if !a.projFindOpen || e.gen != a.projFindGen {
+	if !a.projFind.findOpen || e.gen != a.projFind.findGen {
 		return
 	}
-	a.projFindMatches = e.matches
-	a.projFindTruncated = e.truncated
-	a.projFindBusy = false
-	a.projFindSelected = 0
-	a.projFindScrollY = 0
+	a.projFind.findMatches = e.matches
+	a.projFind.findTruncated = e.truncated
+	a.projFind.findBusy = false
+	a.projFind.findSelected = 0
+	a.projFind.findScrollY = 0
 }
 
 // projFindRows flattens the match list into renderable rows: one header
@@ -172,14 +206,14 @@ func (a *App) handleProjFindDone(e *projFindDoneEvent) {
 func (a *App) projFindRows() []projFindRow {
 	var rows []projFindRow
 	i := 0
-	for i < len(a.projFindMatches) {
-		path := a.projFindMatches[i].Path
+	for i < len(a.projFind.findMatches) {
+		path := a.projFind.findMatches[i].Path
 		j := i
-		for j < len(a.projFindMatches) && a.projFindMatches[j].Path == path {
+		for j < len(a.projFind.findMatches) && a.projFind.findMatches[j].Path == path {
 			j++
 		}
 		rows = append(rows, projFindRow{IsHeader: true, Path: path, MatchIdx: -1, Count: j - i})
-		if !a.projFindFolded[path] {
+		if !a.projFind.findFolded[path] {
 			for k := i; k < j; k++ {
 				rows = append(rows, projFindRow{Path: path, MatchIdx: k})
 			}
@@ -192,14 +226,14 @@ func (a *App) projFindRows() []projFindRow {
 // projFindToggleFold flips a file group's fold state, keeping the
 // selection on the header so fold/unfold round-trips in place.
 func (a *App) projFindToggleFold(path string) {
-	if a.projFindFolded == nil {
-		a.projFindFolded = map[string]bool{}
+	if a.projFind.findFolded == nil {
+		a.projFind.findFolded = map[string]bool{}
 	}
-	a.projFindFolded[path] = !a.projFindFolded[path]
+	a.projFind.findFolded[path] = !a.projFind.findFolded[path]
 	rows := a.projFindRows()
 	for idx, r := range rows {
 		if r.IsHeader && r.Path == path {
-			a.projFindSelected = idx
+			a.projFind.findSelected = idx
 			break
 		}
 	}
@@ -210,15 +244,15 @@ func (a *App) projFindToggleFold(path string) {
 // the file at the hit line and dismiss the panel.
 func (a *App) projFindActivate() {
 	rows := a.projFindRows()
-	if a.projFindSelected < 0 || a.projFindSelected >= len(rows) {
+	if a.projFind.findSelected < 0 || a.projFind.findSelected >= len(rows) {
 		return
 	}
-	row := rows[a.projFindSelected]
+	row := rows[a.projFind.findSelected]
 	if row.IsHeader {
 		a.projFindToggleFold(row.Path)
 		return
 	}
-	m := a.projFindMatches[row.MatchIdx]
+	m := a.projFind.findMatches[row.MatchIdx]
 	a.closeProjFind()
 	a.OpenFileAtLineCol(filepath.Join(a.rootDir, m.Path), m.Line, m.Col)
 }
@@ -230,12 +264,12 @@ func (a *App) projFindMove(delta int) {
 	if len(rows) == 0 {
 		return
 	}
-	a.projFindSelected += delta
-	if a.projFindSelected < 0 {
-		a.projFindSelected = 0
+	a.projFind.findSelected += delta
+	if a.projFind.findSelected < 0 {
+		a.projFind.findSelected = 0
 	}
-	if a.projFindSelected >= len(rows) {
-		a.projFindSelected = len(rows) - 1
+	if a.projFind.findSelected >= len(rows) {
+		a.projFind.findSelected = len(rows) - 1
 	}
 	a.projFindClampView(rows)
 }
@@ -247,21 +281,21 @@ func (a *App) projFindClampView(rows []projFindRow) {
 	if eh < 1 {
 		eh = 1
 	}
-	if a.projFindSelected < a.projFindScrollY {
-		a.projFindScrollY = a.projFindSelected
+	if a.projFind.findSelected < a.projFind.findScrollY {
+		a.projFind.findScrollY = a.projFind.findSelected
 	}
-	if a.projFindSelected >= a.projFindScrollY+eh {
-		a.projFindScrollY = a.projFindSelected - eh + 1
+	if a.projFind.findSelected >= a.projFind.findScrollY+eh {
+		a.projFind.findScrollY = a.projFind.findSelected - eh + 1
 	}
 	maxScroll := len(rows) - eh
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
-	if a.projFindScrollY > maxScroll {
-		a.projFindScrollY = maxScroll
+	if a.projFind.findScrollY > maxScroll {
+		a.projFind.findScrollY = maxScroll
 	}
-	if a.projFindScrollY < 0 {
-		a.projFindScrollY = 0
+	if a.projFind.findScrollY < 0 {
+		a.projFind.findScrollY = 0
 	}
 }
 
@@ -273,7 +307,7 @@ func (a *App) handleProjFindKey(ev *tcell.EventKey) {
 	case tcell.KeyEsc:
 		a.closeProjFind()
 	case tcell.KeyEnter:
-		if a.projFocusReplace {
+		if a.projFind.focusReplace {
 			a.projReplaceEnter(ev.Modifiers()&tcell.ModShift != 0)
 			return
 		}
@@ -293,59 +327,59 @@ func (a *App) handleProjFindKey(ev *tcell.EventKey) {
 		_, _, _, eh := a.editorRect()
 		a.projFindMove(eh)
 	case tcell.KeyLeft:
-		if a.projFocusReplace {
-			if a.projReplaceCursor > 0 {
-				a.projReplaceCursor--
+		if a.projFind.focusReplace {
+			if a.projFind.replaceCursor > 0 {
+				a.projFind.replaceCursor--
 			}
 			return
 		}
-		if a.projFindCursor > 0 {
-			a.projFindCursor--
+		if a.projFind.findCursor > 0 {
+			a.projFind.findCursor--
 		}
 	case tcell.KeyRight:
-		if a.projFocusReplace {
-			if a.projReplaceCursor < len(a.projReplaceValue) {
-				a.projReplaceCursor++
+		if a.projFind.focusReplace {
+			if a.projFind.replaceCursor < len(a.projFind.replaceValue) {
+				a.projFind.replaceCursor++
 			}
 			return
 		}
-		if a.projFindCursor < len(a.projFindValue) {
-			a.projFindCursor++
+		if a.projFind.findCursor < len(a.projFind.findValue) {
+			a.projFind.findCursor++
 		}
 	case tcell.KeyHome:
-		if a.projFocusReplace {
-			a.projReplaceCursor = 0
+		if a.projFind.focusReplace {
+			a.projFind.replaceCursor = 0
 			return
 		}
-		a.projFindCursor = 0
+		a.projFind.findCursor = 0
 	case tcell.KeyEnd:
-		if a.projFocusReplace {
-			a.projReplaceCursor = len(a.projReplaceValue)
+		if a.projFind.focusReplace {
+			a.projFind.replaceCursor = len(a.projFind.replaceValue)
 			return
 		}
-		a.projFindCursor = len(a.projFindValue)
+		a.projFind.findCursor = len(a.projFind.findValue)
 	case tcell.KeyBackspace, tcell.KeyBackspace2:
-		if a.projFocusReplace {
-			if a.projReplaceCursor > 0 {
-				a.projReplaceValue = append(a.projReplaceValue[:a.projReplaceCursor-1], a.projReplaceValue[a.projReplaceCursor:]...)
-				a.projReplaceCursor--
+		if a.projFind.focusReplace {
+			if a.projFind.replaceCursor > 0 {
+				a.projFind.replaceValue = append(a.projFind.replaceValue[:a.projFind.replaceCursor-1], a.projFind.replaceValue[a.projFind.replaceCursor:]...)
+				a.projFind.replaceCursor--
 			}
 			return
 		}
-		if a.projFindCursor > 0 {
-			a.projFindValue = append(a.projFindValue[:a.projFindCursor-1], a.projFindValue[a.projFindCursor:]...)
-			a.projFindCursor--
+		if a.projFind.findCursor > 0 {
+			a.projFind.findValue = append(a.projFind.findValue[:a.projFind.findCursor-1], a.projFind.findValue[a.projFind.findCursor:]...)
+			a.projFind.findCursor--
 			a.projFindQueryChanged()
 		}
 	case tcell.KeyDelete:
-		if a.projFocusReplace {
-			if a.projReplaceCursor < len(a.projReplaceValue) {
-				a.projReplaceValue = append(a.projReplaceValue[:a.projReplaceCursor], a.projReplaceValue[a.projReplaceCursor+1:]...)
+		if a.projFind.focusReplace {
+			if a.projFind.replaceCursor < len(a.projFind.replaceValue) {
+				a.projFind.replaceValue = append(a.projFind.replaceValue[:a.projFind.replaceCursor], a.projFind.replaceValue[a.projFind.replaceCursor+1:]...)
 			}
 			return
 		}
-		if a.projFindCursor < len(a.projFindValue) {
-			a.projFindValue = append(a.projFindValue[:a.projFindCursor], a.projFindValue[a.projFindCursor+1:]...)
+		if a.projFind.findCursor < len(a.projFind.findValue) {
+			a.projFind.findValue = append(a.projFind.findValue[:a.projFind.findCursor], a.projFind.findValue[a.projFind.findCursor+1:]...)
 			a.projFindQueryChanged()
 		}
 	case tcell.KeyRune:
@@ -353,21 +387,21 @@ func (a *App) handleProjFindKey(ev *tcell.EventKey) {
 		if r < 0x20 {
 			return
 		}
-		if a.projFocusReplace {
-			next := make([]rune, 0, len(a.projReplaceValue)+1)
-			next = append(next, a.projReplaceValue[:a.projReplaceCursor]...)
+		if a.projFind.focusReplace {
+			next := make([]rune, 0, len(a.projFind.replaceValue)+1)
+			next = append(next, a.projFind.replaceValue[:a.projFind.replaceCursor]...)
 			next = append(next, r)
-			next = append(next, a.projReplaceValue[a.projReplaceCursor:]...)
-			a.projReplaceValue = next
-			a.projReplaceCursor++
+			next = append(next, a.projFind.replaceValue[a.projFind.replaceCursor:]...)
+			a.projFind.replaceValue = next
+			a.projFind.replaceCursor++
 			return
 		}
-		next := make([]rune, 0, len(a.projFindValue)+1)
-		next = append(next, a.projFindValue[:a.projFindCursor]...)
+		next := make([]rune, 0, len(a.projFind.findValue)+1)
+		next = append(next, a.projFind.findValue[:a.projFind.findCursor]...)
 		next = append(next, r)
-		next = append(next, a.projFindValue[a.projFindCursor:]...)
-		a.projFindValue = next
-		a.projFindCursor++
+		next = append(next, a.projFind.findValue[a.projFind.findCursor:]...)
+		a.projFind.findValue = next
+		a.projFind.findCursor++
 		a.projFindQueryChanged()
 	}
 }
@@ -378,12 +412,12 @@ func (a *App) handleProjFindKey(ev *tcell.EventKey) {
 func (a *App) handleProjFindMouse(x, y int, btn tcell.ButtonMask) {
 	ex, ey, ew, eh := a.editorRect()
 	if btn&tcell.WheelUp != 0 {
-		a.projFindScrollY -= wheelLines
+		a.projFind.findScrollY -= wheelLines
 		a.projFindClampView(a.projFindRows())
 		return
 	}
 	if btn&tcell.WheelDown != 0 {
-		a.projFindScrollY += wheelLines
+		a.projFind.findScrollY += wheelLines
 		a.projFindClampView(a.projFindRows())
 		return
 	}
@@ -402,26 +436,26 @@ func (a *App) handleProjFindMouse(x, y int, btn tcell.ButtonMask) {
 				return
 			}
 		}
-		if btn&tcell.Button1 != 0 && a.projReplaceOpen {
-			if x >= a.projReplaceAllX0 && x < a.projReplaceAllX1 && a.projReplaceAllX1 > 0 {
+		if btn&tcell.Button1 != 0 && a.projFind.replaceOpen {
+			if x >= a.projFind.replaceAllX0 && x < a.projFind.replaceAllX1 && a.projFind.replaceAllX1 > 0 {
 				a.projReplaceConfirmAll()
 				return
 			}
-			if x >= a.projReplaceFieldX0 && x < a.projReplaceFieldX1 {
-				a.projFocusReplace = true
+			if x >= a.projFind.replaceFieldX0 && x < a.projFind.replaceFieldX1 {
+				a.projFind.focusReplace = true
 				return
 			}
-			a.projFocusReplace = false
+			a.projFind.focusReplace = false
 		}
 		return
 	}
 	if x >= ex && x < ex+ew && y >= ey && y < ey+eh {
 		rows := a.projFindRows()
-		idx := a.projFindScrollY + (y - ey)
+		idx := a.projFind.findScrollY + (y - ey)
 		if idx < 0 || idx >= len(rows) {
 			return
 		}
-		a.projFindSelected = idx
+		a.projFind.findSelected = idx
 		a.projFindActivate()
 		return
 	}
@@ -435,7 +469,7 @@ func (a *App) handleProjFindMouse(x, y int, btn tcell.ButtonMask) {
 //	                  123: the matched line text
 //	<bar row>        Search project: query     37 matches in 4 files
 func (a *App) drawProjFind() {
-	if !a.projFindOpen {
+	if !a.projFind.findOpen {
 		return
 	}
 	a.drawProjFindResults()
@@ -454,21 +488,21 @@ func (a *App) drawProjFindResults() {
 	rows := a.projFindRows()
 	if len(rows) == 0 {
 		msg := "Type to search the project"
-		if a.projFindBusy {
+		if a.projFind.findBusy {
 			msg = "Searching…"
-		} else if len(a.projFindValue) > 0 {
+		} else if len(a.projFind.findValue) > 0 {
 			msg = "No matches"
 		}
 		drawAt(a.screen, ex+2, ey+1, msg, bgStyle.Foreground(a.theme.Muted))
 		return
 	}
-	query := string(a.projFindValue)
+	query := string(a.projFind.findValue)
 	for i := 0; i < eh; i++ {
-		idx := a.projFindScrollY + i
+		idx := a.projFind.findScrollY + i
 		if idx >= len(rows) {
 			break
 		}
-		a.drawProjFindRow(ex, ey+i, ew, rows[idx], idx == a.projFindSelected, query)
+		a.drawProjFindRow(ex, ey+i, ew, rows[idx], idx == a.projFind.findSelected, query)
 	}
 }
 
@@ -484,7 +518,7 @@ func (a *App) drawProjFindRow(x, y, w int, row projFindRow, selected bool, query
 	}
 	if row.IsHeader {
 		arrow := "▾ "
-		if a.projFindFolded[row.Path] {
+		if a.projFind.findFolded[row.Path] {
 			arrow = "▸ "
 		}
 		label := fmt.Sprintf("%s%s (%d)", arrow, row.Path, row.Count)
@@ -495,7 +529,7 @@ func (a *App) drawProjFindRow(x, y, w int, row projFindRow, selected bool, query
 		drawClipped(a.screen, x+1, y, w-2, label, st)
 		return
 	}
-	m := a.projFindMatches[row.MatchIdx]
+	m := a.projFind.findMatches[row.MatchIdx]
 	numStr := fmt.Sprintf("%6d: ", m.Line)
 	numEnd := drawClipped(a.screen, x+1, y, w-2, numStr, base.Foreground(a.theme.Muted))
 	textW := x + w - 1 - numEnd
@@ -538,9 +572,9 @@ func (a *App) projFindChips(labelEnd int) []projFindChip {
 		label string
 		on    *bool
 	}{
-		{"Aa", &a.projFindMatchCase},
-		{"⌇w", &a.projFindWholeWord},
-		{".*", &a.projFindRegex},
+		{"Aa", &a.projFind.findMatchCase},
+		{"⌇w", &a.projFind.findWholeWord},
+		{".*", &a.projFind.findRegex},
 	}
 	out := make([]projFindChip, 0, 3)
 	x := labelEnd
@@ -578,9 +612,9 @@ func (a *App) drawProjFindBar() {
 	inputStart := bx + chips[len(chips)-1].x1 + 1
 
 	hint := " Enter: open · Tab: replace · Esc: close "
-	if a.projReplaceOpen && a.projFocusReplace {
+	if a.projFind.replaceOpen && a.projFind.focusReplace {
 		hint = " Enter: replace line · Shift+Enter: all · Tab: query · Esc: close "
-	} else if a.projReplaceOpen {
+	} else if a.projFind.replaceOpen {
 		hint = " Enter: open · Tab: replace field · Esc: close "
 	}
 	counter := a.projFindCounterText()
@@ -592,7 +626,7 @@ func (a *App) drawProjFindBar() {
 	if counter != "" && bw > runeLen(label)+runeLen(counter)+4 {
 		rightTextStart -= runeLen(counter) + 2
 		style := mutedStyle
-		if !a.projFindBusy && len(a.projFindValue) > 0 && len(a.projFindMatches) == 0 {
+		if !a.projFind.findBusy && len(a.projFind.findValue) > 0 && len(a.projFind.findMatches) == 0 {
 			style = tcell.StyleDefault.Background(bg).Foreground(a.theme.Error).Bold(true)
 		}
 		drawAt(a.screen, rightTextStart, by, counter, style)
@@ -605,57 +639,57 @@ func (a *App) drawProjFindBar() {
 	// With the replace field open, the query keeps the left half; the
 	// right half carries " ⇒ <replacement> [ All ]". The x ranges are
 	// stamped for the mouse handler.
-	a.projReplaceFieldX0, a.projReplaceFieldX1 = 0, 0
-	a.projReplaceAllX0, a.projReplaceAllX1 = 0, 0
-	if a.projReplaceOpen {
+	a.projFind.replaceFieldX0, a.projFind.replaceFieldX1 = 0, 0
+	a.projFind.replaceAllX0, a.projFind.replaceAllX1 = 0, 0
+	if a.projFind.replaceOpen {
 		half := inputStart + (inputEnd-inputStart)/2
 		rlabel := " ⇒ "
 		drawAt(a.screen, half, by, rlabel, labelStyle)
 		fieldX0 := half + runeLen(rlabel)
 		fieldX1 := inputEnd
-		if len(a.projReplaceValue) > 0 {
+		if len(a.projFind.replaceValue) > 0 {
 			allBtn := "[ All ]"
 			bx0 := inputEnd - runeLen(allBtn)
 			if bx0 > fieldX0+2 {
 				drawAt(a.screen, bx0, by, allBtn, labelStyle)
-				a.projReplaceAllX0, a.projReplaceAllX1 = bx0, bx0+runeLen(allBtn)
+				a.projFind.replaceAllX0, a.projFind.replaceAllX1 = bx0, bx0+runeLen(allBtn)
 				fieldX1 = bx0 - 1
 			}
 		}
-		for i, r := range a.projReplaceValue {
+		for i, r := range a.projFind.replaceValue {
 			if fieldX0+i >= fieldX1 {
 				break
 			}
 			a.screen.SetContent(fieldX0+i, by, r, nil, barStyle)
 		}
-		a.projReplaceFieldX0, a.projReplaceFieldX1 = fieldX0, fieldX1
+		a.projFind.replaceFieldX0, a.projFind.replaceFieldX1 = fieldX0, fieldX1
 		inputEnd = half - 1
 	}
 	inputWidth := inputEnd - inputStart
 	if inputWidth < 1 {
 		inputWidth = 1
 	}
-	if a.projFindCursor < a.projFindScroll {
-		a.projFindScroll = a.projFindCursor
+	if a.projFind.findCursor < a.projFind.findScroll {
+		a.projFind.findScroll = a.projFind.findCursor
 	}
-	if a.projFindCursor >= a.projFindScroll+inputWidth {
-		a.projFindScroll = a.projFindCursor - inputWidth + 1
+	if a.projFind.findCursor >= a.projFind.findScroll+inputWidth {
+		a.projFind.findScroll = a.projFind.findCursor - inputWidth + 1
 	}
 	for i := 0; i < inputWidth; i++ {
-		idx := a.projFindScroll + i
-		if idx >= len(a.projFindValue) {
+		idx := a.projFind.findScroll + i
+		if idx >= len(a.projFind.findValue) {
 			break
 		}
-		a.screen.SetContent(inputStart+i, by, a.projFindValue[idx], nil, barStyle)
+		a.screen.SetContent(inputStart+i, by, a.projFind.findValue[idx], nil, barStyle)
 	}
-	if a.projReplaceOpen && a.projFocusReplace {
-		caret := a.projReplaceFieldX0 + a.projReplaceCursor
-		if caret >= a.projReplaceFieldX0 && caret <= a.projReplaceFieldX1 {
+	if a.projFind.replaceOpen && a.projFind.focusReplace {
+		caret := a.projFind.replaceFieldX0 + a.projFind.replaceCursor
+		if caret >= a.projFind.replaceFieldX0 && caret <= a.projFind.replaceFieldX1 {
 			a.screen.ShowCursor(caret, by)
 		}
 		return
 	}
-	caret := inputStart + (a.projFindCursor - a.projFindScroll)
+	caret := inputStart + (a.projFind.findCursor - a.projFind.findScroll)
 	if caret >= inputStart && caret <= inputEnd {
 		a.screen.ShowCursor(caret, by)
 	}
@@ -663,25 +697,25 @@ func (a *App) drawProjFindBar() {
 
 // projFindCounterText summarises the sweep for the bar's right side.
 func (a *App) projFindCounterText() string {
-	if len(a.projFindValue) == 0 {
+	if len(a.projFind.findValue) == 0 {
 		return ""
 	}
-	if a.projFindBusy {
+	if a.projFind.findBusy {
 		return "searching…"
 	}
-	if len(a.projFindMatches) == 0 {
+	if len(a.projFind.findMatches) == 0 {
 		return "no results"
 	}
 	files := 0
 	last := ""
-	for _, m := range a.projFindMatches {
+	for _, m := range a.projFind.findMatches {
 		if m.Path != last {
 			files++
 			last = m.Path
 		}
 	}
-	s := fmt.Sprintf("%d matches in %d files", len(a.projFindMatches), files)
-	if a.projFindTruncated {
+	s := fmt.Sprintf("%d matches in %d files", len(a.projFind.findMatches), files)
+	if a.projFind.findTruncated {
 		s += " (capped)"
 	}
 	return s

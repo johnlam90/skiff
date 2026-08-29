@@ -653,37 +653,37 @@ func TestAnyModalOpen_FindStripIsNotOverlay(t *testing.T) {
 
 // TestCloseAllModals_TearsDownProjectFindThroughOnePath pins the forked
 // teardown bug: closeAllModals hand-cleared a subset of the project-find
-// fields, so opening any overlay over the panel left projReplaceOpen
-// armed, projFindTruncated stale, and the in-flight sweep generation live
+// fields, so opening any overlay over the panel left projFind.replaceOpen
+// armed, projFind.findTruncated stale, and the in-flight sweep generation live
 // — the next results event could then paint into a closed panel. There is
 // exactly one project-find teardown (closeProjFind), the same way the find
 // bar has exactly one (closeFind), and closeAllModals must use it.
 func TestCloseAllModals_TearsDownProjectFindThroughOnePath(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	a.projFindOpen = true
-	a.projFindValue = []rune("query")
-	a.projFindCursor = 5
-	a.projFindTruncated = true
-	a.projFindFolded = map[string]bool{"a.go": true}
-	a.projReplaceOpen = true
-	a.projReplaceValue = []rune("repl")
-	a.projReplaceCursor = 4
-	a.projFocusReplace = true
-	gen := a.projFindGen
+	a.projFind.findOpen = true
+	a.projFind.findValue = []rune("query")
+	a.projFind.findCursor = 5
+	a.projFind.findTruncated = true
+	a.projFind.findFolded = map[string]bool{"a.go": true}
+	a.projFind.replaceOpen = true
+	a.projFind.replaceValue = []rune("repl")
+	a.projFind.replaceCursor = 4
+	a.projFind.focusReplace = true
+	gen := a.projFind.findGen
 
 	a.closeAllModals()
 
-	if a.projFindOpen || a.projFindValue != nil || a.projFindCursor != 0 ||
-		a.projFindTruncated || a.projFindFolded != nil {
+	if a.projFind.findOpen || a.projFind.findValue != nil || a.projFind.findCursor != 0 ||
+		a.projFind.findTruncated || a.projFind.findFolded != nil {
 		t.Fatalf("panel state survived: open=%v value=%q cursor=%d truncated=%v folded=%v",
-			a.projFindOpen, string(a.projFindValue), a.projFindCursor,
-			a.projFindTruncated, a.projFindFolded)
+			a.projFind.findOpen, string(a.projFind.findValue), a.projFind.findCursor,
+			a.projFind.findTruncated, a.projFind.findFolded)
 	}
-	if a.projReplaceOpen || a.projReplaceValue != nil || a.projReplaceCursor != 0 || a.projFocusReplace {
+	if a.projFind.replaceOpen || a.projFind.replaceValue != nil || a.projFind.replaceCursor != 0 || a.projFind.focusReplace {
 		t.Fatalf("replace state survived: open=%v value=%q cursor=%d focus=%v",
-			a.projReplaceOpen, string(a.projReplaceValue), a.projReplaceCursor, a.projFocusReplace)
+			a.projFind.replaceOpen, string(a.projFind.replaceValue), a.projFind.replaceCursor, a.projFind.focusReplace)
 	}
-	if a.projFindGen == gen {
+	if a.projFind.findGen == gen {
 		t.Fatalf("closeAllModals must invalidate the in-flight sweep; gen still %d", gen)
 	}
 }

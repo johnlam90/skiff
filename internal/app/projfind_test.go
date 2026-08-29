@@ -32,7 +32,7 @@ func projFindApp(t *testing.T, root string) *App {
 	a := newTestApp(t, root)
 	a.finder = finder.New(root)
 	a.openProjFind()
-	if !a.projFindOpen {
+	if !a.projFind.findOpen {
 		t.Fatal("panel should be open")
 	}
 	return a
@@ -53,7 +53,7 @@ func fakeMatches() []search.Match {
 // its match rows while the header (and other files) stay put.
 func TestProjFindRowsGroupAndFold(t *testing.T) {
 	a := projFindApp(t, t.TempDir())
-	a.projFindMatches = fakeMatches()
+	a.projFind.findMatches = fakeMatches()
 
 	rows := a.projFindRows()
 	if len(rows) != 5 {
@@ -74,8 +74,8 @@ func TestProjFindRowsGroupAndFold(t *testing.T) {
 	if !rows[0].IsHeader || rows[0].Path != "a.go" {
 		t.Fatalf("folded header should remain: %+v", rows[0])
 	}
-	if a.projFindSelected != 0 {
-		t.Fatalf("selection should snap to the folded header, got %d", a.projFindSelected)
+	if a.projFind.findSelected != 0 {
+		t.Fatalf("selection should snap to the folded header, got %d", a.projFind.findSelected)
 	}
 }
 
@@ -83,15 +83,15 @@ func TestProjFindRowsGroupAndFold(t *testing.T) {
 // must never land — only the generation the current query started.
 func TestProjFindStaleGenerationDropped(t *testing.T) {
 	a := projFindApp(t, t.TempDir())
-	a.projFindGen = 7
+	a.projFind.findGen = 7
 
 	a.handleProjFindDone(&projFindDoneEvent{when: time.Now(), gen: 6, matches: fakeMatches()})
-	if len(a.projFindMatches) != 0 {
+	if len(a.projFind.findMatches) != 0 {
 		t.Fatal("stale generation applied")
 	}
 	a.handleProjFindDone(&projFindDoneEvent{when: time.Now(), gen: 7, matches: fakeMatches(), truncated: true})
-	if len(a.projFindMatches) != 3 || !a.projFindTruncated {
-		t.Fatalf("current generation should land: %d matches", len(a.projFindMatches))
+	if len(a.projFind.findMatches) != 3 || !a.projFind.findTruncated {
+		t.Fatalf("current generation should land: %d matches", len(a.projFind.findMatches))
 	}
 }
 
@@ -101,11 +101,11 @@ func TestProjFindEnterOpensAtLine(t *testing.T) {
 	root := t.TempDir()
 	mkFile(t, root, "a.go", "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n")
 	a := projFindApp(t, root)
-	a.projFindMatches = fakeMatches()
+	a.projFind.findMatches = fakeMatches()
 
-	a.projFindSelected = 2 // second match row of a.go (header, m0, m1)
+	a.projFind.findSelected = 2 // second match row of a.go (header, m0, m1)
 	a.projFindActivate()
-	if a.projFindOpen {
+	if a.projFind.findOpen {
 		t.Fatal("activation should close the panel")
 	}
 	tab := a.activeTabPtr()
@@ -121,14 +121,14 @@ func TestProjFindEnterOpensAtLine(t *testing.T) {
 // opening anything.
 func TestProjFindActivateHeaderFolds(t *testing.T) {
 	a := projFindApp(t, t.TempDir())
-	a.projFindMatches = fakeMatches()
+	a.projFind.findMatches = fakeMatches()
 
-	a.projFindSelected = 0
+	a.projFind.findSelected = 0
 	a.projFindActivate()
-	if !a.projFindOpen {
+	if !a.projFind.findOpen {
 		t.Fatal("folding must not close the panel")
 	}
-	if !a.projFindFolded["a.go"] {
+	if !a.projFind.findFolded["a.go"] {
 		t.Fatal("header activation should fold the file")
 	}
 	if a.tabs.Len() != 0 {
@@ -140,11 +140,11 @@ func TestProjFindActivateHeaderFolds(t *testing.T) {
 // state so the next open starts fresh.
 func TestProjFindEscCloses(t *testing.T) {
 	a := projFindApp(t, t.TempDir())
-	a.projFindValue = []rune("abc")
-	a.projFindMatches = fakeMatches()
+	a.projFind.findValue = []rune("abc")
+	a.projFind.findMatches = fakeMatches()
 
 	a.closeProjFind()
-	if a.projFindOpen || a.projFindValue != nil || a.projFindMatches != nil {
+	if a.projFind.findOpen || a.projFind.findValue != nil || a.projFind.findMatches != nil {
 		t.Fatal("close should clear the panel state")
 	}
 }
@@ -157,21 +157,21 @@ func TestProjFindDebounceAndStaleKick(t *testing.T) {
 	mkFile(t, root, "a.go", "xx alpha\n")
 	a := projFindApp(t, root)
 
-	a.projFindValue = []rune("al")
+	a.projFind.findValue = []rune("al")
 	a.projFindQueryChanged() // gen N
-	staleGen := a.projFindGen
-	a.projFindValue = []rune("alpha")
+	staleGen := a.projFind.findGen
+	a.projFind.findValue = []rune("alpha")
 	a.projFindQueryChanged() // gen N+1 supersedes
 	a.handleProjFindKick(&projFindKickEvent{when: time.Now(), gen: staleGen})
 	// The stale kick must be inert: no done event for staleGen can win,
 	// and busy stays owned by the live generation.
-	if a.projFindGen != staleGen+1 {
-		t.Fatalf("generation bookkeeping broke: %d vs %d", a.projFindGen, staleGen)
+	if a.projFind.findGen != staleGen+1 {
+		t.Fatalf("generation bookkeeping broke: %d vs %d", a.projFind.findGen, staleGen)
 	}
 
 	// Column landing via activation.
-	a.projFindMatches = []search.Match{{Path: "a.go", Line: 1, Col: 3, Text: "xx alpha"}}
-	a.projFindSelected = 1 // header row 0, match row 1
+	a.projFind.findMatches = []search.Match{{Path: "a.go", Line: 1, Col: 3, Text: "xx alpha"}}
+	a.projFind.findSelected = 1 // header row 0, match row 1
 	a.projFindActivate()
 	tab := a.activeTabPtr()
 	if tab == nil || tab.Cursor.Col != 3 {
@@ -188,7 +188,7 @@ func TestProjFindMouseClickOnMatchRowOpensFile(t *testing.T) {
 	root := t.TempDir()
 	mkFile(t, root, "a.go", "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n")
 	a := projFindApp(t, root)
-	a.projFindMatches = fakeMatches()
+	a.projFind.findMatches = fakeMatches()
 
 	rows := a.projFindRows()
 	// rows[1] is a.go's first match (line 3, "alpha one") — scrollY is
@@ -199,7 +199,7 @@ func TestProjFindMouseClickOnMatchRowOpensFile(t *testing.T) {
 	ex, ey, _, _ := a.editorRect()
 	a.handleMouse(tcell.NewEventMouse(ex+2, ey+1, tcell.Button1, tcell.ModNone))
 
-	if a.projFindOpen {
+	if a.projFind.findOpen {
 		t.Fatal("clicking a match row should close the panel")
 	}
 	tab := a.activeTabPtr()
@@ -220,16 +220,16 @@ func TestProjFindMouseClickOnMatchRowOpensFile(t *testing.T) {
 // TestProjFindActivateHeaderFolds, but driven via the mouse.
 func TestProjFindMouseClickOnHeaderFolds(t *testing.T) {
 	a := projFindApp(t, t.TempDir())
-	a.projFindMatches = fakeMatches()
+	a.projFind.findMatches = fakeMatches()
 
 	ex, ey, _, _ := a.editorRect()
 	// rows[0] is the a.go header at scrollY 0, so its row is exactly ey.
 	a.handleMouse(tcell.NewEventMouse(ex+2, ey, tcell.Button1, tcell.ModNone))
 
-	if !a.projFindOpen {
+	if !a.projFind.findOpen {
 		t.Fatal("folding via mouse must not close the panel")
 	}
-	if !a.projFindFolded["a.go"] {
+	if !a.projFind.findFolded["a.go"] {
 		t.Fatal("clicking the header row should fold its file")
 	}
 	if a.tabs.Len() != 0 {
@@ -244,9 +244,9 @@ func TestProjFindMouseClickOnHeaderFolds(t *testing.T) {
 // the wrong match.
 func TestProjFindMouseClickBelowLastRowIsNoop(t *testing.T) {
 	a := projFindApp(t, t.TempDir())
-	a.projFindMatches = fakeMatches() // 5 rows total
-	beforeSelected := a.projFindSelected
-	beforeMatches := len(a.projFindMatches)
+	a.projFind.findMatches = fakeMatches() // 5 rows total
+	beforeSelected := a.projFind.findSelected
+	beforeMatches := len(a.projFind.findMatches)
 
 	ex, ey, _, eh := a.editorRect()
 	if eh < 11 {
@@ -254,13 +254,13 @@ func TestProjFindMouseClickBelowLastRowIsNoop(t *testing.T) {
 	}
 	a.handleMouse(tcell.NewEventMouse(ex+2, ey+10, tcell.Button1, tcell.ModNone))
 
-	if !a.projFindOpen {
+	if !a.projFind.findOpen {
 		t.Fatal("a click below the last row must not close the panel")
 	}
-	if a.projFindSelected != beforeSelected {
-		t.Fatalf("selection changed on an out-of-range click: got %d, want %d", a.projFindSelected, beforeSelected)
+	if a.projFind.findSelected != beforeSelected {
+		t.Fatalf("selection changed on an out-of-range click: got %d, want %d", a.projFind.findSelected, beforeSelected)
 	}
-	if len(a.projFindMatches) != beforeMatches {
+	if len(a.projFind.findMatches) != beforeMatches {
 		t.Fatal("match set changed on an out-of-range click")
 	}
 	if a.tabs.Len() != 0 {
@@ -277,8 +277,8 @@ func TestProjFindMouseClickBelowLastRowIsNoop(t *testing.T) {
 func TestProjFindDraw_PaintsResultsAndBar(t *testing.T) {
 	root := t.TempDir()
 	a := projFindApp(t, root)
-	a.projFindValue = []rune("alpha")
-	a.projFindMatches = fakeMatches()
+	a.projFind.findValue = []rune("alpha")
+	a.projFind.findMatches = fakeMatches()
 
 	a.draw()
 	scr := a.screen.(tcell.SimulationScreen)

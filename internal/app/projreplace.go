@@ -47,29 +47,29 @@ func (e *projReplaceDoneEvent) When() time.Time { return e.when }
 // closeAllModals, so an overlay opening over the panel can't leave the
 // replace field armed underneath it.
 func (a *App) resetProjReplace() {
-	a.projReplaceOpen = false
-	a.projReplaceValue = nil
-	a.projReplaceCursor = 0
-	a.projFocusReplace = false
+	a.projFind.replaceOpen = false
+	a.projFind.replaceValue = nil
+	a.projFind.replaceCursor = 0
+	a.projFind.focusReplace = false
 }
 
 // projReplaceToggleFocus is the Tab gesture: first press grows the
 // replace field and focuses it, later presses hop between the fields.
 func (a *App) projReplaceToggleFocus() {
-	if !a.projReplaceOpen {
-		a.projReplaceOpen = true
-		a.projFocusReplace = true
+	if !a.projFind.replaceOpen {
+		a.projFind.replaceOpen = true
+		a.projFind.focusReplace = true
 		return
 	}
-	a.projFocusReplace = !a.projFocusReplace
+	a.projFind.focusReplace = !a.projFind.focusReplace
 }
 
 // projReplaceOpts snapshots the panel's mode chips into engine options.
 func (a *App) projReplaceOpts() search.Options {
 	opts := search.DefaultOptions()
-	opts.MatchCase = a.projFindMatchCase
-	opts.WholeWord = a.projFindWholeWord
-	opts.Regex = a.projFindRegex
+	opts.MatchCase = a.projFind.findMatchCase
+	opts.WholeWord = a.projFind.findWholeWord
+	opts.Regex = a.projFind.findRegex
 	return opts
 }
 
@@ -82,10 +82,10 @@ func (a *App) projReplaceEnter(all bool) {
 		return
 	}
 	rows := a.projFindRows()
-	if a.projFindSelected < 0 || a.projFindSelected >= len(rows) {
+	if a.projFind.findSelected < 0 || a.projFind.findSelected >= len(rows) {
 		return
 	}
-	row := rows[a.projFindSelected]
+	row := rows[a.projFind.findSelected]
 	if row.IsHeader {
 		a.projFindToggleFold(row.Path)
 		return
@@ -169,11 +169,11 @@ func applyMatchAtTab(tab *editor.Tab, m search.Match, query, repl string, opts s
 // paths target only the row's own occurrence — a sibling row recorded on
 // the same line is left untouched.
 func (a *App) projReplaceRowApply(row projFindRow) {
-	if row.MatchIdx < 0 || row.MatchIdx >= len(a.projFindMatches) {
+	if row.MatchIdx < 0 || row.MatchIdx >= len(a.projFind.findMatches) {
 		return
 	}
-	m := a.projFindMatches[row.MatchIdx]
-	query, repl := string(a.projFindValue), string(a.projReplaceValue)
+	m := a.projFind.findMatches[row.MatchIdx]
+	query, repl := string(a.projFind.findValue), string(a.projFind.replaceValue)
 	opts := a.projReplaceOpts()
 	abs := filepath.Join(a.rootDir, filepath.FromSlash(m.Path))
 	if tab, wasClean := a.findOpenTab(abs); tab != nil {
@@ -202,24 +202,24 @@ func (a *App) projReplaceRowApply(row projFindRow) {
 
 // projReplaceConfirmAll states the blast radius and arms the apply.
 func (a *App) projReplaceConfirmAll() {
-	if len(a.projFindMatches) == 0 {
+	if len(a.projFind.findMatches) == 0 {
 		a.flash("Nothing to replace")
 		return
 	}
 	files := map[string]bool{}
-	for _, m := range a.projFindMatches {
+	for _, m := range a.projFind.findMatches {
 		files[m.Path] = true
 	}
 	msg := fmt.Sprintf(
 		"Replace %d match(es) in %d file(s)? Files change on disk — commit or stash first if unsure.",
-		len(a.projFindMatches), len(files))
-	if a.projFindRegex {
+		len(a.projFind.findMatches), len(files))
+	if a.projFind.findRegex {
 		msg += " Regex replacements expand $1 / ${name} groups ($$ for a literal $)."
 	}
 	// Snapshot everything the apply needs — the confirm modal closes
 	// the panel (closeAllModals), taking the live state with it.
-	matches := append([]search.Match(nil), a.projFindMatches...)
-	query, repl := string(a.projFindValue), string(a.projReplaceValue)
+	matches := append([]search.Match(nil), a.projFind.findMatches...)
+	query, repl := string(a.projFind.findValue), string(a.projFind.replaceValue)
 	opts := a.projReplaceOpts()
 	a.openConfirm("Replace in project", msg, func(app *App) {
 		app.doProjReplaceAll(matches, query, repl, opts)
@@ -306,7 +306,7 @@ func (a *App) handleProjReplaceDone(e *projReplaceDoneEvent) {
 			strings.Join(e.bufSaveFailed, ", "))
 	}
 	a.refreshTreeNow()
-	if a.projFindOpen {
+	if a.projFind.findOpen {
 		a.projFindQueryChanged()
 	}
 	a.flash(msg)

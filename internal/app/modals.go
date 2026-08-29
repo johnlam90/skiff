@@ -34,7 +34,7 @@ const contextMenuWidth = 19
 // strips are torn down through their own single teardown — closeFind and
 // closeProjFind — so the replace rows, the match highlights and the
 // in-flight sweep generation all go with them rather than staying armed
-// under the modal. Hand-clearing a subset here is how projReplaceOpen
+// under the modal. Hand-clearing a subset here is how projFind.replaceOpen
 // once survived an overlay opening on top of the panel.
 func (a *App) closeAllModals() {
 	// A modal opening over a pick cancels it properly — popped first,

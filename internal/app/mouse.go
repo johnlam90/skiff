@@ -72,7 +72,7 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		ov.HandleMouse(x, y, btn)
 		return
 	}
-	if a.projFindOpen {
+	if a.projFind.findOpen {
 		a.handleProjFindMouse(x, y, btn)
 		return
 	}

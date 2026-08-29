@@ -19,7 +19,6 @@ package app
 
 import (
 	"path/filepath"
-	"sync/atomic"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -30,7 +29,6 @@ import (
 	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/overlay"
-	"github.com/johnlam90/skiff/internal/search"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -353,31 +351,9 @@ type App struct {
 	// The list picker is an overlay.Pick prefab — see listpick.go for
 	// the opener; it carries all its own state.
 
-	// Project-wide content search (see projfind.go).
-	projFindOpen      bool
-	projFindValue     []rune
-	projFindCursor    int
-	projFindScroll    int
-	projFindGen       int // generation counter; stale sweeps are dropped
-	projFindBusy      bool
-	projFindMatches   []search.Match
-	projFindTruncated bool
-	projFindSelected  int
-	projFindScrollY   int
-	projFindFolded    map[string]bool
-	projFindLiveGen   atomic.Int64 // latest gen, readable from sweep goroutines
-	projFindMatchCase bool
-	projFindWholeWord bool
-	projFindRegex     bool
-
-	// Project-wide replace riding the panel (see projreplace.go). The
-	// X ranges are stamped by drawProjFindBar for the mouse handler.
-	projReplaceOpen                        bool
-	projReplaceValue                       []rune
-	projReplaceCursor                      int
-	projFocusReplace                       bool
-	projReplaceFieldX0, projReplaceFieldX1 int
-	projReplaceAllX0, projReplaceAllX1     int
+	// projFind is the project-wide content-search panel plus the
+	// replace state riding it — see projFindState in projfind.go.
+	projFind projFindState
 
 	// Auto-scroll while drag-selecting past the editor's top/bottom edge.
 	// lastDragX/Y is the most recent mouse position so the auto-scroll
