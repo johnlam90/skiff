@@ -167,10 +167,7 @@ func (p *Prompt) Draw(scr tcell.Screen) {
 	bg := th.LineHL
 	mutedStyle := tcell.StyleDefault.Background(bg).Foreground(th.Muted)
 	if p.Hint != "" {
-		// Clipped, not drawn raw: drawText does no bounds checking, so a
-		// hint longer than a squeezed frame used to paint straight
-		// through the border and onto whatever sat behind the prompt.
-		drawText(scr, r.X+2, r.Y+3, trimRunes(p.Hint, r.W-4), mutedStyle)
+		drawText(scr, r.X+2, r.Y+3, r.W-4, trimRunes(p.Hint, r.W-4), mutedStyle)
 	}
 
 	inputStyle := tcell.StyleDefault.Background(th.BG).Foreground(th.Text)

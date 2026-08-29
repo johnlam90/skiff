@@ -701,6 +701,57 @@ func TestGitPanelButtons_CollapseToGlyphsWhenNarrow(t *testing.T) {
 	}
 }
 
+// TestDrawGitPanel_CJKPathClipsInsidePanel pins the panel's wide-glyph
+// layout: a CJK path's ideographs land two cells apart (base cell plus
+// the continuation cell tcell paints through), and a name longer than
+// the sidebar clips inside the panel width instead of drifting. Before
+// textdraw, drawClipped painted one rune per COLUMN, so consecutive
+// ideographs collapsed onto each other's continuation cells.
+func TestDrawGitPanel_CJKPathClipsInsidePanel(t *testing.T) {
+	a, _, _ := dirtyRepoApp(t)
+	// 18 ideographs (36 cells) + ".txt" — wider than the default panel.
+	const cjk = "日本語のファイル名がとても長いテスト.txt"
+	writeFileT(t, filepath.Join(a.rootDir, cjk), "x\n")
+	a.refreshGitStatus()
+	a.toggleGitPanel()
+	// Draw ONLY the panel on a cleared screen: in a full draw() the
+	// splitter and editor paint after the sidebar, masking any bleed.
+	a.screen.Clear()
+	sx, sy, sw, sh := a.sidebarRect()
+	a.drawGitPanel(sx, sy, sw, sh)
+	a.screen.Show()
+	scr := a.screen.(tcell.SimulationScreen)
+	cells, w, _ := scr.GetContents()
+
+	rowY := -1
+	for y := sy; y < sy+sh; y++ {
+		if strings.ContainsRune(screenLine(scr, y), '日') {
+			rowY = y
+			break
+		}
+	}
+	if rowY < 0 {
+		t.Fatal("could not find the CJK row in the git panel")
+	}
+	// The name starts after "› ● M " chrome at sx+5: base cell, skipped
+	// continuation cell, next ideograph two cells later.
+	if c := cells[rowY*w+sx+5]; len(c.Runes) == 0 || c.Runes[0] != '日' {
+		t.Fatalf("name cell = %q, want 日 at column %d", c.Runes, sx+5)
+	}
+	if c := cells[rowY*w+sx+6]; len(c.Runes) > 0 && c.Runes[0] != ' ' {
+		t.Fatalf("continuation cell after 日 holds a glyph: %q", c.Runes)
+	}
+	if c := cells[rowY*w+sx+7]; len(c.Runes) == 0 || c.Runes[0] != '本' {
+		t.Fatalf("cell two after 日 = %q, want 本", c.Runes)
+	}
+	// The over-long name must not paint past the panel width.
+	for x := sx + sw; x < w; x++ {
+		if c := cells[rowY*w+x]; len(c.Runes) > 0 && c.Runes[0] != ' ' {
+			t.Fatalf("glyph painted past the panel at x=%d: %q", x, c.Runes[0])
+		}
+	}
+}
+
 // TestDrawGitPanel_BranchRowShowsPickerAffordance pins the ▾ cue: the
 // branch row opens the branch picker on click, so it must not render as
 // a static label.

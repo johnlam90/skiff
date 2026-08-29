@@ -144,13 +144,13 @@ func (a *App) handleProjFindKick(e *projFindKickEvent) {
 	scr := a.screen
 	live := &a.projFindLiveGen
 	matchCase, wholeWord, regex := a.projFindMatchCase, a.projFindWholeWord, a.projFindRegex
-	go func() {
+	a.safeGo("project-find", func() {
 		opts := search.DefaultOptions()
 		opts.Cancelled = func() bool { return live.Load() != int64(gen) }
 		opts.MatchCase, opts.WholeWord, opts.Regex = matchCase, wholeWord, regex
 		matches, truncated := search.Search(root, files, query, opts)
 		_ = scr.PostEvent(&projFindDoneEvent{when: time.Now(), gen: gen, matches: matches, truncated: truncated})
-	}()
+	})
 }
 
 // handleProjFindDone lands a finished sweep: stale generations are

@@ -172,6 +172,24 @@ func TestConfirm_EmptyBodyKeepsClassicGeometry(t *testing.T) {
 	}
 }
 
+// TestConfirm_BodyTextWidth pins the wrap width callers should build a
+// multi-line Body to: the frame's usable text columns at its current
+// runtime width, not the ConfirmBodyTextWidth constant. Callers that
+// wrap to this value instead of the constant get a narrower wrap on a
+// narrow terminal, so Draw's own trimRunes never has to truncate a
+// row (and hide a command's tail behind an ellipsis).
+func TestConfirm_BodyTextWidth(t *testing.T) {
+	c, _ := bodyConfirm(1)
+	c.Size = func() (int, int) { return 120, 24 }
+	if got := c.BodyTextWidth(); got != ConfirmBodyTextWidth {
+		t.Fatalf("wide screen: got %d want %d", got, ConfirmBodyTextWidth)
+	}
+	c.Size = func() (int, int) { return 60, 24 }
+	if got, want := c.BodyTextWidth(), 60-4; got != want {
+		t.Fatalf("narrow screen: got %d want %d", got, want)
+	}
+}
+
 // TestConfirm_BodyGrowsFrameAndMovesButtons pins the Body layout: the
 // frame widens to fit commands and gets one row per body line, and the
 // buttons move below the content instead of being painted over it.

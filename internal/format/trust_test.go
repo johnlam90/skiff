@@ -110,6 +110,27 @@ func TestSaveTrust_AtomicWrite(t *testing.T) {
 	}
 }
 
+// TestSaveTrust_OwnerOnlyPermissions pins the trust store's
+// confidentiality: it records every project root the user has opened
+// (and whether they trusted it), so on a shared box it must not be
+// readable by anyone but the owner. Asserted as "no group/other bits"
+// rather than an exact mode because the process umask caps what
+// OpenFile/Chmod actually produce.
+func TestSaveTrust_OwnerOnlyPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trust.json")
+	tf := &TrustFile{Projects: map[string]TrustEntry{"/x": {Hash: "h", Trusted: true}}}
+	if err := SaveTrust(path, tf); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Fatalf("trust file mode = %v, want no group/other bits", perm)
+	}
+}
+
 // TestLoadTrust_MalformedJSONReturnsEmpty mirrors the editor's
 // "best-effort" stance for the trust file: a corrupted store should
 // not crash on next save. Re-prompting is the safe fallback —

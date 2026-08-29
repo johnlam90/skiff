@@ -148,7 +148,7 @@ func (a *App) startTreeRefresh() {
 	a.treeRefreshStop = make(chan struct{})
 	stop := a.treeRefreshStop
 	scr := a.screen
-	go func() {
+	a.safeGo("tree-refresh-tick", func() {
 		ticker := time.NewTicker(treeRefreshInterval)
 		defer ticker.Stop()
 		for {
@@ -159,7 +159,7 @@ func (a *App) startTreeRefresh() {
 				_ = scr.PostEvent(&treeRefreshEvent{when: t})
 			}
 		}
-	}()
+	})
 }
 
 // stopTreeRefresh signals the background tree-refresh goroutine to exit.
@@ -237,7 +237,7 @@ func (a *App) refreshTreeAsync() {
 		snap = &p
 	}
 	root := a.rootDir
-	go func() {
+	a.safeGo("tree-scan", func() {
 		if snap != nil {
 			_ = session.Save(root, *snap)
 		}
@@ -247,7 +247,7 @@ func (a *App) refreshTreeAsync() {
 			dirs: filetree.ScanDirs(dirs),
 			tabs: probeOpenTabs(paths),
 		})
-	}()
+	})
 }
 
 // handleTreeScan applies a finished background sweep on the main thread

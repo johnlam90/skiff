@@ -254,7 +254,7 @@ func (a *App) execCustomAction(act customactions.Action, promptValues map[string
 
 	a.flash(act.Label + "…")
 	scr := a.screen
-	go func() {
+	a.safeGo("custom-action", func() {
 		started := time.Now()
 		cmd := exec.Command("sh", "-c", act.Command)
 		cmd.Env = env
@@ -283,7 +283,7 @@ func (a *App) execCustomAction(act customactions.Action, promptValues map[string
 			output:   out,
 			duration: duration,
 		})
-	}()
+	})
 }
 
 // menuSave runs the Save action and dismisses the menu.

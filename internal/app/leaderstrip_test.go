@@ -18,6 +18,35 @@ import (
 	"github.com/gdamore/tcell/v2"
 )
 
+// TestDrawStripSegment_EmojiAdvancesByCells pins the segment cursor's
+// unit: a ZWJ family emoji is five runes painted in two cells, and the
+// returned x must advance by the CELLS (2), not the rune count (5) —
+// otherwise the next segment lands three columns adrift of the glyph.
+func TestDrawStripSegment_EmojiAdvancesByCells(t *testing.T) {
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init sim screen: %v", err)
+	}
+	t.Cleanup(scr.Fini)
+	scr.SetSize(40, 5)
+	st := tcell.StyleDefault
+
+	const famEmoji = "\U0001F468\u200D\U0001F469\u200D\U0001F466"
+	x := drawStripSegment(scr, 0, 0, 40, famEmoji, st)
+	if x != 2 {
+		t.Fatalf("emoji segment advanced x to %d, want 2", x)
+	}
+	// The next segment must butt up against the emoji's two cells.
+	if x = drawStripSegment(scr, x, 0, 40, "ok", st); x != 4 {
+		t.Fatalf("follow-up segment advanced x to %d, want 4", x)
+	}
+	scr.Show()
+	cells, _, _ := scr.GetContents()
+	if c := cells[2]; len(c.Runes) == 0 || c.Runes[0] != 'o' {
+		t.Fatalf("cell 2 = %q, want o right after the emoji", c.Runes)
+	}
+}
+
 // TestLeaderBindingsAllHaveDescs pins the invariant the strip depends
 // on: every leader binding carries a human-readable description. An
 // empty desc would render as a bare rune with no explanation.

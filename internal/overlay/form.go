@@ -285,9 +285,7 @@ func (f *Form) Draw(scr tcell.Screen) {
 		if i == f.Focus {
 			labelStyle = titleStyle
 		}
-		// Clipped: drawText has no bounds check, and a prompt label
-		// longer than a squeezed frame would paint through the border.
-		drawText(scr, r.X+2, rowY, trimRunes(row.Label, r.W-4), labelStyle)
+		drawText(scr, r.X+2, rowY, r.W-4, trimRunes(row.Label, r.W-4), labelStyle)
 
 		fieldStart := r.X + 3
 		fieldEnd := r.X + r.W - 3
@@ -303,13 +301,14 @@ func (f *Form) Draw(scr tcell.Screen) {
 			for cx := fieldStart - 1; cx <= fieldEnd; cx++ {
 				scr.SetContent(cx, inputRow, ' ', nil, inputStyle)
 			}
-			drawText(scr, fieldStart, inputRow, "<", inputStyle)
-			drawText(scr, fieldEnd-1, inputRow, ">", inputStyle)
+			drawText(scr, fieldStart, inputRow, fieldWidth, "<", inputStyle)
+			drawText(scr, fieldEnd-1, inputRow, 1, ">", inputStyle)
 			opt := ""
 			if row.Sel >= 0 && row.Sel < len(row.Options) {
 				opt = row.Options[row.Sel]
 			}
-			drawText(scr, fieldStart+(fieldWidth-runeLen(opt))/2, inputRow, opt, inputStyle)
+			optX := fieldStart + (fieldWidth-runeLen(opt))/2
+			drawText(scr, optX, inputRow, fieldEnd-optX, opt, inputStyle)
 			continue
 		}
 		row.Field.Draw(scr, fieldStart, inputRow, fieldWidth, inputStyle, i == f.Focus)
@@ -317,10 +316,10 @@ func (f *Form) Draw(scr tcell.Screen) {
 
 	moreStyle := tcell.StyleDefault.Background(bg).Foreground(th.Accent)
 	if f.scroll > 0 {
-		drawText(scr, r.X+2, r.Y+2, " ▲ ", moreStyle)
+		drawText(scr, r.X+2, r.Y+2, r.W-3, " ▲ ", moreStyle)
 	}
 	if f.scroll < f.maxScroll() {
-		drawText(scr, r.X+2, r.Y+r.H-1, " ▼ ", moreStyle)
+		drawText(scr, r.X+2, r.Y+r.H-1, r.W-3, " ▼ ", moreStyle)
 	}
 
 	DrawButton(scr, r.X+4, r.Y+r.H-3, "[ Cancel ]", bg, th.Text, false)
