@@ -456,6 +456,120 @@ func TestTab_Reload_VanishedFile(t *testing.T) {
 	}
 }
 
+// TestReloadKeepHistory_UndoRestoresPreReloadContent pins the whole point
+// of this method: a reload the user didn't ask for (format-on-save, the
+// background reconcile) must not destroy their prior edits. The pre-reload
+// buffer has to still be one Undo away, and Redo has to be able to move
+// forward again to the disk content.
+func TestReloadKeepHistory_UndoRestoresPreReloadContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.txt")
+	if err := os.WriteFile(path, []byte("original"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.InsertString("edited-")
+	if err := tab.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	preReload := tab.Buffer.String()
+
+	if err := os.WriteFile(path, []byte("formatted-on-disk"), 0644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if err := tab.ReloadKeepHistory(); err != nil {
+		t.Fatalf("ReloadKeepHistory: %v", err)
+	}
+	if got := tab.Buffer.String(); got != "formatted-on-disk" {
+		t.Fatalf("buffer after reload = %q, want formatted-on-disk", got)
+	}
+	if !tab.CanUndo() {
+		t.Fatal("expected undo history to survive ReloadKeepHistory")
+	}
+
+	if !tab.Undo() {
+		t.Fatal("Undo should succeed")
+	}
+	if got := tab.Buffer.String(); got != preReload {
+		t.Fatalf("after undo = %q, want %q", got, preReload)
+	}
+
+	if !tab.Redo() {
+		t.Fatal("Redo should succeed")
+	}
+	if got := tab.Buffer.String(); got != "formatted-on-disk" {
+		t.Fatalf("after redo = %q, want formatted-on-disk", got)
+	}
+}
+
+// TestReloadKeepHistory_ShorterFileClampsOnUndo reloads to a file much
+// shorter than the pre-reload buffer, then rounds trip Undo/Redo. The
+// cursor/anchor restored by applySnapshot must stay in range of whatever
+// buffer they're paired with rather than panicking.
+func TestReloadKeepHistory_ShorterFileClampsOnUndo(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.txt")
+	if err := os.WriteFile(path, []byte("line one\nline two\nline three\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.Cursor = Position{Line: 2, Col: 5}
+	tab.Anchor = tab.Cursor
+
+	if err := os.WriteFile(path, []byte("x"), 0644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if err := tab.ReloadKeepHistory(); err != nil {
+		t.Fatalf("ReloadKeepHistory: %v", err)
+	}
+
+	if !tab.Undo() {
+		t.Fatal("Undo should succeed")
+	}
+	if tab.Cursor.Line >= len(tab.Buffer.Lines) {
+		t.Fatalf("cursor line out of range after undo: %+v (lines=%d)", tab.Cursor, len(tab.Buffer.Lines))
+	}
+
+	if !tab.Redo() {
+		t.Fatal("Redo should succeed")
+	}
+	if tab.Cursor.Line >= len(tab.Buffer.Lines) {
+		t.Fatalf("cursor line out of range after redo: %+v (lines=%d)", tab.Cursor, len(tab.Buffer.Lines))
+	}
+}
+
+// TestReload_StillClearsHistory pins that the plain Reload() contract used
+// by the disk-conflict prompt's explicit "Reload" button is unchanged:
+// the user chose to take the disk version, so undo history is wiped.
+func TestReload_StillClearsHistory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.txt")
+	if err := os.WriteFile(path, []byte("original"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.InsertString("edited-")
+
+	if err := os.WriteFile(path, []byte("disk-version"), 0644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if err := tab.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if tab.CanUndo() {
+		t.Fatal("plain Reload should still clear undo history")
+	}
+}
+
 // TestTab_HasSelection_AndSelectionText covers the selection accessors for
 // (a) no selection, (b) anchor before cursor, (c) anchor after cursor.
 func TestTab_HasSelection_AndSelectionText(t *testing.T) {
