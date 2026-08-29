@@ -31,6 +31,38 @@ import (
 // every call site.
 const findBarHeight = 1
 
+// minFieldWidth is the fewest cells a find bar will shrink its input to
+// before it starts dropping the labels on its right instead. Twelve is
+// about the shortest window a query stays readable in while it is being
+// typed: the caret window slides one cell at a time, so a narrower field
+// degrades into a porthole showing the tail of what you typed. The
+// labels lose that contest on purpose — a dropped hint can be recalled
+// by widening the terminal, and a dropped counter by reading the results
+// list, but text the user is composing exists nowhere else on screen.
+const minFieldWidth = 12
+
+// barLabelsThatFit decides which of a find bar's two right-hand labels
+// get painted. spare is what is left of the bar once the input has been
+// given minFieldWidth cells, and each label costs its own width plus the
+// gap separating it from its neighbour. The counter is offered the space
+// first: it reports what this search found, which the hint — a fixed
+// reminder of the keys — never does.
+//
+// Returning the decision instead of drawing is what lets both bars share
+// one priority order. They used to carry two copies of a check that
+// compared each label against the bar's left-hand label and never
+// against the other label or the input, so both could be drawn onto
+// cells the input needed and the input, painted last, was left to
+// overlap them.
+func barLabelsThatFit(spare, counterCost, hintCost int) (counter, hint bool) {
+	if counterCost > 0 && counterCost <= spare {
+		counter = true
+		spare -= counterCost
+	}
+	hint = hintCost > 0 && hintCost <= spare
+	return counter, hint
+}
+
 // openFind shows the find bar with an empty input. We don't pre-fill
 // the user's last query because closing the bar already clears find
 // state — Esc means "I'm done searching." Each Esc-f opens a fresh
@@ -195,13 +227,10 @@ func (a *App) findEditKey(ev *tcell.EventKey) {
 //	" Find: <input>                       3 of 12   Enter: next · Esc: close "
 //
 // The hint on the right is dropped first when the window is too narrow
-// to fit it, and the match counter is dropped next, so the input keeps
-// the room. That intended order does NOT hold at every width: the two
-// fit checks each measure the label against their own text and never
-// against each other, so a band of widths draws both and leaves the
-// input no box at all, and the input is what disappears. Fixing the
-// checks is the way to restore the order — the field cannot take the
-// cells back without erasing the text already painted there.
+// to fit it; the match counter is dropped next; the input keeps at least
+// minFieldWidth cells because that's the whole point of the bar. Only a
+// bar too narrow for the label plus one cell of input drops the input,
+// and then it drops everything.
 func (a *App) drawFindBar() {
 	if !a.findOpen {
 		return
@@ -224,28 +253,34 @@ func (a *App) drawFindBar() {
 	drawAt(a.screen, bx, by, label, labelStyle)
 	inputStart := bx + runeLen(label)
 
-	// Right side: counter + hint, drawn first so we can clip the input
-	// against them on a narrow window.
+	// Right side: counter + hint. They are placed before the input so
+	// the input can be clipped against them, but they only get the cells
+	// left over once the input has minFieldWidth — the input outranks
+	// both, and the counter outranks the hint.
 	hint := " Enter: next · Shift+Enter: prev · Tab: replace · Esc: close "
 	if a.replaceOpen && a.findFocusReplace {
 		hint = " Enter: replace · Shift+Enter: all · Tab: query · Esc: close "
 	}
 	counter := a.findCounterText()
-	rightPadding := 1
-	rightTextStart := bx + bw
+	counterCost := 0
+	if counter != "" {
+		counterCost = runeLen(counter) + 2
+	}
+	hintCost := runeLen(hint) + 1
+	spare := (bx + bw) - (inputStart + minFieldWidth + 1)
+	showCounter, showHint := barLabelsThatFit(spare, counterCost, hintCost)
 
-	if bw > runeLen(label)+runeLen(hint)+10 {
-		rightTextStart -= runeLen(hint) + rightPadding
+	rightTextStart := bx + bw
+	if showHint {
+		rightTextStart -= hintCost
 		drawAt(a.screen, rightTextStart, by, hint, mutedStyle)
 	}
-	if counter != "" && bw > runeLen(label)+runeLen(counter)+4 {
-		// Only draw the counter when there's room; right-align before
-		// the hint (or against the bar's right edge if the hint was
-		// dropped).
-		rightTextStart -= runeLen(counter) + 2
-		// Color the counter red when the query has no matches so the
-		// user gets immediate negative feedback without having to read
-		// the digits.
+	if showCounter {
+		// Right-align before the hint, or against the bar's right edge
+		// when the hint was dropped. Color the counter red on a query
+		// with no matches so the user gets immediate negative feedback
+		// without having to read the digits.
+		rightTextStart -= counterCost
 		style := mutedStyle
 		if a.findHasNoMatches() {
 			style = emptyStyle
@@ -254,17 +289,22 @@ func (a *App) drawFindBar() {
 	}
 
 	// Input geometry. The fields carry their own caret windows, so the
-	// bar only decides how many cells each of them gets — and they end
-	// one cell short of the right-hand text. When the counter and hint
-	// reach back past the input's start there is no box left, and the
-	// fields are skipped rather than handed the rest of the bar:
-	// Field.Draw blanks its whole box (plus a cell either side) before
-	// painting, so a field overlapping the text to its right erases it
-	// instead of sharing the cells. Reaching here at all is a separate
-	// bug — the fit checks above measure the label against the hint and
-	// counter, never against each other.
+	// bar only decides how many cells each gets — and they end one cell
+	// short of the right-hand text, because Field.Draw blanks its whole
+	// box plus a cell either side before painting and would otherwise
+	// erase a label rather than share its cells.
+	//
+	// The labels have already yielded everything they could by here, so
+	// reaching this bail means the bar cannot hold its own label plus a
+	// single cell of input — a terminal narrower than anything the
+	// layout can serve. HideCursor is not optional on that path:
+	// Field.Draw owns this frame's only ShowCursor call, so returning
+	// without it strands the hardware cursor wherever the editor's
+	// render parked it, blinking over static text and pointing at a
+	// buffer that does not have the keyboard.
 	inputEnd := rightTextStart - 1
 	if inputEnd <= inputStart {
+		a.screen.HideCursor()
 		return
 	}
 	// With the replace field open, the query keeps the left half and

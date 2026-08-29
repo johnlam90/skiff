@@ -557,6 +557,10 @@ func (a *App) drawProjFindBar() {
 	}
 	inputStart := bx + chips[len(chips)-1].x1 + 1
 
+	// Right side: counter + hint, placed before the input but only into
+	// the cells left over once the input has minFieldWidth. The chips
+	// never yield — they are controls, not labels, and a control the
+	// user cannot click is worse than a reminder they cannot read.
 	hint := " Enter: open · Tab: replace · Esc: close "
 	if a.projFind.replaceOpen && a.projFind.focusReplace {
 		hint = " Enter: replace line · Shift+Enter: all · Tab: query · Esc: close "
@@ -564,13 +568,21 @@ func (a *App) drawProjFindBar() {
 		hint = " Enter: open · Tab: replace field · Esc: close "
 	}
 	counter := a.projFindCounterText()
+	counterCost := 0
+	if counter != "" {
+		counterCost = runeLen(counter) + 2
+	}
+	hintCost := runeLen(hint) + 1
+	spare := (bx + bw) - (inputStart + minFieldWidth + 1)
+	showCounter, showHint := barLabelsThatFit(spare, counterCost, hintCost)
+
 	rightTextStart := bx + bw
-	if bw > runeLen(label)+runeLen(hint)+10 {
-		rightTextStart -= runeLen(hint) + 1
+	if showHint {
+		rightTextStart -= hintCost
 		drawAt(a.screen, rightTextStart, by, hint, mutedStyle)
 	}
-	if counter != "" && bw > runeLen(label)+runeLen(counter)+4 {
-		rightTextStart -= runeLen(counter) + 2
+	if showCounter {
+		rightTextStart -= counterCost
 		style := mutedStyle
 		if !a.projFind.findBusy && len(a.projFind.query.Value) > 0 && len(a.projFind.findMatches) == 0 {
 			style = tcell.StyleDefault.Background(bg).Foreground(a.theme.Error).Bold(true)
@@ -584,17 +596,17 @@ func (a *App) drawProjFindBar() {
 	a.projFind.replaceFieldX0, a.projFind.replaceFieldX1 = 0, 0
 	a.projFind.replaceAllX0, a.projFind.replaceAllX1 = 0, 0
 
-	// The fields end one cell short of the right-hand text. When the
-	// counter and hint reach back past the input's start there is no box
-	// left, and the fields are skipped rather than handed the rest of
-	// the bar: Field.Draw blanks its whole box (plus a cell either side)
-	// before painting, so a field overlapping the text to its right
-	// erases it instead of sharing the cells. Reaching here at all is a
-	// separate bug — the fit checks above measure the label but not the
-	// mode chips, so they can report "fits" on a bar the chips have
-	// already eaten into.
+	// The fields end one cell short of the right-hand text, because
+	// Field.Draw blanks its whole box plus a cell either side before
+	// painting and would otherwise erase a label rather than share its
+	// cells. The labels have already yielded everything they could by
+	// here, so reaching this bail means the label and chips alone fill
+	// the bar. HideCursor is not optional on that path: Field.Draw owns
+	// this frame's only ShowCursor call, so returning without it strands
+	// the hardware cursor wherever the editor's render parked it.
 	inputEnd := rightTextStart - 1
 	if inputEnd <= inputStart {
+		a.screen.HideCursor()
 		return
 	}
 	// With the replace field open, the query keeps the left half; the

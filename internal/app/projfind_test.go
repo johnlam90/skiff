@@ -322,15 +322,48 @@ func TestProjFindDraw_PaintsResultsAndBar(t *testing.T) {
 	// reported for a follow-up bug fix in projfind.go.
 }
 
-// TestProjFindDraw_BarKeepsItsCounterAndHint pins the one rule the query
-// field's box has to obey: it never paints over the counter and hint to
-// its right. Field.Draw blanks its whole box (plus a cell either side)
-// before painting, so a field handed the rest of the bar — which the old
-// "no room" fallback did whenever the right-hand text reached back past
-// the input's start — erased the hint outright and left the counter in
-// pieces. That geometry is not exotic: it is the default 120x40 panel
-// with a sidebar and any real match count.
-func TestProjFindDraw_BarKeepsItsCounterAndHint(t *testing.T) {
+// TestProjFindDraw_BarKeepsTheInputAtTheDefaultSize pins the panel's
+// worst case, which is also its most common one: the suite's default
+// 120x40 with a sidebar and a real match count. The bar's two fit checks
+// measured the label against the hint and the counter but never against
+// each other or the ~12 cells of mode chips, so both labels were drawn
+// on a bar with no room left and the query field was squeezed out of
+// existence — a user typing into an input they cannot see. The input now
+// keeps minFieldWidth cells and the labels yield instead.
+func TestProjFindDraw_BarKeepsTheInputAtTheDefaultSize(t *testing.T) {
+	a := projFindApp(t, t.TempDir())
+	query := strings.Repeat("a", minFieldWidth-1)
+	a.projFind.query.SetText(query)
+	a.projFind.findMatches = fakeMatches()
+
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+
+	row := []rune(screenLine(scr, a.height-2))
+	at := runeIndexOf(row, query)
+	if at < 0 {
+		t.Fatalf("the query field lost its cells: bar row = %q", string(row))
+	}
+	cx, cy, visible := scr.GetCursor()
+	if !visible || cy != a.height-2 || cx != at+len(query) {
+		t.Fatalf("caret (%d,%d) visible=%v, want it at (%d,%d) just after the query",
+			cx, cy, visible, at+len(query), a.height-2)
+	}
+}
+
+// TestProjFindDraw_BarDropsLabelsWholeNeverInPieces pins the other half
+// of the bar's priority order. Which labels appear is a layout decision
+// — the input outranks both, and at this width (the suite's default
+// 120x40, chips and a real match count) the hint is dropped so the
+// counter and the input can have the cells. What must never happen is a
+// label drawn and then half-erased: Field.Draw blanks its whole box plus
+// a cell either side before painting, so a field allowed to overlap the
+// text on its right turns it into rubble. This test was written when it
+// did exactly that, leaving "3 m" of the counter and no hint at all; it
+// now asserts the weaker, correct rule, because "the hint always
+// survives" is not something the bar promises.
+func TestProjFindDraw_BarDropsLabelsWholeNeverInPieces(t *testing.T) {
 	a := projFindApp(t, t.TempDir())
 	a.projFind.query.SetText("alpha")
 	a.projFind.findMatches = fakeMatches()
@@ -340,11 +373,25 @@ func TestProjFindDraw_BarKeepsItsCounterAndHint(t *testing.T) {
 	scr.Show()
 
 	bar := []rune(screenLine(scr, a.height-2))
+	// The counter outranks the hint and fits here, so it must be whole.
 	if counter := a.projFindCounterText(); !containsRunes(bar, counter) {
 		t.Errorf("bar row %q lost its counter %q", string(bar), counter)
 	}
-	if !containsRunes(bar, "Enter: open · Tab: replace · Esc: close") {
-		t.Errorf("bar row %q lost its hint", string(bar))
+	// The hint may be absent. It may not be a fragment: any of it on
+	// screen means all of it.
+	hint := "Enter: open · Tab: replace · Esc: close"
+	if runeIndexOf(bar, "Enter: open") >= 0 && !containsRunes(bar, hint) {
+		t.Errorf("bar row %q left the hint in pieces", string(bar))
+	}
+	// And the input is never the thing that yields.
+	if !containsRunes(bar, "alpha") {
+		t.Errorf("bar row %q dropped the query the labels are supposed to yield to", string(bar))
+	}
+	// The mode chips are controls, not labels: they never yield either.
+	for _, chip := range []string{"Aa", "⌇w", ".*"} {
+		if !containsRunes(bar, chip) {
+			t.Errorf("bar row %q lost the %q chip", string(bar), chip)
+		}
 	}
 }
 

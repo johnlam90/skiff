@@ -310,6 +310,109 @@ func TestDrawFindBar_ScrollsQueryFieldToCaret(t *testing.T) {
 	}
 }
 
+// runeIndexOf returns the screen column of s inside a rendered row, or
+// -1. Rows are indexed in runes, not bytes: the sidebar's box-drawing
+// glyphs sit ahead of the bar, so a byte index would land short.
+func runeIndexOf(row []rune, s string) int {
+	want := []rune(s)
+	for i := 0; i+len(want) <= len(row); i++ {
+		if string(row[i:i+len(want)]) == s {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestBarLabelsThatFit pins the find bars' right-hand priority order in
+// one place: the counter is offered the space before the hint, and
+// neither is offered any until the input has its minimum. The two bars
+// used to carry two copies of a check that measured each label against
+// the label on the left and never against the other one.
+func TestBarLabelsThatFit(t *testing.T) {
+	cases := []struct {
+		name                  string
+		spare, counter, hint  int
+		wantCounter, wantHint bool
+	}{
+		{"both fit", 40, 10, 20, true, true},
+		{"only the counter fits", 25, 10, 20, true, false},
+		{"counter wins the last cells", 10, 10, 20, true, false},
+		{"nothing fits", 5, 10, 20, false, false},
+		{"no counter to place leaves the hint the room", 20, 0, 20, false, true},
+		{"a negative spare places nothing", -3, 10, 20, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotCounter, gotHint := barLabelsThatFit(c.spare, c.counter, c.hint)
+			if gotCounter != c.wantCounter || gotHint != c.wantHint {
+				t.Fatalf("barLabelsThatFit(%d, %d, %d) = (%v, %v), want (%v, %v)",
+					c.spare, c.counter, c.hint, gotCounter, gotHint, c.wantCounter, c.wantHint)
+			}
+		})
+	}
+}
+
+// TestDrawFindBar_InputSurvivesAWidthThatFitsBothLabels pins the
+// priority the bar's doc comment promises, at the band of widths that
+// used to break it. The two fit checks each measured the label against
+// their own text and never against each other, so both the counter and
+// the hint were drawn on a bar with no room for them; the input was
+// handed the leftovers, which is to say the cells they were already
+// painted in. Now the labels yield: the input keeps minFieldWidth cells
+// and the caret stays inside them.
+func TestDrawFindBar_InputSurvivesAWidthThatFitsBothLabels(t *testing.T) {
+	a := seedFindApp(t, "hello\n")
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.SetSize(109, 24)
+	a.width, a.height = 109, 24
+	a.openFind()
+	query := strings.Repeat("z", minFieldWidth-1) // no matches: counter reads "no results"
+	for _, r := range query {
+		a.handleFindKey(keyEv(tcell.KeyRune, r))
+	}
+
+	a.draw()
+	scr.Show()
+
+	_, by, _, _ := a.findBarRect()
+	row := []rune(screenLine(scr, by))
+	at := runeIndexOf(row, query)
+	if at < 0 {
+		t.Fatalf("the input lost its cells: bar row = %q", string(row))
+	}
+	cx, cy, visible := scr.GetCursor()
+	if !visible || cy != by || cx != at+len(query) {
+		t.Fatalf("caret (%d,%d) visible=%v, want it at (%d,%d) just after the query",
+			cx, cy, visible, at+len(query), by)
+	}
+}
+
+// TestDrawFindBar_HidesTheCaretWhenTheBarHasNoRoomAtAll pins the last
+// resort. When even a minimum field will not fit, the bar paints no
+// field — and Field.Draw owns the frame's only ShowCursor call, so
+// returning without it would leave the hardware cursor wherever the
+// editor's own render parked it: a caret blinking over static text,
+// pointing at a buffer that does not have the keyboard.
+func TestDrawFindBar_HidesTheCaretWhenTheBarHasNoRoomAtAll(t *testing.T) {
+	a := seedFindApp(t, "hello\n")
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.SetSize(60, 24)
+	a.width, a.height = 60, 24
+	// A sidebar dragged this wide leaves the bar too narrow for even the
+	// "Find:" label plus one cell of input, while the editor beside it
+	// is still wide enough to render — and to park the hardware cursor
+	// on its own caret, which is the cursor that must not survive.
+	a.sidebarShown, a.sidebarWidth = true, 52
+	a.openFind()
+
+	a.draw()
+	scr.Show()
+
+	if cx, cy, visible := scr.GetCursor(); visible {
+		t.Fatalf("a bar with no field left a caret at (%d,%d); it must be hidden", cx, cy)
+	}
+}
+
 // TestHandleFindKey_CaretMoveDoesNotReSearch pins the "react to the edit,
 // not to the keystroke" rule the delegation to overlay.Field is built on:
 // Left/Right/Home/End change the caret, not the query, so they must not
