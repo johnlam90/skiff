@@ -15,6 +15,7 @@
 package app
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,7 +23,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/johnlam90/skiff/internal/diff"
@@ -101,7 +101,7 @@ func TestLoadGitLineChanges_IncludesStagedChanges(t *testing.T) {
 
 // TestRefreshGitStatusAsync_PostsEventAndApplies drives the full async
 // round trip: the kick collects on a goroutine and posts a
-// gitStatusEvent; feeding that event through handleEvent applies the
+// landing; pumping that event through handleEvent applies the
 // snapshot to the tree and clears the in-flight flag — exactly what
 // the real event loop does, minus the loop.
 func TestRefreshGitStatusAsync_PostsEventAndApplies(t *testing.T) {
@@ -112,26 +112,12 @@ func TestRefreshGitStatusAsync_PostsEventAndApplies(t *testing.T) {
 	a.tree.DirtyFiles = nil // prove the event repopulates it
 
 	a.refreshGitStatusAsync()
-	if !a.gitRefreshInFlight {
+	if !a.gitStatus.Busy() {
 		t.Fatal("kick should mark a collection in flight")
 	}
 
-	evCh := make(chan tcell.Event, 1)
-	go func() { evCh <- a.screen.PollEvent() }()
-	select {
-	case ev := <-evCh:
-		gse, ok := ev.(*gitStatusEvent)
-		if !ok {
-			t.Fatalf("expected gitStatusEvent, got %T", ev)
-		}
-		a.handleEvent(gse)
-	case <-time.After(5 * time.Second):
-		t.Fatal("background collection never posted its event")
-	}
+	pumpUntil(t, a, "git status", idle(&a.gitStatus))
 
-	if a.gitRefreshInFlight {
-		t.Fatal("event should clear the in-flight flag")
-	}
 	if len(a.tree.DirtyFiles) != 1 {
 		t.Fatalf("event should stamp dirty files, got %v", a.tree.DirtyFiles)
 	}
@@ -140,22 +126,29 @@ func TestRefreshGitStatusAsync_PostsEventAndApplies(t *testing.T) {
 // TestRefreshGitStatusAsync_CoalescesKicks pins the burst behaviour: a
 // second kick while one is in flight queues exactly one follow-up run
 // rather than piling up goroutines, and the follow-up fires when the
-// first result lands.
+// first result lands. The policy is the job's; this pins that the
+// status collection runs under it.
 func TestRefreshGitStatusAsync_CoalescesKicks(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	a.gitRefreshInFlight = true // simulate a collection mid-flight
+	release := make(chan struct{})
+	// A collection mid-flight: held open until the kicks below have queued.
+	a.gitStatus.Start(func(context.Context) (gitStatusResult, error) {
+		<-release
+		return gitStatusResult{}, nil
+	})
 
 	a.refreshGitStatusAsync()
 	a.refreshGitStatusAsync()
-	if !a.gitRefreshQueued {
+	if !a.gitStatus.Queued() {
 		t.Fatal("kicks during flight should queue a follow-up")
 	}
 
-	a.handleGitStatusEvent(&gitStatusEvent{res: gitStatusResult{}})
-	if !a.gitRefreshInFlight || a.gitRefreshQueued {
-		t.Fatalf("landing should fire the queued follow-up, inFlight=%v queued=%v",
-			a.gitRefreshInFlight, a.gitRefreshQueued)
+	close(release)
+	pumpUntil(t, a, "first collection", func() bool { return !a.gitStatus.Queued() })
+	if !a.gitStatus.Busy() {
+		t.Fatal("landing should fire the queued follow-up")
 	}
+	pumpUntil(t, a, "follow-up collection", idle(&a.gitStatus))
 }
 
 // TestApplyGitStatus_UpdatesOpenTabGutters verifies a collection's
@@ -666,14 +659,14 @@ func TestGitMissing_FlashesExactlyOnce(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 
 	a.statusMsg = ""
-	a.handleGitStatusEvent(&gitStatusEvent{when: time.Now(), res: missingGitResult()})
+	a.handleGitStatus(missingGitResult(), nil)
 	if !strings.Contains(a.statusMsg, "git was not found") {
 		t.Fatalf("first snapshot must explain the missing binary, got %q", a.statusMsg)
 	}
 
 	for tick := 2; tick <= 5; tick++ {
 		a.statusMsg = ""
-		a.handleGitStatusEvent(&gitStatusEvent{when: time.Now(), res: missingGitResult()})
+		a.handleGitStatus(missingGitResult(), nil)
 		if a.statusMsg != "" {
 			t.Fatalf("tick %d re-flashed a static fact: %q", tick, a.statusMsg)
 		}
@@ -686,10 +679,7 @@ func TestGitMissing_FlashesExactlyOnce(t *testing.T) {
 func TestGitMissing_QuietWhenGitExists(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.statusMsg = ""
-	a.handleGitStatusEvent(&gitStatusEvent{
-		when: time.Now(),
-		res:  gitStatusResult{tabLines: map[string]map[int]editor.GitLineChange{}},
-	})
+	a.handleGitStatus(gitStatusResult{tabLines: map[string]map[int]editor.GitLineChange{}}, nil)
 	if a.statusMsg != "" {
 		t.Fatalf("a non-repo with git installed must not flash, got %q", a.statusMsg)
 	}

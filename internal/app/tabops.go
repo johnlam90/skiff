@@ -75,7 +75,7 @@ func (a *App) saveTab(tab *editor.Tab) bool {
 	// Format-on-save runs after the disk write succeeds, so a broken
 	// formatter never blocks the user's save from landing. The
 	// formatter (when configured + trusted) reloads the buffer
-	// asynchronously via formatDoneEvent — see format.go.
+	// asynchronously when the formatter job lands — see format.go.
 	a.runFormatOnSave(tab)
 	return true
 }

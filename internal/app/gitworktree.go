@@ -7,10 +7,10 @@
 
 // gitworktree.go is the worktree side of skiff's git integration: create,
 // list, and remove `git worktree` checkouts from the Git extras popup.
-// Mutations ride the same one-at-a-time runGitOp / gitOpDoneEvent pattern
-// as the rest of the write side; the list is a read, so it gets its own
-// async event (worktreeListEvent) that keeps a slow `git worktree list`
-// off the UI thread.
+// Mutations ride the same one-at-a-time runGitOp / gitOp job as the
+// rest of the write side; the list is a read, so it gets its own job
+// (worktreeList, Supersede) that keeps a slow `git worktree list` off
+// the UI thread.
 //
 // A worktree is a second working tree of the same repository, so none of
 // these operations rewrite the current one — every op runs with
@@ -21,47 +21,43 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/johnlam90/skiff/internal/git"
 )
 
-// worktreeListEvent delivers an asynchronously-collected worktree list
-// to the main loop, tagged with which flow asked for it — the same
-// purpose-tagged pattern as branchListEvent.
-type worktreeListEvent struct {
-	when    time.Time
+// worktreeListResult is an asynchronously-collected worktree list,
+// tagged with which flow asked for it — the same purpose-tagged shape
+// as branchListResult.
+type worktreeListResult struct {
 	purpose string // "list" | "remove"
 	wts     []git.Worktree
 }
 
-// When implements tcell.Event.
-func (e *worktreeListEvent) When() time.Time { return e.when }
-
-// requestWorktreeList collects the list off the UI thread, then reopens
-// the flow via handleWorktreeList. Best-effort like every read here: a
-// failing git yields no rows, and the flow degrades to a flash rather
-// than a hollow overlay.
+// requestWorktreeList collects the list on the worktreeList job, then
+// reopens the flow via handleWorktreeList. Supersede, like the branch
+// list: only the newest click's list opens anything. Best-effort like
+// every read here: a failing git yields no rows, and the flow degrades
+// to a flash rather than a hollow overlay.
 func (a *App) requestWorktreeList(purpose string) {
 	repo := a.readRepo()
-	scr := a.screen
-	a.safeGo("git-worktree-list", func() {
+	a.worktreeList.Start(func(context.Context) (worktreeListResult, error) {
 		wts, _ := repo.Worktrees()
-		_ = scr.PostEvent(&worktreeListEvent{when: time.Now(), purpose: purpose, wts: wts})
+		return worktreeListResult{purpose: purpose, wts: wts}, nil
 	})
 }
 
 // handleWorktreeList routes a collected list to the flow that asked for
 // it.
-func (a *App) handleWorktreeList(e *worktreeListEvent) {
-	switch e.purpose {
+func (a *App) handleWorktreeList(r worktreeListResult, _ error) {
+	switch r.purpose {
 	case "list":
-		a.openWorktreeList(e.wts)
+		a.openWorktreeList(r.wts)
 	case "remove":
-		a.openRemoveWorktreePick(e.wts)
+		a.openRemoveWorktreePick(r.wts)
 	}
 }
 

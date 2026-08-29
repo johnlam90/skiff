@@ -18,14 +18,14 @@
 package app
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/gdamore/tcell/v2"
-
+	"github.com/johnlam90/skiff/internal/asyncjob"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/finder"
@@ -479,38 +479,39 @@ func writeNewer(t *testing.T, path, body string, base time.Time) {
 }
 
 // pumpUntil feeds events off the simulation screen through handleEvent —
-// what the real loop does, minus the loop — until match recognises the
-// one the test is waiting for. Other background events (a git-status
-// collection riding the same tick, a resize from screen setup) are
-// handled on the way past instead of tripping the test, because the
-// order two goroutines post in is not something a test may assume.
-func pumpUntil(t *testing.T, a *App, what string, match func(tcell.Event) bool) {
+// what the real loop does, minus the loop — until done reports the
+// state the test is waiting for. It is the one pump every test drains
+// with: since every background job lands through the same
+// *asyncjob.Event, a test names what it waits on by job state (the idle
+// adapter below) or by UI state, never by event type. Other background
+// events (a git-status collection riding the same tick, a resize from
+// screen setup) are handled on the way past instead of tripping the
+// test, because the order two goroutines post in is not something a
+// test may assume. Returns at once when done already holds.
+func pumpUntil(t *testing.T, a *App, what string, done func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	for !done() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never arrived", what)
+		}
 		if !a.screen.HasPendingEvent() {
 			time.Sleep(2 * time.Millisecond)
 			continue
 		}
 		ev := a.screen.PollEvent()
 		if ev == nil {
-			break
+			t.Fatalf("%s: the screen closed while pumping", what)
 		}
 		a.handleEvent(ev)
-		if match(ev) {
-			return
-		}
 	}
-	t.Fatalf("%s never arrived", what)
 }
 
-// pumpTreeScan applies the treeScanEvent a background sweep posted.
-func pumpTreeScan(t *testing.T, a *App) {
-	t.Helper()
-	pumpUntil(t, a, "treeScanEvent", func(ev tcell.Event) bool {
-		_, ok := ev.(*treeScanEvent)
-		return ok
-	})
+// idle adapts a job's Busy into pumpUntil's done predicate: pump until
+// the job has nothing in flight, which means every landing it owed —
+// a Coalesce follow-up included — has been applied.
+func idle[T any](j *asyncjob.Job[T]) func() bool {
+	return func() bool { return !j.Busy() }
 }
 
 // reconcileOpenTabsWithDisk runs the open-tab disk sweep synchronously:
@@ -547,18 +548,15 @@ func TestRefreshTreeAsync_ScansOffThreadAndAppliesOnEvent(t *testing.T) {
 	writeNewer(t, target, "two", tab.Mtime)
 
 	a.refreshTreeAsync()
-	if !a.treeScanInFlight {
+	if !a.treeScan.Busy() {
 		t.Fatal("the kick should mark a sweep in flight")
 	}
 	if findTreeChild(a, "appeared.txt") != nil {
 		t.Fatal("the kick must not mutate the tree — that is the event's job")
 	}
 
-	pumpTreeScan(t, a)
+	pumpUntil(t, a, "tree scan", idle(&a.treeScan))
 
-	if a.treeScanInFlight {
-		t.Fatal("the event should clear the in-flight flag")
-	}
 	if findTreeChild(a, "appeared.txt") == nil {
 		t.Fatal("the applied sweep should surface the new file")
 	}
@@ -570,25 +568,29 @@ func TestRefreshTreeAsync_ScansOffThreadAndAppliesOnEvent(t *testing.T) {
 // TestRefreshTreeAsync_CoalescesTicks pins the burst behaviour, matching
 // refreshGitStatusAsync: kicks arriving while a sweep is in flight queue
 // exactly one follow-up rather than piling up goroutines, and that
-// follow-up starts when the first result lands.
+// follow-up starts when the first result lands. The job's policy is
+// what makes it so; this pins that the tree sweep runs under it.
 func TestRefreshTreeAsync_CoalescesTicks(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	a.treeScanInFlight = true // simulate a sweep mid-flight
+	release := make(chan struct{})
+	// A sweep mid-flight: held open until the kicks below have queued.
+	a.treeScan.Start(func(context.Context) (treeScanResult, error) {
+		<-release
+		return treeScanResult{}, nil
+	})
 
 	a.refreshTreeAsync()
 	a.refreshTreeAsync()
-	if !a.treeScanQueued {
+	if !a.treeScan.Queued() {
 		t.Fatal("kicks during flight should queue a follow-up")
 	}
 
-	a.handleTreeScan(&treeScanEvent{when: time.Now(), gen: a.treeScanGen})
-	if a.treeScanQueued {
-		t.Fatal("landing should consume the queued flag")
-	}
-	if !a.treeScanInFlight {
+	close(release)
+	pumpUntil(t, a, "first sweep", func() bool { return !a.treeScan.Queued() })
+	if !a.treeScan.Busy() {
 		t.Fatal("landing with a queued kick should start exactly one follow-up sweep")
 	}
-	pumpTreeScan(t, a)
+	pumpUntil(t, a, "follow-up sweep", idle(&a.treeScan))
 }
 
 // TestHandleTreeScan_DropsScanOlderThanATreeMutation is the correctness
@@ -607,12 +609,13 @@ func TestHandleTreeScan_DropsScanOlderThanATreeMutation(t *testing.T) {
 		t.Fatal("seed file should be in the tree")
 	}
 
-	// The sweep sees doomed.txt...
-	stale := &treeScanEvent{
-		when: time.Now(),
-		gen:  a.treeScanGen,
-		dirs: filetree.ScanDirs(a.tree.LoadedDirs()),
-	}
+	// The sweep sees doomed.txt, then waits to land...
+	stale := filetree.ScanDirs(a.tree.LoadedDirs())
+	release := make(chan struct{})
+	a.treeScan.Start(func(context.Context) (treeScanResult, error) {
+		<-release
+		return treeScanResult{dirs: stale}, nil
+	})
 	// ...and only then does the user delete it, refreshing the tree.
 	if err := os.Remove(doomed); err != nil {
 		t.Fatalf("remove: %v", err)
@@ -622,7 +625,8 @@ func TestHandleTreeScan_DropsScanOlderThanATreeMutation(t *testing.T) {
 		t.Fatal("the synchronous refresh should have dropped the file")
 	}
 
-	a.handleTreeScan(stale)
+	close(release)
+	pumpUntil(t, a, "stale sweep", idle(&a.treeScan))
 	if findTreeChild(a, "doomed.txt") != nil {
 		t.Fatal("a scan older than the deletion must not resurrect the file")
 	}
@@ -631,7 +635,7 @@ func TestHandleTreeScan_DropsScanOlderThanATreeMutation(t *testing.T) {
 // TestRefreshTreeAsync_WritesSessionOffThread pins the third piece of the
 // tick. The capture stays on the main thread (it reads tabs, cursors and
 // the tree's expanded set); only the temp-file-plus-fsync-plus-rename
-// write crosses over, and it rides the same sweep, so the treeScanEvent
+// write crosses over, and it rides the same sweep, so the sweep landing
 // arriving means the write is done — nothing is left touching the state
 // directory after the tick lands. The round trip through restoreSession
 // proves the payload survived the hop.
@@ -650,7 +654,7 @@ func TestRefreshTreeAsync_WritesSessionOffThread(t *testing.T) {
 	if _, ok := session.Load(root); ok {
 		t.Fatal("the kick must not write inline — that is the fsync on the event thread")
 	}
-	pumpTreeScan(t, a)
+	pumpUntil(t, a, "tree scan", idle(&a.treeScan))
 
 	p, ok := session.Load(root)
 	if !ok || len(p.Tabs) != 1 || p.Tabs[0].Line != 2 {
@@ -713,11 +717,7 @@ func TestHandleTreeScan_QuietScanSkipsFinderRebuild(t *testing.T) {
 	a := newTestApp(t, dir)
 	kicks := installReadyFinder(t, a)
 
-	a.handleTreeScan(&treeScanEvent{
-		when: time.Now(),
-		gen:  a.treeScanGen,
-		dirs: filetree.ScanDirs(a.tree.LoadedDirs()),
-	})
+	a.handleTreeScan(treeScanResult{dirs: filetree.ScanDirs(a.tree.LoadedDirs())}, nil)
 
 	if *kicks != 0 {
 		t.Fatalf("an unchanged scan kicked %d finder rebuild(s), want 0", *kicks)
@@ -739,11 +739,7 @@ func TestHandleTreeScan_NewNameTriggersFinderRebuild(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "appeared.txt"), []byte("hi"), 0644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	a.handleTreeScan(&treeScanEvent{
-		when: time.Now(),
-		gen:  a.treeScanGen,
-		dirs: filetree.ScanDirs(a.tree.LoadedDirs()),
-	})
+	a.handleTreeScan(treeScanResult{dirs: filetree.ScanDirs(a.tree.LoadedDirs())}, nil)
 
 	if *kicks != 1 {
 		t.Fatalf("a scan with a new name kicked %d finder rebuild(s), want 1", *kicks)
@@ -762,14 +758,12 @@ func TestHandleGitOpDone_TreeTouchingOpStillReindexesFinder(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	kicks := installReadyFinder(t, a)
 
-	a.handleGitOpDone(&gitOpDoneEvent{
-		when: time.Now(), label: "Pull", okFlash: "Pulled", touchesTree: true,
-	})
+	a.handleGitOpDone(gitOpResult{label: "Pull", okFlash: "Pulled", touchesTree: true}, nil)
 
 	if *kicks != 1 {
 		t.Fatalf("a tree-touching git op kicked %d finder rebuild(s), want 1", *kicks)
 	}
-	pumpTreeScan(t, a)
+	pumpUntil(t, a, "tree scan", idle(&a.treeScan))
 }
 
 // TestHandleCustomActionDone_StillReindexesFinder: same reasoning as
@@ -780,10 +774,10 @@ func TestHandleCustomActionDone_StillReindexesFinder(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	kicks := installReadyFinder(t, a)
 
-	a.handleCustomActionDone(&customActionDoneEvent{when: time.Now(), label: "Sync"})
+	a.handleCustomActionDone(customActionResult{label: "Sync"}, nil)
 
 	if *kicks != 1 {
 		t.Fatalf("a finished custom action kicked %d finder rebuild(s), want 1", *kicks)
 	}
-	pumpTreeScan(t, a)
+	pumpUntil(t, a, "tree scan", idle(&a.treeScan))
 }

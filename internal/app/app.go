@@ -23,6 +23,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/asyncjob"
 	"github.com/johnlam90/skiff/internal/customactions"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filemanager"
@@ -319,15 +320,52 @@ type App struct {
 	closedTabs []closedTabRecord
 
 	// fileClip is the file clipboard (cut / copy / paste of tree
-	// entries) — see fileclip.go. fileOpBusy gates the one background
-	// move/copy at a time it may run.
-	fileClip   fileClip
-	fileOpBusy bool
+	// entries) — see fileclip.go. The fileOp job below gates the one
+	// background move/copy at a time it may run.
+	fileClip fileClip
 
-	// projReplaceBusy gates the background disk apply of project
-	// replace (projreplace.go). Its own flag, not fileOpBusy: the two
-	// features are unrelated and one running must not block the other.
-	projReplaceBusy bool
+	// Background jobs. Every goroutine-backed feature is one
+	// asyncjob.Job: the job owns the in-flight/queued/generation
+	// bookkeeping its policy needs, the loop lands every one of them
+	// through the single *asyncjob.Event case in handleEvent, and
+	// newApp wires the seams — the crash guard, the screen's PostEvent
+	// and the landing handler — in one place. The policy comments are
+	// the whole correctness story per job; see internal/asyncjob.
+	//
+	// treeScan is the 10s disk sweep (refresh.go): Coalesce, so a burst
+	// of ticks costs at most two sweeps, and Invalidate is what every
+	// synchronous tree mutation calls so a sweep read before a delete
+	// cannot resurrect the file.
+	treeScan asyncjob.Job[treeScanResult]
+	// gitStatus is the status collection behind the tree tint and the
+	// gutters (gitstatus.go): Coalesce, textually the same burst rule
+	// as treeScan.
+	gitStatus asyncjob.Job[gitStatusResult]
+	// diffLoad is the click-driven diff read (diffview.go): Supersede,
+	// so a diff the user already clicked past never yanks itself on
+	// screen.
+	diffLoad asyncjob.Job[diffLoadResult]
+	// fileOp is the background move/copy/duplicate (fileclip.go):
+	// Refuse — racing two ops over the same paths helps nobody.
+	fileOp asyncjob.Job[fileOpResult]
+	// projReplace is project replace's disk apply (projreplace.go):
+	// its own Refuse gate, not fileOp's — the two features are
+	// unrelated and one running must not block the other.
+	projReplace asyncjob.Job[projReplaceResult]
+	// gitOp is the one-at-a-time write verb (gitops.go): Refuse.
+	gitOp asyncjob.Job[gitOpResult]
+	// branchList and worktreeList are the picker-feeding reads
+	// (gitops.go, gitworktree.go): Supersede, so two rapid clicks open
+	// one picker — the older list's landing is dropped.
+	branchList   asyncjob.Job[branchListResult]
+	worktreeList asyncjob.Job[worktreeListResult]
+	// formatter is the format-on-save shell-out (format.go) and
+	// customAction the user's shell-out (actions.go): Concurrent.
+	// Neither ever had a gate — a formatter is per saved tab and an
+	// action is the user's own command with its own report — so every
+	// start spawns and every landing applies, as before.
+	formatter    asyncjob.Job[formatResult]
+	customAction asyncjob.Job[customActionResult]
 
 	// tabScroll is how many cells the tab strip is scrolled left when
 	// the open tabs are wider than the bar (narrow tmux panes). It is
@@ -383,24 +421,6 @@ type App struct {
 	// treeRefreshStop signals the background tree-refresh goroutine to exit.
 	treeRefreshStop chan struct{}
 
-	// treeScanInFlight marks a background disk sweep for the 10s tick
-	// currently running; treeScanQueued remembers that another tick (or
-	// a refreshTreeNow call) fired meanwhile, so exactly one follow-up
-	// sweep runs when the in-flight one lands. treeScanGen is bumped by
-	// every main-thread tree mutation, so a sweep that started before a
-	// create/rename/delete is discarded instead of resurrecting the file
-	// the user just removed. All three are main-thread-only state.
-	treeScanInFlight bool
-	treeScanQueued   bool
-	treeScanGen      int
-
-	// diffLoadGen is bumped by every async diff request (a gutter-marker
-	// click, ≡ → Diff this file). A finished load carries the generation
-	// it started at and is dropped unless it still matches, so a diff
-	// the user has already clicked past never yanks itself on screen.
-	// Main-thread-only.
-	diffLoadGen int
-
 	// gitRunner overrides the git process boundary — nil in production
 	// (real git), a *git.Fake in tests that script a surface without a
 	// repo or a subprocess. Every git-aware surface (status refresh,
@@ -413,13 +433,6 @@ type App struct {
 	// and (via the tree) the changed set. gitSnap.IsRepo is the explicit
 	// repo test; nothing infers repo-ness from a non-empty branch name.
 	gitSnap git.Snapshot
-
-	// gitRefreshInFlight marks a background status collection currently
-	// running; gitRefreshQueued remembers that more refresh requests
-	// arrived meanwhile, so exactly one follow-up run fires when the
-	// in-flight one lands. Both are main-thread-only state.
-	gitRefreshInFlight bool
-	gitRefreshQueued   bool
 
 	// gitMissingSeen records that we have already told the user this
 	// machine has no git binary. The fact never changes within a
@@ -453,11 +466,10 @@ type App struct {
 	// collection's answer instead of stat'ing on the event loop.
 	gitDirtyDirs map[string]bool
 
-	// Write-side git state (see gitops.go / gitchanges.go): the
-	// one-at-a-time mutation gate, the commit checkbox set (absent =
-	// checked), and the panel row the open diff came from (-1 = diff
-	// not from the panel).
-	gitOpBusy         bool
+	// Write-side git state (see gitops.go / gitchanges.go): the commit
+	// checkbox set (absent = checked) and the panel row the open diff
+	// came from (-1 = diff not from the panel). The one-at-a-time
+	// mutation gate is the gitOp job above.
 	gitCommitChecks   map[string]bool
 	diffPanelRow      int
 	gitDeleteTarget   string // branch mid-delete, for the force-delete offer
@@ -509,10 +521,7 @@ func New(rootDir string) (*App, error) {
 	// Route the index build through the crash guard: internal/finder
 	// can't import internal/app, so the guard rides in as a hook.
 	a.finder.PanicGuard = a.safeGo
-	scr2 := a.screen
-	a.finder.Rebuild(func() {
-		_ = scr2.PostEvent(&finderRebuiltEvent{when: time.Now()})
-	})
+	a.finder.Rebuild(a.finderRebuiltNotice())
 	// Put the user back where they left this project: tabs, cursors,
 	// expanded folders, sidebar. Best-effort — no session, no change.
 	a.restoreSession()
@@ -617,6 +626,7 @@ func newApp(scr tcell.Screen, rootDir string, tree *filetree.Tree, sidebarShown 
 	} else {
 		a.setActiveFolder(rootDir)
 	}
+	a.wireJobs()
 	a.loadUserConfig()
 	// The config may have swapped in a different palette, so the
 	// colour-depth fallback is resolved last — it must degrade the
@@ -624,6 +634,39 @@ func newApp(scr tcell.Screen, rootDir string, tree *filetree.Tree, sidebarShown 
 	a.applyColorDepth()
 	a.loadCustomActions()
 	return a
+}
+
+// wireJobs binds every background job to its seams and its landing
+// handler: the crash guard spawns, the screen posts, and the handler
+// runs on the loop when the event lands. One place, so a job cannot be
+// half-wired — a Start on a job with no seams panics rather than run
+// an unguarded goroutine. The policies are named here and nowhere
+// else; the field comments on App say why each one holds.
+func (a *App) wireJobs() {
+	wireJob(a, &a.treeScan, "tree-scan", asyncjob.Coalesce, a.handleTreeScan)
+	wireJob(a, &a.gitStatus, "git-status", asyncjob.Coalesce, a.handleGitStatus)
+	wireJob(a, &a.diffLoad, "diff-load", asyncjob.Supersede, a.handleDiffLoaded)
+	wireJob(a, &a.fileOp, "file-op", asyncjob.Refuse, a.handleFileOpDone)
+	wireJob(a, &a.projReplace, "project-replace", asyncjob.Refuse, a.handleProjReplaceDone)
+	wireJob(a, &a.gitOp, "git-op", asyncjob.Refuse, a.handleGitOpDone)
+	wireJob(a, &a.branchList, "git-branch-list", asyncjob.Supersede, a.handleBranchList)
+	wireJob(a, &a.worktreeList, "git-worktree-list", asyncjob.Supersede, a.handleWorktreeList)
+	wireJob(a, &a.formatter, "format", asyncjob.Concurrent, a.handleFormatDone)
+	wireJob(a, &a.customAction, "custom-action", asyncjob.Concurrent, a.handleCustomActionDone)
+	wireJob(a, &a.projFind.sweep, "project-find", asyncjob.Supersede, a.handleProjFindDone)
+}
+
+// wireJob is the one struct literal every job is built from. A generic
+// function rather than a method because Go methods cannot carry their
+// own type parameter.
+func wireJob[T any](a *App, j *asyncjob.Job[T], name string, policy asyncjob.Policy, onDone func(T, error)) {
+	*j = asyncjob.Job[T]{
+		Name:   name,
+		Policy: policy,
+		Spawn:  a.safeGo,
+		Post:   a.screen.PostEvent,
+		OnDone: onDone,
+	}
 }
 
 // applyColorDepth re-derives the live palette for whatever the terminal
@@ -775,38 +818,14 @@ func (a *App) handleEvent(ev tcell.Event) {
 		a.handleAutoScroll()
 	case *treeRefreshEvent:
 		a.refreshTreeNow()
-	case *customActionDoneEvent:
-		a.handleCustomActionDone(e)
-	case *formatDoneEvent:
-		a.handleFormatDone(e)
-	case *finderRebuiltEvent:
-		// Refresh the open finder's results so a finished index build
-		// replaces "Indexing…" without waiting for a keystroke.
-		if fo, ok := a.overlays.Top().(*finderOverlay); ok {
-			fo.refreshResults()
-		}
-	case *gitStatusEvent:
-		a.handleGitStatusEvent(e)
-	case *treeScanEvent:
-		a.handleTreeScan(e)
-	case *diffLoadEvent:
-		a.handleDiffLoaded(e)
-	case *projFindDoneEvent:
-		a.handleProjFindDone(e)
-	case *projFindKickEvent:
-		a.handleProjFindKick(e)
-	case *projReplaceDoneEvent:
-		a.handleProjReplaceDone(e)
-	case *gitOpDoneEvent:
-		a.handleGitOpDone(e)
-	case *fileOpDoneEvent:
-		a.handleFileOpDone(e)
-	case *fileOpProgressEvent:
-		a.handleFileOpProgress(e)
-	case *branchListEvent:
-		a.handleBranchList(e)
-	case *worktreeListEvent:
-		a.handleWorktreeList(e)
+	case *asyncjob.Event:
+		// Every background job lands here — the tree sweep, git
+		// status, a diff, a file op, a git verb, a formatter — and so
+		// does every goroutine notification (a copy's progress tick,
+		// the finder index's "rebuilt"). The event carries its own
+		// on-loop half: the job's stale check, its handler, and any
+		// queued follow-up. The loop never learns which job it was.
+		e.Land()
 	}
 }
 

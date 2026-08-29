@@ -14,11 +14,11 @@
 package app
 
 import (
+	"context"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -81,18 +81,31 @@ func TestProjFindRowsGroupAndFold(t *testing.T) {
 }
 
 // TestProjFindStaleGenerationDropped: results from an outdated sweep
-// must never land — only the generation the current query started.
+// must never land — only the run the current query started. The sweep
+// job is Supersede, so the older run is retired the moment the newer
+// one starts; this drives two runs through the real job and handler
+// and lands the older one last, where a missing generation check would
+// paint its stale hits over the current ones.
 func TestProjFindStaleGenerationDropped(t *testing.T) {
 	a := projFindApp(t, t.TempDir())
-	a.projFind.findGen = 7
+	stale := make(chan struct{})
+	a.projFind.sweep.Start(func(context.Context) (projFindResult, error) {
+		<-stale
+		return projFindResult{matches: fakeMatches()[:1]}, nil
+	})
+	a.projFind.sweep.Start(func(context.Context) (projFindResult, error) {
+		return projFindResult{matches: fakeMatches(), truncated: true}, nil
+	})
 
-	a.handleProjFindDone(&projFindDoneEvent{when: time.Now(), gen: 6, matches: fakeMatches()})
-	if len(a.projFind.findMatches) != 0 {
-		t.Fatal("stale generation applied")
+	pumpUntil(t, a, "current sweep", func() bool { return len(a.projFind.findMatches) == 3 })
+	if !a.projFind.findTruncated {
+		t.Fatal("the current run should land its truncation flag too")
 	}
-	a.handleProjFindDone(&projFindDoneEvent{when: time.Now(), gen: 7, matches: fakeMatches(), truncated: true})
+	close(stale)
+	pumpUntil(t, a, "stale sweep", idle(&a.projFind.sweep))
 	if len(a.projFind.findMatches) != 3 || !a.projFind.findTruncated {
-		t.Fatalf("current generation should land: %d matches", len(a.projFind.findMatches))
+		t.Fatalf("stale generation applied: %d matches, truncated=%v",
+			len(a.projFind.findMatches), a.projFind.findTruncated)
 	}
 }
 
@@ -150,24 +163,26 @@ func TestProjFindEscCloses(t *testing.T) {
 	}
 }
 
-// TestProjFindDebounceAndStaleKick: a kick event whose generation was
-// superseded by a newer keystroke must not start a sweep, and Enter on
-// a match lands the cursor on the match column, not column 0.
+// TestProjFindDebounceAndStaleKick: a keystroke's sweep that a newer
+// keystroke superseded must never land — after two rapid edits the
+// results are the second query's — and Enter on a match lands the
+// cursor on the match column, not column 0.
 func TestProjFindDebounceAndStaleKick(t *testing.T) {
 	root := t.TempDir()
-	mkFile(t, root, "a.go", "xx alpha\n")
+	mkFile(t, root, "a.go", "xx alpha\nalpine\n")
 	a := projFindApp(t, root)
+	installReadyFinder(t, a) // the sweep reads the index; give it one
 
 	a.projFind.query.SetText("al")
-	a.projFindQueryChanged() // gen N
-	staleGen := a.projFind.findGen
+	a.projFindQueryChanged() // would match both lines
 	a.projFind.query.SetText("alpha")
-	a.projFindQueryChanged() // gen N+1 supersedes
-	a.handleProjFindKick(&projFindKickEvent{when: time.Now(), gen: staleGen})
-	// The stale kick must be inert: no done event for staleGen can win,
-	// and busy stays owned by the live generation.
-	if a.projFind.findGen != staleGen+1 {
-		t.Fatalf("generation bookkeeping broke: %d vs %d", a.projFind.findGen, staleGen)
+	a.projFindQueryChanged() // supersedes: one line
+	if !a.projFind.sweep.Busy() {
+		t.Fatal("a non-empty query should start a sweep")
+	}
+	pumpUntil(t, a, "sweeps", idle(&a.projFind.sweep))
+	if n := len(a.projFind.findMatches); n != 1 {
+		t.Fatalf("results must be the newest query's: got %d matches, want 1", n)
 	}
 
 	// Column landing via activation.
@@ -396,23 +411,31 @@ func TestProjFindDraw_BarDropsLabelsWholeNeverInPieces(t *testing.T) {
 
 // TestHandleProjFindKey_TypingEditsQueryAndCaretMovesDoNotResweep pins
 // the panel's half of the overlay.Field delegation: printable runes and
-// Backspace land in the query and each start a fresh sweep generation,
-// while Home/Right only move the caret. A caret move that spent a
-// generation would launch a redundant disk walk on every arrow press.
+// Backspace land in the query and each start a fresh sweep run, while
+// Home/Right only move the caret. A caret move that started a run would
+// launch a redundant disk walk on every arrow press. Runs are counted
+// at the job's Spawn seam — the sweep is a Supersede job, so every
+// keystroke's Start spawns a worker that the next keystroke cancels.
 func TestHandleProjFindKey_TypingEditsQueryAndCaretMovesDoNotResweep(t *testing.T) {
 	a := projFindApp(t, t.TempDir())
+	spawns := 0
+	inner := a.projFind.sweep.Spawn
+	a.projFind.sweep.Spawn = func(name string, fn func()) { spawns++; inner(name, fn) }
 	for _, r := range "alpha" {
 		a.handleProjFindKey(keyEv(tcell.KeyRune, r))
 	}
 	if a.projFind.query.Text() != "alpha" {
 		t.Fatalf("typing did not reach the query field: %q", a.projFind.query.Text())
 	}
+	if spawns != len("alpha") {
+		t.Fatalf("every keystroke should start a sweep run: got %d spawns, want %d", spawns, len("alpha"))
+	}
 
-	gen := a.projFind.findGen
+	before := spawns
 	a.handleProjFindKey(keyEv(tcell.KeyHome, 0))
 	a.handleProjFindKey(keyEv(tcell.KeyRight, 0))
-	if a.projFind.findGen != gen {
-		t.Fatalf("a caret move started a new sweep generation: %d -> %d", gen, a.projFind.findGen)
+	if spawns != before {
+		t.Fatalf("a caret move started a sweep run: %d -> %d spawns", before, spawns)
 	}
 	if a.projFind.query.Cursor != 1 {
 		t.Fatalf("caret should have moved inside the query, cursor=%d", a.projFind.query.Cursor)
@@ -422,9 +445,11 @@ func TestHandleProjFindKey_TypingEditsQueryAndCaretMovesDoNotResweep(t *testing.
 	if a.projFind.query.Text() != "lpha" {
 		t.Fatalf("backspace did not edit the query: %q", a.projFind.query.Text())
 	}
-	if a.projFind.findGen == gen {
-		t.Fatal("an edit must start a new sweep generation")
+	if spawns != before+1 {
+		t.Fatalf("an edit must start a new sweep run: got %d spawns, want %d", spawns, before+1)
 	}
+	a.projFind.sweep.Invalidate()
+	pumpUntil(t, a, "sweeps", idle(&a.projFind.sweep))
 }
 
 // TestProjFindDraw_ShowsCaretInsideALongReplaceField pins the replace

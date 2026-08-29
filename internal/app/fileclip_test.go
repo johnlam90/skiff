@@ -15,33 +15,14 @@
 package app
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/johnlam90/skiff/internal/finder"
 )
-
-// waitFileOpIdle pumps the simulation screen's queue until the pending
-// background file op posts its done event, then applies it — tests run
-// without the real event loop.
-func waitFileOpIdle(t *testing.T, a *App) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for a.fileOpBusy {
-		if time.Now().After(deadline) {
-			t.Fatal("file op never finished")
-		}
-		switch e := a.screen.PollEvent().(type) {
-		case *fileOpDoneEvent:
-			a.handleFileOpDone(e)
-		case *fileOpProgressEvent:
-			a.handleFileOpProgress(e)
-		}
-	}
-}
 
 // mkFile writes content to dir/name (creating parents) and returns the path.
 func mkFile(t *testing.T, dir, name, content string) string {
@@ -72,9 +53,9 @@ func TestPasteCopyKeepsClip(t *testing.T) {
 
 	a.clipCopyPath(src)
 	a.pasteInto(sub1)
-	waitFileOpIdle(t, a)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 	a.pasteInto(sub2)
-	waitFileOpIdle(t, a)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 	for _, want := range []string{filepath.Join(sub1, "a.txt"), filepath.Join(sub2, "a.txt")} {
 		if _, err := os.Stat(want); err != nil {
 			t.Fatalf("missing pasted copy %s: %v", want, err)
@@ -101,7 +82,7 @@ func TestPasteCutMovesAndClearsClip(t *testing.T) {
 
 	a.clipCutPath(src)
 	a.pasteInto(sub)
-	waitFileOpIdle(t, a)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 	if _, err := os.Stat(filepath.Join(sub, "a.txt")); err != nil {
 		t.Fatalf("moved file missing: %v", err)
 	}
@@ -128,7 +109,7 @@ func TestPasteDirIntoItselfRefused(t *testing.T) {
 	outer := filepath.Join(root, "outer")
 	a.clipCutPath(outer)
 	a.pasteInto(inner)
-	waitFileOpIdle(t, a)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 	if !strings.Contains(a.statusMsg, "into itself") {
 		t.Fatalf("expected the into-itself flash, got %q", a.statusMsg)
 	}
@@ -169,7 +150,7 @@ func TestPasteInto_SymlinkedDescendantRefused(t *testing.T) {
 
 	a.clipCutPath(outer)
 	a.pasteInto(link)
-	waitFileOpIdle(t, a)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 
 	if !strings.Contains(a.statusMsg, "into itself") {
 		t.Fatalf("expected the into-itself flash, got %q", a.statusMsg)
@@ -192,7 +173,7 @@ func TestPasteOntoFileLandsBeside(t *testing.T) {
 
 	a.clipCopyPath(src)
 	a.pasteInto(pasteDirForPath(target, false))
-	waitFileOpIdle(t, a)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 	if _, err := os.Stat(filepath.Join(root, "sub", "a.txt")); err != nil {
 		t.Fatalf("paste-onto-file should land beside it: %v", err)
 	}
@@ -213,7 +194,7 @@ func TestMoveUpdatesOpenTabs(t *testing.T) {
 
 	a.clipCutPath(filepath.Join(root, "pkg"))
 	a.pasteInto(dest)
-	waitFileOpIdle(t, a)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 	want := filepath.Join(dest, "pkg", "file.go")
 	if got := a.activeTabPtr().Path; got != want {
 		t.Fatalf("tab path: got %q, want %q", got, want)
@@ -228,7 +209,7 @@ func TestDuplicateInPlace(t *testing.T) {
 	a := newTestApp(t, root)
 
 	a.duplicatePath(src)
-	waitFileOpIdle(t, a)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 	if _, err := os.Stat(filepath.Join(root, "a copy.txt")); err != nil {
 		t.Fatalf("duplicate missing: %v", err)
 	}
@@ -250,13 +231,13 @@ func TestHandleFileOpDone_FailureStillRefreshesFinderAndGit(t *testing.T) {
 	// Run the index build inline so the count is settled by the time
 	// the assertion reads it, with no goroutine to drain.
 	a.finder.PanicGuard = func(_ string, fn func()) { rebuilds++; fn() }
-	if a.gitRefreshInFlight {
+	if a.gitStatus.Busy() {
 		t.Fatal("setup: no git refresh should be in flight before the op")
 	}
 
 	a.clipCutPath(src)
 	a.pasteInto(filepath.Join(root, "nope"))
-	waitFileOpIdle(t, a)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 
 	if !strings.Contains(a.statusMsg, "failed") {
 		t.Fatalf("expected the failure flash, got %q", a.statusMsg)
@@ -264,22 +245,26 @@ func TestHandleFileOpDone_FailureStillRefreshesFinderAndGit(t *testing.T) {
 	if rebuilds == 0 {
 		t.Fatal("a failed move must invalidate and rebuild the finder index")
 	}
-	if !a.gitRefreshInFlight && !a.gitRefreshQueued {
+	if !a.gitStatus.Busy() && !a.gitStatus.Queued() {
 		t.Fatal("a failed move must request a git status refresh")
 	}
 }
 
 // TestFileOpGate_IsSeparateFromProjectReplace pins the split of the two
-// busy flags: a project replace in flight is no reason to refuse a
-// paste — the features are unrelated and used to share one gate.
+// gates: a project replace in flight is no reason to refuse a paste —
+// the features are unrelated and used to share one busy flag.
 func TestFileOpGate_IsSeparateFromProjectReplace(t *testing.T) {
 	root := t.TempDir()
 	src := mkFile(t, root, "a.txt", "data")
 	a := newTestApp(t, root)
-	a.projReplaceBusy = true
+	release := make(chan struct{})
+	a.projReplace.Start(func(context.Context) (projReplaceResult, error) {
+		<-release
+		return projReplaceResult{}, nil
+	})
 
 	a.duplicatePath(src)
-	waitFileOpIdle(t, a)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 
 	if _, err := os.Stat(filepath.Join(root, "a copy.txt")); err != nil {
 		t.Fatalf("duplicate should run while a replace is busy: %v", err)
@@ -287,5 +272,6 @@ func TestFileOpGate_IsSeparateFromProjectReplace(t *testing.T) {
 	if !strings.Contains(a.statusMsg, "Duplicated") {
 		t.Fatalf("expected the done flash, got %q", a.statusMsg)
 	}
-	a.projReplaceBusy = false
+	close(release)
+	pumpUntil(t, a, "replace", idle(&a.projReplace))
 }

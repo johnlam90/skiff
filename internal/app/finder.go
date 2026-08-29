@@ -18,10 +18,10 @@ package app
 
 import (
 	"path/filepath"
-	"time"
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/asyncjob"
 	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/overlay"
 )
@@ -46,17 +46,27 @@ const (
 	finderChromeRows = 5
 )
 
-// finderRebuiltEvent is posted by the background indexer goroutine
-// when it finishes a rebuild. The main loop reacts by re-running
-// the current query so the visible results refresh — the user
-// gets to see "Indexing…" replaced with real matches without
-// having to type or wait for the next keystroke.
-type finderRebuiltEvent struct {
-	when time.Time
+// finderRebuiltNotice is what the background indexer runs when it
+// finishes a rebuild: it posts a Notify whose on-loop half is
+// onFinderRebuilt. The indexer is not an asyncjob.Job — internal/finder
+// owns its goroutine and its own coalescing (Rebuild during a build is
+// a no-op) and has no result to land — so the wake-up rides the same
+// event type as every job's landing, with no case of its own in
+// handleEvent. Built on the loop; the returned closure is all the
+// goroutine ever touches.
+func (a *App) finderRebuiltNotice() func() {
+	scr := a.screen
+	return func() { _ = scr.PostEvent(asyncjob.Notify(a.onFinderRebuilt)) }
 }
 
-// When satisfies the tcell.Event interface.
-func (e *finderRebuiltEvent) When() time.Time { return e.when }
+// onFinderRebuilt re-runs the open finder's query so a finished index
+// build replaces "Indexing…" with real matches without the user having
+// to type or wait for the next keystroke. Runs on the loop.
+func (a *App) onFinderRebuilt() {
+	if fo, ok := a.overlays.Top().(*finderOverlay); ok {
+		fo.refreshResults()
+	}
+}
 
 // finderOverlay is the file finder's overlay: the query field, the
 // current results, and the window over them. It dies with the overlay —
@@ -108,14 +118,11 @@ func (a *App) openFinder() {
 	}
 	a.closeAllModals()
 	fo := &finderOverlay{app: a}
-	scr := a.screen
 	if a.finder != nil {
 		// Rebuild only when the cache is genuinely stale. A re-open
 		// during a still-warm session shouldn't pay for a refresh.
 		if a.finder.State() != finder.StateReady {
-			a.finder.Rebuild(func() {
-				_ = scr.PostEvent(&finderRebuiltEvent{when: time.Now()})
-			})
+			a.finder.Rebuild(a.finderRebuiltNotice())
 		}
 	}
 	fo.refreshResults()
@@ -167,10 +174,7 @@ func (a *App) invalidateFinder() {
 		return
 	}
 	a.finder.Invalidate()
-	scr := a.screen
-	a.finder.Rebuild(func() {
-		_ = scr.PostEvent(&finderRebuiltEvent{when: time.Now()})
-	})
+	a.finder.Rebuild(a.finderRebuiltNotice())
 }
 
 // HandleKey routes keyboard input while the finder is open: Esc

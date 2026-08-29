@@ -298,7 +298,7 @@ func (a *App) moveGitPanelSel(delta int) {
 // a mutation is running the row renders "git is working…" instead of
 // buttons, so there is nothing to focus.
 func (a *App) moveGitPanelFocus(delta int) {
-	if a.gitOpBusy {
+	if a.gitOp.Busy() {
 		return
 	}
 	_, _, sw, _ := a.sidebarRect()
@@ -330,7 +330,7 @@ func (a *App) moveGitPanelFocus(delta int) {
 // button, which is what every button anywhere does.
 func (a *App) activateGitPanelFocus(space bool) {
 	if a.gitPanel.onBtns {
-		if a.gitOpBusy {
+		if a.gitOp.Busy() {
 			a.flash("Another git operation is still running")
 			return
 		}
@@ -445,7 +445,7 @@ func (a *App) gitPanelClick(x, y int) {
 				// A mouse user in keyboard mode gets the focus ring
 				// moved to what they clicked, so the two input paths
 				// never disagree about where "here" is.
-				if a.gitPanelKeysOn() && !a.gitOpBusy {
+				if a.gitPanelKeysOn() && !a.gitOp.Busy() {
 					a.gitPanel.onBtns, a.gitPanel.btn = true, i
 				}
 				b.action(a, sx+b.x0, sy+3)
@@ -954,7 +954,7 @@ func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 
 	// Buttons row — commit / push / pull / everything else. While a
 	// mutation runs, say so instead of pretending clicks would work.
-	if a.gitOpBusy {
+	if a.gitOp.Busy() {
 		muted := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
 		drawClipped(a.screen, sx+1, sy+2, sw-1, "git is working…", muted)
 	} else {

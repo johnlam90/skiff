@@ -9,9 +9,9 @@
 // paste it into (or beside) another, and duplicate in place. The disk
 // work — the never-overwrite " copy" ladder, the into-itself guard,
 // the cross-device fallback — is the file manager's; this file owns
-// the clipboard state, the background runner that keeps a
-// node_modules-sized paste from freezing the editor, and the done
-// event that lands the manager's Changeset on the main loop. Cut keeps
+// the clipboard state, the background job that keeps a
+// node_modules-sized paste from freezing the editor, and the landing
+// that hands the manager's Changeset to the main loop. Cut keeps
 // the entry on disk until the paste lands; copy keeps the clipboard
 // afterwards so one source can be pasted into several folders.
 // Reachable from the tree's right-click menu and (per the project
@@ -20,12 +20,14 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"time"
 
+	"github.com/johnlam90/skiff/internal/asyncjob"
 	"github.com/johnlam90/skiff/internal/filemanager"
 	"github.com/johnlam90/skiff/internal/filetree"
 )
@@ -109,54 +111,38 @@ func (k fileOpKind) label() string {
 	}
 }
 
-// fileOpDoneEvent reports a finished background file operation: the
-// manager's Changeset (empty on failure) and its error.
-type fileOpDoneEvent struct {
-	when  time.Time
+// fileOpResult is what a finished background file operation lands: the
+// manager's Changeset (empty on failure — the error rides beside it as
+// the job's error) and what the flash needs to name it.
+type fileOpResult struct {
 	label string
 	src   string
 	cs    filemanager.Changeset
-	err   error
 }
 
-// When implements tcell.Event.
-func (e *fileOpDoneEvent) When() time.Time { return e.when }
-
-// fileOpProgressEvent ticks the status bar while a big copy runs.
-type fileOpProgressEvent struct {
-	when  time.Time
-	label string
-	count int64
-}
-
-// When implements tcell.Event.
-func (e *fileOpProgressEvent) When() time.Time { return e.when }
-
-// startFileOp runs a move, copy or duplicate in the background so a
-// node_modules-sized tree never freezes the editor (druk's rule). One
-// at a time — racing two ops over the same paths helps nobody. The
-// goroutine calls the manager (Move / Copy / Duplicate read only its
-// immutable fields, so this is safe beside the main loop's trash
-// reads) and posts the Changeset back as a fileOpDoneEvent; nothing
-// here touches UI state off the loop.
+// startFileOp runs a move, copy or duplicate on the fileOp job so a
+// node_modules-sized tree never freezes the editor (druk's rule). The
+// job is Refuse — one at a time, because racing two ops over the same
+// paths helps nobody. The goroutine calls the manager (Move / Copy /
+// Duplicate read only its immutable fields, so this is safe beside the
+// main loop's trash reads) and lands the Changeset through
+// handleFileOpDone; nothing here touches UI state off the loop — the
+// progress tick is a Notify whose closure runs on the loop too.
 func (a *App) startFileOp(kind fileOpKind, src, dstDir string) {
-	if a.fileOpBusy {
-		a.flash("Another file operation is still running")
-		return
-	}
-	a.fileOpBusy = true
 	label := kind.label()
-	a.flash(gerundOf(label) + " " + filepath.Base(src) + "…")
 	scr := a.screen
 	files := a.files
-	a.safeGo("file-op", func() {
+	// tick is the on-loop half of a progress report, built here so the
+	// goroutine only ever posts it.
+	tick := func(n int64) { a.handleFileOpProgress(label, n) }
+	started := a.fileOp.Start(func(context.Context) (fileOpResult, error) {
 		var count int64
 		lastTick := time.Now()
 		progress := func() {
 			n := atomic.AddInt64(&count, 1)
 			if time.Since(lastTick) > 150*time.Millisecond {
 				lastTick = time.Now()
-				_ = scr.PostEvent(&fileOpProgressEvent{when: time.Now(), label: label, count: n})
+				_ = scr.PostEvent(asyncjob.Notify(func() { tick(n) }))
 			}
 		}
 		var cs filemanager.Changeset
@@ -169,13 +155,18 @@ func (a *App) startFileOp(kind fileOpKind, src, dstDir string) {
 		default:
 			cs, err = files.Duplicate(src, progress)
 		}
-		_ = scr.PostEvent(&fileOpDoneEvent{when: time.Now(), label: label, src: src, cs: cs, err: err})
+		return fileOpResult{label: label, src: src, cs: cs}, err
 	})
+	if !started {
+		a.flash("Another file operation is still running")
+		return
+	}
+	a.flash(gerundOf(label) + " " + filepath.Base(src) + "…")
 }
 
 // handleFileOpProgress keeps the user informed mid-copy.
-func (a *App) handleFileOpProgress(e *fileOpProgressEvent) {
-	a.flash(fmt.Sprintf("%s… %d files", gerundOf(e.label), e.count))
+func (a *App) handleFileOpProgress(label string, count int64) {
+	a.flash(fmt.Sprintf("%s… %d files", gerundOf(label), count))
 }
 
 // gerundOf maps an op verb to its progress form.
@@ -213,25 +204,24 @@ func doneVerbOf(label string) string {
 // empty Changeset — a cross-device move that died half-way has already
 // changed the disk, and refreshing only the tree left the finder and
 // the git tint stale.
-func (a *App) handleFileOpDone(e *fileOpDoneEvent) {
-	a.fileOpBusy = false
-	if e.err != nil {
+func (a *App) handleFileOpDone(r fileOpResult, err error) {
+	if err != nil {
 		a.applyChangeset(filemanager.Changeset{})
-		a.flash(fmt.Sprintf("%s failed: %v", e.label, e.err))
+		a.flash(fmt.Sprintf("%s failed: %v", r.label, err))
 		return
 	}
-	if len(e.cs.Moved) > 0 && a.fileClip.cut && a.fileClip.path == e.src {
+	if len(r.cs.Moved) > 0 && a.fileClip.cut && a.fileClip.path == r.src {
 		a.fileClip = fileClip{}
 	}
-	a.applyChangeset(e.cs)
-	name := filepath.Base(e.src)
+	a.applyChangeset(r.cs)
+	name := filepath.Base(r.src)
 	switch {
-	case len(e.cs.Moved) > 0:
-		name = filepath.Base(e.cs.Moved[0].New)
-	case len(e.cs.Added) > 0:
-		name = filepath.Base(e.cs.Added[0])
+	case len(r.cs.Moved) > 0:
+		name = filepath.Base(r.cs.Moved[0].New)
+	case len(r.cs.Added) > 0:
+		name = filepath.Base(r.cs.Added[0])
 	}
-	a.flash(fmt.Sprintf("%s %s", doneVerbOf(e.label), name))
+	a.flash(fmt.Sprintf("%s %s", doneVerbOf(r.label), name))
 }
 
 // duplicatePath copies path beside itself under the next free " copy"

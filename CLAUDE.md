@@ -142,6 +142,14 @@ internal/customactions/       Loader for ~/.config/skiff/actions.json, incl. the
 internal/session/session.go   Session store — one file per project under
                               ~/.local/state/skiff/sessions/ (legacy
                               sessions.json is migrated + renamed aside)
+internal/asyncjob/            The one shape of a background job: Job[T]
+                              with a Policy (Coalesce / Supersede / Refuse /
+                              Concurrent), injected Spawn + Post seams, and an OnDone
+                              that runs only when the loop lands the single
+                              *asyncjob.Event. Every goroutine-backed
+                              feature in app is one Job field; Notify is
+                              the no-result wake-up (progress ticks, the
+                              finder index's "rebuilt")
 internal/atomicfile/atomicfile.go Temp-file + fsync + rename write, shared by
                               every config/state file (session, trust,
                               config.json, .skiff/format.json)
@@ -364,10 +372,31 @@ the single door app uses to obtain a handle, so `a.gitRunner =
 overlays, git panel rows, pickers, and every op.
 
 ### Custom tcell events for goroutine → main-loop messaging
-Background work (auto-scroll during drag, 10s tree refresh) posts custom
-events (`autoScrollEvent`, `treeRefreshEvent`) onto the tcell event queue
-and the main loop handles them. Don't mutate UI state from goroutines
-directly.
+Background work posts events onto the tcell event queue and the main
+loop handles them. Don't mutate UI state from goroutines directly.
+Two kinds exist. Long-lived tickers (auto-scroll during drag, the 10s
+tree-refresh tick, the signal forwarder) post their own tiny events
+(`autoScrollEvent`, `treeRefreshEvent`, `quitRequestEvent`). Everything
+that runs once and lands a result is an `asyncjob.Job[T]` field on
+`App` — tree sweep, git status, diff load, file op, project replace,
+git verb, branch/worktree list, formatter, custom action, the
+project-find sweep — wired in `wireJobs` with one of four policies:
+`Coalesce` (one in flight, one queued follow-up), `Supersede` (every
+start spawns; only the newest landing applies), `Refuse` (busy →
+`Start` returns false), `Concurrent` (every start spawns, every landing
+applies — the formatter and custom actions, which never had a gate). A
+landing the loop's queue refuses is retried from the worker and, if
+still lost, stops counting as in flight, so no gate can strand. The job
+owns the busy/queued/generation
+bookkeeping; `handleEvent` has ONE `*asyncjob.Event` case whose `Land`
+runs the stale check, the handler, and any follow-up. `Invalidate` is
+the "a main-thread mutation retired the in-flight run" verb (tree
+mutations, closing the project-find panel). Don't add a per-job event
+struct or a loose `xBusy` bool back — add a `Job` field and a line in
+`wireJobs`, and pick the policy in its field comment. `safeGo` stays
+the only goroutine spawner: the job's `Spawn` seam is `a.safeGo`, so a
+panic in a worker still reaches the crash guard. Tests drain with the
+one `pumpUntil(t, a, what, done)` and the `idle(&a.job)` adapter.
 
 ### Identity-preserving tree refresh (filetree.go)
 `merge` walks the existing children, matches survivors by name, and
@@ -382,10 +411,10 @@ walk) names the work, `filetree.ScanDirs` does the ReadDir sweep and
 along, and `handleTreeScan` merges the result via `Tree.ApplyScan` on the
 event loop — the node graph the renderer walks is only ever mutated
 there. `Tree.Refresh` stays synchronous for file operations, which need
-the tree correct before the next draw; its `treeScanGen` bump retires any
-in-flight sweep so a stale listing can't resurrect a just-deleted file.
-Overlapping ticks coalesce into one follow-up, as in
-`refreshGitStatusAsync`.
+the tree correct before the next draw; `refreshTree` calls
+`a.treeScan.Invalidate()` so an in-flight sweep's stale listing can't
+resurrect a just-deleted file. The sweep is a `Coalesce` job, so
+overlapping ticks fold into one follow-up, as does `gitStatus`.
 
 ### Three-way external-change reconciliation (refresh.go)
 On each tree-refresh tick, `reconcileTab` compares each open tab's mtime
