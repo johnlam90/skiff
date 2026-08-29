@@ -76,8 +76,11 @@ func (a *App) OpenFileAtLineCol(path string, line, col int) {
 	}
 	tab.JumpToLine(line)
 	if col > 0 {
-		tab.Cursor = tab.Buffer.Clamp(editor.Position{Line: tab.Cursor.Line, Col: col})
-		tab.Anchor = tab.Cursor
+		// JumpToLine has already clamped the line; MoveCursorTo owns the
+		// column half — clamping it, snapping it onto a grapheme
+		// boundary, and collapsing the selection — so the app never
+		// assigns Cursor / Anchor itself.
+		tab.MoveCursorTo(editor.Position{Line: tab.Cursor.Line, Col: col}, false)
 	}
 	_, h := a.editorSize()
 	tab.CenterOnCursor(h)

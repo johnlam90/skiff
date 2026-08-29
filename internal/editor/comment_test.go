@@ -94,7 +94,7 @@ func TestToggleLineComment_UncommentsIndentedExistingComments(t *testing.T) {
 // editor rule: a mixed selection comments every non-blank line.
 func TestToggleLineComment_MixedSelectionCommentsAllLines(t *testing.T) {
 	tab := commentTestTab("main.go", "// one\n\n  two")
-	tab.SelectAll()
+	selectWholeBuffer(tab)
 
 	changed, ok := tab.ToggleLineComment()
 
@@ -152,7 +152,7 @@ func TestToggleLineComment_MixedIndentAlignsToShallowestIndent(t *testing.T) {
 // marker column is derived from the block's non-blank lines.
 func TestToggleLineComment_BlankLinesInsideSelectionStayBare(t *testing.T) {
 	tab := commentTestTab("main.go", "    a\n\n  \n    b\n")
-	tab.SelectAll()
+	selectWholeBuffer(tab)
 
 	changed, ok := tab.ToggleLineComment()
 
@@ -184,11 +184,11 @@ func TestToggleLineComment_RoundTripRestoresOriginalBytes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tab := commentTestTab("main.go", tc.text)
-			tab.SelectAll()
+			selectWholeBuffer(tab)
 			if changed, ok := tab.ToggleLineComment(); !ok || !changed {
 				t.Fatalf("comment pass = %v, %v; want changed and ok", changed, ok)
 			}
-			tab.SelectAll()
+			selectWholeBuffer(tab)
 			if changed, ok := tab.ToggleLineComment(); !ok || !changed {
 				t.Fatalf("uncomment pass = %v, %v; want changed and ok", changed, ok)
 			}
@@ -204,7 +204,7 @@ func TestToggleLineComment_RoundTripRestoresOriginalBytes(t *testing.T) {
 // uncommenting back to their exact original bytes.
 func TestToggleLineComment_UncommentsLegacyColumnZeroComments(t *testing.T) {
 	tab := commentTestTab("main.go", "//     four spaces\n// \ttabbed\n")
-	tab.SelectAll()
+	selectWholeBuffer(tab)
 
 	changed, ok := tab.ToggleLineComment()
 
@@ -284,7 +284,7 @@ func TestToggleLineComment_NoSelectionUsesCursorLine(t *testing.T) {
 // to whitespace-only lines just because they were inside the selection.
 func TestToggleLineComment_BlankSelectionIsNoop(t *testing.T) {
 	tab := commentTestTab("main.go", "  \n\t")
-	tab.SelectAll()
+	selectWholeBuffer(tab)
 
 	changed, ok := tab.ToggleLineComment()
 
@@ -334,6 +334,15 @@ func TestToggleLineComment_UndoRestoresSelectionAndText(t *testing.T) {
 	if tab.Anchor != (Position{Line: 0, Col: 1}) || tab.Cursor != (Position{Line: 1, Col: 2}) {
 		t.Fatalf("undo selection = anchor %+v cursor %+v", tab.Anchor, tab.Cursor)
 	}
+}
+
+// selectWholeBuffer spans the anchor and cursor across the entire buffer.
+// The toggle's line range is derived from the selection, so most of these
+// cases want "every line"; the editor itself has no SelectAll (nothing in
+// the app ever called one), which is why the tests set the two fields.
+func selectWholeBuffer(tab *Tab) {
+	tab.Anchor = Position{Line: 0, Col: 0}
+	tab.Cursor = tab.Buffer.EndPos()
 }
 
 // commentTestTab constructs a text tab with undo initialized, without touching

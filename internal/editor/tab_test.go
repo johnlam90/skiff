@@ -730,6 +730,151 @@ func TestTab_HasSelection_AndSelectionText(t *testing.T) {
 	}
 }
 
+// TestTab_EveryMutatorGoesThroughEdit pins the trailer the edit seam
+// owns, for every mutator in the package. After any text mutation the
+// tab must be dirty, its highlight cache stale, its caret flagged as
+// moved (and that flag consumed by the next Render), and one undo entry
+// must roll the whole change back. Ten hand-typed copies of that trailer
+// had already drifted apart — the find-match refresh only ever reached
+// three of them — so this table is what stops the eleventh.
+func TestTab_EveryMutatorGoesThroughEdit(t *testing.T) {
+	const seed = "alpha\nbeta\ngamma"
+	cases := []struct {
+		name  string
+		setup func(*Tab) // cursor / selection / find state the mutator needs
+		apply func(*Tab)
+		want  string
+	}{
+		{
+			name:  "DeleteSelection",
+			setup: func(tb *Tab) { tb.Anchor = Position{}; tb.Cursor = Position{Line: 0, Col: 2} },
+			apply: func(tb *Tab) { tb.DeleteSelection() },
+			want:  "pha\nbeta\ngamma",
+		},
+		{
+			name:  "InsertString",
+			apply: func(tb *Tab) { tb.InsertString("xy") },
+			want:  "xyalpha\nbeta\ngamma",
+		},
+		{
+			name:  "InsertString over a selection",
+			setup: func(tb *Tab) { tb.Anchor = Position{}; tb.Cursor = Position{Line: 0, Col: 5} },
+			apply: func(tb *Tab) { tb.InsertString("xy") },
+			want:  "xy\nbeta\ngamma",
+		},
+		{
+			name:  "InsertNewline",
+			setup: func(tb *Tab) { tb.Cursor = Position{Line: 0, Col: 2}; tb.Anchor = tb.Cursor },
+			apply: func(tb *Tab) { tb.InsertNewline() },
+			want:  "al\npha\nbeta\ngamma",
+		},
+		{
+			name:  "InsertRune",
+			apply: func(tb *Tab) { tb.InsertRune('x') },
+			want:  "xalpha\nbeta\ngamma",
+		},
+		{
+			name:  "InsertRune over a selection",
+			setup: func(tb *Tab) { tb.Anchor = Position{}; tb.Cursor = Position{Line: 0, Col: 5} },
+			apply: func(tb *Tab) { tb.InsertRune('x') },
+			want:  "x\nbeta\ngamma",
+		},
+		{
+			name:  "Backspace",
+			setup: func(tb *Tab) { tb.Cursor = Position{Line: 0, Col: 2}; tb.Anchor = tb.Cursor },
+			apply: func(tb *Tab) { tb.Backspace() },
+			want:  "apha\nbeta\ngamma",
+		},
+		{
+			name:  "Delete",
+			apply: func(tb *Tab) { tb.Delete() },
+			want:  "lpha\nbeta\ngamma",
+		},
+		{
+			name:  "ToggleLineComment",
+			apply: func(tb *Tab) { tb.ToggleLineComment() },
+			want:  "// alpha\nbeta\ngamma",
+		},
+		{
+			name:  "ReplaceCurrentMatch",
+			setup: func(tb *Tab) { tb.SetFindQuery("beta") },
+			apply: func(tb *Tab) { tb.ReplaceCurrentMatch("x") },
+			want:  "alpha\nx\ngamma",
+		},
+		{
+			name:  "ReplaceAllMatches",
+			setup: func(tb *Tab) { tb.SetFindQuery("a") },
+			apply: func(tb *Tab) { tb.ReplaceAllMatches("") },
+			want:  "lph\nbet\ngmm",
+		},
+		{
+			name:  "ReplaceLines",
+			apply: func(tb *Tab) { tb.ReplaceLines(map[int]string{1: "BETA"}) },
+			want:  "alpha\nBETA\ngamma",
+		},
+		{
+			name:  "MoveLinesUp",
+			setup: func(tb *Tab) { tb.Cursor = Position{Line: 1}; tb.Anchor = tb.Cursor },
+			apply: func(tb *Tab) { tb.MoveLinesUp() },
+			want:  "beta\nalpha\ngamma",
+		},
+		{
+			name:  "MoveLinesDown",
+			apply: func(tb *Tab) { tb.MoveLinesDown() },
+			want:  "beta\nalpha\ngamma",
+		},
+		{
+			name:  "DuplicateLines",
+			apply: func(tb *Tab) { tb.DuplicateLines() },
+			want:  "alpha\nalpha\nbeta\ngamma",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tab := &Tab{Path: "main.go", Buffer: NewBuffer(seed), IndentUnit: "\t"}
+			tab.initUndo()
+			if tc.setup != nil {
+				tc.setup(tab)
+			}
+
+			// Render first so the trailer's flags start from the state a
+			// painted editor is actually in: it consumes cursorMoved and
+			// clears StyleStale, which is what makes the assertions below
+			// evidence that the MUTATION set them rather than the setup.
+			scr := newSimScreen(t, 40, 10)
+			defer scr.Fini()
+			tab.Render(scr, theme.Default(), 0, 0, 40, 10)
+			tab.Dirty, tab.StyleStale = false, false
+
+			tc.apply(tab)
+
+			if got := tab.Buffer.String(); got != tc.want {
+				t.Fatalf("buffer:\n%q\nwant:\n%q", got, tc.want)
+			}
+			if !tab.Dirty {
+				t.Error("Dirty not set — the tab would close without a save prompt")
+			}
+			if !tab.StyleStale {
+				t.Error("StyleStale not set — the highlight cache would paint the old text")
+			}
+			if !tab.CanUndo() {
+				t.Error("no undo entry pushed — the edit is unrecoverable")
+			}
+			if !tab.cursorMoved {
+				t.Error("cursorMoved not set — the next Render would not scroll the caret into view")
+			}
+			tab.Render(scr, theme.Default(), 0, 0, 40, 10)
+			if tab.cursorMoved {
+				t.Error("Render must consume cursorMoved, or wheel scrolling fights every repaint")
+			}
+			if !tab.Undo() || tab.Buffer.String() != seed {
+				t.Fatalf("one undo should restore the seed, got %q", tab.Buffer.String())
+			}
+		})
+	}
+}
+
 // TestTab_DeleteSelection removes the selected range and collapses both
 // cursor and anchor to the start.
 func TestTab_DeleteSelection(t *testing.T) {
@@ -1028,15 +1173,54 @@ func TestTab_MoveLineHome_End(t *testing.T) {
 	}
 }
 
-// TestTab_SelectAll spans the whole buffer.
-func TestTab_SelectAll(t *testing.T) {
-	tab := &Tab{Buffer: NewBuffer("foo\nbar")}
-	tab.SelectAll()
-	if tab.Anchor != (Position{Line: 0, Col: 0}) {
-		t.Fatalf("anchor wrong: %+v", tab.Anchor)
+// TestTab_RestoreView covers the happy path of the seam the app puts a
+// remembered place back through: the caret lands where it was, the
+// selection collapses, the viewport takes the saved line, and both the
+// cursorMoved flag and the undo-group break happen — the two things the
+// old hand-written Cursor/Anchor/ScrollY assignments in the app kept
+// forgetting.
+func TestTab_RestoreView(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer(strings.Repeat("hello\n", 50))}
+	tab.initUndo()
+	tab.Anchor = Position{Line: 0, Col: 0}
+	tab.Cursor = Position{Line: 0, Col: 3} // a live selection to collapse
+	tab.InsertRune('x')                    // opens a typing coalesce window
+	tab.cursorMoved = false
+
+	tab.RestoreView(Position{Line: 20, Col: 2}, 15)
+
+	if tab.Cursor != (Position{Line: 20, Col: 2}) {
+		t.Fatalf("cursor: %+v", tab.Cursor)
 	}
+	if tab.Anchor != tab.Cursor {
+		t.Fatalf("anchor should collapse onto the cursor: %+v", tab.Anchor)
+	}
+	if tab.ScrollY != 15 || tab.ScrollSeg != 0 {
+		t.Fatalf("scroll: ScrollY=%d ScrollSeg=%d, want 15/0", tab.ScrollY, tab.ScrollSeg)
+	}
+	if !tab.cursorMoved {
+		t.Fatal("RestoreView must flag the cursor as moved or Render won't scroll to it")
+	}
+	if tab.lastUndoGroup != undoGroupNone {
+		t.Fatalf("undo group %v still open — typing would coalesce across the restore", tab.lastUndoGroup)
+	}
+}
+
+// TestTab_RestoreView_ClampsGarbage is the failure mode: session files
+// and reopen records are stale by nature (the file shrank, or the entry
+// was hand-edited), so a place that no longer exists must land somewhere
+// real instead of parking the caret past the end of the buffer.
+func TestTab_RestoreView_ClampsGarbage(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("one\ntwo")}
+	tab.initUndo()
+
+	tab.RestoreView(Position{Line: 99, Col: 99}, -5)
+
 	if tab.Cursor != (Position{Line: 1, Col: 3}) {
-		t.Fatalf("cursor wrong: %+v", tab.Cursor)
+		t.Fatalf("cursor should clamp to the end of the buffer, got %+v", tab.Cursor)
+	}
+	if tab.ScrollY != 0 {
+		t.Fatalf("negative scroll should clamp to 0, got %d", tab.ScrollY)
 	}
 }
 
