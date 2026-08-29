@@ -55,7 +55,7 @@ func (a *App) draw() {
 			// path, so a drag that ends through some other route (an
 			// overlay opening, closeAllModals) can't strand a thumb in
 			// its bright Accent state. Same rule drawSplitter follows.
-			a.tree.ScrollbarActive = a.dragMode == "treescrollbar"
+			a.tree.ScrollbarActive = a.dragMode == dragTreeScrollbar
 			a.tree.Render(a.screen, a.theme, sx, sy, sw, sh)
 			// Overdraw the tree's plain header with the EXPLORER / GIT
 			// tab row — the tree keeps rendering its own header so its
@@ -69,7 +69,7 @@ func (a *App) draw() {
 
 	if tab := a.activeTabPtr(); tab != nil {
 		ex, ey, ew, eh := a.editorRect()
-		tab.ScrollbarActive = a.dragMode == "scrollbar"
+		tab.ScrollbarActive = a.dragMode == dragScrollbar
 		tab.Render(a.screen, a.theme, ex, ey, ew, eh)
 	} else {
 		a.drawEmptyEditor()
@@ -448,7 +448,7 @@ func (a *App) drawSplitter() {
 		return
 	}
 	fg := a.theme.Subtle
-	if a.dragMode == "sidebar" {
+	if a.dragMode == dragSidebar {
 		fg = a.theme.Accent
 	}
 	style := tcell.StyleDefault.Background(a.theme.SidebarBG).Foreground(fg)

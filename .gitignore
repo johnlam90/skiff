@@ -1,5 +1,6 @@
 # Compiled binaries.
 /bin/
+/skiff
 
 # macOS metadata.
 .DS_Store

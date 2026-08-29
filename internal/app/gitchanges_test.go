@@ -1405,7 +1405,7 @@ func TestGitPanelScrollbar_ThumbBrightensWhileDragging(t *testing.T) {
 
 	// Not via release: an overlay stealing the drag is exactly the
 	// route a latched flag would get wrong.
-	a.dragMode = ""
+	a.dragMode = dragNone
 	if _, fg := barCell(t, a, barX, thumbY); fg != a.theme.Muted {
 		t.Fatalf("thumb stayed lit after the drag ended, fg %v", fg)
 	}

@@ -14,6 +14,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -147,6 +148,45 @@ func TestPasteDirIntoItselfRefused(t *testing.T) {
 	a.clipCutPath(outer)
 	a.pasteInto(inner)
 	if _, err := os.Stat(inner); err != nil {
+		t.Fatalf("refused paste must not disturb the tree: %v", err)
+	}
+	if !a.hasFileClip() {
+		t.Fatal("refused paste should keep the clipboard for a retry")
+	}
+}
+
+// TestPasteInto_SymlinkedDescendantRefused: the unresolved-path
+// comparison in the into-itself guard has a hole — a destination that
+// LOOKS unrelated to src by string prefix but RESOLVES (via a symlink)
+// to somewhere inside src must be refused too, or copyTree would walk
+// into its own growing output. The fixture: root/outer/inner is a real
+// directory; root/elsewhere/link is a symlink pointing at outer itself,
+// so pasting outer into elsewhere/link resolves to pasting outer into
+// outer — no different in effect from the plain into-itself case, just
+// reached through a symlink the unresolved-string check can't see.
+func TestPasteInto_SymlinkedDescendantRefused(t *testing.T) {
+	root := t.TempDir()
+	outer := filepath.Join(root, "outer")
+	if err := os.MkdirAll(filepath.Join(outer, "inner"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	elsewhere := filepath.Join(root, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	link := filepath.Join(elsewhere, "link")
+	if err := os.Symlink(outer, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	a := newTestApp(t, root)
+
+	a.clipCutPath(outer)
+	a.pasteInto(link)
+
+	if !strings.Contains(a.statusMsg, "into itself") {
+		t.Fatalf("expected the into-itself flash, got %q", a.statusMsg)
+	}
+	if _, err := os.Stat(filepath.Join(outer, "inner")); err != nil {
 		t.Fatalf("refused paste must not disturb the tree: %v", err)
 	}
 	if !a.hasFileClip() {

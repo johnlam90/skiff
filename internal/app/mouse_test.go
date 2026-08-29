@@ -567,13 +567,13 @@ func TestHandleMouse_LeftPressInEditor(t *testing.T) {
 	a.openFile(target)
 	ev := tcell.NewEventMouse(60, 5, tcell.Button1, tcell.ModNone)
 	a.handleMouse(ev)
-	if a.dragMode != "editor" {
+	if a.dragMode != dragEditor {
 		t.Fatalf("expected dragMode=editor, got %q", a.dragMode)
 	}
 	// Release.
 	ev = tcell.NewEventMouse(60, 5, 0, tcell.ModNone)
 	a.handleMouse(ev)
-	if a.dragMode != "" {
+	if a.dragMode != dragNone {
 		t.Fatalf("expected drag cleared on release, got %q", a.dragMode)
 	}
 }
@@ -584,7 +584,7 @@ func TestHandleMouse_SidebarSplitterDrag(t *testing.T) {
 	splitX := a.splitterX()
 	ev := tcell.NewEventMouse(splitX, 5, tcell.Button1, tcell.ModNone)
 	a.handleMouse(ev)
-	if a.dragMode != "sidebar" {
+	if a.dragMode != dragSidebar {
 		t.Fatalf("expected sidebar drag, got %q", a.dragMode)
 	}
 	// Continue dragging — resizes.
@@ -610,7 +610,7 @@ func TestScrollbarPressScrollsAndDrags(t *testing.T) {
 	barX := ex + ew - 1
 	// Press near the bottom of the bar.
 	a.handleMouse(tcell.NewEventMouse(barX, ey+eh-1, tcell.Button1, 0))
-	if a.dragMode != "scrollbar" {
+	if a.dragMode != dragScrollbar {
 		t.Fatalf("dragMode = %q, want scrollbar", a.dragMode)
 	}
 	tab := a.activeTabPtr()
@@ -624,7 +624,7 @@ func TestScrollbarPressScrollsAndDrags(t *testing.T) {
 	}
 	// Release exits the mode.
 	a.handleMouse(tcell.NewEventMouse(barX, ey, tcell.ButtonNone, 0))
-	if a.dragMode != "" {
+	if a.dragMode != dragNone {
 		t.Fatalf("release should clear dragMode, got %q", a.dragMode)
 	}
 }
@@ -733,14 +733,14 @@ func TestDragRelease_CopiesSelection(t *testing.T) {
 	tab := a.activeTabPtr()
 	tab.MoveCursorTo(editor.Position{Line: 0, Col: 0}, false)
 	tab.MoveCursorTo(editor.Position{Line: 0, Col: 5}, true) // drag built "hello"
-	a.dragMode = "editor"
+	a.dragMode = dragEditor
 
 	a.handleMouse(tcell.NewEventMouse(40, 5, tcell.ButtonNone, 0)) // release
 
 	if a.clipBuf != "hello" {
 		t.Fatalf("release should copy the selection, clipBuf = %q", a.clipBuf)
 	}
-	if a.dragMode != "" {
+	if a.dragMode != dragNone {
 		t.Fatalf("release should end the drag, dragMode = %q", a.dragMode)
 	}
 }
@@ -758,7 +758,7 @@ func TestDragRelease_NoCopyWithoutSelection(t *testing.T) {
 	a.openFile(target)
 	a.clipBuf = "keep me"
 	a.activeTabPtr().MoveCursorTo(editor.Position{Line: 0, Col: 3}, false)
-	a.dragMode = "editor"
+	a.dragMode = dragEditor
 
 	a.handleMouse(tcell.NewEventMouse(40, 5, tcell.ButtonNone, 0))
 
@@ -782,7 +782,7 @@ func TestDragRelease_NonEditorDragDoesNotCopy(t *testing.T) {
 	tab.MoveCursorTo(editor.Position{Line: 0, Col: 0}, false)
 	tab.MoveCursorTo(editor.Position{Line: 0, Col: 5}, true)
 	a.clipBuf = "keep me"
-	a.dragMode = "sidebar"
+	a.dragMode = dragSidebar
 
 	a.handleMouse(tcell.NewEventMouse(20, 5, tcell.ButtonNone, 0))
 
@@ -792,7 +792,7 @@ func TestDragRelease_NonEditorDragDoesNotCopy(t *testing.T) {
 }
 
 // TestHandleMouse_FindBarPressDoesNotArmEditorDrag pins the press-branch
-// regression: dragMode used to be set to "editor" for every left press in
+// regression: dragMode used to be set to dragEditor for every left press in
 // the middle band of the screen, whether or not the press actually landed
 // on text. With the find bar open the editor rect shrinks by a row, so the
 // bar's own row falls inside that band — editorPress correctly no-ops
@@ -813,7 +813,7 @@ func TestHandleMouse_FindBarPressDoesNotArmEditorDrag(t *testing.T) {
 	x := a.sidebarW() + 10
 	a.handleMouse(tcell.NewEventMouse(x, fy, tcell.Button1, tcell.ModNone))
 
-	if a.dragMode != "" {
+	if a.dragMode != dragNone {
 		t.Fatalf("press on the find-bar row must not arm a drag, got %q", a.dragMode)
 	}
 
@@ -828,13 +828,13 @@ func TestHandleMouse_FindBarPressDoesNotArmEditorDrag(t *testing.T) {
 // TestHandleMouse_EmptyEditorPressDoesNotArmEditorDrag covers the other
 // half of the same bug: with no tab open there is no caret to place, so a
 // press in the empty editor body must leave the drag state alone rather
-// than parking a stale "editor" drag that survives until the next release.
+// than parking a stale dragEditor state that survives until the next release.
 func TestHandleMouse_EmptyEditorPressDoesNotArmEditorDrag(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 
 	a.handleMouse(tcell.NewEventMouse(a.sidebarW()+10, 5, tcell.Button1, tcell.ModNone))
 
-	if a.dragMode != "" {
+	if a.dragMode != dragNone {
 		t.Fatalf("press with no open tab must not arm a drag, got %q", a.dragMode)
 	}
 }
@@ -869,9 +869,9 @@ func barCell(t *testing.T, a *App, x, y int) (rune, tcell.Color) {
 
 // TestTreeScrollbarPressScrollsAndDrags: the sidebar's bar is a real
 // mouse target. Pressing near its bottom jumps the tree there and enters
-// the "treescrollbar" drag mode, dragging keeps the listing glued to the
-// pointer's row, and release ends the drag without leaving the tree
-// scrolled somewhere the user didn't ask for.
+// dragTreeScrollbar, dragging keeps the listing glued to the pointer's
+// row, and release ends the drag without leaving the tree scrolled
+// somewhere the user didn't ask for.
 func TestTreeScrollbarPressScrollsAndDrags(t *testing.T) {
 	dir := t.TempDir()
 	seedTreeFiles(t, dir, 80)
@@ -882,7 +882,7 @@ func TestTreeScrollbarPressScrollsAndDrags(t *testing.T) {
 	barX := sw - 1
 
 	a.handleMouse(tcell.NewEventMouse(barX, sy+sh-1, tcell.Button1, 0))
-	if a.dragMode != "treescrollbar" {
+	if a.dragMode != dragTreeScrollbar {
 		t.Fatalf("dragMode = %q, want treescrollbar", a.dragMode)
 	}
 	bottom := a.tree.ScrollY
@@ -902,7 +902,7 @@ func TestTreeScrollbarPressScrollsAndDrags(t *testing.T) {
 	}
 
 	a.handleMouse(tcell.NewEventMouse(barX, sy+sh-1, tcell.ButtonNone, 0))
-	if a.dragMode != "" {
+	if a.dragMode != dragNone {
 		t.Fatalf("release should clear dragMode, got %q", a.dragMode)
 	}
 	if a.tree.ScrollY != bottom {
@@ -935,7 +935,7 @@ func TestSidebarThreeWayHitTestAtSameY(t *testing.T) {
 	// 1. The splitter starts a resize and leaves the tree alone.
 	before := a.tree.ScrollY
 	a.handleMouse(tcell.NewEventMouse(splitX, y, tcell.Button1, 0))
-	if a.dragMode != "sidebar" {
+	if a.dragMode != dragSidebar {
 		t.Fatalf("splitter press: dragMode = %q, want sidebar", a.dragMode)
 	}
 	if a.tree.ScrollY != before {
@@ -946,7 +946,7 @@ func TestSidebarThreeWayHitTestAtSameY(t *testing.T) {
 	// 2. The scrollbar scrolls and opens no file.
 	openTabs := a.tabs.Len()
 	a.handleMouse(tcell.NewEventMouse(barX, y, tcell.Button1, 0))
-	if a.dragMode != "treescrollbar" {
+	if a.dragMode != dragTreeScrollbar {
 		t.Fatalf("bar press: dragMode = %q, want treescrollbar", a.dragMode)
 	}
 	if a.tree.ScrollY == before {
@@ -962,7 +962,7 @@ func TestSidebarThreeWayHitTestAtSameY(t *testing.T) {
 	a.draw()
 	scrolled := a.tree.ScrollY
 	a.handleMouse(tcell.NewEventMouse(rowX, y, tcell.Button1, 0))
-	if a.dragMode != "" {
+	if a.dragMode != dragNone {
 		t.Fatalf("row press: dragMode = %q, want none", a.dragMode)
 	}
 	if a.tree.ScrollY != scrolled {
@@ -976,7 +976,7 @@ func TestSidebarThreeWayHitTestAtSameY(t *testing.T) {
 // TestGitPanelScrollbarPressScrollsAndDrags: the change list's bar is a
 // grab handle, not just a click target. It is the sidebar's other panel,
 // so it gets the identical contract to the tree's — press jumps and arms
-// "gitpanelscrollbar", the drag stays glued to the pointer's row even
+// dragGitPanelScrollbar, the drag stays glued to the pointer's row even
 // once it wanders off the column, and release ends the drag where the
 // user left it.
 func TestGitPanelScrollbarPressScrollsAndDrags(t *testing.T) {
@@ -992,7 +992,7 @@ func TestGitPanelScrollbarPressScrollsAndDrags(t *testing.T) {
 	lastRow := sy + gitPanelListTop + listH - 1
 
 	a.handleMouse(tcell.NewEventMouse(barX, lastRow, tcell.Button1, 0))
-	if a.dragMode != "gitpanelscrollbar" {
+	if a.dragMode != dragGitPanelScrollbar {
 		t.Fatalf("dragMode = %q, want gitpanelscrollbar", a.dragMode)
 	}
 	bottom := a.gitPanelScroll
@@ -1013,7 +1013,7 @@ func TestGitPanelScrollbarPressScrollsAndDrags(t *testing.T) {
 	}
 
 	a.handleMouse(tcell.NewEventMouse(barX, lastRow, tcell.ButtonNone, 0))
-	if a.dragMode != "" {
+	if a.dragMode != dragNone {
 		t.Fatalf("release should clear dragMode, got %q", a.dragMode)
 	}
 	if a.gitPanelScroll != bottom {

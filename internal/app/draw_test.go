@@ -792,7 +792,7 @@ func TestFlashStrip_NotAnOverlay(t *testing.T) {
 	if tab.Cursor != before {
 		t.Fatalf("a click on the strip moved the caret %v -> %v", before, tab.Cursor)
 	}
-	if a.dragMode != "" {
+	if a.dragMode != dragNone {
 		t.Fatalf("a click on the strip armed drag mode %q", a.dragMode)
 	}
 }

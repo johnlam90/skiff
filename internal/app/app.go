@@ -147,6 +147,19 @@ const (
 	autoScrollTick = 60 * time.Millisecond
 )
 
+// dragKind names which surface owns the current mouse drag. Typed so a
+// misspelled mode is a compile error instead of a silently dead drag.
+type dragKind uint8
+
+const (
+	dragNone dragKind = iota
+	dragEditor
+	dragSidebar
+	dragScrollbar
+	dragTreeScrollbar
+	dragGitPanelScrollbar
+)
+
 // App is the editor's top-level state holder and event-loop owner.
 type App struct {
 	screen tcell.Screen
@@ -236,7 +249,7 @@ type App struct {
 	clipBuf      string
 	statusMsg    string
 	statusUntil  time.Time
-	dragMode     string // "editor" while a drag-select is active.
+	dragMode     dragKind // dragEditor while a drag-select is active, etc.
 	lastClick    clickRecord
 	lastTabRects []tabRect
 

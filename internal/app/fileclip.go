@@ -71,8 +71,21 @@ func (a *App) pasteInto(dir string) {
 		return
 	}
 	if info.IsDir() {
+		// Compare resolved paths, not the raw strings: a destination
+		// that looks unrelated to src by prefix can still symlink to
+		// somewhere inside it, and copyTree would then walk into its
+		// own growing output. EvalSymlinks falls back to the original
+		// on error (a dangling link, permission trouble) — best-effort,
+		// same as every other symlink resolution in this codebase.
+		rSrc, rDir := src, dir
+		if resolved, err := filepath.EvalSymlinks(src); err == nil {
+			rSrc = resolved
+		}
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			rDir = resolved
+		}
 		sep := string(filepath.Separator)
-		if dir == src || strings.HasPrefix(dir+sep, src+sep) {
+		if rDir == rSrc || strings.HasPrefix(rDir+sep, rSrc+sep) {
 			a.flash("Can't paste a folder into itself")
 			return
 		}

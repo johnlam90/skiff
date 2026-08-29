@@ -372,7 +372,7 @@ func TestBaselineMouse_CoreGesturesNeedNoMotionEvents(t *testing.T) {
 	a.clipBuf = ""
 	press(ex+8, ey+1)
 	press(ex+13, ey+1) // motion WITH Button1 down — a 1002 drag report
-	if a.dragMode != "editor" {
+	if a.dragMode != dragEditor {
 		t.Fatalf("drag mode = %q, want editor", a.dragMode)
 	}
 	if !tab.HasSelection() {
@@ -393,7 +393,7 @@ func TestBaselineMouse_CoreGesturesNeedNoMotionEvents(t *testing.T) {
 	// 4. The editor scrollbar: press jumps, held drag tracks, release ends.
 	barX := ex + ew - 1
 	press(barX, ey+eh-1)
-	if a.dragMode != "scrollbar" {
+	if a.dragMode != dragScrollbar {
 		t.Fatalf("scrollbar press: dragMode = %q", a.dragMode)
 	}
 	if tab.ScrollY == 0 {
@@ -404,7 +404,7 @@ func TestBaselineMouse_CoreGesturesNeedNoMotionEvents(t *testing.T) {
 		t.Fatalf("dragging the thumb to the top must return to 0, got %d", tab.ScrollY)
 	}
 	release(barX, ey)
-	if a.dragMode != "" {
+	if a.dragMode != dragNone {
 		t.Fatalf("release must clear dragMode, got %q", a.dragMode)
 	}
 
@@ -412,7 +412,7 @@ func TestBaselineMouse_CoreGesturesNeedNoMotionEvents(t *testing.T) {
 	_, sy, sw, sh := a.sidebarRect()
 	treeBarX := sw - 1
 	press(treeBarX, sy+sh-1)
-	if a.dragMode != "treescrollbar" {
+	if a.dragMode != dragTreeScrollbar {
 		t.Fatalf("tree bar press: dragMode = %q", a.dragMode)
 	}
 	if a.tree.ScrollY == 0 {
@@ -428,7 +428,7 @@ func TestBaselineMouse_CoreGesturesNeedNoMotionEvents(t *testing.T) {
 	splitX := a.splitterX()
 	before := a.sidebarWidth
 	press(splitX, sy+3)
-	if a.dragMode != "sidebar" {
+	if a.dragMode != dragSidebar {
 		t.Fatalf("splitter press: dragMode = %q", a.dragMode)
 	}
 	press(splitX+6, sy+3)
@@ -436,7 +436,7 @@ func TestBaselineMouse_CoreGesturesNeedNoMotionEvents(t *testing.T) {
 		t.Fatalf("splitter drag should widen the sidebar: %d -> %d", before, a.sidebarWidth)
 	}
 	release(splitX+6, sy+3)
-	if a.dragMode != "" {
+	if a.dragMode != dragNone {
 		t.Fatalf("release must clear dragMode, got %q", a.dragMode)
 	}
 

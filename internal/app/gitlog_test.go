@@ -12,6 +12,7 @@
 package app
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -111,6 +112,47 @@ func TestLoadGitCommitDiff_WholeAndScoped(t *testing.T) {
 	scoped := strings.Join(loadGitCommitDiff(a.rootDir, c1.SHA, aFile), "\n")
 	if !strings.Contains(scoped, "a.txt") || strings.Contains(scoped, "b.txt") {
 		t.Fatalf("scoped diff should cover a.txt only, got:\n%s", scoped)
+	}
+}
+
+// TestLoadGitCommitDiff_RefusesOptionLookalikeSHA pins the defense-in-depth
+// gate: loadGitCommitDiff routes sha through git.SafeRef before it ever
+// reaches argv. The test runs against a REAL repo (not a non-repo temp
+// dir) on purpose — git resolves "is this even a repository?" before it
+// parses `show`'s own options, so a non-repo root fails identically
+// whether or not the gate fires and can't prove the gate did anything.
+// Two of the three cases carry an observable side effect that only
+// happens if the raw string reaches argv: "--output=pwned" makes a real
+// `git show` write a file (proven manually: it does, in a real repo,
+// pre-gate), and "-p" makes `git show --format= -p` silently show
+// HEAD's diff instead of refusing — both would corrupt this test's repo
+// or return a wrong-but-non-nil diff if the gate didn't fire first.
+func TestLoadGitCommitDiff_RefusesOptionLookalikeSHA(t *testing.T) {
+	a, aFile, _ := historyRepoApp(t)
+
+	for _, sha := range []string{"--output=pwned", "", "-p"} {
+		if got := loadGitCommitDiff(a.rootDir, sha, ""); got != nil {
+			t.Fatalf("sha %q: got %v, want nil (refused before any subprocess)", sha, got)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(a.rootDir, "pwned")); err == nil {
+		t.Fatal("--output=pwned must not reach argv: file was written")
+	}
+
+	entries := loadGitLog(a.rootDir, "", gitLogLimit)
+	if len(entries) == 0 {
+		t.Fatal("need at least one real commit for the positive case")
+	}
+	// The trailing "--" always precedes the (possibly absent) path
+	// argument; both branches must still resolve correctly with it in
+	// place — an unscoped diff (no path after "--") and a path-scoped
+	// one (the path lands after it) exercise both shapes.
+	if whole := loadGitCommitDiff(a.rootDir, entries[0].SHA, ""); len(whole) == 0 {
+		t.Fatalf("valid sha, no path: got %v, want a diff", whole)
+	}
+	scoped := loadGitCommitDiff(a.rootDir, entries[0].SHA, aFile)
+	if len(scoped) == 0 {
+		t.Fatalf("valid sha, scoped path: got %v, want a diff", scoped)
 	}
 }
 

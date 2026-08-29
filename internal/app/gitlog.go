@@ -82,13 +82,25 @@ func loadGitLog(rootDir, path string, limit int) []gitLogEntry {
 // the whole commit, or just path's part of it when path is non-empty.
 // --format= suppresses the message header so the output starts at the
 // first `diff --git`, which is what the diff view's parser expects.
+//
+// sha is routed through git.SafeRef and the arg list always carries a
+// trailing "--" even with no path, unlike every other loader here that
+// only bothers when path is non-empty. This is defense-in-depth: today
+// sha only ever holds loadGitLog's %h output (hex, single-line), so no
+// current input reaches the refused class, but the gate is what stands
+// between a future caller — or a format-string change upstream — and a
+// repo-supplied string landing on git's argv as an option.
 func loadGitCommitDiff(rootDir, sha, path string) []string {
-	if rootDir == "" || sha == "" {
+	if rootDir == "" {
 		return nil
 	}
-	args := []string{"show", "--format=", sha}
+	safe, err := git.SafeRef(sha)
+	if err != nil {
+		return nil
+	}
+	args := []string{"show", "--format=", safe, "--"}
 	if path != "" {
-		args = append(args, "--", path)
+		args = append(args, path)
 	}
 	out, err := git.Output(rootDir, args...)
 	if err != nil || len(out) == 0 {

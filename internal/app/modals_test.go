@@ -30,7 +30,7 @@ func TestCloseAllModals_ClearsEverything(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.menuOpen = true
 	a.hoveredMenuRow = 3
-	a.dragMode = "editor"
+	a.dragMode = dragEditor
 	a.autoScrollDir = 1
 
 	a.closeAllModals()
@@ -41,7 +41,7 @@ func TestCloseAllModals_ClearsEverything(t *testing.T) {
 	if a.hoveredMenuRow != -1 {
 		t.Fatalf("hoveredMenuRow not cleared: %d", a.hoveredMenuRow)
 	}
-	if a.dragMode != "" {
+	if a.dragMode != dragNone {
 		t.Fatalf("dragMode not cleared: %q", a.dragMode)
 	}
 	if a.autoScrollDir != 0 {
