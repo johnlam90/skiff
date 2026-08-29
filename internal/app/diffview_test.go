@@ -273,15 +273,109 @@ func TestDrawDiffView_WordLevelHighlight(t *testing.T) {
 	mx, my, _, _ := diffOv(t, a).modalRect()
 	rowY := my + 5 // hunk, ctx, then the change row
 	leftTextX := mx + 2 + diffNoGutter
-
-	// "old line" vs "new line": span [0,3) — "old" reversed, " line" not.
-	_, _, attrsChanged := cells[rowY*w+leftTextX].Style.Decompose()
-	if attrsChanged&tcell.AttrReverse == 0 {
-		t.Fatal("changed span should render in reverse video")
+	tints, ok := a.theme.DiffTints()
+	if !ok {
+		t.Fatal("test theme must yield tints")
 	}
-	_, _, attrsCommon := cells[rowY*w+leftTextX+4].Style.Decompose()
-	if attrsCommon&tcell.AttrReverse != 0 {
-		t.Fatal("common suffix should not be reversed")
+
+	// "old line" vs "new line": span [0,3) — "old" gets the louder
+	// emphasis tint, " line" the row tint, and nothing is reversed.
+	_, bgEmph, attrsChanged := cells[rowY*w+leftTextX].Style.Decompose()
+	if bgEmph != tints.DelEmph {
+		t.Fatalf("changed span bg = %v, want the DelEmph tint %v", bgEmph, tints.DelEmph)
+	}
+	if attrsChanged&tcell.AttrReverse != 0 {
+		t.Fatal("tinted emphasis must not also reverse")
+	}
+	_, bgCommon, _ := cells[rowY*w+leftTextX+4].Style.Decompose()
+	if bgCommon != tints.DelRow {
+		t.Fatalf("common suffix bg = %v, want the DelRow tint %v", bgCommon, tints.DelRow)
+	}
+}
+
+// TestDrawDiffView_LowColorKeepsLegacyPainting pins the fallback: on a
+// palette the terminal can't blend for, changed rows keep the colored
+// foreground and reverse-video emphasis on the plain modal surface —
+// tinting is an upgrade, never a requirement.
+func TestDrawDiffView_LowColorKeepsLegacyPainting(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.theme.LowColor = true
+	a.openDiffView("Diff · f.txt", sampleDiff(), "", "f.txt")
+	diffOv(t, a).Draw(a.screen)
+	a.screen.Show()
+	scr := a.screen.(tcell.SimulationScreen)
+	cells, w, _ := scr.GetContents()
+	mx, my, _, _ := diffOv(t, a).modalRect()
+	rowY := my + 5
+	leftTextX := mx + 2 + diffNoGutter
+
+	fg, bg, attrs := cells[rowY*w+leftTextX].Style.Decompose()
+	if fg != a.theme.GitDeleted {
+		t.Fatalf("low-color deletion fg = %v, want GitDeleted", fg)
+	}
+	if bg != a.theme.LineHL {
+		t.Fatalf("low-color deletion bg = %v, want the plain modal surface", bg)
+	}
+	if attrs&tcell.AttrReverse == 0 {
+		t.Fatal("low-color emphasis must keep reverse video")
+	}
+}
+
+// goDiff is a .go-flavored diff for the syntax-on-changes tests: one
+// paired modification and one pure addition.
+func goDiff() []string {
+	return []string{
+		"diff --git a/main.go b/main.go",
+		"--- a/main.go",
+		"+++ b/main.go",
+		"@@ -1,2 +1,3 @@",
+		" package m",
+		"-var old = 1",
+		"+var renamed = 2",
+		"+func added() {}",
+	}
+}
+
+// TestDrawDiffView_ChangedRowsKeepSyntaxColors is the screenshot look:
+// a changed row paints the whole side — gutter, text, trailing pad —
+// with the change tint while the text keeps its Chroma colors, so the
+// diff reads like highlighted code on a wash rather than flat
+// red/green text. The blank side of a pure addition stays untinted:
+// the gap is what says "nothing was here".
+func TestDrawDiffView_ChangedRowsKeepSyntaxColors(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.openDiffView("Diff · main.go", goDiff(), "", "main.go")
+	diffOv(t, a).Draw(a.screen)
+	a.screen.Show()
+	scr := a.screen.(tcell.SimulationScreen)
+	cells, w, _ := scr.GetContents()
+	mx, my, mw, _ := diffOv(t, a).modalRect()
+	tints, _ := a.theme.DiffTints()
+	bodyX, bodyW := mx+2, mw-4
+	leftW := (bodyW - 3) / 2
+	rightX := bodyX + leftW + 3
+	changeY := my + 5 // hunk, context, then the paired change
+	addY := my + 6    // the pure addition
+
+	// The right side of the pair: "var" is a keyword — syntax fg, tint bg.
+	fg, bg, _ := cells[changeY*w+rightX+diffNoGutter].Style.Decompose()
+	if bg != tints.AddRow {
+		t.Fatalf("added text bg = %v, want the AddRow tint %v", bg, tints.AddRow)
+	}
+	if fg == a.theme.Text || fg == a.theme.GitAdded {
+		t.Fatalf("added keyword should keep its syntax color, got %v", fg)
+	}
+	// Gutter and trailing pad carry the tint too — full-row wash.
+	if _, bg, _ = cells[changeY*w+rightX].Style.Decompose(); bg != tints.AddRow {
+		t.Fatalf("gutter bg = %v, want the AddRow tint", bg)
+	}
+	padX := rightX + diffNoGutter + runeLen("var renamed = 2") + 2
+	if _, bg, _ = cells[changeY*w+padX].Style.Decompose(); bg != tints.AddRow {
+		t.Fatalf("trailing pad bg = %v, want the AddRow tint", bg)
+	}
+	// The blank left side of the pure addition keeps the plain surface.
+	if _, bg, _ = cells[addY*w+bodyX+diffNoGutter].Style.Decompose(); bg != a.theme.LineHL {
+		t.Fatalf("blank side bg = %v, want the plain modal surface", bg)
 	}
 }
 
@@ -358,7 +452,7 @@ func TestHandleDiffMouse_ShiftWheelScrollsHorizontally(t *testing.T) {
 // TestDiffContextStyles_HighlightsContextOnly verifies Chroma styles
 // land on context rows (a Go keyword picks up a non-default color) and
 // never on changed rows, whose git coloring is the diff's whole point.
-func TestDiffContextStyles_HighlightsContextOnly(t *testing.T) {
+func TestDiffSideStyles_CoverContextAndChanges(t *testing.T) {
 	raw := []string{
 		"@@ -1,3 +1,3 @@",
 		" func main() {",
@@ -368,14 +462,19 @@ func TestDiffContextStyles_HighlightsContextOnly(t *testing.T) {
 	}
 	rows := parseSideBySideDiff(raw)
 	th := theme.Default()
-	styles := diffContextStyles(rows, "main.go", th)
-	if styles == nil {
-		t.Fatal("expected styles for a .go diff")
+	left, right := diffSideStyles(rows, "main.go", th)
+	if left == nil || right == nil {
+		t.Fatal("expected styles for both sides of a .go diff")
 	}
-	if styles[2] != nil {
-		t.Fatal("changed rows must not carry syntax styles")
+	if left[2] == nil || right[2] == nil {
+		t.Fatal("changed rows must carry syntax styles on both sides")
 	}
-	ctx := styles[1] // "func main() {"
+	// Each side is lexed from its own text: the change row's grids
+	// cover "\told := 1" on the left and "\tnew := 2" on the right.
+	if len(left[2]) != runeLen("\told := 1") || len(right[2]) != runeLen("\tnew := 2") {
+		t.Fatalf("per-side grids sized %d/%d, want each side's own text", len(left[2]), len(right[2]))
+	}
+	ctx := left[1] // "func main() {"
 	if len(ctx) < 4 {
 		t.Fatalf("context row should have per-rune styles, got %d", len(ctx))
 	}
@@ -393,7 +492,8 @@ func TestDiffContextStyles_HighlightsContextOnly(t *testing.T) {
 // megabytes at open time.
 func TestDiffContextStyles_SkipsHugeDiffs(t *testing.T) {
 	rows := make([]diffRow, diffHighlightCap+1)
-	if got := diffContextStyles(rows, "main.go", theme.Default()); got != nil {
+	left, right := diffSideStyles(rows, "main.go", theme.Default())
+	if left != nil || right != nil {
 		t.Fatal("huge diffs should skip highlighting")
 	}
 }

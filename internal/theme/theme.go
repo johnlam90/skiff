@@ -186,6 +186,97 @@ func lerpChannel(a, b int32, mix float64) int32 {
 	return int32(math.Round(float64(a) + (float64(b)-float64(a))*mix))
 }
 
+// Blend linearly mixes a toward b by mix (0 = a, 1 = b) per RGB
+// channel. Exported because the diff surfaces derive their changed-row
+// tints with it and the tests pin that derivation.
+func Blend(a, b tcell.Color, mix float64) tcell.Color {
+	ar, ag, ab := a.RGB()
+	br, bg, bb := b.RGB()
+	return tcell.NewRGBColor(
+		lerpChannel(ar, br, mix),
+		lerpChannel(ag, bg, mix),
+		lerpChannel(ab, bb, mix),
+	)
+}
+
+// DiffTints are the derived backgrounds the diff surfaces paint changed
+// rows with: a whisper of the Git change hue over the modal surface for
+// the whole row, and a louder mix over the intra-line span that
+// actually differs. Derived rather than hand-tuned per palette, so
+// every registry theme gets a correct set for free and a tweak to
+// GitAdded/GitDeleted moves the tints with it.
+type DiffTints struct {
+	DelRow, AddRow   tcell.Color
+	DelEmph, AddEmph tcell.Color
+}
+
+// diffRowMix and diffEmphMix are how far the row and emphasis tints
+// lean from the modal surface (LineHL) toward the Git change hue. 0.18
+// reads as a wash under syntax-colored text; 0.35 is loud enough that
+// the changed span pops without drowning the glyphs. Both are fenced
+// registry-wide by TestEveryThemeDiffTintsReadable — raise them only
+// with that test's contrast floor in view.
+const (
+	diffRowMix  = 0.18
+	diffEmphMix = 0.35
+)
+
+// diffTintFloor, diffTintSpend, diffMixStep, diffEmphMinGap parametrise
+// the tint correction: a tint aims for 4.5:1-adjacent readability
+// (diffTintFloor), may spend at most 8% of the contrast its surface
+// already affords (diffTintSpend caps the floor for palettes like
+// Solarized whose body text starts under 4.0), walks toward the surface
+// in diffMixStep steps until it clears, and an emphasis tint always
+// stays at least diffEmphMinGap of mix louder than its row tint —
+// loudness bought with a bounded contrast cost, because over the few
+// glyphs that differ, being distinguishable IS the readability.
+const (
+	diffTintFloor  = 4.0
+	diffTintSpend  = 0.92
+	diffMixStep    = 0.02
+	diffEmphMinGap = 0.08
+)
+
+// DiffTints returns the palette's derived diff-row backgrounds, or
+// ok=false on a low-color palette — blending hues the terminal will
+// round anyway produces mush, so callers keep their attribute-based
+// painting (colored foregrounds, reverse-video emphasis) there.
+// Each tint is derived at its target mix, then minimally corrected the
+// way readable() corrects StatusFg: walked toward the surface until
+// body text clears the floor the palette can afford.
+func (t Theme) DiffTints() (DiffTints, bool) {
+	if t.LowColor {
+		return DiffTints{}, false
+	}
+	del := diffTintPair(t.LineHL, t.GitDeleted, t.Text)
+	add := diffTintPair(t.LineHL, t.GitAdded, t.Text)
+	return DiffTints{
+		DelRow: del[0], AddRow: add[0],
+		DelEmph: del[1], AddEmph: add[1],
+	}, true
+}
+
+// diffTintPair derives the row and emphasis tints for one change hue.
+// The floor is what the palette affords: diffTintFloor when the surface
+// itself clears it, a diffTintSpend fraction of the surface's own
+// contrast otherwise — so a mix of zero always satisfies the floor and
+// the walk always terminates with some tint. The emphasis mix is
+// clamped to at least the row's plus diffEmphMinGap, the one place
+// loudness deliberately outranks the floor.
+func diffTintPair(surface, hue, text tcell.Color) [2]tcell.Color {
+	floor := math.Min(diffTintFloor, ContrastRatio(text, surface)*diffTintSpend)
+	fit := func(target, minMix float64) float64 {
+		mix := target
+		for mix > minMix && ContrastRatio(text, Blend(surface, hue, mix)) < floor {
+			mix -= diffMixStep
+		}
+		return math.Max(mix, minMix)
+	}
+	row := fit(diffRowMix, 0)
+	emph := fit(diffEmphMix, row+diffEmphMinGap)
+	return [2]tcell.Color{Blend(surface, hue, row), Blend(surface, hue, emph)}
+}
+
 // Default returns the editor's hand-tuned Tokyo Night theme — the
 // registry's first entry and the fallback for unknown ids.
 func Default() Theme {

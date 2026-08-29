@@ -182,17 +182,27 @@ func (n *Info) Draw(scr tcell.Screen) {
 
 // DiffLineStyle colors one line of a git diff preview: additions,
 // deletions, hunk headers, and file headers each get their own color so
-// the preview reads like a real diff. Shared with the diff view's
-// raw-preview path.
+// the preview reads like a real diff. Additions and deletions also
+// carry the palette's derived row tint as background — the same wash
+// the side-by-side view paints — except on low-color palettes, where
+// DiffTints opts out and the passed surface stays. Shared with the
+// diff view's unified fallback.
 func DiffLineStyle(th theme.Theme, bg tcell.Color, line string) tcell.Style {
 	style := tcell.StyleDefault.Background(bg).Foreground(th.Text)
 	if strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---") {
 		return style.Foreground(th.Muted)
 	}
+	tints, tinted := th.DiffTints()
 	if strings.HasPrefix(line, "+") {
+		if tinted {
+			style = style.Background(tints.AddRow)
+		}
 		return style.Foreground(th.GitAdded)
 	}
 	if strings.HasPrefix(line, "-") {
+		if tinted {
+			style = style.Background(tints.DelRow)
+		}
 		return style.Foreground(th.GitDeleted)
 	}
 	if strings.HasPrefix(line, "@@") {

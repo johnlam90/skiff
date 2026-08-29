@@ -334,3 +334,30 @@ func TestInfo_ClampsToPhoneSizedScreen(t *testing.T) {
 		t.Fatalf("body window ends at %d, past the frame's last inner row %d", last, r.Y+r.H-1)
 	}
 }
+
+// TestDiffLineStyle_TintsChangedRows: the unified fallback and the git
+// previews get the same wash the side-by-side view paints — additions
+// and deletions carry their derived row tint as background while the
+// foreground keeps its change color. Low-color palettes opt out and
+// keep the passed background untouched.
+func TestDiffLineStyle_TintsChangedRows(t *testing.T) {
+	th := theme.Default()
+	tints, ok := th.DiffTints()
+	if !ok {
+		t.Fatal("test theme must yield tints")
+	}
+	if _, bg, _ := DiffLineStyle(th, th.LineHL, "+added").Decompose(); bg != tints.AddRow {
+		t.Fatalf("addition bg = %v, want the AddRow tint %v", bg, tints.AddRow)
+	}
+	if _, bg, _ := DiffLineStyle(th, th.LineHL, "-gone").Decompose(); bg != tints.DelRow {
+		t.Fatalf("deletion bg = %v, want the DelRow tint %v", bg, tints.DelRow)
+	}
+	if _, bg, _ := DiffLineStyle(th, th.LineHL, " context").Decompose(); bg != th.LineHL {
+		t.Fatalf("context bg = %v, want the passed surface", bg)
+	}
+	low := th
+	low.LowColor = true
+	if _, bg, _ := DiffLineStyle(low, low.LineHL, "+added").Decompose(); bg != low.LineHL {
+		t.Fatalf("low-color bg = %v, must keep the passed surface", bg)
+	}
+}
