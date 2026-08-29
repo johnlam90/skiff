@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gdamore/tcell/v2"
+
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/format"
 	"github.com/johnlam90/skiff/internal/overlay"
@@ -553,6 +555,135 @@ func TestMaybeOfferInstall_ProjectHasEntryUsesTrustPath(t *testing.T) {
 	}
 }
 
+// TestMaybeOfferInstall_MergedConfigNotSilentlyTrusted is the
+// regression this plan exists for: a project with a pre-existing
+// format.json entry the user has never seen must not have that entry
+// silently trusted just because the user consented to installing an
+// unrelated extension. Accepting the install prompt should still
+// merge the new entry (InstallCommandIntoProject's job), but the
+// resulting file's hash must stay TrustUnknown — the standard trust
+// prompt, which actually shows every command, decides the merged
+// file's fate instead.
+func TestMaybeOfferInstall_MergedConfigNotSilentlyTrusted(t *testing.T) {
+	trustPath := useTestTrustFile(t)
+	useTestDefaultsFile(t, `{"commands":{"go":["gofmt","-w","$FILE"]}}`)
+	root := t.TempDir()
+	// A pre-existing project entry the user has never been shown.
+	writeFormatConfig(t, root, `{"commands":{"py":["evil-cmd","$FILE"]}}`)
+	a := newTestApp(t, root)
+	target := filepath.Join(root, "main.go")
+	if err := os.WriteFile(target, []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	openTabAtPath(t, a, target)
+
+	a.runFormatOnSave(a.tabs.At(0))
+	if !confirmIsOpen(a) {
+		t.Fatal("expected install prompt to open")
+	}
+	confirmYes(a)
+
+	mergedCfg, err := format.Load(root)
+	if err != nil {
+		t.Fatalf("load merged cfg: %v", err)
+	}
+	if mergedCfg == nil || len(mergedCfg.Commands["go"]) == 0 || len(mergedCfg.Commands["py"]) == 0 {
+		t.Fatalf("expected merge to preserve both entries, got %v", mergedCfg)
+	}
+
+	tf, err := format.LoadTrust(trustPath)
+	if err != nil {
+		t.Fatalf("load trust: %v", err)
+	}
+	if d := tf.CheckTrust(root, mergedCfg.Hash()); d != format.TrustUnknown {
+		t.Fatalf("merged config must not be silently trusted, got %v", d)
+	}
+
+	if !confirmIsOpen(a) {
+		t.Fatal("expected the merged file's trust prompt to open")
+	}
+	body := strings.Join(confirmPrefab(t, a).Body, "\n")
+	if !strings.Contains(body, "py") {
+		t.Fatalf("trust prompt for merged file must show the pre-existing py entry.\nbody:\n%s", body)
+	}
+}
+
+// TestOpenFormatInstallPrompt_BodyListsMergedCommands pins the other
+// half of the fix: even before the user answers, the install prompt's
+// Body must preview the whole file the merge will produce — the new
+// entry AND every extension the project already declared — not just
+// the one command this prompt is nominally about.
+func TestOpenFormatInstallPrompt_BodyListsMergedCommands(t *testing.T) {
+	useTestTrustFile(t)
+	useTestDefaultsFile(t, `{"commands":{"go":["gofmt","-w","$FILE"]}}`)
+	root := t.TempDir()
+	writeFormatConfig(t, root, `{"commands":{"py":["ruff","format","$FILE"]}}`)
+	a := newTestApp(t, root)
+	target := filepath.Join(root, "main.go")
+	if err := os.WriteFile(target, []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	openTabAtPath(t, a, target)
+
+	a.runFormatOnSave(a.tabs.At(0))
+	if !confirmIsOpen(a) {
+		t.Fatal("expected install prompt to open")
+	}
+
+	body := strings.Join(confirmPrefab(t, a).Body, "\n")
+	for _, want := range []string{".go", "gofmt -w", ".py", "ruff format"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("install prompt omits %q before any answer.\nbody:\n%s", want, body)
+		}
+	}
+}
+
+// TestMaybeOfferInstall_FreshProjectStillAutoTrusts pins the
+// preserved half of the Step 2 decision table: a project with no
+// pre-existing format.json has nothing to silently ride along in the
+// merge, so Yes may still auto-trust in one step with no second
+// prompt — the Body the user just read already was the whole merged
+// file.
+func TestMaybeOfferInstall_FreshProjectStillAutoTrusts(t *testing.T) {
+	trustPath := useTestTrustFile(t)
+	root := t.TempDir()
+	target := filepath.Join(root, "main.go")
+	if err := os.WriteFile(target, []byte("orig\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	useTestDefaultsFile(t, `{"commands":{"go":["sh","-c","echo formatted > $FILE"]}}`)
+
+	a := newTestApp(t, root)
+	openTabAtPath(t, a, target)
+
+	a.runFormatOnSave(a.tabs.At(0))
+	if !confirmIsOpen(a) {
+		t.Fatal("expected install prompt to open")
+	}
+	confirmYes(a)
+
+	if confirmIsOpen(a) {
+		t.Fatal("a fresh project's install should not chain into a second prompt")
+	}
+
+	cfg, err := format.Load(root)
+	if err != nil {
+		t.Fatalf("load cfg: %v", err)
+	}
+	tf, err := format.LoadTrust(trustPath)
+	if err != nil {
+		t.Fatalf("load trust: %v", err)
+	}
+	if d := tf.CheckTrust(root, cfg.Hash()); d != format.TrustAllowed {
+		t.Fatalf("expected TrustAllowed for a fresh project's install, got %v", d)
+	}
+
+	ev := waitForFormatEvent(t, a)
+	if ev.err != nil {
+		t.Fatalf("formatter failed: %v", ev.err)
+	}
+}
+
 // waitForFormatEvent drains the simulation screen's event queue
 // until a formatDoneEvent shows up. Cap the wait at 2s so a hung
 // goroutine fails the test instead of hanging CI forever.
@@ -905,6 +1036,41 @@ func TestExecFormatter_TimeoutKillsAndReports(t *testing.T) {
 func TestFormatTimeoutDefault_IsGenerousButFinite(t *testing.T) {
 	if formatTimeoutDefault < 5*time.Second || formatTimeoutDefault > time.Minute {
 		t.Fatalf("formatter deadline out of sane range: %s", formatTimeoutDefault)
+	}
+}
+
+// TestFormatTrustPrompt_NarrowTerminalShowsFullCommands is the
+// truncation half of the fix: the body wraps its rows to a constant
+// width but used to be drawn clipped to the real terminal width, so a
+// narrow terminal silently dropped the tail of a long command behind
+// an ellipsis — precisely how a hostile format.json would smuggle a
+// payload past the prompt. No row painted on screen may end in '…'.
+func TestFormatTrustPrompt_NarrowTerminalShowsFullCommands(t *testing.T) {
+	useTestTrustFile(t)
+	root := t.TempDir()
+	longFlag := "--some-quite-long-flag=" + strings.Repeat("a", 35)
+	writeFormatConfig(t, root, `{"commands":{"go":["gofmt","-w","`+longFlag+`","$FILE"]}}`)
+	a := newTestApp(t, root)
+	resizeTestApp(t, a, 60, 40)
+	target := filepath.Join(root, "main.go")
+	if err := os.WriteFile(target, []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	openTabAtPath(t, a, target)
+
+	a.runFormatOnSave(a.tabs.At(0))
+	if !confirmIsOpen(a) {
+		t.Fatal("expected trust prompt to open")
+	}
+
+	a.draw()
+	a.screen.Show()
+
+	scr := a.screen.(tcell.SimulationScreen)
+	for y := 0; y < a.height; y++ {
+		if line := screenLine(scr, y); strings.ContainsRune(line, '…') {
+			t.Fatalf("row %d truncated with an ellipsis at 60 cols: %q", y, line)
+		}
 	}
 }
 
