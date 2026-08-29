@@ -657,6 +657,48 @@ func TestReload_RefusesNowBinaryFile(t *testing.T) {
 	}
 }
 
+// TestReload_RefusesNowInvalidUTF8 pins that a file which turned invalid
+// UTF-8 after it was opened — e.g. someone re-saved it from an editor set
+// to Latin-1 — is refused by both reload variants, with the tab's existing
+// (valid) buffer left completely intact rather than partly applying the
+// rejected content. Same shape as TestReload_RefusesNowBinaryFile and
+// TestReload_RefusesGrownFile: the shared readTextFile gate must catch
+// this on reload exactly as it does on first open.
+func TestReload_RefusesNowInvalidUTF8(t *testing.T) {
+	for _, variant := range []struct {
+		name   string
+		reload func(*Tab) error
+	}{
+		{"Reload", (*Tab).Reload},
+		{"ReloadKeepHistory", (*Tab).ReloadKeepHistory},
+	} {
+		t.Run(variant.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "x.txt")
+			if err := os.WriteFile(path, []byte("original"), 0644); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			tab, err := NewTab(path)
+			if err != nil {
+				t.Fatalf("NewTab: %v", err)
+			}
+
+			// Raw 0xE9 is Latin-1 "é" — not valid UTF-8 on its own, and no
+			// NUL byte, so looksBinary must not be the thing that catches it.
+			if err := os.WriteFile(path, []byte("caf\xe9 au lait\n"), 0644); err != nil {
+				t.Fatalf("rewrite: %v", err)
+			}
+
+			if err := variant.reload(tab); !errors.Is(err, ErrNotUTF8) {
+				t.Fatalf("want ErrNotUTF8, got %v", err)
+			}
+			if got := tab.Buffer.String(); got != "original" {
+				t.Fatalf("buffer mutated by refused reload: %q", got)
+			}
+		})
+	}
+}
+
 // TestTab_HasSelection_AndSelectionText covers the selection accessors for
 // (a) no selection, (b) anchor before cursor, (c) anchor after cursor.
 func TestTab_HasSelection_AndSelectionText(t *testing.T) {
@@ -1998,6 +2040,45 @@ func TestNewTab_RefusesBinaryFiles(t *testing.T) {
 	}
 	if _, err := NewTab(path); !errors.Is(err, ErrBinaryFile) {
 		t.Fatalf("want ErrBinaryFile, got %v", err)
+	}
+}
+
+// TestNewTab_RefusesInvalidUTF8 pins the UTF-8 validity gate: a file with
+// one raw non-UTF-8 byte (no NUL, so looksBinary must not be what catches
+// this) is refused rather than silently loaded — Buffer.LineRunes would
+// otherwise decode the invalid byte to U+FFFD, and editing that line would
+// permanently rewrite it on save.
+func TestNewTab_RefusesInvalidUTF8(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "latin1.txt")
+	// Raw 0xE9 is Latin-1 "é" and is not valid UTF-8 on its own.
+	data := []byte("caf\xe9 au lait\n")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := NewTab(path); !errors.Is(err, ErrNotUTF8) {
+		t.Fatalf("want ErrNotUTF8, got %v", err)
+	}
+}
+
+// TestNewTab_AcceptsMultibyteUTF8 guards the guard: valid multibyte UTF-8
+// — CJK, an emoji ZWJ sequence, and a combining mark — must still open
+// normally rather than being caught by the new validity check.
+func TestNewTab_AcceptsMultibyteUTF8(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "multibyte.txt")
+	// 高さ (CJK), a family emoji built from a ZWJ sequence, and "é" spelled
+	// as e + combining acute (U+0301).
+	data := []byte("高さ\n👨‍👩‍👧‍👦\ncafé\n")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("valid multibyte UTF-8 must open, got %v", err)
+	}
+	if len(tab.Buffer.Lines) < 3 {
+		t.Fatalf("buffer looks wrong: %d lines", len(tab.Buffer.Lines))
 	}
 }
 
