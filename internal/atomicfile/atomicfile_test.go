@@ -129,6 +129,119 @@ func TestWriteSyncsDirectory(t *testing.T) {
 	}
 }
 
+// TestReplacePreservesMode is the executable-script case: a user's
+// 0755 file must still be 0755 after a save, not reset to Write's
+// fixed config-file perm.
+func TestReplacePreservesMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "script.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := Replace(path, []byte("#!/bin/sh\necho hi\n")); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0755 {
+		t.Fatalf("mode = %v, want 0755", got)
+	}
+}
+
+// TestReplaceWritesThroughSymlink pins the resolve step: saving through
+// a symlink must update the target file, not replace the link itself
+// with a regular file — that's how editors silently detach a user's
+// dotfile from its dotfiles repo.
+func TestReplaceWritesThroughSymlink(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.txt")
+	link := filepath.Join(dir, "link.txt")
+	if err := os.WriteFile(real, []byte("old"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := Replace(link, []byte("new")); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("link.txt was replaced by a regular file, want it to stay a symlink")
+	}
+	got, err := os.ReadFile(real)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(got) != "new" {
+		t.Fatalf("target = %q, want %q", got, "new")
+	}
+}
+
+// TestReplaceCreatesMissingFile covers the first save of a brand-new
+// file: nothing to resolve, nothing to preserve, so it lands 0644.
+func TestReplaceCreatesMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fresh.txt")
+	if err := Replace(path, []byte("hello")); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0644 {
+		t.Fatalf("mode = %v, want 0644", got)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("content = %q", got)
+	}
+}
+
+// TestReplaceFailureKeepsOriginal is the whole point of the package
+// applied to user files: when the write can't complete, the original
+// bytes must be untouched and no temp droppings may remain.
+func TestReplaceFailureKeepsOriginal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions; the failure can't be provoked")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "code.go")
+	if err := os.WriteFile(path, []byte("original"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(dir, 0555); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+	if err := Replace(path, []byte("replacement")); err == nil {
+		t.Fatal("expected an error writing into a read-only directory")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("original clobbered by a failed Replace: %q", got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp-") {
+			t.Fatalf("temp file %q leaked after a failed Replace", e.Name())
+		}
+	}
+}
+
 // TestWriteConcurrentWritersNeverTear is the reason the temp name is
 // randomised: two skiff instances (or two goroutines) saving the same
 // file must each land a complete document. A shared "path + .tmp"
