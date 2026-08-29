@@ -266,7 +266,7 @@ func TestGitPanelClick_BranchRowOpensPicker(t *testing.T) {
 	a.refreshGitStatus()
 	// Activate the panel without toggleGitPanel's async status kick —
 	// a background `git status` racing t.TempDir cleanup flakes.
-	a.gitPanelActive = true
+	a.gitPanel.active = true
 	a.rebuildGitChangesRows()
 	gitRun(t, a.rootDir, "branch", "other")
 	a.gitPanelClick(5, 1)

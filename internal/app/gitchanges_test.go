@@ -125,17 +125,17 @@ func TestApplyGitStatus_CarriesIsDirToPanelRows(t *testing.T) {
 	// newTestApp runs the synchronous refreshGitStatus, which flows
 	// through the same collect → apply pipeline as the async tick.
 	a := newTestApp(t, repo)
-	a.gitPanelActive = true
+	a.gitPanel.active = true
 	a.rebuildGitChangesRows()
 
 	var dirRow *gitChangeRow
-	for i := range a.gitPanelRows {
-		if a.gitPanelRows[i].Abs == filepath.Join(repo, "newdir") {
-			dirRow = &a.gitPanelRows[i]
+	for i := range a.gitPanel.rows {
+		if a.gitPanel.rows[i].Abs == filepath.Join(repo, "newdir") {
+			dirRow = &a.gitPanel.rows[i]
 		}
 	}
 	if dirRow == nil {
-		t.Fatalf("untracked dir missing from panel rows: %+v", a.gitPanelRows)
+		t.Fatalf("untracked dir missing from panel rows: %+v", a.gitPanel.rows)
 	}
 	if !dirRow.IsDir || dirRow.Rel != "newdir/" {
 		t.Fatalf("untracked dir row should carry IsDir + trailing slash: %+v", dirRow)
@@ -175,7 +175,7 @@ func TestToggleGitPanel_SingleFileModeFlashes(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.tree = nil
 	a.toggleGitPanel()
-	if a.gitPanelActive {
+	if a.gitPanel.active {
 		t.Fatal("panel should not activate in single-file mode")
 	}
 	if !strings.Contains(a.statusMsg, "single-file") {
@@ -189,7 +189,7 @@ func TestToggleGitPanel_SingleFileModeFlashes(t *testing.T) {
 func TestToggleGitPanel_NonRepoFlashes(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.toggleGitPanel()
-	if a.gitPanelActive {
+	if a.gitPanel.active {
 		t.Fatal("panel should not activate outside a git repo")
 	}
 	if !strings.Contains(a.statusMsg, "Not a git repository") {
@@ -204,17 +204,17 @@ func TestToggleGitPanel_NonRepoFlashes(t *testing.T) {
 func TestToggleGitPanel_ActivatesAndLists(t *testing.T) {
 	a, _, _ := dirtyRepoApp(t)
 	a.toggleGitPanel()
-	if !a.gitPanelActive {
+	if !a.gitPanel.active {
 		t.Fatal("panel should be active")
 	}
-	if len(a.gitPanelRows) != 2 {
-		t.Fatalf("expected 2 rows, got %d: %+v", len(a.gitPanelRows), a.gitPanelRows)
+	if len(a.gitPanel.rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d: %+v", len(a.gitPanel.rows), a.gitPanel.rows)
 	}
-	if a.gitPanelRows[0].Rel != "modified.txt" || a.gitPanelRows[0].Kind != filetree.GitChangeModified {
-		t.Fatalf("row 0: %+v", a.gitPanelRows[0])
+	if a.gitPanel.rows[0].Rel != "modified.txt" || a.gitPanel.rows[0].Kind != filetree.GitChangeModified {
+		t.Fatalf("row 0: %+v", a.gitPanel.rows[0])
 	}
-	if a.gitPanelRows[1].Rel != "untracked.txt" || a.gitPanelRows[1].Kind != filetree.GitChangeAdded {
-		t.Fatalf("row 1: %+v", a.gitPanelRows[1])
+	if a.gitPanel.rows[1].Rel != "untracked.txt" || a.gitPanel.rows[1].Kind != filetree.GitChangeAdded {
+		t.Fatalf("row 1: %+v", a.gitPanel.rows[1])
 	}
 }
 
@@ -224,11 +224,11 @@ func TestToggleGitPanel_ActivatesAndLists(t *testing.T) {
 func TestToggleGitPanel_TogglesBackToExplorer(t *testing.T) {
 	a, _, _ := dirtyRepoApp(t)
 	a.toggleGitPanel()
-	if !a.gitPanelActive {
+	if !a.gitPanel.active {
 		t.Fatal("first toggle should activate the panel")
 	}
 	a.toggleGitPanel()
-	if a.gitPanelActive {
+	if a.gitPanel.active {
 		t.Fatal("second toggle should return to the explorer")
 	}
 }
@@ -240,9 +240,9 @@ func TestToggleGitPanel_ShowsHiddenSidebar(t *testing.T) {
 	a, _, _ := dirtyRepoApp(t)
 	a.sidebarShown = false
 	a.toggleGitPanel()
-	if !a.sidebarShown || !a.gitPanelActive {
+	if !a.sidebarShown || !a.gitPanel.active {
 		t.Fatalf("expected sidebar shown in git mode, got shown=%v git=%v",
-			a.sidebarShown, a.gitPanelActive)
+			a.sidebarShown, a.gitPanel.active)
 	}
 }
 
@@ -254,11 +254,11 @@ func TestSidebarHeaderClick_SwitchesPanels(t *testing.T) {
 	a.refreshGitStatus() // populate gitBranch so the GIT tab exists
 	gx := runeLen(sidebarHeaderExplorer) + sidebarHeaderGap
 	a.sidebarClick(gx, 0) // click "GIT"
-	if !a.gitPanelActive {
+	if !a.gitPanel.active {
 		t.Fatal("clicking the GIT tab should activate the panel")
 	}
 	a.sidebarClick(1, 0) // click "EXPLORER"
-	if a.gitPanelActive {
+	if a.gitPanel.active {
 		t.Fatal("clicking the EXPLORER tab should return to the tree")
 	}
 }
@@ -363,8 +363,8 @@ func TestGitPanelClick_DeletedHasNoOpenButton(t *testing.T) {
 	}
 	a := newTestApp(t, dir)
 	a.toggleGitPanel()
-	if len(a.gitPanelRows) != 1 || a.gitPanelRows[0].Kind != filetree.GitChangeDeleted {
-		t.Fatalf("expected one deleted row, got %+v", a.gitPanelRows)
+	if len(a.gitPanel.rows) != 1 || a.gitPanel.rows[0].Kind != filetree.GitChangeDeleted {
+		t.Fatalf("expected one deleted row, got %+v", a.gitPanel.rows)
 	}
 	a.gitPanelClick(5, gitPanelListTop)
 	if !diffIsOpen(a) {
@@ -395,11 +395,11 @@ func TestGitPanelClick_UntrackedDirRevealsInExplorer(t *testing.T) {
 	writeFileT(t, filepath.Join(sub, "inside.txt"), "y\n")
 	a := newTestApp(t, dir)
 	a.toggleGitPanel()
-	if len(a.gitPanelRows) != 1 || !a.gitPanelRows[0].IsDir {
-		t.Fatalf("expected one dir row, got %+v", a.gitPanelRows)
+	if len(a.gitPanel.rows) != 1 || !a.gitPanel.rows[0].IsDir {
+		t.Fatalf("expected one dir row, got %+v", a.gitPanel.rows)
 	}
 	a.gitPanelClick(5, gitPanelListTop)
-	if a.gitPanelActive {
+	if a.gitPanel.active {
 		t.Fatal("dir activation should switch back to the explorer")
 	}
 	if a.activeFolder != sub {
@@ -417,8 +417,8 @@ func TestGitPanelClick_UntrackedDirRevealsInExplorer(t *testing.T) {
 func TestGitPanelClick_IgnoresChrome(t *testing.T) {
 	a, _, _ := dirtyRepoApp(t)
 	a.toggleGitPanel()
-	if len(a.gitPanelRows) != 2 {
-		t.Fatalf("fixture: want 2 change rows, got %d", len(a.gitPanelRows))
+	if len(a.gitPanel.rows) != 2 {
+		t.Fatalf("fixture: want 2 change rows, got %d", len(a.gitPanel.rows))
 	}
 	_, _, sw, _ := a.sidebarRect()
 	btns := a.gitPanelButtons(sw)
@@ -429,11 +429,11 @@ func TestGitPanelClick_IgnoresChrome(t *testing.T) {
 	// a different guard from the far-below case, and the one that
 	// would index past the row slice if it went missing.
 	listH, _ := a.gitPanelBody()
-	pastRows := gitPanelListTop + len(a.gitPanelRows) + 1
+	pastRows := gitPanelListTop + len(a.gitPanel.rows) + 1
 	if pastRows-gitPanelListTop >= listH {
 		t.Fatalf("fixture: list window (%d rows) too short to click past the rows inside it", listH)
 	}
-	a.gitPanelSelected = 1
+	a.gitPanel.selected = 1
 	checks, msg := len(a.gitCommitChecks), a.statusMsg
 	for _, tc := range []struct {
 		name string
@@ -449,9 +449,9 @@ func TestGitPanelClick_IgnoresChrome(t *testing.T) {
 		if a.overlays.IsOpen() {
 			t.Fatalf("%s: click opened %T", tc.name, a.overlays.Top())
 		}
-		if !a.gitPanelActive || a.gitPanelSelected != 1 || a.gitPanelScroll != 0 {
+		if !a.gitPanel.active || a.gitPanel.selected != 1 || a.gitPanel.scroll != 0 {
 			t.Fatalf("%s: panel state moved — active %v, selected %d, scroll %d",
-				tc.name, a.gitPanelActive, a.gitPanelSelected, a.gitPanelScroll)
+				tc.name, a.gitPanel.active, a.gitPanel.selected, a.gitPanel.scroll)
 		}
 		if len(a.gitCommitChecks) != checks {
 			t.Fatalf("%s: click touched the commit checkboxes", tc.name)
@@ -467,20 +467,20 @@ func TestGitPanelClick_IgnoresChrome(t *testing.T) {
 // at the last full window.
 func TestScrollGitPanel_Clamps(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	a.gitPanelRows = make([]gitChangeRow, 100)
+	a.gitPanel.rows = make([]gitChangeRow, 100)
 	_, _, _, sh := a.sidebarRect()
 	a.scrollGitPanel(1000)
-	if want := 100 - (sh - gitPanelListTop); a.gitPanelScroll != want {
-		t.Fatalf("scroll past end: got %d, want %d", a.gitPanelScroll, want)
+	if want := 100 - (sh - gitPanelListTop); a.gitPanel.scroll != want {
+		t.Fatalf("scroll past end: got %d, want %d", a.gitPanel.scroll, want)
 	}
 	a.scrollGitPanel(-1000)
-	if a.gitPanelScroll != 0 {
-		t.Fatalf("scroll past top: got %d, want 0", a.gitPanelScroll)
+	if a.gitPanel.scroll != 0 {
+		t.Fatalf("scroll past top: got %d, want 0", a.gitPanel.scroll)
 	}
-	a.gitPanelRows = a.gitPanelRows[:3]
+	a.gitPanel.rows = a.gitPanel.rows[:3]
 	a.scrollGitPanel(5)
-	if a.gitPanelScroll != 0 {
-		t.Fatalf("short list should never scroll, got %d", a.gitPanelScroll)
+	if a.gitPanel.scroll != 0 {
+		t.Fatalf("short list should never scroll, got %d", a.gitPanel.scroll)
 	}
 }
 
@@ -515,7 +515,7 @@ func TestDrawGitPanel_Smoke(t *testing.T) {
 	}
 
 	// Empty state: pretend the repo went clean under us.
-	a.gitPanelRows = nil
+	a.gitPanel.rows = nil
 	a.draw()
 	a.screen.Show()
 	if body := screenLine(scr, gitPanelListTop); !strings.Contains(body, "No uncommitted changes") {
@@ -576,12 +576,12 @@ func TestStatusBarClick_TogglesGitPanel(t *testing.T) {
 	}
 	sx, _, sw, _ := a.statusRect()
 	a.statusBarClick(sx + sw - 2) // inside the segment
-	if !a.gitPanelActive {
+	if !a.gitPanel.active {
 		t.Fatal("click on the git segment should activate the panel")
 	}
 	a.showExplorerPanel()
 	a.statusBarClick(sx + 1) // far left — file info territory
-	if a.gitPanelActive {
+	if a.gitPanel.active {
 		t.Fatal("click outside the segment should not activate the panel")
 	}
 }
@@ -614,7 +614,7 @@ func TestMenuGitChangesRow(t *testing.T) {
 	// session's startup status refresh does.
 	a.gitSnap.Branch = "main"
 	a.menuGitChanges()
-	if !a.gitPanelActive {
+	if !a.gitPanel.active {
 		t.Fatal("the menu row should show the Git panel")
 	}
 	if !a.gitPanelKeysOn() {
@@ -628,13 +628,13 @@ func TestMenuGitChangesRow(t *testing.T) {
 func TestRefreshGitStatus_RebuildsActivePanel(t *testing.T) {
 	a, _, _ := dirtyRepoApp(t)
 	a.toggleGitPanel()
-	if len(a.gitPanelRows) != 2 {
-		t.Fatalf("expected 2 rows, got %d", len(a.gitPanelRows))
+	if len(a.gitPanel.rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(a.gitPanel.rows))
 	}
 	writeFileT(t, filepath.Join(a.rootDir, "another.txt"), "hi\n")
 	a.refreshGitStatus()
-	if len(a.gitPanelRows) != 3 {
-		t.Fatalf("active panel should track new changes, got %d rows", len(a.gitPanelRows))
+	if len(a.gitPanel.rows) != 3 {
+		t.Fatalf("active panel should track new changes, got %d rows", len(a.gitPanel.rows))
 	}
 }
 
@@ -689,8 +689,8 @@ func TestDiffWalk_ArrowsMoveBetweenFiles(t *testing.T) {
 	if !strings.Contains(diffOv(t, a).title, "modified.txt") {
 		t.Fatalf("up should walk back, title %q", diffOv(t, a).title)
 	}
-	if a.gitPanelSelected != 0 {
-		t.Fatalf("panel selection should track the walk, got %d", a.gitPanelSelected)
+	if a.gitPanel.selected != 0 {
+		t.Fatalf("panel selection should track the walk, got %d", a.gitPanel.selected)
 	}
 	a.closeAllModals()
 	if a.diffPanelRow != -1 {
@@ -705,7 +705,7 @@ func TestGitPanelButtons_CarryLiveState(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.gitSnap.IsRepo = true
 	a.gitSnap.Ahead, a.gitSnap.Behind = 2, 1
-	a.gitPanelRows = []gitChangeRow{
+	a.gitPanel.rows = []gitChangeRow{
 		{Abs: "/p/a.go"}, {Abs: "/p/b.go"}, {Abs: "/p/dir", IsDir: true},
 	}
 	labels := []string{}
@@ -822,8 +822,8 @@ func keyboardGitApp(t *testing.T) *App {
 	if !a.gitPanelKeysOn() {
 		t.Fatal("Esc-g should hand the keyboard to the Git panel")
 	}
-	if len(a.gitPanelRows) != 2 {
-		t.Fatalf("expected 2 change rows, got %d", len(a.gitPanelRows))
+	if len(a.gitPanel.rows) != 2 {
+		t.Fatalf("expected 2 change rows, got %d", len(a.gitPanel.rows))
 	}
 	return a
 }
@@ -871,8 +871,8 @@ func TestGitPanelKeys_DownMovesSelection(t *testing.T) {
 	}
 
 	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
-	if a.gitPanelSelected != 1 {
-		t.Fatalf("down should select row 1, got %d", a.gitPanelSelected)
+	if a.gitPanel.selected != 1 {
+		t.Fatalf("down should select row 1, got %d", a.gitPanel.selected)
 	}
 	if got := gitScreenRow(t, a, gitPanelListTop+1); !strings.HasPrefix(got, "›") {
 		t.Fatalf("caret should have moved to row 1, got %q", got)
@@ -882,13 +882,13 @@ func TestGitPanelKeys_DownMovesSelection(t *testing.T) {
 	}
 
 	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
-	if a.gitPanelSelected != 1 {
-		t.Fatalf("selection must clamp at the last row, got %d", a.gitPanelSelected)
+	if a.gitPanel.selected != 1 {
+		t.Fatalf("selection must clamp at the last row, got %d", a.gitPanel.selected)
 	}
 	a.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, 0))
 	a.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, 0))
-	if a.gitPanelSelected != 0 {
-		t.Fatalf("selection must clamp at the first row, got %d", a.gitPanelSelected)
+	if a.gitPanel.selected != 0 {
+		t.Fatalf("selection must clamp at the first row, got %d", a.gitPanel.selected)
 	}
 }
 
@@ -898,7 +898,7 @@ func TestGitPanelKeys_DownMovesSelection(t *testing.T) {
 // without a mouse.
 func TestGitPanelKeys_SpaceStagesSelectedRowOnly(t *testing.T) {
 	a := keyboardGitApp(t)
-	first, second := a.gitPanelRows[0].Abs, a.gitPanelRows[1].Abs
+	first, second := a.gitPanel.rows[0].Abs, a.gitPanel.rows[1].Abs
 
 	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
 	a.handleKey(tcell.NewEventKey(tcell.KeyRune, ' ', 0))
@@ -939,8 +939,8 @@ func TestGitPanelKeys_EnterOpensDiff(t *testing.T) {
 func TestGitPanelKeys_TabReachesButtonsAndEnterRuns(t *testing.T) {
 	a := keyboardGitApp(t)
 	a.handleKey(tcell.NewEventKey(tcell.KeyTab, 0, 0))
-	if !a.gitPanelOnBtns || a.gitPanelBtn != 0 {
-		t.Fatalf("tab should focus the first button, onBtns=%v idx=%d", a.gitPanelOnBtns, a.gitPanelBtn)
+	if !a.gitPanel.onBtns || a.gitPanel.btn != 0 {
+		t.Fatalf("tab should focus the first button, onBtns=%v idx=%d", a.gitPanel.onBtns, a.gitPanel.btn)
 	}
 
 	// drawButton's focus language is an inverted block: the label sits
@@ -962,8 +962,8 @@ func TestGitPanelKeys_TabReachesButtonsAndEnterRuns(t *testing.T) {
 	for range 3 {
 		a.handleKey(tcell.NewEventKey(tcell.KeyRight, 0, 0))
 	}
-	if a.gitPanelBtn != 3 {
-		t.Fatalf("→ should walk the button row, got %d", a.gitPanelBtn)
+	if a.gitPanel.btn != 3 {
+		t.Fatalf("→ should walk the button row, got %d", a.gitPanel.btn)
 	}
 	a.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
 	if labels := popupLabels(t, a); len(labels) == 0 {
@@ -980,16 +980,16 @@ func TestGitPanelKeys_FocusFallsBackToTheList(t *testing.T) {
 	for range 4 {
 		a.handleKey(tcell.NewEventKey(tcell.KeyRight, 0, 0))
 	}
-	if a.gitPanelOnBtns {
+	if a.gitPanel.onBtns {
 		t.Fatal("stepping past the last button should return to the list")
 	}
 	// Shift-Tab from the list enters the row at its far end.
 	a.handleKey(tcell.NewEventKey(tcell.KeyBacktab, 0, 0))
-	if !a.gitPanelOnBtns || a.gitPanelBtn != 3 {
-		t.Fatalf("shift-tab should focus the last button, onBtns=%v idx=%d", a.gitPanelOnBtns, a.gitPanelBtn)
+	if !a.gitPanel.onBtns || a.gitPanel.btn != 3 {
+		t.Fatalf("shift-tab should focus the last button, onBtns=%v idx=%d", a.gitPanel.onBtns, a.gitPanel.btn)
 	}
 	a.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, 0))
-	if a.gitPanelOnBtns {
+	if a.gitPanel.onBtns {
 		t.Fatal("up from the button row should return to the list")
 	}
 }
@@ -1009,7 +1009,7 @@ func TestGitPanelKeys_EscReturnsToEditor(t *testing.T) {
 	if a.gitPanelKeysOn() {
 		t.Fatal("esc should hand the keyboard back to the editor")
 	}
-	if !a.gitPanelActive {
+	if !a.gitPanel.active {
 		t.Fatal("esc releases focus, it does not close the panel")
 	}
 
@@ -1021,8 +1021,8 @@ func TestGitPanelKeys_EscReturnsToEditor(t *testing.T) {
 	if tab.Cursor.Line != 1 {
 		t.Fatalf("arrows should move the caret again, cursor line %d", tab.Cursor.Line)
 	}
-	if a.gitPanelSelected != 0 {
-		t.Fatalf("the panel must not react after esc, selection %d", a.gitPanelSelected)
+	if a.gitPanel.selected != 0 {
+		t.Fatalf("the panel must not react after esc, selection %d", a.gitPanel.selected)
 	}
 }
 
@@ -1035,10 +1035,10 @@ func TestGitPanelKeys_IgnoredWhileOverlayOpen(t *testing.T) {
 	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
 	a.handleKey(tcell.NewEventKey(tcell.KeyRune, ' ', 0))
 	a.handleKey(tcell.NewEventKey(tcell.KeyTab, 0, 0))
-	if a.gitPanelSelected != 0 {
-		t.Fatalf("selection moved under an open overlay, got %d", a.gitPanelSelected)
+	if a.gitPanel.selected != 0 {
+		t.Fatalf("selection moved under an open overlay, got %d", a.gitPanel.selected)
 	}
-	if a.gitPanelOnBtns {
+	if a.gitPanel.onBtns {
 		t.Fatal("focus moved to the buttons under an open overlay")
 	}
 	if len(a.gitCommitChecks) != 0 {
@@ -1063,7 +1063,7 @@ func TestGitPanelKeys_NoCtrlBindings(t *testing.T) {
 			t.Fatalf("Ctrl key %v must not be bound in the Git panel", k)
 		}
 	}
-	if a.gitPanelSelected != 0 || a.gitPanelOnBtns || len(a.gitCommitChecks) != 0 {
+	if a.gitPanel.selected != 0 || a.gitPanel.onBtns || len(a.gitCommitChecks) != 0 {
 		t.Fatal("Ctrl keys must leave the panel completely untouched")
 	}
 }
@@ -1152,11 +1152,11 @@ func TestFocusGitPanel_GrabsAMousePanelThenToggles(t *testing.T) {
 		t.Fatal("a mouse route must not steal the keyboard")
 	}
 	a.focusGitPanel()
-	if !a.gitPanelKeysOn() || !a.gitPanelActive {
+	if !a.gitPanelKeysOn() || !a.gitPanel.active {
 		t.Fatal("Esc-g on an open panel should grab focus, not close it")
 	}
 	a.focusGitPanel()
-	if a.gitPanelActive || a.gitPanelKeysOn() {
+	if a.gitPanel.active || a.gitPanelKeysOn() {
 		t.Fatal("Esc-g from inside should toggle back to the explorer")
 	}
 }
@@ -1181,7 +1181,7 @@ func TestGitPanelKeys_EditorPressDropsCapture(t *testing.T) {
 	if a.gitPanelKeysOn() {
 		t.Fatal("a press outside the sidebar must release the keyboard mode")
 	}
-	if !a.gitPanelActive {
+	if !a.gitPanel.active {
 		t.Fatal("the press releases focus, it does not close the panel")
 	}
 }
@@ -1199,11 +1199,11 @@ func gitPanelApp(t *testing.T, n int) *App {
 	a := newTestApp(t, t.TempDir())
 	a.gitSnap.IsRepo = true
 	a.gitSnap.Branch = "main"
-	a.gitPanelActive = true
-	a.gitPanelRows = make([]gitChangeRow, n)
+	a.gitPanel.active = true
+	a.gitPanel.rows = make([]gitChangeRow, n)
 	for i := range n {
 		name := "file" + itoa(i) + ".go"
-		a.gitPanelRows[i] = gitChangeRow{
+		a.gitPanel.rows[i] = gitChangeRow{
 			Rel:  name,
 			Abs:  filepath.Join(a.rootDir, name),
 			Kind: filetree.GitChangeModified,
@@ -1259,8 +1259,8 @@ func TestGitPanelScrollbar_HiddenWhenListFits(t *testing.T) {
 func TestGitPanelScrollbar_ThumbTracksScroll(t *testing.T) {
 	a := gitPanelApp(t, 60)
 	listH, _ := a.gitPanelBody()
-	if len(a.gitPanelRows) <= listH {
-		t.Fatalf("fixture should overflow: %d rows in %d", len(a.gitPanelRows), listH)
+	if len(a.gitPanel.rows) <= listH {
+		t.Fatalf("fixture should overflow: %d rows in %d", len(a.gitPanel.rows), listH)
 	}
 
 	top := gitPanelBarColumn(t, a)
@@ -1276,12 +1276,12 @@ func TestGitPanelScrollbar_ThumbTracksScroll(t *testing.T) {
 		}
 	}
 
-	a.scrollGitPanel(len(a.gitPanelRows))
+	a.scrollGitPanel(len(a.gitPanel.rows))
 	bottom := gitPanelBarColumn(t, a)
 	if !strings.HasSuffix(bottom, string(scrollbar.Thumb)) {
 		t.Fatalf("at the end the thumb must finish the track, got %q", bottom)
 	}
-	wantStart, wantLen, ok := scrollbar.Geom(len(a.gitPanelRows), listH, a.gitPanelScroll)
+	wantStart, wantLen, ok := scrollbar.Geom(len(a.gitPanel.rows), listH, a.gitPanel.scroll)
 	if !ok {
 		t.Fatal("fixture should overflow")
 	}
@@ -1304,7 +1304,7 @@ func TestGitPanelScrollbar_ThumbTracksScroll(t *testing.T) {
 func TestGitPanelScrollbar_ReservesTheRowColumn(t *testing.T) {
 	a := gitPanelApp(t, 60)
 	long := strings.Repeat("deep/", 12) + "name.go"
-	a.gitPanelRows[0] = gitChangeRow{
+	a.gitPanel.rows[0] = gitChangeRow{
 		Rel:  long,
 		Abs:  filepath.Join(a.rootDir, long),
 		Kind: filetree.GitChangeModified,
@@ -1322,7 +1322,7 @@ func TestGitPanelScrollbar_ReservesTheRowColumn(t *testing.T) {
 	}
 
 	// Once the listing fits, the column goes back to the label.
-	a.gitPanelRows = a.gitPanelRows[:2]
+	a.gitPanel.rows = a.gitPanel.rows[:2]
 	row = []rune(gitScreenRow(t, a, gitPanelListTop))
 	if got := row[sw-1]; got == scrollbar.Thumb || got == scrollbar.Track {
 		t.Fatalf("no bar expected once the list fits, got %q", string(row))
@@ -1350,19 +1350,19 @@ func TestGitPanelScrollbar_ClickScrollsAndLeavesTheRestAlone(t *testing.T) {
 	// tree-bar check before sidebarClick ever sees it.
 	a.handleMouse(tcell.NewEventMouse(barX, y, tcell.Button1, 0))
 	a.handleMouse(tcell.NewEventMouse(barX, y, tcell.ButtonNone, 0))
-	if want := len(a.gitPanelRows) - listH; a.gitPanelScroll != want {
-		t.Fatalf("bar click: scroll %d, want %d", a.gitPanelScroll, want)
+	if want := len(a.gitPanel.rows) - listH; a.gitPanel.scroll != want {
+		t.Fatalf("bar click: scroll %d, want %d", a.gitPanel.scroll, want)
 	}
 	if a.overlays.IsOpen() {
 		t.Fatal("a bar click must not open the diff")
 	}
-	if a.gitPanelSelected != 0 {
-		t.Fatalf("a bar click must not move the selection, got %d", a.gitPanelSelected)
+	if a.gitPanel.selected != 0 {
+		t.Fatalf("a bar click must not move the selection, got %d", a.gitPanel.selected)
 	}
 
 	// The checkbox column at the same y: stages, opens nothing.
-	idx := a.gitPanelScroll + y - gitPanelListTop
-	abs := a.gitPanelRows[idx].Abs
+	idx := a.gitPanel.scroll + y - gitPanelListTop
+	abs := a.gitPanel.rows[idx].Abs
 	a.gitPanelClick(1, y)
 	if a.commitCheckOn(abs) {
 		t.Fatal("the checkbox column must still toggle the stage mark")
@@ -1373,8 +1373,8 @@ func TestGitPanelScrollbar_ClickScrollsAndLeavesTheRestAlone(t *testing.T) {
 
 	// The label between them: still activates the row.
 	a.gitPanelClick(6, y)
-	if a.gitPanelSelected != idx {
-		t.Fatalf("a row click should select row %d, got %d", idx, a.gitPanelSelected)
+	if a.gitPanel.selected != idx {
+		t.Fatalf("a row click should select row %d, got %d", idx, a.gitPanel.selected)
 	}
 
 	// The button row and the branch line are above the bar's span.
@@ -1392,7 +1392,7 @@ func TestGitPanelScrollbar_ClickScrollsAndLeavesTheRestAlone(t *testing.T) {
 // the list rather than paint over the bindings.
 func TestGitPanelScrollbar_KeepsClearOfTheHintStrip(t *testing.T) {
 	a := gitPanelApp(t, 60)
-	a.gitPanelKeys = true
+	a.gitPanel.keys = true
 	listH, hint := a.gitPanelBody()
 	if len(hint) == 0 {
 		t.Fatal("keyboard mode should dock a hint strip")

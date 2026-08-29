@@ -47,7 +47,7 @@ func (a *App) draw() {
 
 	if a.sidebarShown {
 		sx, sy, sw, sh := a.sidebarRect()
-		if a.gitPanelActive {
+		if a.gitPanel.active {
 			a.drawGitPanel(sx, sy, sw, sh)
 		} else {
 			// Both scrollbar "I'm being dragged" flags are derived from

@@ -424,15 +424,9 @@ type App struct {
 	// its transient state.
 	finder *finder.Finder
 
-	// Git panel state — the sidebar's second tab ("Esc g", ≡ → Git
-	// changes, the GIT header tab, or a click on the status bar's
-	// branch segment). When active the sidebar shows the uncommitted-
-	// changes list instead of the file tree. Rows are rebuilt from
-	// tree.DirtyFiles on activation and on every git-status refresh
-	// while the panel is up.
-	gitPanelActive bool
-	gitPanelRows   []gitChangeRow
-	gitPanelScroll int
+	// gitPanel is the sidebar's Git-changes panel state — see
+	// gitPanelState in gitchanges.go.
+	gitPanel gitPanelState
 
 	// gitDirtyDirs flags which dirty paths are directories, keyed by
 	// tree-cased absolute path. Stat'd off-thread by collectGitStatus
@@ -441,22 +435,12 @@ type App struct {
 	// collection's answer instead of stat'ing on the event loop.
 	gitDirtyDirs map[string]bool
 
-	// Git panel keyboard mode (gitchanges.go). The panel is mouse-first,
-	// but Button3 and mouse reporting are exactly what macOS Terminal +
-	// tmux swallow, so Esc-g / ≡ → Git changes arm a keyboard focus that
-	// walks the rows and the action row. All three fields are zero-safe:
-	// off, focus on the list, first button.
-	gitPanelKeys   bool
-	gitPanelOnBtns bool
-	gitPanelBtn    int
-
 	// Write-side git state (see gitops.go / gitchanges.go): the
 	// one-at-a-time mutation gate, the commit checkbox set (absent =
-	// checked), the panel's keyboard/walk selection, and the panel row
-	// the open diff came from (-1 = diff not from the panel).
+	// checked), and the panel row the open diff came from (-1 = diff
+	// not from the panel).
 	gitOpBusy         bool
 	gitCommitChecks   map[string]bool
-	gitPanelSelected  int
 	diffPanelRow      int
 	gitDeleteTarget   string // branch mid-delete, for the force-delete offer
 	gitWorktreeTarget string // worktree mid-remove, for the force-remove offer

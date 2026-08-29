@@ -1069,29 +1069,29 @@ func TestGitPanelScrollbarPressScrollsAndDrags(t *testing.T) {
 	if a.dragMode != dragGitPanelScrollbar {
 		t.Fatalf("dragMode = %q, want gitpanelscrollbar", a.dragMode)
 	}
-	bottom := a.gitPanelScroll
+	bottom := a.gitPanel.scroll
 	if bottom == 0 {
 		t.Fatal("pressing the bottom of the bar should scroll the list")
 	}
 
 	// Drag back to the first list row.
 	a.handleMouse(tcell.NewEventMouse(barX, sy+gitPanelListTop, tcell.Button1, 0))
-	if a.gitPanelScroll != 0 {
-		t.Fatalf("dragging to the top should return to 0, got %d", a.gitPanelScroll)
+	if a.gitPanel.scroll != 0 {
+		t.Fatalf("dragging to the top should return to 0, got %d", a.gitPanel.scroll)
 	}
 	// Off-column motion still tracks the row — that is the whole point
 	// of a grab, and the click-only version could not do it.
 	a.handleMouse(tcell.NewEventMouse(barX-6, lastRow, tcell.Button1, 0))
-	if a.gitPanelScroll != bottom {
-		t.Fatalf("drag off-column should still track the row: got %d, want %d", a.gitPanelScroll, bottom)
+	if a.gitPanel.scroll != bottom {
+		t.Fatalf("drag off-column should still track the row: got %d, want %d", a.gitPanel.scroll, bottom)
 	}
 
 	a.handleMouse(tcell.NewEventMouse(barX, lastRow, tcell.ButtonNone, 0))
 	if a.dragMode != dragNone {
 		t.Fatalf("release should clear dragMode, got %q", a.dragMode)
 	}
-	if a.gitPanelScroll != bottom {
-		t.Fatalf("release must not move the list, got %d", a.gitPanelScroll)
+	if a.gitPanel.scroll != bottom {
+		t.Fatalf("release must not move the list, got %d", a.gitPanel.scroll)
 	}
 	if a.overlays.IsOpen() {
 		t.Fatal("a bar drag must never open a diff")
@@ -1126,8 +1126,8 @@ func TestGitPanelScrollbarDragDoesNotStageOrOpen(t *testing.T) {
 	if a.overlays.IsOpen() {
 		t.Fatal("the drag opened an overlay")
 	}
-	if a.gitPanelSelected != 0 {
-		t.Fatalf("the drag moved the selection to %d", a.gitPanelSelected)
+	if a.gitPanel.selected != 0 {
+		t.Fatalf("the drag moved the selection to %d", a.gitPanel.selected)
 	}
 }
 

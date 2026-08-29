@@ -236,7 +236,7 @@ func TestHandleKey_LeaderGitChanges(t *testing.T) {
 	a.handleKey(keyEv(tcell.KeyEsc, 0))
 	a.handleKey(keyEv(tcell.KeyRune, 'g'))
 
-	if !a.gitPanelActive {
+	if !a.gitPanel.active {
 		t.Fatal("Esc-g should switch the sidebar to the Git panel")
 	}
 }

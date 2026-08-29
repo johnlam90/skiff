@@ -738,8 +738,8 @@ func (a *App) applyGitStatus(res gitStatusResult) {
 			a.gitDirtyDirs = nil
 			// No repo, no Git panel — fall back to the explorer rather
 			// than strand the user on a view with nothing behind it.
-			a.gitPanelActive = false
-			a.gitPanelRows = nil
+			a.gitPanel.active = false
+			a.gitPanel.rows = nil
 		} else {
 			dirtyFiles := rebaseGitPaths(res.st.Files, a.tree.Root.Path)
 			a.tree.DirtyFiles = dirtyFiles
@@ -764,7 +764,7 @@ func (a *App) applyGitStatus(res gitStatusResult) {
 	}
 	// Keep the Git panel live: whatever refreshed the status (the 10s
 	// tick, a save, a file op) also refreshes the visible list.
-	if a.gitPanelActive {
+	if a.gitPanel.active {
 		a.rebuildGitChangesRows()
 	}
 }

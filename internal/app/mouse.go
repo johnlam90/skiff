@@ -252,7 +252,7 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 // scrollAt scrolls whichever panel the (x, y) cursor is over.
 func (a *App) scrollAt(x, y, delta int) {
 	if sw := a.sidebarW(); sw > 0 && x < sw {
-		if a.gitPanelActive {
+		if a.gitPanel.active {
 			a.scrollGitPanel(delta)
 		} else {
 			a.tree.Scroll(delta)
@@ -294,7 +294,7 @@ func (a *App) tryTreeContextClick(x, y int) bool {
 	}
 	// The Git panel has no per-row context actions — the tree isn't
 	// what's on screen, so tree.HitTest would map to invisible rows.
-	if a.gitPanelActive {
+	if a.gitPanel.active {
 		return false
 	}
 	splitX := a.splitterX()
@@ -342,7 +342,7 @@ func (a *App) sidebarClick(x, y int) {
 		}
 		return
 	}
-	if a.gitPanelActive {
+	if a.gitPanel.active {
 		a.gitPanelClick(x-sx, y-sy)
 		return
 	}
@@ -655,7 +655,7 @@ func (a *App) scrollbarTo(localY int) {
 // The Git panel draws its own list over the same rect and has no tree
 // bar, so it opts out entirely.
 func (a *App) treeScrollbarHit(x, y int) bool {
-	if a.tree == nil || a.gitPanelActive {
+	if a.tree == nil || a.gitPanel.active {
 		return false
 	}
 	sx, sy, sw, sh := a.sidebarRect()
@@ -686,7 +686,7 @@ func (a *App) treeScrollbarTo(y int) {
 // out when the panel is: the two share a column and only one of them
 // is ever painted on it.
 func (a *App) gitPanelScrollbarHit(x, y int) bool {
-	if !a.gitPanelActive {
+	if !a.gitPanel.active {
 		return false
 	}
 	sx, sy, _, _ := a.sidebarRect()
@@ -697,7 +697,7 @@ func (a *App) gitPanelScrollbarHit(x, y int) bool {
 // screen row y — shared by the initial press and the drag, so a grab
 // and a click can never disagree about where the thumb lands.
 func (a *App) gitPanelScrollbarTo(y int) {
-	if !a.gitPanelActive {
+	if !a.gitPanel.active {
 		return
 	}
 	_, sy, _, _ := a.sidebarRect()

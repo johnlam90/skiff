@@ -237,8 +237,8 @@ func TestSidebarPanelsSurviveTheMinimumHeight(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	resizeTestApp(t, a, minWidth, minHeight)
 	a.sidebarShown = true
-	a.gitPanelActive = true
-	a.gitPanelKeys = true
+	a.gitPanel.active = true
+	a.gitPanel.keys = true
 
 	_, _, _, sh := a.sidebarRect()
 	if sh-gitPanelListTop < 1 {

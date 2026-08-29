@@ -642,7 +642,7 @@ func TestGitUnavailableMsg_SeparatesMissingBinaryFromNonRepo(t *testing.T) {
 	if a.statusMsg != "Not a git repository" {
 		t.Fatalf("plain directory: got %q", a.statusMsg)
 	}
-	if a.gitPanelActive {
+	if a.gitPanel.active {
 		t.Fatal("the panel must not open without a repo")
 	}
 
@@ -661,8 +661,8 @@ func TestGitUnavailableMsg_SeparatesMissingBinaryFromNonRepo(t *testing.T) {
 func TestGitPanelEmptyLabel_NamesMissingGit(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	scr := a.screen.(tcell.SimulationScreen)
-	a.gitPanelActive = true
-	a.gitPanelRows = nil
+	a.gitPanel.active = true
+	a.gitPanel.rows = nil
 
 	a.gitSnap = gitStatus{IsRepo: true, Branch: "main"}
 	a.draw()

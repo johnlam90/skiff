@@ -255,7 +255,7 @@ func (a *App) hasGitChanges() bool {
 // deliberate act.
 func (a *App) checkedChangePaths() []string {
 	var out []string
-	for _, row := range a.gitPanelRows {
+	for _, row := range a.gitPanel.rows {
 		if checked, explicit := a.gitCommitChecks[row.Abs]; explicit && !checked {
 			continue
 		}
