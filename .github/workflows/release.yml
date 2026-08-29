@@ -43,9 +43,13 @@ on:
 
 # Pushes back to main need write access to the repo's contents: the
 # version-bump commit and the GoReleaser-written Formula/skiff.rb commit
-# both push straight to main with the default token.
+# both push straight to main with the default token. id-token: write is
+# cosign's keyless-signing OIDC exchange and attestations: write is the
+# build-provenance attestation step — neither writes to the repo itself.
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 # Serialise releases — no two version-bumps racing each other.
 concurrency:
@@ -160,6 +164,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Needed by .goreleaser.yml's signs: block, which shells out to
+      # `cosign sign-blob` on checksums.txt. Keyless signing exchanges the
+      # job's OIDC token for a short-lived cert — no key material to manage
+      # or leak.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
       # Pinned exactly, like the staticcheck version test.yml pins: the
       # tool that builds every shipped binary must not float on "latest"
       # and silently change what we ship on release day.
@@ -172,4 +183,15 @@ jobs:
           # Same-repo brew formula push uses the default workflow token —
           # no separate tap repo or PAT needed.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Separate from cosign's checksum signature: this is GitHub's own
+      # build-provenance attestation (SLSA-style), attached to the release
+      # via the repo's Attestations UI/API rather than shipped as a
+      # release asset.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
 

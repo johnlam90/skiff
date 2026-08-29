@@ -49,6 +49,15 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# Keyless cosign signature over checksums.txt: signing the checksum file
+# covers every archive it lists. Verification is optional in install.sh
+# (when cosign is on PATH) so BusyBox/minimal targets keep working.
+signs:
+  - cmd: cosign
+    args: ["sign-blob", "--yes", "--output-signature=${signature}", "--output-certificate=${certificate}", "${artifact}"]
+    artifacts: checksum
+    certificate: "${artifact}.pem"
+
 changelog:
   sort: asc
   use: github

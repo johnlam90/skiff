@@ -159,8 +159,42 @@ verify_checksum() {
 		printf '%serror:%s checksum mismatch for %s\n' "$RED" "$RESET" "$archive_name" >&2
 		printf '  expected %s\n' "$expected" >&2
 		printf '  actual   %s\n' "$actual" >&2
-		fatal "the download is corrupt or has been tampered with — aborting"
+		fatal "the download does not match the published checksum — refusing to install (corrupt or incomplete download)"
 	fi
+}
+
+# verify_signature checks checksums.txt's cosign signature when cosign is
+# on PATH. verify_checksum already proves the archive matches what this
+# release published; this proves the release itself was published by this
+# repo's own release workflow (keyless OIDC signing), not a swapped
+# publishing path. It is the ceiling, not the floor: cosign missing, or a
+# release published before signing landed (no .sig/.pem assets), is
+# reported and the install continues on the checksum alone.
+verify_signature() {
+	sums_file="$1"
+	sig_url="$2"
+	cert_url="$3"
+	tmp_dir="$4"
+
+	if ! command -v cosign >/dev/null 2>&1; then
+		info "  cosign not found — skipping signature check (checksum already verified)"
+		return
+	fi
+
+	if ! fetch "$sig_url" "$tmp_dir/checksums.txt.sig" 2>/dev/null \
+		|| ! fetch "$cert_url" "$tmp_dir/checksums.txt.pem" 2>/dev/null; then
+		info "  no signature published for ${version} — skipping signature check (checksum already verified)"
+		return
+	fi
+
+	cosign verify-blob \
+		--certificate "$tmp_dir/checksums.txt.pem" \
+		--signature "$tmp_dir/checksums.txt.sig" \
+		--certificate-identity-regexp "https://github.com/${REPO}/\.github/workflows/release\.yml@.*" \
+		--certificate-oidc-issuer https://token.actions.githubusercontent.com \
+		"$sums_file" >/dev/null 2>&1 \
+		|| fatal "checksums.txt signature verification failed — refusing to install"
+	info "  signature verified"
 }
 
 # resolve_version picks the version to install. If the user passed VERSION,
@@ -277,6 +311,10 @@ main() {
 		|| fatal "could not download checksums.txt for ${version} — refusing to install unverified bytes"
 	verify_checksum "$tmp/$archive" "$archive" "$tmp/checksums.txt"
 	info "  sha256 verified"
+	verify_signature "$tmp/checksums.txt" \
+		"https://github.com/${REPO}/releases/download/${version}/checksums.txt.sig" \
+		"https://github.com/${REPO}/releases/download/${version}/checksums.txt.pem" \
+		"$tmp"
 
 	tar -xzf "$tmp/$archive" -C "$tmp" \
 		|| fatal "extraction failed (archive may be corrupt)"
