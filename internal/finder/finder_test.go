@@ -307,3 +307,35 @@ func BenchmarkSearchTopN(b *testing.B) {
 		}
 	}
 }
+
+// TestFinder_RebuildUsesPanicGuard pins the injection seam the app
+// wires its crash guard through: when PanicGuard is set, Rebuild
+// launches the build via the guard — with a stable task name — instead
+// of a bare goroutine, so a panicking index build restores the terminal
+// like every other background task. A nil guard keeps the plain-go
+// semantics the other tests in this file rely on.
+func TestFinder_RebuildUsesPanicGuard(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, dir, "a.go", "package a")
+
+	f := New(dir)
+	var guardName string
+	f.PanicGuard = func(name string, fn func()) {
+		guardName = name
+		go fn()
+	}
+	done := make(chan struct{})
+	f.Rebuild(func() { close(done) })
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rebuild did not finish in 2s")
+	}
+	if guardName == "" {
+		t.Fatal("Rebuild should launch through PanicGuard when it is set")
+	}
+	if f.State() != StateReady {
+		t.Fatalf("state: got %v, want StateReady", f.State())
+	}
+}

@@ -542,6 +542,9 @@ func New(rootDir string) (*App, error) {
 	// takes ~150ms; the user pays it once at startup instead of
 	// when they're trying to navigate.
 	a.finder = finder.New(rootDir)
+	// Route the index build through the crash guard: internal/finder
+	// can't import internal/app, so the guard rides in as a hook.
+	a.finder.PanicGuard = a.safeGo
 	scr2 := a.screen
 	a.finder.Rebuild(func() {
 		_ = scr2.PostEvent(&finderRebuiltEvent{when: time.Now()})
