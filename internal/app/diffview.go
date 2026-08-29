@@ -27,6 +27,7 @@ package app
 // PgUp PgDn.
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"time"
@@ -96,81 +97,64 @@ const (
 	diffLoadHunk
 )
 
-// diffLoadEvent carries a finished background diff load onto the main
-// event loop, following the same custom-event pattern as
-// gitStatusEvent. gen and tabPath are the staleness guards — see
-// handleDiffLoaded.
-type diffLoadEvent struct {
-	when    time.Time
-	gen     int
+// diffLoadResult is what a finished background diff load lands: the
+// patch plus what the click that asked for it needs to present it.
+// tabPath is the staleness guard the handler still owns — see
+// handleDiffLoaded. The load's error rides beside it as the job's error:
+// git's (or the parser's) reason when there is no usable patch, the
+// difference between "clean" and "couldn't ask".
+type diffLoadResult struct {
 	kind    diffLoadKind
 	title   string
 	tabPath string
 	patch   diff.Patch
-	// err is git's (or the parser's) reason when the load produced no
-	// usable patch — the difference between "clean" and "couldn't ask".
-	err error
 }
 
-// When satisfies the tcell.Event interface.
-func (e *diffLoadEvent) When() time.Time { return e.when }
-
-// requestDiff runs load on a background goroutine and posts the result
-// back as a diffLoadEvent. Both callers are click paths and
+// requestDiff runs load on the diffLoad job's goroutine and lands the
+// result through handleDiffLoaded. Both callers are click paths and
 // internal/git's read timeout is ten seconds, so running the diff inline
 // meant one click on a gutter marker could freeze the editor for that
 // long on a slow or network-mounted repo. load receives an immutable
 // *git.Repo and must close over nothing but plain values captured here,
 // on the main thread — it never touches App, tab, or tree state.
 //
-// Every request bumps diffLoadGen and every request spawns. A click is a
-// discrete, low-rate gesture bounded by git's own read deadline, so the
-// newest click winning matters more than capping concurrency; the
-// generation check in handleDiffLoaded is what makes that safe.
+// The job is Supersede: every request spawns. A click is a discrete,
+// low-rate gesture bounded by git's own read deadline, so the newest
+// click winning matters more than capping concurrency; the job's
+// generation check is what makes that safe.
 func (a *App) requestDiff(kind diffLoadKind, title, tabPath string, load func(*git.Repo) (diff.Patch, error)) {
-	a.diffLoadGen++
-	gen := a.diffLoadGen
 	repo := a.readRepo()
-	scr := a.screen
 	// Acknowledge the click immediately: the diff is a git round trip
 	// away, and a click that paints nothing reads as a dropped click.
 	a.flash("Loading diff…")
-	a.safeGo("diff-load", func() {
+	a.diffLoad.Start(func(context.Context) (diffLoadResult, error) {
 		patch, err := load(repo)
-		_ = scr.PostEvent(&diffLoadEvent{
-			when:    time.Now(),
-			gen:     gen,
-			kind:    kind,
-			title:   title,
-			tabPath: tabPath,
-			patch:   patch,
-			err:     err,
-		})
+		return diffLoadResult{kind: kind, title: title, tabPath: tabPath, patch: patch}, err
 	})
 }
 
 // handleDiffLoaded opens the diff a background load produced, or
-// explains its absence. Three things can have happened while git was
-// working and all of them mean "drop it": a newer request superseded
-// this one (gen), an overlay went up (a diff yanking itself over a
-// prompt the user is typing into is worse than no diff at all), or the
-// active tab moved on, which would leave the diff describing a file
-// that is no longer in front of the user. An empty patch that came
-// with an error is not "clean" — git could not answer, and the reason
-// is what the user needs.
-func (a *App) handleDiffLoaded(e *diffLoadEvent) {
-	if e.gen != a.diffLoadGen || a.anyModalOpen() {
+// explains its absence. Two things can have happened while git was
+// working and both mean "drop it": an overlay went up (a diff yanking
+// itself over a prompt the user is typing into is worse than no diff at
+// all), or the active tab moved on, which would leave the diff
+// describing a file that is no longer in front of the user. The third —
+// a newer click superseded this one — never reaches here; the job drops
+// it. An empty patch that came with an error is not "clean" — git could
+// not answer, and the reason is what the user needs.
+func (a *App) handleDiffLoaded(r diffLoadResult, err error) {
+	if a.anyModalOpen() {
 		return
 	}
 	tab := a.activeTabPtr()
-	if tab == nil || tab.Path != e.tabPath {
+	if tab == nil || tab.Path != r.tabPath {
 		return
 	}
-	if e.patch.Empty() {
+	if r.patch.Empty() {
 		switch {
-		case e.err != nil:
-			a.openInfo(e.title, []string{"Couldn't load the diff:", "", e.err.Error()})
-		case e.kind == diffLoadHunk:
+		case err != nil:
+			a.openInfo(r.title, []string{"Couldn't load the diff:", "", err.Error()})
+		case r.kind == diffLoadHunk:
 			a.openInfo("Git change", []string{"No git diff found for this line."})
 		default:
 			a.flash("No uncommitted changes in this file")
@@ -179,7 +163,7 @@ func (a *App) handleDiffLoaded(e *diffLoadEvent) {
 	}
 	// The file is already open in front of the user, so the diff view
 	// gets no [ Open file ] button — Close is the only way out.
-	a.openDiffView(e.title, e.patch, "", e.tabPath)
+	a.openDiffView(r.title, r.patch, "", r.tabPath)
 }
 
 // menuDiffFile is the ≡ menu entry that opens the active tab's own

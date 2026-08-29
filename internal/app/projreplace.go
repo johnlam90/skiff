@@ -17,30 +17,26 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/search"
 )
 
-// projReplaceDoneEvent reports a finished background disk apply,
+// projReplaceResult is what a finished background disk apply lands,
 // carrying the buffer-side counts so the user gets ONE combined flash.
 // bufSaveFailed names the open buffers we rewrote but could not write
 // back — those tabs are still dirty and the report has to say so, or
 // the user reads a success count that covers files nothing reached.
-type projReplaceDoneEvent struct {
-	when                      time.Time
+type projReplaceResult struct {
 	rep                       search.ReplaceReport
 	bufOcc, bufFiles, bufSkip int
 	bufSaveFailed             []string
 }
-
-// When implements tcell.Event.
-func (e *projReplaceDoneEvent) When() time.Time { return e.when }
 
 // resetProjReplace clears the replace field state. Every teardown
 // funnels through closeProjFind, which calls this — including
@@ -227,9 +223,11 @@ func (a *App) projReplaceConfirmAll() {
 }
 
 // doProjReplaceAll applies everywhere: open buffers synchronously (the
-// editor owns them), closed files in the background behind the
-// replace's own gate (projReplaceBusy — not the file clipboard's, the
-// two are unrelated). One combined report lands via projReplaceDoneEvent.
+// editor owns them), closed files in the background on the projReplace
+// job — its own Refuse gate, not the file clipboard's, the two are
+// unrelated. One combined report lands via handleProjReplaceDone. The
+// gate is checked before the buffers are touched: a refused replace
+// must leave nothing half-applied.
 //
 // Re-saving a clean tab can fail (the file turned into a directory, the
 // disk filled, permissions changed under us). Those failures are
@@ -238,7 +236,7 @@ func (a *App) projReplaceConfirmAll() {
 // count for a write that never landed is the one outcome worse than the
 // failure itself.
 func (a *App) doProjReplaceAll(matches []search.Match, query, repl string, opts search.Options) {
-	if a.projReplaceBusy {
+	if a.projReplace.Busy() {
 		a.flash("Another replace is still running")
 		return
 	}
@@ -275,15 +273,12 @@ func (a *App) doProjReplaceAll(matches []search.Match, query, repl string, opts 
 	// failure must not produce a different message on each run.
 	sort.Strings(saveFailed)
 	root := a.rootDir
-	scr := a.screen
-	a.projReplaceBusy = true
-	a.safeGo("project-replace", func() {
-		rep := search.ApplyReplace(root, diskMatches, query, repl, opts)
-		_ = scr.PostEvent(&projReplaceDoneEvent{
-			when: time.Now(), rep: rep,
+	a.projReplace.Start(func(context.Context) (projReplaceResult, error) {
+		return projReplaceResult{
+			rep:    search.ApplyReplace(root, diskMatches, query, repl, opts),
 			bufOcc: bufOcc, bufFiles: bufFiles, bufSkip: bufSkip,
 			bufSaveFailed: saveFailed,
-		})
+		}, nil
 	})
 }
 
@@ -293,18 +288,17 @@ func (a *App) doProjReplaceAll(matches []search.Match, query, repl string, opts 
 // flashes its own warning for any tab that now disagrees with the file
 // — which is exactly the tab whose save just failed. Flashing first
 // would let that generic warning bury the specific report.
-func (a *App) handleProjReplaceDone(e *projReplaceDoneEvent) {
-	a.projReplaceBusy = false
-	occ := e.rep.Replaced + e.bufOcc
-	files := e.rep.Files + e.bufFiles
-	skipped := e.rep.Skipped + e.bufSkip
+func (a *App) handleProjReplaceDone(r projReplaceResult, _ error) {
+	occ := r.rep.Replaced + r.bufOcc
+	files := r.rep.Files + r.bufFiles
+	skipped := r.rep.Skipped + r.bufSkip
 	msg := fmt.Sprintf("Replaced %d in %d file(s)", occ, files)
 	if skipped > 0 {
 		msg += fmt.Sprintf(" (%d skipped — changed since search)", skipped)
 	}
-	if len(e.bufSaveFailed) > 0 {
+	if len(r.bufSaveFailed) > 0 {
 		msg += fmt.Sprintf(" — save failed for %s, still unsaved",
-			strings.Join(e.bufSaveFailed, ", "))
+			strings.Join(r.bufSaveFailed, ", "))
 	}
 	a.refreshTreeNow()
 	if a.projFind.findOpen {

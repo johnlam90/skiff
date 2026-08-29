@@ -14,9 +14,11 @@
 package app
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -669,7 +671,14 @@ func TestCloseAllModals_TearsDownProjectFindThroughOnePath(t *testing.T) {
 	a.projFind.replaceValue = []rune("repl")
 	a.projFind.replaceCursor = 4
 	a.projFind.focusReplace = true
-	gen := a.projFind.findGen
+	// An in-flight sweep, which the teardown must retire: its walk is
+	// told to stop and its landing can never paint into the closed panel.
+	retired := make(chan struct{})
+	a.projFind.sweep.Start(func(ctx context.Context) (projFindResult, error) {
+		<-ctx.Done()
+		close(retired)
+		return projFindResult{}, ctx.Err()
+	})
 
 	a.closeAllModals()
 
@@ -683,7 +692,13 @@ func TestCloseAllModals_TearsDownProjectFindThroughOnePath(t *testing.T) {
 		t.Fatalf("replace state survived: open=%v value=%q cursor=%d focus=%v",
 			a.projFind.replaceOpen, string(a.projFind.replaceValue), a.projFind.replaceCursor, a.projFind.focusReplace)
 	}
-	if a.projFind.findGen == gen {
-		t.Fatalf("closeAllModals must invalidate the in-flight sweep; gen still %d", gen)
+	select {
+	case <-retired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("closeAllModals must invalidate the in-flight sweep")
+	}
+	pumpUntil(t, a, "retired sweep", idle(&a.projFind.sweep))
+	if a.projFind.findMatches != nil {
+		t.Fatal("a retired sweep must not land into the closed panel")
 	}
 }

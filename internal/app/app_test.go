@@ -93,7 +93,7 @@ func newTestApp(t *testing.T, root string) *App {
 	// flake. Registered after the Fini cleanup so it runs first (LIFO).
 	t.Cleanup(func() {
 		deadline := time.Now().Add(3 * time.Second)
-		for a.gitRefreshInFlight && time.Now().Before(deadline) {
+		for a.gitStatus.Busy() && time.Now().Before(deadline) {
 			if scr.HasPendingEvent() {
 				a.handleEvent(scr.PollEvent())
 			} else {
@@ -249,7 +249,7 @@ func TestRun_DrainsBurstAndExits(t *testing.T) {
 	// screen's 10-slot queue with the burst below (postEvent blocks
 	// when it is full).
 	deadline := time.Now().Add(3 * time.Second)
-	for (a.gitRefreshInFlight || scr.HasPendingEvent()) && time.Now().Before(deadline) {
+	for (a.gitStatus.Busy() || scr.HasPendingEvent()) && time.Now().Before(deadline) {
 		if scr.HasPendingEvent() {
 			a.handleEvent(scr.PollEvent())
 		} else {

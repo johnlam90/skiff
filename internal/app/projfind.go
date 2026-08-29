@@ -8,50 +8,37 @@
 // projfind.go owns the project-wide content search UI: a find-bar-style
 // input row above the status bar plus a results overlay in the editor
 // area, grouped by file with per-file folding (druk's search panel,
-// skiff-shaped). The sweep itself lives in internal/search and runs in
-// a goroutine; results come back through a projFindDoneEvent carrying a
-// generation number so stale sweeps are dropped, never rendered.
+// skiff-shaped). The sweep itself lives in internal/search and runs on
+// the panel's sweep job (internal/asyncjob, Supersede): every keystroke
+// starts a run that debounces, then searches; the newer keystroke
+// retires the older run, so stale sweeps are dropped, never rendered.
 
 package app
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/asyncjob"
 	"github.com/johnlam90/skiff/internal/search"
 )
-
-// projFindKickEvent fires after the debounce interval: the sweep for
-// gen starts only if no newer keystroke has arrived meanwhile.
-type projFindKickEvent struct {
-	when time.Time
-	gen  int
-}
-
-// When implements tcell.Event.
-func (e *projFindKickEvent) When() time.Time { return e.when }
 
 // projFindDebounce is how long typing must pause before a sweep
 // starts. Long enough to coalesce a burst of keystrokes, short enough
 // to feel instant.
 const projFindDebounce = 120 * time.Millisecond
 
-// projFindDoneEvent carries a finished background sweep onto the main
-// event loop. gen pins it to the query generation that started it.
-type projFindDoneEvent struct {
-	when      time.Time
-	gen       int
+// projFindResult is what a finished sweep lands: the matches and
+// whether the engine's cap cut them short.
+type projFindResult struct {
 	matches   []search.Match
 	truncated bool
 }
-
-// When implements tcell.Event.
-func (e *projFindDoneEvent) When() time.Time { return e.when }
 
 // projFindRow is one rendered row of the results overlay: a file header
 // (fold toggle) or a single match line.
@@ -73,14 +60,11 @@ type projFindState struct {
 	findValue     []rune
 	findCursor    int
 	findScroll    int
-	findGen       int // generation counter; stale sweeps are dropped
-	findBusy      bool
 	findMatches   []search.Match
 	findTruncated bool
 	findSelected  int
 	findScrollY   int
 	findFolded    map[string]bool
-	findLiveGen   atomic.Int64 // latest gen, readable from sweep goroutines
 	findMatchCase bool
 	findWholeWord bool
 	findRegex     bool
@@ -93,6 +77,11 @@ type projFindState struct {
 	focusReplace                   bool
 	replaceFieldX0, replaceFieldX1 int
 	replaceAllX0, replaceAllX1     int
+
+	// sweep is the background search: Supersede, so the newest
+	// keystroke's run is the only one that can land, and Busy is the
+	// bar's "searching…" state. Closing the panel invalidates it.
+	sweep asyncjob.Job[projFindResult]
 }
 
 // menuFindInProject is the ≡ menu / Esc-F entry point.
@@ -115,7 +104,6 @@ func (a *App) openProjFind() {
 	a.projFind.findScroll = 0
 	a.projFind.findMatches = nil
 	a.projFind.findTruncated = false
-	a.projFind.findBusy = false
 	a.projFind.findSelected = 0
 	a.projFind.findScrollY = 0
 	a.projFind.findFolded = map[string]bool{}
@@ -131,71 +119,75 @@ func (a *App) closeProjFind() {
 	a.projFind.findScroll = 0
 	a.projFind.findMatches = nil
 	a.projFind.findTruncated = false
-	a.projFind.findBusy = false
 	a.projFind.findFolded = nil
 	a.resetProjReplace()
-	// Invalidate any in-flight sweep.
-	a.projFind.findGen++
+	// Retire any in-flight sweep: its landing is dropped and its walk
+	// told to stop.
+	a.projFind.sweep.Invalidate()
 }
 
-// projFindQueryChanged kicks a background sweep for the current input.
-// Every call bumps the generation; the done-handler drops results from
-// older generations, so fast typing never renders stale hits.
+// projFindQueryChanged starts a background sweep for the current input.
+// The sweep job is Supersede, so every keystroke retires the run before
+// it — the older run's walk stops at its next cancellation check and
+// its landing is dropped — and fast typing never renders stale hits.
+//
+// The run debounces before it reads anything: the sweep proper starts
+// only after the typing pauses, so a burst of keystrokes costs a burst
+// of goroutines that exit at the debounce, not a full disk walk each.
+// The file index is read after the debounce too, on the worker — the
+// finder is safe from any goroutine, and copying a 50k-entry list per
+// keystroke would be the wrong side of that trade.
 func (a *App) projFindQueryChanged() {
-	a.projFind.findGen++
-	gen := a.projFind.findGen
 	query := string(a.projFind.findValue)
 	if strings.TrimSpace(query) == "" {
+		a.projFind.sweep.Invalidate()
 		a.projFind.findMatches = nil
 		a.projFind.findTruncated = false
-		a.projFind.findBusy = false
 		a.projFind.findSelected = 0
 		a.projFind.findScrollY = 0
 		return
 	}
-	a.projFind.findBusy = true
-	a.projFind.findLiveGen.Store(int64(gen))
-	// Debounce: the sweep starts only after the typing pauses — every
-	// keystroke on a big repo used to launch (and then discard) a full
-	// disk walk.
-	scr := a.screen
-	time.AfterFunc(projFindDebounce, func() {
-		_ = scr.PostEvent(&projFindKickEvent{when: time.Now(), gen: gen})
-	})
-}
-
-// handleProjFindKick starts the debounced sweep, unless a newer
-// keystroke superseded it. The sweep itself also polls the live
-// generation so an in-flight walk abandons as soon as it is stale.
-func (a *App) handleProjFindKick(e *projFindKickEvent) {
-	if !a.projFind.findOpen || e.gen != a.projFind.findGen {
-		return
-	}
-	gen := e.gen
-	query := string(a.projFind.findValue)
-	files := a.finder.Files()
+	index := a.finder
 	root := a.rootDir
-	scr := a.screen
-	live := &a.projFind.findLiveGen
 	matchCase, wholeWord, regex := a.projFind.findMatchCase, a.projFind.findWholeWord, a.projFind.findRegex
-	a.safeGo("project-find", func() {
+	a.projFind.sweep.Start(func(ctx context.Context) (projFindResult, error) {
+		if !projFindDebounceWait(ctx) {
+			return projFindResult{}, ctx.Err()
+		}
 		opts := search.DefaultOptions()
-		opts.Cancelled = func() bool { return live.Load() != int64(gen) }
+		opts.Cancelled = func() bool { return ctx.Err() != nil }
 		opts.MatchCase, opts.WholeWord, opts.Regex = matchCase, wholeWord, regex
-		matches, truncated := search.Search(root, files, query, opts)
-		_ = scr.PostEvent(&projFindDoneEvent{when: time.Now(), gen: gen, matches: matches, truncated: truncated})
+		matches, truncated := search.Search(root, index.Files(), query, opts)
+		return projFindResult{matches: matches, truncated: truncated}, ctx.Err()
 	})
 }
 
-// handleProjFindDone lands a finished sweep: stale generations are
-// dropped, current ones replace the result set and reset the cursor.
-func (a *App) handleProjFindDone(e *projFindDoneEvent) {
-	if !a.projFind.findOpen || e.gen != a.projFind.findGen {
+// projFindDebounceWait holds the run for the debounce interval and
+// reports whether it survived it — false when a newer keystroke (or the
+// panel closing) retired the run first, which is the common case while
+// the user is still typing.
+func projFindDebounceWait(ctx context.Context) bool {
+	timer := time.NewTimer(projFindDebounce)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// handleProjFindDone lands a finished sweep: a run that was cancelled
+// mid-walk carries a partial answer and is dropped, as is one landing
+// after the panel closed; a current one replaces the result set and
+// resets the cursor. Superseded runs never reach here — the job drops
+// them.
+func (a *App) handleProjFindDone(r projFindResult, err error) {
+	if err != nil || !a.projFind.findOpen {
 		return
 	}
-	a.projFind.findMatches = e.matches
-	a.projFind.findTruncated = e.truncated
-	a.projFind.findBusy = false
+	a.projFind.findMatches = r.matches
+	a.projFind.findTruncated = r.truncated
 	a.projFind.findSelected = 0
 	a.projFind.findScrollY = 0
 }
@@ -488,7 +480,7 @@ func (a *App) drawProjFindResults() {
 	rows := a.projFindRows()
 	if len(rows) == 0 {
 		msg := "Type to search the project"
-		if a.projFind.findBusy {
+		if a.projFind.sweep.Busy() {
 			msg = "Searching…"
 		} else if len(a.projFind.findValue) > 0 {
 			msg = "No matches"
@@ -626,7 +618,7 @@ func (a *App) drawProjFindBar() {
 	if counter != "" && bw > runeLen(label)+runeLen(counter)+4 {
 		rightTextStart -= runeLen(counter) + 2
 		style := mutedStyle
-		if !a.projFind.findBusy && len(a.projFind.findValue) > 0 && len(a.projFind.findMatches) == 0 {
+		if !a.projFind.sweep.Busy() && len(a.projFind.findValue) > 0 && len(a.projFind.findMatches) == 0 {
 			style = tcell.StyleDefault.Background(bg).Foreground(a.theme.Error).Bold(true)
 		}
 		drawAt(a.screen, rightTextStart, by, counter, style)
@@ -700,7 +692,7 @@ func (a *App) projFindCounterText() string {
 	if len(a.projFind.findValue) == 0 {
 		return ""
 	}
-	if a.projFind.findBusy {
+	if a.projFind.sweep.Busy() {
 		return "searching…"
 	}
 	if len(a.projFind.findMatches) == 0 {

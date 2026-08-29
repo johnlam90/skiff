@@ -11,13 +11,14 @@
 // The operations themselves live in tabops.go and the editor package; this
 // file is the wiring from a menu row to a behavior.
 //
-// Custom actions shell out on a goroutine and report back through
-// customActionDoneEvent, because a slow scp or ssh must never freeze the
-// event loop.
+// Custom actions shell out on the customAction job and land through
+// handleCustomActionDone, because a slow scp or ssh must never freeze
+// the event loop.
 
 package app
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -29,21 +30,16 @@ import (
 	"github.com/johnlam90/skiff/internal/userconfig"
 )
 
-// customActionDoneEvent is posted by runCustomAction when its background
-// shell-out finishes. Carries the label, any error, and how long the run
-// took so the main loop can pick a proportionate report — running scp /
-// ssh inline would freeze the UI for the duration of the network
-// round-trip.
-type customActionDoneEvent struct {
-	when     time.Time
+// customActionResult is what a finished shell-out lands beside its exit
+// error: the label, the captured output the report shows, and how long
+// the run took so the main loop can pick a proportionate report —
+// running scp / ssh inline would freeze the UI for the duration of the
+// network round-trip.
+type customActionResult struct {
 	label    string
-	err      error
 	output   []byte // combined stdout+stderr from the action's shell run
 	duration time.Duration
 }
-
-// When satisfies the tcell.Event interface.
-func (e *customActionDoneEvent) When() time.Time { return e.when }
 
 // customActionQuietRun is how long a successful action may take before
 // its completion is worth a modal rather than a flash. Under a second
@@ -65,9 +61,9 @@ const customActionQuietRun = time.Second
 // A fast, silent action still gets nothing but a flash, because
 // stopping to dismiss a modal after every one-second formatter run is
 // its own kind of hostile.
-func (a *App) handleCustomActionDone(e *customActionDoneEvent) {
-	if e.err != nil {
-		a.openInfo("Action failed: "+e.label, splitErrorOutput(e.err, e.output))
+func (a *App) handleCustomActionDone(r customActionResult, err error) {
+	if err != nil {
+		a.openInfo("Action failed: "+r.label, splitErrorOutput(err, r.output))
 		return
 	}
 	// Explicit finder invalidation, not the tick's conditional one: an
@@ -75,15 +71,15 @@ func (a *App) handleCustomActionDone(e *customActionDoneEvent) {
 	// tree never loaded, which the sweep's membership gate cannot see.
 	a.refreshTreeNow()
 	a.invalidateFinder()
-	body := splitActionOutput(e.output, e.duration)
+	body := splitActionOutput(r.output, r.duration)
 	if len(body) == 0 {
-		a.flash(e.label + " — done")
+		a.flash(r.label + " — done")
 		return
 	}
 	// refreshTreeNow ran first: openInfo takes the overlay slot, and a
 	// tree tick that reconciles a changed tab must not try to open a
 	// conflict prompt on top of the report we are about to show.
-	a.openInfo("Action done: "+e.label, body)
+	a.openInfo("Action done: "+r.label, body)
 }
 
 // splitActionOutput formats a *successful* action's captured output for
@@ -222,9 +218,9 @@ func (a *App) menuRevert() {
 // command runs immediately (the historical behaviour) and the action
 // requires an open tab so $FILE / $FILENAME aren't blank.
 //
-// Either path runs in a goroutine so a slow scp / ssh can't freeze
-// the UI; completion fires a customActionDoneEvent the main loop
-// turns into a flash on success or an info modal on failure.
+// Either path runs on the customAction job so a slow scp / ssh can't
+// freeze the UI; the landing turns into a flash on success or an info
+// modal on failure.
 func (a *App) runCustomAction(idx int) {
 	a.closeMenu()
 	if idx < 0 || idx >= len(a.customActions) {
@@ -250,15 +246,18 @@ func (a *App) runCustomAction(idx int) {
 
 // execCustomAction is the actual shell-out. Pulled out of
 // runCustomAction so both the prompt-less and prompted paths share
-// the env-var, logging, and event-posting wiring without diverging.
+// the env-var, logging, and landing wiring without diverging. The job
+// is Refuse: a second action while one is still running is refused
+// with a flash rather than run concurrently — of the three policies it
+// is the only one that cannot silently lose the first action's report,
+// which is the "did my scp actually work?" complaint the report exists
+// to answer.
 func (a *App) execCustomAction(act customactions.Action, promptValues map[string]string) {
 	vars := a.captureActionVars()
 	env := append(os.Environ(), vars.envSlice()...)
 	env = append(env, promptValuesEnv(act.Prompts, promptValues)...)
 
-	a.flash(act.Label + "…")
-	scr := a.screen
-	a.safeGo("custom-action", func() {
+	accepted := a.customAction.Start(func(context.Context) (customActionResult, error) {
 		started := time.Now()
 		cmd := exec.Command("sh", "-c", act.Command)
 		cmd.Env = env
@@ -280,14 +279,13 @@ func (a *App) execCustomAction(act customactions.Action, promptValues map[string
 			Output:   out,
 		})
 
-		_ = scr.PostEvent(&customActionDoneEvent{
-			when:     time.Now(),
-			label:    act.Label,
-			err:      runErr,
-			output:   out,
-			duration: duration,
-		})
+		return customActionResult{label: act.Label, output: out, duration: duration}, runErr
 	})
+	if !accepted {
+		a.flash("Another action is still running")
+		return
+	}
+	a.flash(act.Label + "…")
 }
 
 // menuSave runs the Save action and dismisses the menu.

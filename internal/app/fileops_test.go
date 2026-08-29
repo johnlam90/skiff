@@ -956,7 +956,7 @@ func TestApplyChangeset_EmptyStillRefreshesEverything(t *testing.T) {
 
 	a.applyChangeset(filemanager.Changeset{})
 
-	if !a.gitRefreshInFlight && !a.gitRefreshQueued {
+	if !a.gitStatus.Busy() && !a.gitStatus.Queued() {
 		t.Fatal("an empty changeset must still request a git refresh")
 	}
 	if *rebuilds != 1 {
@@ -1065,7 +1065,7 @@ func TestDoRename_FailureRunsTheTail(t *testing.T) {
 	if *rebuilds != 1 {
 		t.Fatalf("a failed rename must still invalidate the finder; rebuilds = %d", *rebuilds)
 	}
-	if !a.gitRefreshInFlight && !a.gitRefreshQueued {
+	if !a.gitStatus.Busy() && !a.gitStatus.Queued() {
 		t.Fatal("a failed rename must still request a git refresh")
 	}
 	if _, err := os.Stat(src); err != nil {

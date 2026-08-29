@@ -252,7 +252,7 @@ func TestTrustPromptCancel_PersistsDeny(t *testing.T) {
 
 // TestExecFormatter_RunsAndPostsEvent walks the async happy path: the
 // goroutine shells out, the formatter rewrites the file, and a
-// formatDoneEvent lands on the screen's queue with no error.
+// landing reaches the loop with no error.
 func TestExecFormatter_RunsAndPostsEvent(t *testing.T) {
 	useTestTrustFile(t)
 	root := t.TempDir()
@@ -264,13 +264,7 @@ func TestExecFormatter_RunsAndPostsEvent(t *testing.T) {
 
 	a.execFormatter(target, []string{"sh", "-c", "echo formatted > " + target})
 
-	ev := waitForFormatEvent(t, a)
-	if ev.err != nil {
-		t.Fatalf("formatter err: %v", ev.err)
-	}
-	if ev.tabPath != target {
-		t.Fatalf("event tabPath: got %q, want %q", ev.tabPath, target)
-	}
+	waitFormatterQuiet(t, a)
 	got, _ := os.ReadFile(target)
 	if string(got) != "formatted\n" {
 		t.Fatalf("file contents: got %q, want %q", string(got), "formatted\n")
@@ -279,17 +273,14 @@ func TestExecFormatter_RunsAndPostsEvent(t *testing.T) {
 
 // TestExecFormatter_MissingBinaryIsSilent codifies the "skip when not
 // installed" rule: a missing binary must not flash an error or
-// otherwise punish the user. The done event should arrive with err
-// == nil so handleFormatDone treats it as a no-op.
+// otherwise punish the user. The run lands with err == nil so
+// handleFormatDone treats it as a no-op.
 func TestExecFormatter_MissingBinaryIsSilent(t *testing.T) {
 	useTestTrustFile(t)
 	a := newTestApp(t, t.TempDir())
 	a.execFormatter("/tmp/nope.go", []string{"definitely-not-a-real-binary-xyzzy"})
 
-	ev := waitForFormatEvent(t, a)
-	if ev.err != nil {
-		t.Fatalf("missing binary should be silent, got err=%v", ev.err)
-	}
+	waitFormatterQuiet(t, a)
 }
 
 // TestHandleFormatDone_ReloadsCleanBuffer is the success path for
@@ -309,7 +300,7 @@ func TestHandleFormatDone_ReloadsCleanBuffer(t *testing.T) {
 		t.Fatalf("rewrite: %v", err)
 	}
 
-	a.handleFormatDone(&formatDoneEvent{tabPath: target, label: "fmt"})
+	a.handleFormatDone(formatResult{tabPath: target, label: "fmt"}, nil)
 
 	if got := tab.Buffer.String(); got != "formatted\n" {
 		t.Fatalf("buffer after reload: got %q, want %q", got, "formatted\n")
@@ -339,7 +330,7 @@ func TestFormatOnSave_PreservesUndoHistory(t *testing.T) {
 	if err := os.WriteFile(target, []byte("formatted\n"), 0644); err != nil {
 		t.Fatalf("rewrite: %v", err)
 	}
-	a.handleFormatDone(&formatDoneEvent{tabPath: target, label: "fmt"})
+	a.handleFormatDone(formatResult{tabPath: target, label: "fmt"}, nil)
 
 	if got := tab.Buffer.String(); got != "formatted\n" {
 		t.Fatalf("buffer after format reload: got %q, want %q", got, "formatted\n")
@@ -374,7 +365,7 @@ func TestHandleFormatDone_PreservesDirtyBuffer(t *testing.T) {
 		t.Fatalf("rewrite: %v", err)
 	}
 
-	a.handleFormatDone(&formatDoneEvent{tabPath: target, label: "fmt"})
+	a.handleFormatDone(formatResult{tabPath: target, label: "fmt"}, nil)
 
 	if got := tab.Buffer.String(); got != "user-typed-this\n" {
 		t.Fatalf("dirty buffer was overwritten: got %q", got)
@@ -387,7 +378,7 @@ func TestHandleFormatDone_PreservesDirtyBuffer(t *testing.T) {
 func TestHandleFormatDone_ClosedTabIsNoop(t *testing.T) {
 	useTestTrustFile(t)
 	a := newTestApp(t, t.TempDir())
-	a.handleFormatDone(&formatDoneEvent{tabPath: "/tmp/never-opened.go", label: "fmt"})
+	a.handleFormatDone(formatResult{tabPath: "/tmp/never-opened.go", label: "fmt"}, nil)
 	// No assertion — the test passes if we don't panic.
 }
 
@@ -495,11 +486,8 @@ func TestMaybeOfferInstall_AcceptWritesProjectConfig(t *testing.T) {
 		t.Fatalf("expected TrustAllowed after install, got %v", d)
 	}
 
-	// Wait for the formatter goroutine to land its done event.
-	ev := waitForFormatEvent(t, a)
-	if ev.err != nil {
-		t.Fatalf("formatter failed: %v", ev.err)
-	}
+	// Wait for the formatter run to land.
+	waitFormatterQuiet(t, a)
 	got, _ := os.ReadFile(target)
 	if string(got) != "formatted\n" {
 		t.Fatalf("file after format: got %q", string(got))
@@ -717,29 +705,19 @@ func TestMaybeOfferInstall_FreshProjectStillAutoTrusts(t *testing.T) {
 		t.Fatalf("expected TrustAllowed for a fresh project's install, got %v", d)
 	}
 
-	ev := waitForFormatEvent(t, a)
-	if ev.err != nil {
-		t.Fatalf("formatter failed: %v", ev.err)
-	}
+	waitFormatterQuiet(t, a)
 }
 
-// waitForFormatEvent drains the simulation screen's event queue
-// until a formatDoneEvent shows up. Cap the wait at 2s so a hung
-// goroutine fails the test instead of hanging CI forever.
-func waitForFormatEvent(t *testing.T, a *App) *formatDoneEvent {
+// waitFormatterQuiet pumps until the formatter run lands through the
+// real handler and then asserts it landed without an error: the
+// handler's failure path is the one flash that says "failed", so its
+// absence is the success signal a test can read.
+func waitFormatterQuiet(t *testing.T, a *App) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		ev := a.screen.PollEvent()
-		if ev == nil {
-			t.Fatal("screen returned nil event")
-		}
-		if fe, ok := ev.(*formatDoneEvent); ok {
-			return fe
-		}
+	pumpUntil(t, a, "formatter", idle(&a.formatter))
+	if strings.Contains(a.statusMsg, "failed") {
+		t.Fatalf("formatter failed: %q", a.statusMsg)
 	}
-	t.Fatal("timed out waiting for formatDoneEvent")
-	return nil
 }
 
 // -----------------------------------------------------------------------------
@@ -857,44 +835,17 @@ func plantRepoBinary(t *testing.T, root, rel, marker string) {
 	}
 }
 
-// formatSentinelEvent is a test-local marker, shaped like the real
-// events format.go declares (a time.Time plus a When() method), that
-// expectNoFormatEvent posts onto the queue itself right after the
-// refusal path under test has already returned.
-type formatSentinelEvent struct{ when time.Time }
-
-// When satisfies the tcell.Event interface.
-func (e *formatSentinelEvent) When() time.Time { return e.when }
-
-// expectNoFormatEvent asserts a formatter refusal never posts a
-// formatDoneEvent. format.go's execution goroutine (format.go:509's
-// `go func`) is only ever spawned past the refusal checks these tests
-// exercise, so a refused run returns synchronously with nothing in
-// flight — which makes a sentinel posted right here a strict
-// happens-after marker: any formatDoneEvent that attempt could still
-// produce is already queued (or never will be) by the time the
-// sentinel lands, so draining until the sentinel arrives is equivalent
-// to waiting out that attempt in full, without guessing how long that
-// takes. The 5s deadline only trips if the queue is genuinely stuck
-// (a caller whose refusal path turns out to be asynchronous would hang
-// here instead of racing silently).
+// expectNoFormatEvent asserts a formatter refusal never started a run.
+// The formatter job is the only thing that spawns the execution
+// goroutine, and it is only ever started past the refusal checks these
+// tests exercise, so a refused run returns synchronously with nothing
+// in flight — Busy false the moment the caller returns is the whole
+// proof, with no event to wait out.
 func expectNoFormatEvent(t *testing.T, a *App) {
 	t.Helper()
-	_ = a.screen.PostEvent(&formatSentinelEvent{when: time.Now()})
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if !a.screen.HasPendingEvent() {
-			time.Sleep(2 * time.Millisecond)
-			continue
-		}
-		switch ev := a.screen.PollEvent().(type) {
-		case *formatDoneEvent:
-			t.Fatalf("formatter ran when it should have been refused: %+v", ev)
-		case *formatSentinelEvent:
-			return
-		}
+	if a.formatter.Busy() {
+		t.Fatal("formatter ran when it should have been refused")
 	}
-	t.Fatal("timed out waiting for the sentinel event — event queue appears stuck")
 }
 
 // TestRunFormatOnSave_RepoShippedBinaryRefused is the second half of the
@@ -1046,9 +997,7 @@ func TestExecFormatter_RunsInProjectRoot(t *testing.T) {
 	// directory is the project root.
 	a.execFormatter(filepath.Join(root, "main.go"), []string{"sh", "-c", "cat marker.txt > " + out})
 
-	if ev := waitForFormatEvent(t, a); ev.err != nil {
-		t.Fatalf("formatter should have found marker.txt in the root: %v", ev.err)
-	}
+	waitFormatterQuiet(t, a)
 	got, err := os.ReadFile(out)
 	if err != nil {
 		t.Fatalf("read probe: %v", err)
@@ -1075,18 +1024,15 @@ func TestExecFormatter_TimeoutKillsAndReports(t *testing.T) {
 	start := time.Now()
 	a.execFormatter(filepath.Join(a.rootDir, "main.go"), []string{"sleep", "30"})
 
-	ev := waitForFormatEvent(t, a)
-	if ev.err == nil {
-		t.Fatal("a formatter past the deadline must be reported as a failure")
-	}
-	if !strings.Contains(ev.err.Error(), "timed out") {
-		t.Fatalf("error should name the timeout, got %v", ev.err)
-	}
+	pumpUntil(t, a, "formatter", idle(&a.formatter))
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("formatter was not killed promptly: waited %s", elapsed)
 	}
-	// The failure has to reach the user, not just the event.
-	a.handleFormatDone(ev)
+	// The failure has to reach the user through the landing, and it has
+	// to name the deadline rather than a bare "signal: killed".
+	if !strings.Contains(a.statusMsg, "failed") {
+		t.Fatalf("a formatter past the deadline must be reported as a failure, got %q", a.statusMsg)
+	}
 	if !strings.Contains(a.statusMsg, "timed out") {
 		t.Fatalf("timeout should surface in the status bar, got %q", a.statusMsg)
 	}

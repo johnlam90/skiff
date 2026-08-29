@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/johnlam90/skiff/internal/git"
+	"github.com/johnlam90/skiff/internal/overlay"
 )
 
 // commitAll makes a commit of everything so the repo has a HEAD.
@@ -107,7 +108,7 @@ func TestMenuGitPush_ReturnsBeforeUpstreamProbe(t *testing.T) {
 		t.Fatal("the push cannot have run before its upstream probe was answered")
 	}
 	close(gate.release)
-	waitGitIdle(t, a)
+	pumpUntil(t, a, "git op", idle(&a.gitOp))
 	if !fake.Called("rev-parse --abbrev-ref @{upstream}") || !fake.Called("push --set-upstream origin main") {
 		t.Fatalf("push must reach the runner seam through readRepo, ran %v", fake.Calls())
 	}
@@ -127,7 +128,7 @@ func TestMenuGitPush_ScriptedRejectionOffersPullAndPush(t *testing.T) {
 	fake.Script("push", "! [rejected] main -> main (fetch first)\n", errors.New("exit status 1"))
 
 	a.menuGitPush()
-	waitGitIdle(t, a)
+	pumpUntil(t, a, "git op", idle(&a.gitOp))
 	c := confirmPrefab(t, a)
 	if c.Title != "Push rejected" {
 		t.Fatalf("a non-fast-forward push should offer pull-then-push, got %q", c.Title)
@@ -136,7 +137,7 @@ func TestMenuGitPush_ScriptedRejectionOffersPullAndPush(t *testing.T) {
 	fake.Script("pull --no-rebase --no-edit", "Merge made by the 'ort' strategy.\n", nil)
 	fake.Script("push", "", nil)
 	confirmYes(a)
-	waitGitIdle(t, a)
+	pumpUntil(t, a, "git op", idle(&a.gitOp))
 	if !fake.Called("pull --no-rebase --no-edit") {
 		t.Fatalf("accepting the offer must pull first, ran %v", fake.Calls())
 	}
@@ -156,18 +157,52 @@ func TestMenuGitSwitchBranch_ListsScriptedBranches(t *testing.T) {
 	fake.Script("checkout -b remote-only --track origin/remote-only --", "", nil)
 
 	a.menuGitSwitchBranch()
-	waitListPick(t, a)
+	pumpUntil(t, a, "picker", func() bool { return pickIsOpen(a) })
 	items := pickPrefab(t, a).Items
 	if len(items) != 3 || items[0].Label != "main" || items[1].Label != "side" || items[2].Label != "origin/remote-only" {
 		t.Fatalf("picker rows should be the scripted branches, got %+v", items)
 	}
 	pickChoose(t, a, 2)
-	waitGitIdle(t, a)
+	pumpUntil(t, a, "git op", idle(&a.gitOp))
 	if !fake.Called("checkout -b remote-only --track origin/remote-only --") {
 		t.Fatalf("picking the remote spelling should create the tracking local, ran %v", fake.Calls())
 	}
 	if a.statusMsg != "On remote-only" {
 		t.Fatalf("success should flash the local name, got %q", a.statusMsg)
+	}
+}
+
+// TestMenuGitSwitchBranch_TwoRapidClicksOpenOnePicker is the
+// double-picker bug: the branch list is collected off-thread and each
+// click used to spawn its own collection with no gate and no
+// generation, so two clicks landed two lists and the second landing
+// re-opened the picker over the first — resetting whatever the user
+// had already highlighted. Only the newest click's list may open a
+// picker; the older landing is stale and must be dropped.
+func TestMenuGitSwitchBranch_TwoRapidClicksOpenOnePicker(t *testing.T) {
+	a, fake := fakeRepoApp(t)
+	fake.Script("for-each-ref --format=%(HEAD)%00%(refname)%00%(symref) refs/heads refs/remotes",
+		"*\x00refs/heads/main\x00\n \x00refs/heads/side\x00\n", nil)
+
+	a.menuGitSwitchBranch()
+	a.menuGitSwitchBranch()
+
+	// Each distinct *overlay.Pick on top after an event is one picker
+	// opening; a re-open is a new prefab instance. Both collections are
+	// in flight, so the pump drains until the job is idle and notes
+	// what is on top after every landing.
+	var pickers []*overlay.Pick
+	pumpUntil(t, a, "branch lists", func() bool {
+		if p, ok := a.overlays.Top().(*overlay.Pick); ok && (len(pickers) == 0 || pickers[len(pickers)-1] != p) {
+			pickers = append(pickers, p)
+		}
+		return !a.branchList.Busy()
+	})
+	if len(pickers) != 1 {
+		t.Fatalf("two rapid switch-branch clicks opened %d pickers, want 1", len(pickers))
+	}
+	if items := pickPrefab(t, a).Items; len(items) != 2 || items[1].Label != "side" {
+		t.Fatalf("the one picker should list the scripted branches, got %+v", items)
 	}
 }
 
@@ -204,35 +239,27 @@ func TestSetDiffBase_RejectsUnsafeRef(t *testing.T) {
 func TestHandleGitOpDone_Routing(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 
-	a.gitOpBusy = true
-	a.handleGitOpDone(&gitOpDoneEvent{when: time.Now(), label: "Push", okFlash: "Pushed"})
-	if a.gitOpBusy {
-		t.Fatal("done must clear the busy gate")
-	}
+	a.handleGitOpDone(gitOpResult{label: "Push", okFlash: "Pushed"}, nil)
 	if a.statusMsg != "Pushed" {
 		t.Fatalf("success should flash, got %q", a.statusMsg)
 	}
 
-	a.handleGitOpDone(&gitOpDoneEvent{
-		when: time.Now(), label: "Push",
-		err: &git.OpError{Op: "Push", Output: "opaque", Advice: "n/a", NonFastForward: true},
-	})
+	a.handleGitOpDone(gitOpResult{label: "Push"},
+		&git.OpError{Op: "Push", Output: "opaque", Advice: "n/a", NonFastForward: true})
 	if c := confirmPrefab(t, a); c.Title != "Push rejected" {
 		t.Fatalf("rejected push should offer pull-then-push, got title %q", c.Title)
 	}
 	a.closeAllModals()
 
-	a.handleGitOpDone(&gitOpDoneEvent{
-		when: time.Now(), label: "Pull",
-		err: &git.OpError{Op: "Pull", Output: "CONFLICT (content)\n\nAutomatic merge failed", Advice: "merge conflict — fix the marked files, then commit"},
-	})
+	a.handleGitOpDone(gitOpResult{label: "Pull"},
+		&git.OpError{Op: "Pull", Output: "CONFLICT (content)\n\nAutomatic merge failed", Advice: "merge conflict — fix the marked files, then commit"})
 	n := infoPrefab(t, a)
 	if len(n.Lines) < 3 || !strings.Contains(n.Lines[0], "merge conflict") || n.Lines[2] != "CONFLICT (content)" {
 		t.Fatalf("info should lead with the advice and carry git's words, got %v", n.Lines)
 	}
 	a.closeAllModals()
 
-	a.handleGitOpDone(&gitOpDoneEvent{when: time.Now(), label: "Merge", err: git.ErrUnsafeRef})
+	a.handleGitOpDone(gitOpResult{label: "Merge"}, git.ErrUnsafeRef)
 	if n := infoPrefab(t, a); len(n.Lines) != 1 || !strings.Contains(n.Lines[0], "unsafe") {
 		t.Fatalf("a refusal that never ran git should show its one line, got %v", n.Lines)
 	}
@@ -271,43 +298,10 @@ func TestMenuGitCommit_OpensPromptAndCommits(t *testing.T) {
 	}
 	promptPrefab(t, a).Field.SetText("from the panel")
 	submitPrompt(a)
-	waitGitIdle(t, a)
+	pumpUntil(t, a, "git op", idle(&a.gitOp))
 	if out, err := exec.Command("git", "-C", a.rootDir, "log", "-1", "--format=%s").Output(); err != nil ||
 		!strings.Contains(string(out), "from the panel") {
 		t.Fatalf("commit missing: %v %q", err, out)
-	}
-}
-
-// waitGitIdle waits for the in-flight git op to post its done event,
-// then applies it — tests run without the tcell event loop, so the
-// event is fished off the simulation screen's queue manually.
-func waitGitIdle(t *testing.T, a *App) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for a.gitOpBusy {
-		if time.Now().After(deadline) {
-			t.Fatal("git op never finished")
-		}
-		ev := a.screen.PollEvent()
-		if e, ok := ev.(*gitOpDoneEvent); ok {
-			a.handleGitOpDone(e)
-			return
-		}
-	}
-}
-
-// waitListPick pumps events until the async branch-list collection
-// opens its picker.
-func waitListPick(t *testing.T, a *App) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !pickIsOpen(a) {
-		if time.Now().After(deadline) {
-			t.Fatal("picker never opened")
-		}
-		if ev := a.screen.PollEvent(); ev != nil {
-			a.handleEvent(ev)
-		}
 	}
 }
 
@@ -326,7 +320,7 @@ func TestGitMergeBranchEndToEnd(t *testing.T) {
 
 	a := newTestApp(t, dir)
 	a.menuGitMergeBranch()
-	waitListPick(t, a)
+	pumpUntil(t, a, "picker", func() bool { return pickIsOpen(a) })
 	all, err := git.Open(dir).Branches()
 	if err != nil {
 		t.Fatalf("branches: %v", err)
@@ -342,7 +336,7 @@ func TestGitMergeBranchEndToEnd(t *testing.T) {
 		t.Fatalf("feature branch missing from %v", names)
 	}
 	pickChoose(t, a, idx)
-	waitGitIdle(t, a)
+	pumpUntil(t, a, "git op", idle(&a.gitOp))
 	if _, err := os.Stat(filepath.Join(dir, "feat.txt")); err != nil {
 		t.Fatalf("merge should bring feat.txt onto main: %v", err)
 	}
@@ -364,7 +358,7 @@ func TestGitDeleteBranchForceOffer(t *testing.T) {
 
 	a := newTestApp(t, dir)
 	a.menuGitDeleteBranch()
-	waitListPick(t, a)
+	pumpUntil(t, a, "picker", func() bool { return pickIsOpen(a) })
 	all, err := git.Open(dir).Branches()
 	if err != nil {
 		t.Fatalf("branches: %v", err)
@@ -378,12 +372,12 @@ func TestGitDeleteBranchForceOffer(t *testing.T) {
 		t.Fatal("delete needs a confirm first")
 	}
 	confirmYes(a) // yes, delete
-	waitGitIdle(t, a)
+	pumpUntil(t, a, "git op", idle(&a.gitOp))
 	if c := confirmPrefab(t, a); !strings.Contains(c.Message, "Force delete") {
 		t.Fatalf("unmerged delete should offer force, got %q", c.Message)
 	}
 	confirmYes(a) // yes, force
-	waitGitIdle(t, a)
+	pumpUntil(t, a, "git op", idle(&a.gitOp))
 	out, _ := exec.Command("git", "-C", dir, "branch", "--list", "orphan").Output()
 	if strings.TrimSpace(string(out)) != "" {
 		t.Fatalf("orphan should be gone, got %q", out)
@@ -406,7 +400,7 @@ func TestGitRenameBranchEndToEnd(t *testing.T) {
 	}
 	promptPrefab(t, a).Field.SetText("mainline")
 	submitPrompt(a)
-	waitGitIdle(t, a)
+	pumpUntil(t, a, "git op", idle(&a.gitOp))
 	out, err := exec.Command("git", "-C", dir, "symbolic-ref", "--short", "HEAD").Output()
 	if err != nil || strings.TrimSpace(string(out)) != "mainline" {
 		t.Fatalf("rename failed: %q %v", out, err)

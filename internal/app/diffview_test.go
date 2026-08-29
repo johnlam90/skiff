@@ -42,15 +42,6 @@ func diffIsOpen(a *App) bool {
 	return ok
 }
 
-// pumpDiffLoad applies the diffLoadEvent an async diff request posted.
-func pumpDiffLoad(t *testing.T, a *App) {
-	t.Helper()
-	pumpUntil(t, a, "diffLoadEvent", func(ev tcell.Event) bool {
-		_, ok := ev.(*diffLoadEvent)
-		return ok
-	})
-}
-
 // sampleDiff is a small captured `git diff` with one modification
 // flanked by context — the standard hunk shape the parser must align.
 func sampleDiff() []string {
@@ -351,7 +342,7 @@ func TestMenuDiffFile_OpensActiveTabDiff(t *testing.T) {
 	if diffIsOpen(a) {
 		t.Fatal("the git read is off-thread; nothing should open inline")
 	}
-	pumpDiffLoad(t, a)
+	pumpUntil(t, a, "diff load", idle(&a.diffLoad))
 	if !diffIsOpen(a) {
 		t.Fatal("menu action should open the diff view")
 	}
@@ -377,7 +368,7 @@ func TestMenuDiffFile_CleanFileFlashes(t *testing.T) {
 	a.openFile(target)
 
 	a.menuDiffFile()
-	pumpDiffLoad(t, a)
+	pumpUntil(t, a, "diff load", idle(&a.diffLoad))
 	if diffIsOpen(a) {
 		t.Fatal("clean file should not open a diff")
 	}
@@ -686,7 +677,7 @@ func TestRequestDiff_PostsEventWithoutBlocking(t *testing.T) {
 		t.Fatalf("the click needs acknowledging immediately, flash = %q", a.statusMsg)
 	}
 
-	pumpDiffLoad(t, a)
+	pumpUntil(t, a, "diff load", idle(&a.diffLoad))
 	if !diffIsOpen(a) {
 		t.Fatal("the posted event should open the diff")
 	}
@@ -702,7 +693,8 @@ func TestRequestDiff_PostsEventWithoutBlocking(t *testing.T) {
 // load can arrive too late. Each would otherwise throw a modal over
 // whatever the user moved on to in the meantime, which is worse than
 // showing no diff at all. The live case at the end proves the guards
-// aren't simply "never open".
+// aren't simply "never open". The superseded case runs through the real
+// job: two clicks, the older one landing after the newer started.
 func TestHandleDiffLoaded_DropsStaleResults(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "f.txt")
@@ -712,10 +704,8 @@ func TestHandleDiffLoaded_DropsStaleResults(t *testing.T) {
 	a := newTestApp(t, dir)
 	a.openFile(target)
 
-	landed := func(gen int, path string) *diffLoadEvent {
-		return &diffLoadEvent{
-			when:    time.Now(),
-			gen:     gen,
+	landed := func(path string) diffLoadResult {
+		return diffLoadResult{
 			kind:    diffLoadHunk,
 			title:   "Git change · f.txt",
 			tabPath: path,
@@ -723,16 +713,28 @@ func TestHandleDiffLoaded_DropsStaleResults(t *testing.T) {
 		}
 	}
 
-	// A newer click bumped the generation while git worked.
-	a.diffLoadGen = 7
-	a.handleDiffLoaded(landed(6, target))
+	// A newer click superseded the first while git worked. The newer
+	// load lands first and opens; the older one, arriving after the
+	// user has already dismissed that diff, must not re-open it.
+	older := make(chan struct{})
+	a.requestDiff(diffLoadHunk, "Git change · f.txt", target, func(*git.Repo) (diff.Patch, error) {
+		<-older
+		return samplePatch(), nil
+	})
+	a.requestDiff(diffLoadHunk, "Git change · f.txt", target, func(*git.Repo) (diff.Patch, error) {
+		return samplePatch(), nil
+	})
+	pumpUntil(t, a, "newer load", func() bool { return diffIsOpen(a) })
+	a.closeAllModals()
+	close(older)
+	pumpUntil(t, a, "older load", idle(&a.diffLoad))
 	if diffIsOpen(a) {
 		t.Fatal("a superseded load must not open")
 	}
 
 	// An overlay went up meanwhile.
 	a.openInfo("Busy", []string{"working"})
-	a.handleDiffLoaded(landed(7, target))
+	a.handleDiffLoaded(landed(target), nil)
 	if diffIsOpen(a) {
 		t.Fatal("a load landing under an open overlay must not steal it")
 	}
@@ -741,12 +743,12 @@ func TestHandleDiffLoaded_DropsStaleResults(t *testing.T) {
 	// The user switched tabs; the diff would describe a file that is no
 	// longer in front of them.
 	a.openFile(other)
-	a.handleDiffLoaded(landed(7, target))
+	a.handleDiffLoaded(landed(target), nil)
 	if diffIsOpen(a) {
 		t.Fatal("a load for a no-longer-active tab must not open")
 	}
 
-	a.handleDiffLoaded(landed(7, other))
+	a.handleDiffLoaded(landed(other), nil)
 	if !diffIsOpen(a) {
 		t.Fatal("a current load should open")
 	}
@@ -763,12 +765,12 @@ func TestHandleDiffLoaded_EmptyResultExplainsPerSurface(t *testing.T) {
 	a := newTestApp(t, dir)
 	a.openFile(target)
 
-	empty := func(kind diffLoadKind) *diffLoadEvent {
-		return &diffLoadEvent{when: time.Now(), gen: a.diffLoadGen, kind: kind, tabPath: target}
+	empty := func(kind diffLoadKind) diffLoadResult {
+		return diffLoadResult{kind: kind, tabPath: target}
 	}
 
 	a.statusMsg = ""
-	a.handleDiffLoaded(empty(diffLoadFile))
+	a.handleDiffLoaded(empty(diffLoadFile), nil)
 	if infoIsOpen(a) {
 		t.Fatal("the menu action should flash, not open a dialog")
 	}
@@ -776,7 +778,7 @@ func TestHandleDiffLoaded_EmptyResultExplainsPerSurface(t *testing.T) {
 		t.Fatalf("flash = %q, want the no-changes message", a.statusMsg)
 	}
 
-	a.handleDiffLoaded(empty(diffLoadHunk))
+	a.handleDiffLoaded(empty(diffLoadHunk), nil)
 	if !infoIsOpen(a) {
 		t.Fatal("a marker click with no hunk should explain itself in a dialog")
 	}

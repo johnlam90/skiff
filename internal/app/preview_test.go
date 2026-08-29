@@ -15,9 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/gdamore/tcell/v2"
 	"github.com/johnlam90/skiff/internal/editor"
 )
 
@@ -265,7 +263,7 @@ func TestOpenFile_SwitchToOpenTabDoesNotBlockOnGit(t *testing.T) {
 	if tab == nil || tab.GitLines != nil {
 		t.Fatalf("switching to an already-open tab must not load git lines inline, got %v", tab.GitLines)
 	}
-	if !a.gitRefreshInFlight {
+	if !a.gitStatus.Busy() {
 		t.Fatal("switching to an already-open tab should kick the async git-status refresh")
 	}
 }
@@ -297,26 +295,12 @@ func TestOpenFile_GutterArrivesViaStatusEvent(t *testing.T) {
 	if tab.GitLines != nil {
 		t.Fatalf("a fresh open must not carry git lines yet, got %v", tab.GitLines)
 	}
-	if !a.gitRefreshInFlight {
+	if !a.gitStatus.Busy() {
 		t.Fatal("opening a new tab should kick the async git-status refresh")
 	}
 
-	evCh := make(chan tcell.Event, 1)
-	go func() { evCh <- a.screen.PollEvent() }()
-	select {
-	case ev := <-evCh:
-		gse, ok := ev.(*gitStatusEvent)
-		if !ok {
-			t.Fatalf("expected gitStatusEvent, got %T", ev)
-		}
-		a.handleEvent(gse)
-	case <-time.After(5 * time.Second):
-		t.Fatal("background collection never posted its event")
-	}
+	pumpUntil(t, a, "git status", idle(&a.gitStatus))
 
-	if a.gitRefreshInFlight {
-		t.Fatal("handling the event should clear the in-flight flag")
-	}
 	if got := tab.GitLines[1]; got != editor.GitLineModified {
 		t.Fatalf("gutter should arrive via the status event, got %v", tab.GitLines)
 	}

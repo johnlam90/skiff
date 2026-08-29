@@ -16,28 +16,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/search"
 )
-
-// pumpReplaceDone waits out the background disk apply and lands its
-// report through the real handler.
-func pumpReplaceDone(t *testing.T, a *App) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for a.projReplaceBusy {
-		if time.Now().After(deadline) {
-			t.Fatal("replace never finished")
-		}
-		if ev := a.screen.PollEvent(); ev != nil {
-			a.handleEvent(ev)
-		}
-	}
-}
 
 // TestProjReplaceTabGesture: Tab grows and focuses the replace field,
 // typed runes land there (leaving the query alone), and Tab hops back.
@@ -230,7 +214,7 @@ func TestProjReplaceAll_MixedRouting(t *testing.T) {
 		t.Fatalf("confirm: %q", c.Message)
 	}
 	confirmYes(a)
-	pumpReplaceDone(t, a)
+	pumpUntil(t, a, "replace", idle(&a.projReplace))
 
 	if tab.Buffer.Lines[0] != "new here" || !tab.Dirty {
 		t.Fatalf("open tab: %q dirty=%v", tab.Buffer.Lines[0], tab.Dirty)
@@ -282,7 +266,7 @@ func TestProjReplaceAll_ReportsBufferSaveFailure(t *testing.T) {
 
 	a.projReplaceConfirmAll()
 	confirmYes(a)
-	pumpReplaceDone(t, a)
+	pumpUntil(t, a, "replace", idle(&a.projReplace))
 
 	if tab.Buffer.Lines[0] != "new value" {
 		t.Fatalf("buffer should still carry the replacement: %q", tab.Buffer.Lines[0])

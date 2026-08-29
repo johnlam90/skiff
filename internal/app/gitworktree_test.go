@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/johnlam90/skiff/internal/git"
 )
@@ -34,7 +33,7 @@ func TestMenuGitListWorktrees_FromScriptedFake(t *testing.T) {
 			"worktree /repo-side\nHEAD abc\nbranch refs/heads/side\nlocked\n", nil)
 
 	a.menuGitListWorktrees()
-	waitInfo(t, a)
+	pumpUntil(t, a, "info overlay", func() bool { return infoIsOpen(a) })
 	lines := infoPrefab(t, a).Lines
 	if len(lines) != 2 || lines[0] != "* /repo  (main)" || lines[1] != "/repo-side  (side)  [locked]" {
 		t.Fatalf("info rows should be the scripted worktrees, got %q", lines)
@@ -48,8 +47,8 @@ func TestMenuGitListWorktrees_FromScriptedFake(t *testing.T) {
 func TestDoGitNewWorktree_RefusesUnsafeBranchBeforeRunning(t *testing.T) {
 	a, fake := fakeRepoApp(t)
 	a.doGitNewWorktree(filepath.Join(t.TempDir(), "wt"), "--output=/tmp/x", true)
-	if a.gitOpBusy || fake.CallCount() != 0 {
-		t.Fatalf("unsafe branch must not start an op, busy=%v calls=%v", a.gitOpBusy, fake.Calls())
+	if a.gitOp.Busy() || fake.CallCount() != 0 {
+		t.Fatalf("unsafe branch must not start an op, busy=%v calls=%v", a.gitOp.Busy(), fake.Calls())
 	}
 	if !strings.Contains(a.statusMsg, "unsafe") {
 		t.Fatalf("the refusal should flash, got %q", a.statusMsg)
@@ -91,7 +90,7 @@ func TestMenuGitNewWorktree_EndToEnd(t *testing.T) {
 
 	a := newTestApp(t, dir)
 	a.menuGitNewWorktree()
-	waitListPick(t, a)
+	pumpUntil(t, a, "picker", func() bool { return pickIsOpen(a) })
 	// Row 0 is "New branch…"; the current branch (main) is excluded, so
 	// row 1 is the side branch.
 	pickChoose(t, a, 1)
@@ -100,7 +99,7 @@ func TestMenuGitNewWorktree_EndToEnd(t *testing.T) {
 	}
 	promptPrefab(t, a).Field.SetText(filepath.Join(t.TempDir(), "wt"))
 	submitPrompt(a)
-	waitGitIdle(t, a)
+	pumpUntil(t, a, "git op", idle(&a.gitOp))
 
 	wts, err := git.Open(dir).Worktrees()
 	if err != nil {
@@ -122,7 +121,7 @@ func TestMenuGitNewWorktree_NewBranch(t *testing.T) {
 
 	a := newTestApp(t, dir)
 	a.menuGitNewWorktree()
-	waitListPick(t, a)
+	pumpUntil(t, a, "picker", func() bool { return pickIsOpen(a) })
 	pickChoose(t, a, 0) // New branch…
 	if !promptIsOpen(a) {
 		t.Fatal("path prompt should open")
@@ -135,7 +134,7 @@ func TestMenuGitNewWorktree_NewBranch(t *testing.T) {
 	}
 	promptPrefab(t, a).Field.SetText("fresh")
 	submitPrompt(a)
-	waitGitIdle(t, a)
+	pumpUntil(t, a, "git op", idle(&a.gitOp))
 
 	if _, err := os.Stat(wt); err != nil {
 		t.Fatalf("worktree dir missing: %v", err)
@@ -161,27 +160,13 @@ func TestMenuGitListWorktrees_EndToEnd(t *testing.T) {
 
 	a := newTestApp(t, dir)
 	a.menuGitListWorktrees()
-	waitInfo(t, a)
+	pumpUntil(t, a, "info overlay", func() bool { return infoIsOpen(a) })
 	lines := strings.Join(infoPrefab(t, a).Lines, "\n")
 	if !strings.Contains(lines, "* "+dir) {
 		t.Fatalf("main worktree should be starred:\n%s", lines)
 	}
 	if !strings.Contains(lines, wt+"  (side)") {
 		t.Fatalf("side worktree row missing:\n%s", lines)
-	}
-}
-
-// waitInfo pumps events until the async worktree list opens its overlay.
-func waitInfo(t *testing.T, a *App) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !infoIsOpen(a) {
-		if time.Now().After(deadline) {
-			t.Fatal("info overlay never opened")
-		}
-		if ev := a.screen.PollEvent(); ev != nil {
-			a.handleEvent(ev)
-		}
 	}
 }
 
@@ -201,7 +186,7 @@ func TestMenuGitRemoveWorktree_EndToEnd(t *testing.T) {
 
 	a := newTestApp(t, dir)
 	a.menuGitRemoveWorktree()
-	waitListPick(t, a)
+	pumpUntil(t, a, "picker", func() bool { return pickIsOpen(a) })
 	if n := len(pickPrefab(t, a).Items); n != 1 {
 		t.Fatalf("picker should list only the side worktree, got %d rows", n)
 	}
@@ -210,7 +195,7 @@ func TestMenuGitRemoveWorktree_EndToEnd(t *testing.T) {
 		t.Fatal("remove needs a confirm first")
 	}
 	confirmYes(a)
-	waitGitIdle(t, a)
+	pumpUntil(t, a, "git op", idle(&a.gitOp))
 	if _, err := os.Stat(wt); !os.IsNotExist(err) {
 		t.Fatalf("worktree dir should be gone, stat err = %v", err)
 	}
@@ -233,15 +218,15 @@ func TestMenuGitRemoveWorktree_ForceOffer(t *testing.T) {
 
 	a := newTestApp(t, dir)
 	a.menuGitRemoveWorktree()
-	waitListPick(t, a)
+	pumpUntil(t, a, "picker", func() bool { return pickIsOpen(a) })
 	pickChoose(t, a, 0)
 	confirmYes(a)
-	waitGitIdle(t, a)
+	pumpUntil(t, a, "git op", idle(&a.gitOp))
 	if c := confirmPrefab(t, a); !strings.Contains(c.Message, "Force remove") {
 		t.Fatalf("dirty remove should offer force, got %q", c.Message)
 	}
 	confirmYes(a)
-	waitGitIdle(t, a)
+	pumpUntil(t, a, "git op", idle(&a.gitOp))
 	if _, err := os.Stat(wt); !os.IsNotExist(err) {
 		t.Fatalf("worktree dir should be gone, stat err = %v", err)
 	}

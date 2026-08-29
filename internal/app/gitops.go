@@ -8,8 +8,9 @@
 // gitops.go is the write side of skiff's git integration: commit, push,
 // pull, fetch, branch switching/creation, stash, and undo-commit —
 // druk's source-control verbs, skiff-shaped (≡ menu + Git panel
-// buttons, no new key chords). Mutations run one at a time in a
-// background goroutine and report back through a gitOpDoneEvent.
+// buttons, no new key chords). Mutations run one at a time on the
+// gitOp job (internal/asyncjob, Refuse) and land through
+// handleGitOpDone.
 // Every verb is a typed method on the repo handle: this file decides
 // WHICH verb runs and what to say when it lands; it never assembles an
 // argument vector, and it never reads stderr — a refusal arrives as a
@@ -19,56 +20,45 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/overlay"
 )
 
-// gitOpDoneEvent carries a finished git mutation back onto the main
-// event loop.
-type gitOpDoneEvent struct {
-	when        time.Time
+// gitOpResult is what a finished git mutation lands beside its error
+// (nil, a *git.OpError, or a refusal such as git.ErrUnsafeRef): the
+// words the report needs and whether the working tree may have moved.
+type gitOpResult struct {
 	label       string // human verb for error titles ("Push", "Commit")
 	okFlash     string // success flash text
-	err         error  // nil, a *git.OpError, or a refusal such as git.ErrUnsafeRef
 	touchesTree bool   // the op may have rewritten working-tree files
 }
-
-// When implements tcell.Event.
-func (e *gitOpDoneEvent) When() time.Time { return e.when }
 
 // gitOp is one write verb bound to a repo handle — a method value such
 // as (*git.Repo).Push, or a closure over the verb's arguments.
 type gitOp func(*git.Repo) error
 
-// runGitOp launches op in the background, guarded by the one-at-a-time
-// gate (mutations share a repository — racing them helps nobody).
-// Returns false when another op is still running. The handle is opened
-// here, on the main thread, through readRepo — so a test's git.Fake
-// scripts the write side exactly as it scripts the reads — and every
-// probe the verb needs to shape its own argv (Push asking for an
+// runGitOp launches op on the gitOp job, whose Refuse policy is the
+// one-at-a-time gate (mutations share a repository — racing them helps
+// nobody). Returns false when another op is still running. The handle
+// is opened here, on the main thread, through readRepo — so a test's
+// git.Fake scripts the write side exactly as it scripts the reads — and
+// every probe the verb needs to shape its own argv (Push asking for an
 // upstream, Switch asking whether the tracking local exists) runs on
-// this goroutine, never on the event loop.
+// the job's goroutine, never on the event loop.
 func (a *App) runGitOp(label, okFlash string, touchesTree bool, op gitOp) bool {
-	if a.gitOpBusy {
-		a.flash("Another git operation is still running")
-		return false
-	}
-	a.gitOpBusy = true
 	repo := a.readRepo()
-	scr := a.screen
-	a.safeGo("git-op", func() {
-		err := op(repo)
-		_ = scr.PostEvent(&gitOpDoneEvent{
-			when: time.Now(), label: label, okFlash: okFlash,
-			err: err, touchesTree: touchesTree,
-		})
+	started := a.gitOp.Start(func(context.Context) (gitOpResult, error) {
+		return gitOpResult{label: label, okFlash: okFlash, touchesTree: touchesTree}, op(repo)
 	})
-	return true
+	if !started {
+		a.flash("Another git operation is still running")
+	}
+	return started
 }
 
 // handleGitOpDone lands a finished mutation: report, then refresh
@@ -78,18 +68,17 @@ func (a *App) runGitOp(label, okFlash string, touchesTree bool, op gitOp) bool {
 // explicit confirm. The routing reads the OpError's flags, never its
 // text — the git package classified the refusal when it built the
 // error.
-func (a *App) handleGitOpDone(e *gitOpDoneEvent) {
-	a.gitOpBusy = false
+func (a *App) handleGitOpDone(r gitOpResult, err error) {
 	var opErr *git.OpError
-	errors.As(e.err, &opErr)
+	errors.As(err, &opErr)
 	switch {
-	case e.err == nil:
-		a.flash(e.okFlash)
-	case opErr != nil && opErr.NonFastForward && e.label == "Push":
+	case err == nil:
+		a.flash(r.okFlash)
+	case opErr != nil && opErr.NonFastForward && r.label == "Push":
 		a.openConfirm("Push rejected",
 			"origin has commits you don't. Pull (merge), then push?",
 			func(app *App) { app.doGitPullAndPush() })
-	case opErr != nil && opErr.NotMerged && e.label == "Delete branch" && a.gitDeleteTarget != "":
+	case opErr != nil && opErr.NotMerged && r.label == "Delete branch" && a.gitDeleteTarget != "":
 		// `-d` refused an unmerged branch — losing work needs its own
 		// explicit yes, so the force delete is a second confirm, never
 		// the default.
@@ -101,7 +90,7 @@ func (a *App) handleGitOpDone(e *gitOpDoneEvent) {
 				app.runGitOp("Force delete", "Deleted "+name, false,
 					func(r *git.Repo) error { return r.DeleteBranch(name, true) })
 			})
-	case opErr != nil && opErr.WorktreeDirty && e.label == "Remove worktree" && a.gitWorktreeTarget != "":
+	case opErr != nil && opErr.WorktreeDirty && r.label == "Remove worktree" && a.gitWorktreeTarget != "":
 		// A plain remove refused uncommitted work — force is a second
 		// confirm, mirroring the branch-delete ladder.
 		path := a.gitWorktreeTarget
@@ -115,14 +104,14 @@ func (a *App) handleGitOpDone(e *gitOpDoneEvent) {
 	case opErr != nil:
 		lines := []string{opErr.Advice, ""}
 		lines = append(lines, splitNonEmptyLines(opErr.Output)...)
-		a.openInfo(e.label+" failed", lines)
+		a.openInfo(r.label+" failed", lines)
 	default:
 		// Git never ran: the verb refused its own input (an unsafe ref
 		// or path). One line says which.
-		a.openInfo(e.label+" failed", []string{e.err.Error()})
+		a.openInfo(r.label+" failed", []string{err.Error()})
 	}
 	a.refreshGitStatusAsync()
-	if e.touchesTree {
+	if r.touchesTree {
 		// Pull / stash / checkout rewrite files under open buffers —
 		// refreshTreeNow reloads clean tabs, warns on dirty ones, and
 		// re-tints everything in one pass. The finder is invalidated
@@ -270,45 +259,43 @@ func (a *App) menuGitFetch() {
 // Branches
 // -----------------------------------------------------------------------------
 
-// branchListEvent delivers an asynchronously-collected branch list to
-// the main loop, tagged with which picker asked for it.
-type branchListEvent struct {
-	when    time.Time
-	purpose string // "switch" | "merge" | "delete"
+// branchListResult is an asynchronously-collected branch list, tagged
+// with which picker asked for it.
+type branchListResult struct {
+	purpose string // "switch" | "merge" | "delete" | "base" | "worktree"
 	names   []string
 }
 
-// When implements tcell.Event.
-func (e *branchListEvent) When() time.Time { return e.when }
-
-// requestBranchList collects the branch list off the UI thread — on a
-// network-mounted repo listing refs can stall, and a menu click must
+// requestBranchList collects the branch list on the branchList job — on
+// a network-mounted repo listing refs can stall, and a menu click must
 // never freeze the event loop — then reopens the flow via
-// handleBranchList. Best-effort like every read here: a failing git
-// yields no names, and the picker explains the empty list.
+// handleBranchList. The job is Supersede: two rapid clicks spawn two
+// collections, and only the newest opens a picker, where an ungated
+// pair used to open the picker twice and reset the user's highlight.
+// Best-effort like every read here: a failing git yields no names, and
+// the picker explains the empty list.
 func (a *App) requestBranchList(purpose string) {
 	repo := a.readRepo()
-	scr := a.screen
-	a.safeGo("git-branch-list", func() {
+	a.branchList.Start(func(context.Context) (branchListResult, error) {
 		names, _ := repo.Branches()
-		_ = scr.PostEvent(&branchListEvent{when: time.Now(), purpose: purpose, names: names})
+		return branchListResult{purpose: purpose, names: names}, nil
 	})
 }
 
 // handleBranchList routes a collected branch list to the picker that
 // asked for it.
-func (a *App) handleBranchList(e *branchListEvent) {
-	switch e.purpose {
+func (a *App) handleBranchList(r branchListResult, _ error) {
+	switch r.purpose {
 	case "switch":
-		a.openSwitchBranchPick(e.names)
+		a.openSwitchBranchPick(r.names)
 	case "merge":
-		a.openMergeBranchPick(e.names)
+		a.openMergeBranchPick(r.names)
 	case "delete":
-		a.openDeleteBranchPick(e.names)
+		a.openDeleteBranchPick(r.names)
 	case "base":
-		a.openComparePick(e.names)
+		a.openComparePick(r.names)
 	case "worktree":
-		a.openWorktreeBranchPick(e.names)
+		a.openWorktreeBranchPick(r.names)
 	}
 }
 

@@ -14,10 +14,10 @@
 package app
 
 import (
+	"context"
 	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -80,18 +80,31 @@ func TestProjFindRowsGroupAndFold(t *testing.T) {
 }
 
 // TestProjFindStaleGenerationDropped: results from an outdated sweep
-// must never land — only the generation the current query started.
+// must never land — only the run the current query started. The sweep
+// job is Supersede, so the older run is retired the moment the newer
+// one starts; this drives two runs through the real job and handler
+// and lands the older one last, where a missing generation check would
+// paint its stale hits over the current ones.
 func TestProjFindStaleGenerationDropped(t *testing.T) {
 	a := projFindApp(t, t.TempDir())
-	a.projFind.findGen = 7
+	stale := make(chan struct{})
+	a.projFind.sweep.Start(func(context.Context) (projFindResult, error) {
+		<-stale
+		return projFindResult{matches: fakeMatches()[:1]}, nil
+	})
+	a.projFind.sweep.Start(func(context.Context) (projFindResult, error) {
+		return projFindResult{matches: fakeMatches(), truncated: true}, nil
+	})
 
-	a.handleProjFindDone(&projFindDoneEvent{when: time.Now(), gen: 6, matches: fakeMatches()})
-	if len(a.projFind.findMatches) != 0 {
-		t.Fatal("stale generation applied")
+	pumpUntil(t, a, "current sweep", func() bool { return len(a.projFind.findMatches) == 3 })
+	if !a.projFind.findTruncated {
+		t.Fatal("the current run should land its truncation flag too")
 	}
-	a.handleProjFindDone(&projFindDoneEvent{when: time.Now(), gen: 7, matches: fakeMatches(), truncated: true})
+	close(stale)
+	pumpUntil(t, a, "stale sweep", idle(&a.projFind.sweep))
 	if len(a.projFind.findMatches) != 3 || !a.projFind.findTruncated {
-		t.Fatalf("current generation should land: %d matches", len(a.projFind.findMatches))
+		t.Fatalf("stale generation applied: %d matches, truncated=%v",
+			len(a.projFind.findMatches), a.projFind.findTruncated)
 	}
 }
 
@@ -149,24 +162,26 @@ func TestProjFindEscCloses(t *testing.T) {
 	}
 }
 
-// TestProjFindDebounceAndStaleKick: a kick event whose generation was
-// superseded by a newer keystroke must not start a sweep, and Enter on
-// a match lands the cursor on the match column, not column 0.
+// TestProjFindDebounceAndStaleKick: a keystroke's sweep that a newer
+// keystroke superseded must never land — after two rapid edits the
+// results are the second query's — and Enter on a match lands the
+// cursor on the match column, not column 0.
 func TestProjFindDebounceAndStaleKick(t *testing.T) {
 	root := t.TempDir()
-	mkFile(t, root, "a.go", "xx alpha\n")
+	mkFile(t, root, "a.go", "xx alpha\nalpine\n")
 	a := projFindApp(t, root)
+	installReadyFinder(t, a) // the sweep reads the index; give it one
 
 	a.projFind.findValue = []rune("al")
-	a.projFindQueryChanged() // gen N
-	staleGen := a.projFind.findGen
+	a.projFindQueryChanged() // would match both lines
 	a.projFind.findValue = []rune("alpha")
-	a.projFindQueryChanged() // gen N+1 supersedes
-	a.handleProjFindKick(&projFindKickEvent{when: time.Now(), gen: staleGen})
-	// The stale kick must be inert: no done event for staleGen can win,
-	// and busy stays owned by the live generation.
-	if a.projFind.findGen != staleGen+1 {
-		t.Fatalf("generation bookkeeping broke: %d vs %d", a.projFind.findGen, staleGen)
+	a.projFindQueryChanged() // supersedes: one line
+	if !a.projFind.sweep.Busy() {
+		t.Fatal("a non-empty query should start a sweep")
+	}
+	pumpUntil(t, a, "sweeps", idle(&a.projFind.sweep))
+	if n := len(a.projFind.findMatches); n != 1 {
+		t.Fatalf("results must be the newest query's: got %d matches, want 1", n)
 	}
 
 	// Column landing via activation.

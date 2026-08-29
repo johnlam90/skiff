@@ -25,10 +25,10 @@
 package app
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/johnlam90/skiff/internal/diff"
 	"github.com/johnlam90/skiff/internal/editor"
@@ -54,17 +54,6 @@ type gitStatusResult struct {
 	// on-loop stat used to.
 	isDir map[string]bool
 }
-
-// gitStatusEvent carries a finished background collection back to the
-// main event loop, following the same custom-event pattern as
-// treeRefreshEvent and finderRebuiltEvent.
-type gitStatusEvent struct {
-	when time.Time
-	res  gitStatusResult
-}
-
-// When satisfies the tcell.Event interface.
-func (e *gitStatusEvent) When() time.Time { return e.when }
 
 // collectGitStatus runs the git side of a status refresh: the repo
 // snapshot (skipped in single-file mode, which deliberately avoids the
@@ -459,37 +448,25 @@ func (a *App) refreshGitStatus() {
 	a.applyGitStatus(collectGitStatus(a.readRepo(), a.diffBase, a.openTabPaths(), a.tree == nil))
 }
 
-// refreshGitStatusAsync collects git status on a background goroutine
-// and posts the result back to the main loop as a gitStatusEvent —
-// the same goroutine → custom event pattern the auto-scroller and the
-// finder indexer use, so no UI state is ever touched off-thread.
-// Kicks while a collection is already in flight coalesce into a single
-// follow-up run, so a burst of file operations costs at most two
-// status calls rather than one each.
+// refreshGitStatusAsync collects git status on the gitStatus job's
+// goroutine and lands the result on the main loop through
+// handleGitStatus, so no UI state is ever touched off-thread. The job
+// is Coalesce: kicks while a collection is already in flight fold into
+// a single follow-up run, so a burst of file operations costs at most
+// two status calls rather than one each. The follow-up runs with the
+// values captured by the latest kick — which is why the capture below
+// runs on every call rather than only when a run actually spawns.
 func (a *App) refreshGitStatusAsync() {
-	if a.gitRefreshInFlight {
-		a.gitRefreshQueued = true
-		return
-	}
-	a.gitRefreshInFlight = true
 	repo, base, paths, skipStatus := a.readRepo(), a.diffBase, a.openTabPaths(), a.tree == nil
-	scr := a.screen
-	a.safeGo("git-status", func() {
-		res := collectGitStatus(repo, base, paths, skipStatus)
-		_ = scr.PostEvent(&gitStatusEvent{when: time.Now(), res: res})
+	a.gitStatus.Start(func(context.Context) (gitStatusResult, error) {
+		return collectGitStatus(repo, base, paths, skipStatus), nil
 	})
 }
 
-// handleGitStatusEvent applies a finished background collection and
-// launches the follow-up run if more refresh requests arrived while
-// this one was in flight.
-func (a *App) handleGitStatusEvent(e *gitStatusEvent) {
-	a.gitRefreshInFlight = false
-	a.applyGitStatus(e.res)
-	if a.gitRefreshQueued {
-		a.gitRefreshQueued = false
-		a.refreshGitStatusAsync()
-	}
+// handleGitStatus applies a finished background collection. The job
+// starts the coalesced follow-up, if one was queued, once this returns.
+func (a *App) handleGitStatus(res gitStatusResult, _ error) {
+	a.applyGitStatus(res)
 }
 
 // openTabPaths returns the file paths of every open text tab — the set
@@ -509,7 +486,7 @@ func (a *App) openTabPaths() []string {
 // applyGitStatus stamps a collection result onto the UI: tree tint
 // maps, branch, per-tab gutter markers, and the Git panel rows when the
 // panel is up. Main-thread only — the async path hands results here
-// via gitStatusEvent.
+// via handleGitStatus.
 func (a *App) applyGitStatus(res gitStatusResult) {
 	a.noteGitMissing(res.st)
 	if a.tree != nil {
@@ -533,7 +510,7 @@ func (a *App) applyGitStatus(res gitStatusResult) {
 	}
 	// Tabs opened after the collection started aren't in the map — they
 	// render without gutter marks until the queued follow-up collection
-	// lands (the coalescer's gitRefreshQueued guarantees one; see
+	// lands (the gitStatus job's Coalesce policy guarantees one; see
 	// refreshGitStatusAsync and newTab). Tabs closed since are simply
 	// skipped by the path lookup.
 	for _, tab := range a.tabs.Tabs() {

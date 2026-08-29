@@ -15,9 +15,9 @@ package app
 //  2. Look up an argv for the file's extension. None → done.
 //  3. Check the trust store. Allowed → run; Denied → done; Unknown
 //     → open the trust prompt and re-enter the run on Allow.
-//  4. exec.Command in a goroutine; post a formatDoneEvent on
-//     completion so the main loop can reload the buffer (when the
-//     user hasn't typed in the meantime) and flash a status.
+//  4. exec.Command on the formatter job; the landing reloads the
+//     buffer on the main loop (when the user hasn't typed in the
+//     meantime) and flashes a status.
 //
 // Keeping everything except the goroutine on the main loop means the
 // usual rule still holds: tcell state is mutated only from the event
@@ -34,25 +34,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gdamore/tcell/v2"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/format"
 	"github.com/johnlam90/skiff/internal/overlay"
 )
 
-// formatDoneEvent is posted by runFormatter when the goroutine
-// finishes. tabPath is how we re-find the right tab on the main
-// loop — not the index, because tabs may have been reordered or
-// closed in the meantime.
-type formatDoneEvent struct {
-	when    time.Time
+// formatResult is what a finished formatter run lands beside its error.
+// tabPath is how we re-find the right tab on the main loop — not the
+// index, because tabs may have been reordered or closed in the
+// meantime.
+type formatResult struct {
 	tabPath string
 	label   string // command name (just argv[0]) for status messages
-	err     error
 }
-
-// When satisfies the tcell.Event interface.
-func (e *formatDoneEvent) When() time.Time { return e.when }
 
 // runFormatOnSave is called by saveTabAt after a successful disk
 // write. It branches three ways:
@@ -578,9 +572,12 @@ const formatWaitDelay = 2 * time.Second
 var formatTimeout = formatTimeoutDefault
 
 // execFormatter shells out to argv with the file path already
-// substituted in. Runs in a goroutine and posts a formatDoneEvent on
-// completion so the main loop can reload the buffer and flash a
-// status — exactly the same pattern runCustomAction uses.
+// substituted in. Runs on the formatter job and lands through
+// handleFormatDone so the main loop can reload the buffer and flash a
+// status — exactly the same pattern runCustomAction uses. The job is
+// Refuse: a second save while a formatter is still running is saved
+// unformatted and told so, rather than racing two formatters over one
+// project or silently losing the first run's reload.
 //
 // We deliberately use exec.CommandContext (not sh -c) with an explicit
 // argv so a shell-injection vector via a malicious format.json is just
@@ -600,15 +597,13 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 		}
 		return
 	}
-	scr := a.screen
 	root := a.rootDir
 	label := argv[0]
 	deadline := formatTimeout
 	// Copy the argv: the caller's slice may be reused or mutated on
 	// the event loop while the goroutine still reads it.
 	args := append([]string(nil), argv...)
-	a.flash(label + "…")
-	a.safeGo("format", func() {
+	started := a.formatter.Start(func(context.Context) (formatResult, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), deadline)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
@@ -636,13 +631,13 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 				err = fmt.Errorf("%v: %s", err, preview)
 			}
 		}
-		_ = scr.PostEvent(&formatDoneEvent{
-			when:    time.Now(),
-			tabPath: tabPath,
-			label:   label,
-			err:     err,
-		})
+		return formatResult{tabPath: tabPath, label: label}, err
 	})
+	if !started {
+		a.flash(label + " skipped — another formatter is still running; saved unformatted")
+		return
+	}
+	a.flash(label + "…")
 }
 
 // indexNewline returns the index of the first newline in s, or -1.
@@ -665,32 +660,25 @@ func indexNewline(s string) int {
 // reload uses ReloadKeepHistory rather than plain Reload: the user
 // never asked for this reload, so it must not cost them their undo
 // stack the way the disk-conflict prompt's explicit Reload does.
-func (a *App) handleFormatDone(e *formatDoneEvent) {
-	if e == nil {
-		return
-	}
-	if e.err != nil {
-		a.flash(fmt.Sprintf("%s failed: %v", e.label, e.err))
+func (a *App) handleFormatDone(r formatResult, err error) {
+	if err != nil {
+		a.flash(fmt.Sprintf("%s failed: %v", r.label, err))
 		return
 	}
 	for _, tab := range a.tabs.Tabs() {
-		if tab.Path != e.tabPath {
+		if tab.Path != r.tabPath {
 			continue
 		}
 		if tab.Dirty {
-			a.flash(fmt.Sprintf("%s ran — kept your edits (file on disk was reformatted)", e.label))
+			a.flash(fmt.Sprintf("%s ran — kept your edits (file on disk was reformatted)", r.label))
 			return
 		}
 		if err := tab.ReloadKeepHistory(); err != nil {
-			a.flash(fmt.Sprintf("%s ran but reload failed: %v", e.label, err))
+			a.flash(fmt.Sprintf("%s ran but reload failed: %v", r.label, err))
 			return
 		}
-		a.flash(fmt.Sprintf("Formatted with %s", e.label))
+		a.flash(fmt.Sprintf("Formatted with %s", r.label))
 		return
 	}
 	// Tab was closed before the formatter finished — silent no-op.
 }
-
-// Compile-time check that formatDoneEvent really is a tcell.Event.
-// Catches signature drift if the interface ever grows a method.
-var _ tcell.Event = (*formatDoneEvent)(nil)

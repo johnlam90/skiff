@@ -174,9 +174,9 @@ func TestRestoreSession_KicksAsyncGitStatusRefresh(t *testing.T) {
 	}
 
 	a := newTestApp(t, root)
-	a.gitRefreshInFlight = false
+	pumpUntil(t, a, "quiescent git status", idle(&a.gitStatus))
 	a.restoreSession()
-	if !a.gitRefreshInFlight {
+	if !a.gitStatus.Busy() {
 		t.Fatal("restoring a session with tabs should kick the async git-status refresh")
 	}
 }

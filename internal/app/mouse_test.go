@@ -329,7 +329,7 @@ func TestOpenGitHunkAt_RequestsDiffOffThread(t *testing.T) {
 	if a.anyModalOpen() {
 		t.Fatal("the git read is off-thread; the click must not open anything inline")
 	}
-	pumpDiffLoad(t, a)
+	pumpUntil(t, a, "diff load", idle(&a.diffLoad))
 	if !diffIsOpen(a) {
 		t.Fatal("the posted event should open the hunk diff")
 	}
