@@ -110,6 +110,27 @@ func TestSearchCapsAndTruncatedFlag(t *testing.T) {
 	}
 }
 
+// TestSearchFile_MaxPerFileCapsOccurrences pins the caps' new meaning:
+// per-occurrence emission means MaxPerFile now bounds OCCURRENCES, not
+// lines — a single line with three hits and a cap of 2 yields exactly 2
+// matches and reports truncation, even though it never left that line.
+func TestSearchFile_MaxPerFileCapsOccurrences(t *testing.T) {
+	root := t.TempDir()
+	f := seed(t, root, "x.txt", "hit hit hit\n")
+
+	opts := Options{MaxTotal: 500, MaxPerFile: 2, MaxFileSize: 1 << 20}
+	got, trunc := Search(root, []string{f}, "hit", opts)
+	if !trunc {
+		t.Fatal("per-file cap was hit — truncated must be true")
+	}
+	if len(got) != 2 {
+		t.Fatalf("matches: got %d, want 2", len(got))
+	}
+	if got[0].Col != 0 || got[1].Col != 4 {
+		t.Fatalf("columns: got %d, %d, want 0, 4", got[0].Col, got[1].Col)
+	}
+}
+
 // TestSearchMissingFileSkipped: a stale index entry (file deleted since
 // the last build) is skipped without error.
 func TestSearchMissingFileSkipped(t *testing.T) {
