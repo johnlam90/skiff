@@ -18,6 +18,27 @@ import (
 // "git ran and failed" with errors.Is.
 var ErrUnsafeRef = errors.New("unsafe git ref")
 
+// ErrUnsafePath reports a filesystem path that must never be placed on
+// git's argv in a position git parses options from — the worktree
+// verbs take the path before their flags, where no `--` protects it.
+var ErrUnsafePath = errors.New("unsafe path")
+
+// safePath refuses a path git would read as an option or that cannot
+// cross the exec boundary. It is the path-shaped half of SafeRef: a
+// path is not a ref (a leading "-" is the only injection it has), so
+// it gets its own sentinel rather than borrowing the ref's.
+func safePath(p string) error {
+	switch {
+	case p == "":
+		return fmt.Errorf("%w: empty", ErrUnsafePath)
+	case strings.HasPrefix(p, "-"):
+		return fmt.Errorf("%w: %q would be read as an option", ErrUnsafePath, p)
+	case strings.ContainsRune(p, 0):
+		return fmt.Errorf("%w: %q contains NUL", ErrUnsafePath, p)
+	}
+	return nil
+}
+
 // SafeRef validates a branch/tag/commit name that came from outside the
 // editor — a picker row, a prompt, or the refs a cloned repository
 // shipped — before it lands in an argument vector.

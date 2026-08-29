@@ -8,6 +8,7 @@
 package git
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,11 +75,11 @@ func writeSeed(t *testing.T, path, body string) {
 	}
 }
 
-// TestRepo_OutputReadsRealGit is the contract test: a read command
+// TestRepo_ReadReachesRealGit is the contract test: a read command
 // against a real repo returns git's stdout.
-func TestRepo_OutputReadsRealGit(t *testing.T) {
+func TestRepo_ReadReachesRealGit(t *testing.T) {
 	r := Open(initRepo(t))
-	out, err := r.Output("symbolic-ref", "--short", "HEAD")
+	out, err := r.read("symbolic-ref", "--short", "HEAD")
 	if err != nil {
 		t.Fatalf("output: %v", err)
 	}
@@ -87,10 +88,10 @@ func TestRepo_OutputReadsRealGit(t *testing.T) {
 	}
 }
 
-// TestRepo_OutputFailsOutsideARepo pins the non-repo contract: the
+// TestRepo_ReadFailsOutsideARepo pins the non-repo contract: the
 // command fails per call, same as the raw invocations did — Open never
 // pre-validates.
-func TestRepo_OutputFailsOutsideARepo(t *testing.T) {
+func TestRepo_ReadFailsOutsideARepo(t *testing.T) {
 	if testing.Short() {
 		t.Skip("forks a real git process — slow; run without -short")
 	}
@@ -98,32 +99,39 @@ func TestRepo_OutputFailsOutsideARepo(t *testing.T) {
 		t.Skip("git not available on PATH")
 	}
 	r := Open(t.TempDir())
-	if _, err := r.Output("symbolic-ref", "--short", "HEAD"); err == nil {
+	if _, err := r.read("symbolic-ref", "--short", "HEAD"); err == nil {
 		t.Fatal("read in a non-repo must fail")
 	}
 }
 
-// TestRepo_RunSequenceStopsAtFirstFailure pins the write contract: the
-// sequence stops at the first failing command and the accumulated
-// output includes what git said before and during the failure.
-func TestRepo_RunSequenceStopsAtFirstFailure(t *testing.T) {
+// TestRepo_OpRunAccumulatesOutputIntoOpError pins the write contract
+// every verb is built on: a failing command comes back as *OpError
+// whose Output holds what git said across the whole run — the words
+// from the commands before the failure included — so a multi-command
+// verb like Commit or PullAndPush reports the whole story.
+func TestRepo_OpRunAccumulatesOutputIntoOpError(t *testing.T) {
 	dir := initRepo(t)
 	r := Open(dir)
-	out, err := r.RunSequence([][]string{
-		{"checkout", "-q", "-b", "feature"},
-		{"checkout", "definitely-not-a-branch"},
-		{"checkout", "-q", "main"}, // must not run
-	})
-	if err == nil {
-		t.Fatal("sequence with a failing step must error")
+	o := r.op("Test")
+	if err := o.run("checkout", "-b", "feature"); err != nil {
+		t.Fatalf("first step: %v", err)
 	}
-	if !strings.Contains(out, "definitely-not-a-branch") {
-		t.Fatalf("output should carry git's words, got %q", out)
+	err := o.run("checkout", "definitely-not-a-branch")
+	var opErr *OpError
+	if !errors.As(err, &opErr) {
+		t.Fatalf("a failing write must be an *OpError, got %T %v", err, err)
 	}
-	// The third command didn't run: we're still on feature.
-	b, _ := r.Output("symbolic-ref", "--short", "HEAD")
-	if strings.TrimSpace(string(b)) != "feature" {
-		t.Fatalf("sequence must stop at the failure; on %q", b)
+	if opErr.Op != "Test" {
+		t.Fatalf("Op = %q, want the verb name", opErr.Op)
+	}
+	if !strings.Contains(opErr.Output, "definitely-not-a-branch") {
+		t.Fatalf("output should carry git's words, got %q", opErr.Output)
+	}
+	if !strings.Contains(opErr.Output, "feature") {
+		t.Fatalf("output should carry the earlier command's words too, got %q", opErr.Output)
+	}
+	if opErr.Unwrap() == nil {
+		t.Fatal("OpError must unwrap to the process error")
 	}
 }
 
@@ -136,7 +144,7 @@ func TestRepo_ReadTimeoutKillsHangingCommands(t *testing.T) {
 	r := Open(dir)
 	r.timeout = 150 * time.Millisecond
 	start := time.Now()
-	_, err := r.Output("-c", "alias.slow=!sleep 5", "slow")
+	_, err := r.read("-c", "alias.slow=!sleep 5", "slow")
 	if err == nil {
 		t.Fatal("a hanging read must fail")
 	}
@@ -156,7 +164,7 @@ func TestRepo_WriteTimeoutKillsWedgedWrites(t *testing.T) {
 	r := Open(dir)
 	r.writeTimeout = 150 * time.Millisecond
 	start := time.Now()
-	_, err := r.RunSequence([][]string{{"-c", "alias.slow=!sleep 5", "slow"}})
+	err := r.op("slow").run("-c", "alias.slow=!sleep 5", "slow")
 	if err == nil {
 		t.Fatal("a wedged write must fail")
 	}
@@ -188,11 +196,11 @@ func TestOpenWith_RoutesThroughTheRunner(t *testing.T) {
 	fake := &Fake{}
 	fake.Script("symbolic-ref --short HEAD", "main\n", nil)
 	r := OpenWith("/nowhere", fake)
-	out, err := r.Output("symbolic-ref", "--short", "HEAD")
+	out, err := r.read("symbolic-ref", "--short", "HEAD")
 	if err != nil || strings.TrimSpace(string(out)) != "main" {
 		t.Fatalf("scripted read failed: %q %v", out, err)
 	}
-	if _, err := r.Output("status", "--porcelain"); err == nil {
+	if _, err := r.read("status", "--porcelain"); err == nil {
 		t.Fatal("unscripted command must fail")
 	}
 	if fake.CallCount() != 2 {
