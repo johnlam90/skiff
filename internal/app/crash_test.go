@@ -85,3 +85,27 @@ func TestSafeGo_RunsFnNormally(t *testing.T) {
 		}
 	}
 }
+
+// TestClose_EmptiesTrash pins where the trash's undo window ends: Close
+// itself — not just a normal Run exit — discards the stored entries, so
+// a signal quit or a crash path that funnels through Close can't orphan
+// hidden .skiff-trash-* files inside the user's project.
+func TestClose_EmptiesTrash(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "doomed.txt")
+	writeFileT(t, target, "x")
+	a := newTestApp(t, dir)
+	if err := a.moveToTrash(target); err != nil {
+		t.Fatalf("moveToTrash: %v", err)
+	}
+	stored := a.trashed[len(a.trashed)-1].stored
+
+	a.Close()
+
+	if _, err := os.Stat(stored); !os.IsNotExist(err) {
+		t.Fatal("Close should discard the stored trash copy")
+	}
+	if a.trashed != nil {
+		t.Fatal("Close should clear the trash entries")
+	}
+}

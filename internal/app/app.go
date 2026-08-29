@@ -656,6 +656,12 @@ func (a *App) applyColorDepth() {
 // at all. Nothing here needs to unwind the mode by hand.
 func (a *App) Close() {
 	a.saveSession()
+	// The undo window for deletes is the session: discard the trash on
+	// the way out so removed work doesn't pile up invisibly on disk.
+	// Living here rather than at the tail of Run means a signal quit or
+	// a recovered panic empties it too — every exit path funnels
+	// through Close.
+	a.emptyTrash()
 	a.stopTreeRefresh()
 	a.stopAutoScroll()
 	if a.screen != nil {
@@ -666,6 +672,21 @@ func (a *App) Close() {
 // Run is the editor's main event loop. It blocks on PollEvent, dispatches
 // each event, redraws, and exits when a.quit is set.
 func (a *App) Run() error {
+	// A panic on the event loop must not reach the runtime with the
+	// terminal still raw: restore it, leave a crash log the user can
+	// paste into a bug report, and re-panic so the exit code and trace
+	// still signal failure. Registered first so it also covers the
+	// other defers.
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		a.Close()
+		reportCrash("event-loop", handleGoroutinePanic("event-loop", r))
+		panic(r)
+	}()
+
 	// Route SIGTERM/SIGHUP/SIGINT through the loop as a clean quit so
 	// `tmux kill-pane` and friends restore the terminal instead of
 	// leaving raw mode and mouse tracking behind.
@@ -706,9 +727,6 @@ func (a *App) Run() error {
 		a.draw()
 		a.screen.Show()
 	}
-	// The undo window for deletes is the session: discard the trash on
-	// the way out so removed work doesn't pile up invisibly on disk.
-	a.emptyTrash()
 	return nil
 }
 

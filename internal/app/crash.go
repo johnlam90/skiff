@@ -147,12 +147,18 @@ func (a *App) runGuarded(name string, fn func()) {
 		if a.screen != nil {
 			a.screen.Fini()
 		}
-		path := handleGoroutinePanic(name, r)
-		if path == "" {
-			path = "(crash log could not be written)"
-		}
-		fmt.Fprintf(os.Stderr, "skiff: background task %q crashed — log at %s\n", name, path)
+		reportCrash(name, handleGoroutinePanic(name, r))
 		os.Exit(2)
 	}()
 	fn()
+}
+
+// reportCrash prints the one crash line every guarded exit path shares,
+// pointing the user at the log file. Printed after the terminal is
+// restored, so it lands on a readable screen.
+func reportCrash(name, path string) {
+	if path == "" {
+		path = "(crash log could not be written)"
+	}
+	fmt.Fprintf(os.Stderr, "skiff: background task %q crashed — log at %s\n", name, path)
 }
