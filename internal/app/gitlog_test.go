@@ -13,7 +13,6 @@ package app
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -402,9 +401,9 @@ func gitLogEntriesN(n int) []git.Commit {
 	out := make([]git.Commit, n)
 	for i := range out {
 		out[i] = git.Commit{
-			Hash:     fmt.Sprintf("sha%03d", i),
+			Hash:    fmt.Sprintf("sha%03d", i),
 			Subject: fmt.Sprintf("commit %d", i),
-			When:     "1 day ago",
+			When:    "1 day ago",
 		}
 	}
 	return out
