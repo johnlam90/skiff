@@ -146,10 +146,13 @@ jobs:
           git tag -a "v$NEW" -m "Release v$NEW"
           git push origin "v$NEW"
 
+      # Pinned exactly, like the staticcheck version test.yml pins: the
+      # tool that builds every shipped binary must not float on "latest"
+      # and silently change what we ship on release day.
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
-          version: latest
+          version: v2.18.0
           args: release --clean
         env:
           # Same-repo brew formula push uses the default workflow token —
