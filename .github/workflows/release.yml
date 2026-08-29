@@ -37,18 +37,15 @@ on:
   # Manual escape hatch. If a merge commit accidentally carries a
   # skip-CI marker (or anything else suppresses the auto-trigger),
   # we can rerun the release flow against the current main without
-  # needing an empty no-op commit. Bumps, tags, and dispatches Pages
-  # exactly the same as a normal push trigger.
+  # needing an empty no-op commit. Bumps and tags exactly the same as
+  # a normal push trigger.
   workflow_dispatch:
 
-# Pushes back to main need write access to the repo's contents. The
-# `actions: write` scope lets the final step kick off the Pages
-# workflow via workflow_dispatch — the version-bump commit carries
-# [skip ci] so the auto-deploy on internal/version/version.go won't
-# fire on its own.
+# Pushes back to main need write access to the repo's contents: the
+# version-bump commit and the GoReleaser-written Formula/skiff.rb commit
+# both push straight to main with the default token.
 permissions:
   contents: write
-  actions: write
 
 # Serialise releases — no two version-bumps racing each other.
 concurrency:
