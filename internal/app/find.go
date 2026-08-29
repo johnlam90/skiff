@@ -195,8 +195,13 @@ func (a *App) findEditKey(ev *tcell.EventKey) {
 //	" Find: <input>                       3 of 12   Enter: next · Esc: close "
 //
 // The hint on the right is dropped first when the window is too narrow
-// to fit it; the match counter is dropped next; the input itself always
-// stays visible because that's the whole point of the bar.
+// to fit it, and the match counter is dropped next, so the input keeps
+// the room. That intended order does NOT hold at every width: the two
+// fit checks each measure the label against their own text and never
+// against each other, so a band of widths draws both and leaves the
+// input no box at all, and the input is what disappears. Fixing the
+// checks is the way to restore the order — the field cannot take the
+// cells back without erasing the text already painted there.
 func (a *App) drawFindBar() {
 	if !a.findOpen {
 		return
@@ -249,10 +254,18 @@ func (a *App) drawFindBar() {
 	}
 
 	// Input geometry. The fields carry their own caret windows, so the
-	// bar only decides how many cells each of them gets.
+	// bar only decides how many cells each of them gets — and they end
+	// one cell short of the right-hand text. When the counter and hint
+	// reach back past the input's start there is no box left, and the
+	// fields are skipped rather than handed the rest of the bar:
+	// Field.Draw blanks its whole box (plus a cell either side) before
+	// painting, so a field overlapping the text to its right erases it
+	// instead of sharing the cells. Reaching here at all is a separate
+	// bug — the fit checks above measure the label against the hint and
+	// counter, never against each other.
 	inputEnd := rightTextStart - 1
 	if inputEnd <= inputStart {
-		inputEnd = bx + bw - 1
+		return
 	}
 	// With the replace field open, the query keeps the left half and
 	// the replacement takes the right — both always visible, the caret

@@ -303,23 +303,49 @@ func TestProjFindDraw_PaintsResultsAndBar(t *testing.T) {
 	if !containsRunes([]rune(barRow), "Search project:") {
 		t.Fatalf("bar row = %q, want the search label", barRow)
 	}
-	// NOT asserted here: a.projFindCounterText() ("3 matches in 2
-	// files") actually appearing intact in the bar. Writing this test
-	// surfaced a real layout bug in drawProjFindBar: the hint/counter
-	// fit checks (`bw > runeLen(label)+runeLen(hint)+10` and
-	// `bw > runeLen(label)+runeLen(counter)+4`) compare against the
+	// NOT asserted here: the query text appearing in the bar at all.
+	// Writing this test surfaced a real layout bug in drawProjFindBar:
+	// the hint/counter fit checks (`bw > runeLen(label)+runeLen(hint)+10`
+	// and `bw > runeLen(label)+runeLen(counter)+4`) compare against the
 	// label's width only, never the three mode chips' ~12 cells, so on
 	// this suite's default 120x40 SimulationScreen (30-col sidebar ->
 	// a 90-col bar) they both report "fits" while the chips have
 	// already eaten into that budget. rightTextStart then lands left of
-	// where the chips end, inputEnd <= inputStart trips the "no room"
-	// fallback (inputEnd = bx+bw-1), and the query field's own draw
-	// (which runs last) repaints across the just-drawn counter — here
-	// turning "3 matches in 2 files" into "3 maalpha in 2 files" and
-	// swallowing the ".*" chip entirely. This reproduces with any
-	// nonzero query and match count at this width, not just this
-	// test's data. Out of scope to fix in this test-only plan (plan
-	// 019) — reported for a follow-up bug fix in projfind.go.
+	// where the chips end and the query field has no box at all, so the
+	// bar draws the counter and hint and skips the input — see
+	// TestProjFindDraw_BarKeepsItsCounterAndHint, which pins that the
+	// right-hand text survives. The input losing instead is the visible
+	// symptom of the same fit-check bug, and it reproduces with any
+	// nonzero query and match count at this width, not just this test's
+	// data. Out of scope for the plan that added this test (plan 019)
+	// and for the one that moved the fields onto overlay.Field —
+	// reported for a follow-up bug fix in projfind.go.
+}
+
+// TestProjFindDraw_BarKeepsItsCounterAndHint pins the one rule the query
+// field's box has to obey: it never paints over the counter and hint to
+// its right. Field.Draw blanks its whole box (plus a cell either side)
+// before painting, so a field handed the rest of the bar — which the old
+// "no room" fallback did whenever the right-hand text reached back past
+// the input's start — erased the hint outright and left the counter in
+// pieces. That geometry is not exotic: it is the default 120x40 panel
+// with a sidebar and any real match count.
+func TestProjFindDraw_BarKeepsItsCounterAndHint(t *testing.T) {
+	a := projFindApp(t, t.TempDir())
+	a.projFind.query.SetText("alpha")
+	a.projFind.findMatches = fakeMatches()
+
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+
+	bar := []rune(screenLine(scr, a.height-2))
+	if counter := a.projFindCounterText(); !containsRunes(bar, counter) {
+		t.Errorf("bar row %q lost its counter %q", string(bar), counter)
+	}
+	if !containsRunes(bar, "Enter: open · Tab: replace · Esc: close") {
+		t.Errorf("bar row %q lost its hint", string(bar))
+	}
 }
 
 // TestHandleProjFindKey_TypingEditsQueryAndCaretMovesDoNotResweep pins

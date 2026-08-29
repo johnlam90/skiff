@@ -578,15 +578,27 @@ func (a *App) drawProjFindBar() {
 		drawAt(a.screen, rightTextStart, by, counter, style)
 	}
 
-	inputEnd := rightTextStart - 1
-	if inputEnd <= inputStart {
-		inputEnd = bx + bw - 1
-	}
-	// With the replace field open, the query keeps the left half; the
-	// right half carries " ⇒ <replacement> [ All ]". The x ranges are
-	// stamped for the mouse handler.
+	// The x ranges the mouse handler hit-tests are re-stamped on every
+	// draw, before the "no room" bail below, so a bar that paints no
+	// replace field can never leave last frame's rect taking clicks.
 	a.projFind.replaceFieldX0, a.projFind.replaceFieldX1 = 0, 0
 	a.projFind.replaceAllX0, a.projFind.replaceAllX1 = 0, 0
+
+	// The fields end one cell short of the right-hand text. When the
+	// counter and hint reach back past the input's start there is no box
+	// left, and the fields are skipped rather than handed the rest of
+	// the bar: Field.Draw blanks its whole box (plus a cell either side)
+	// before painting, so a field overlapping the text to its right
+	// erases it instead of sharing the cells. Reaching here at all is a
+	// separate bug — the fit checks above measure the label but not the
+	// mode chips, so they can report "fits" on a bar the chips have
+	// already eaten into.
+	inputEnd := rightTextStart - 1
+	if inputEnd <= inputStart {
+		return
+	}
+	// With the replace field open, the query keeps the left half; the
+	// right half carries " ⇒ <replacement> [ All ]".
 	replaceFocused := a.projFind.replaceOpen && a.projFind.focusReplace
 	if a.projFind.replaceOpen {
 		half := inputStart + (inputEnd-inputStart)/2
