@@ -155,19 +155,29 @@ func TestSearchToggles(t *testing.T) {
 	opts := DefaultOptions()
 	opts.MatchCase = true
 	got, _ := Search(root, []string{f}, "foo", opts)
-	if len(got) != 2 {
-		t.Fatalf("MatchCase: got %d lines, want 2", len(got))
+	// Per-occurrence emission: line 1 ("Foo food foo") has two
+	// case-sensitive hits ("food"'s "foo" and the trailing "foo"), line 2
+	// ("football") has one — 3 occurrences, not 2 lines.
+	if len(got) != 3 {
+		t.Fatalf("MatchCase: got %d occurrences, want 3", len(got))
 	}
 
 	opts = DefaultOptions()
 	opts.WholeWord = true
 	got, _ = Search(root, []string{f}, "foo", opts)
-	if len(got) != 1 || got[0].Line != 1 {
+	// Line 1 has two word-bounded hits ("Foo" at the start and the
+	// trailing "foo"); "food"'s "foo" and "football"'s are not
+	// word-bounded, so line 2 contributes nothing.
+	if len(got) != 2 || got[0].Line != 1 || got[1].Line != 1 {
 		t.Fatalf("WholeWord: got %+v", got)
 	}
 	if got[0].Col != 0 {
 		// "Foo" matches case-insensitively at col 0 and is word-bounded.
 		t.Fatalf("WholeWord col: got %d", got[0].Col)
+	}
+	if got[1].Col != 9 {
+		// The trailing "foo" starts at rune column 9.
+		t.Fatalf("WholeWord second hit col: got %d", got[1].Col)
 	}
 
 	opts = DefaultOptions()
@@ -276,6 +286,39 @@ func TestReplaceLineRegexGroups(t *testing.T) {
 	got, _ = ReplaceLine("x", "x", "$1", DefaultOptions())
 	if got != "$1" {
 		t.Fatalf("literal mode must not expand: %q", got)
+	}
+}
+
+// TestSearchAndReplace_CountsAgreeOnMultiOccurrenceLine pins the
+// preview-parity guarantee: a line with the query twice must produce two
+// distinct Match rows (not one), and applying those two matches must
+// report Replaced == 2 with nothing skipped — the panel row count the
+// user reviewed must equal the number of occurrences actually rewritten.
+func TestSearchAndReplace_CountsAgreeOnMultiOccurrenceLine(t *testing.T) {
+	root := t.TempDir()
+	f := seed(t, root, "dup.txt", "foo(foo)\n")
+
+	got, trunc := Search(root, []string{f}, "foo", DefaultOptions())
+	if trunc {
+		t.Fatal("no caps should trip here")
+	}
+	if len(got) != 2 {
+		t.Fatalf("matches: got %d, want 2 (one per occurrence)", len(got))
+	}
+	if got[0].Col != 0 || got[1].Col != 4 {
+		t.Fatalf("columns: got %d, %d, want 0, 4", got[0].Col, got[1].Col)
+	}
+
+	rep := ApplyReplace(root, got, "foo", "bar", DefaultOptions())
+	if rep.Replaced != 2 || rep.Skipped != 0 {
+		t.Fatalf("report: %+v, want Replaced=2 Skipped=0", rep)
+	}
+	data, err := os.ReadFile(filepath.Join(root, f))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(data) != "bar(bar)\n" {
+		t.Fatalf("file: got %q, want %q", data, "bar(bar)\n")
 	}
 }
 

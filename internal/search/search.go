@@ -118,9 +118,13 @@ func Search(rootDir string, files []string, query string, opts Options) ([]Match
 	return out, truncated
 }
 
-// searchFile scans one file for needle. Missing, oversized, and binary
-// files are silently skipped — the index can be slightly stale and the
-// sweep must shrug that off.
+// searchFile scans one file and records every qualifying occurrence of
+// needle — not just the first hit per line. ReplaceLine rewrites every
+// occurrence on a matched line, so the sweep has to enumerate them the
+// same way or the panel under-reports what Replace-All will actually
+// touch (a line with the query twice showed one row and "replaced" two).
+// Missing, oversized, and binary files are silently skipped — the index
+// can be slightly stale and the sweep must shrug that off.
 func searchFile(path, rel, needle string, caseSensitive bool, re *regexp.Regexp, opts Options) ([]Match, bool) {
 	info, err := os.Stat(path)
 	if err != nil || info.IsDir() {
@@ -144,32 +148,44 @@ func searchFile(path, rel, needle string, caseSensitive bool, re *regexp.Regexp,
 	var out []Match
 	truncated := false
 	lineNo := 0
+lines:
 	for line := range strings.SplitSeq(string(data), "\n") {
 		lineNo++
-		byteCol, byteLen := lineMatch(line, needle, caseSensitive, re, opts.WholeWord)
-		if byteCol < 0 {
-			continue
+		// Folded once per line, then walked with lineMatchFrom — the same
+		// resumable scanner ReplaceLine uses — so the sweep and the
+		// rewrite agree on where occurrences start by construction.
+		hay := matchHaystack(line, caseSensitive, re)
+		from := 0
+		for {
+			byteCol, byteLen := lineMatchFrom(line, hay, from, needle, re, opts.WholeWord)
+			if byteCol < 0 {
+				continue lines
+			}
+			if opts.MaxPerFile > 0 && len(out) >= opts.MaxPerFile {
+				truncated = true
+				break lines
+			}
+			out = append(out, Match{
+				Path: rel,
+				Line: lineNo,
+				Col:  len([]rune(line[:byteCol])),
+				Text: capRunes(line, maxLineRunes),
+			})
+			// Advance past this hit exactly the way ReplaceLine's outer
+			// loop does (search.go ReplaceLine): by its length, or by one
+			// byte when it matched empty, so a zero-width regex can't
+			// re-report the same position forever.
+			next := byteCol + byteLen
+			if byteLen == 0 {
+				next = byteCol + 1
+			}
+			from = next
+			if from > len(line) {
+				continue lines
+			}
 		}
-		_ = byteLen
-		if opts.MaxPerFile > 0 && len(out) >= opts.MaxPerFile {
-			truncated = true
-			break
-		}
-		out = append(out, Match{
-			Path: rel,
-			Line: lineNo,
-			Col:  len([]rune(line[:byteCol])),
-			Text: capRunes(line, maxLineRunes),
-		})
 	}
 	return out, truncated
-}
-
-// lineMatch finds the first qualifying hit on line, returning its byte
-// offset and length (-1, 0 when none). Regex and whole-word are layered
-// here so the sweep loop stays a single call.
-func lineMatch(line, needle string, caseSensitive bool, re *regexp.Regexp, wholeWord bool) (int, int) {
-	return lineMatchFrom(line, matchHaystack(line, caseSensitive, re), 0, needle, re, wholeWord)
 }
 
 // matchHaystack returns the string literal probes run against: the line
