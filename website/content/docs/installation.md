@@ -10,12 +10,13 @@ Skiff ships as a single static Go binary. There is no runtime, no node, no langu
 
 ## macOS (Homebrew)
 
-The Homebrew formula lives in this repo's `Formula/` directory. Tap it by URL — there's no separate `homebrew-tap` repo to remember:
+One command — brew resolves the [johnlam90/homebrew-skiff](https://github.com/johnlam90/homebrew-skiff) tap automatically:
 
 ```sh
-brew tap johnlam90/skiff https://github.com/johnlam90/skiff
 brew install johnlam90/skiff/skiff
 ```
+
+If an older install command left a broken `johnlam90/skiff` tap behind, run `brew untap johnlam90/skiff` first.
 
 Both Apple Silicon (`arm64`) and Intel (`amd64`) builds are published on every release. Homebrew picks the right one.
 

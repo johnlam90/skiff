@@ -3,7 +3,7 @@
   panels below. JS auto-selects based on data-os and persists user override.
 */}}
 
-{{ $brewInstall := "brew tap johnlam90/skiff https://github.com/johnlam90/skiff\nbrew install johnlam90/skiff/skiff" }}
+{{ $brewInstall := "brew install johnlam90/skiff/skiff" }}
 {{ $brewUpdate := "brew update\nbrew upgrade johnlam90/skiff/skiff" }}
 {{ $brewUninstall := "brew uninstall johnlam90/skiff/skiff\nbrew untap johnlam90/skiff" }}
 {{ $linuxInstall := "curl -fsSL https://raw.githubusercontent.com/johnlam90/skiff/main/install.sh | sh" }}
@@ -21,8 +21,12 @@
 
   {{/* macOS panel */}}
   <div class="install-panel is-active" data-install-panel="mac" role="tabpanel" aria-label="macOS install">
-    <p class="text-sm mb-3" style="color: var(--color-muted);">Install (Apple Silicon and Intel).</p>
+    <p class="text-sm mb-3" style="color: var(--color-muted);">Install (Apple Silicon and Intel) — brew resolves the tap automatically.</p>
     {{ partial "code-block.html" (dict "code" $brewInstall "lang" "sh" "id" "brew-install") }}
+    <p class="mt-3 text-sm" style="color: var(--color-text-soft);">
+      If an older install command left a broken <code>johnlam90/skiff</code> tap behind,
+      run <code>brew untap johnlam90/skiff</code> first.
+    </p>
 
     <p class="text-sm mt-6 mb-3" style="color: var(--color-muted);">Update to the latest release.</p>
     {{ partial "code-block.html" (dict "code" $brewUpdate "lang" "sh" "id" "brew-update") }}
