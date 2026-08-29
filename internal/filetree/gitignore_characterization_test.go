@@ -156,6 +156,32 @@ func libraryVerdictAt(patterns []string, giDir, probe string, isDir bool) bool {
 	return gi.MatchesPath(rel)
 }
 
+// fsIsCaseInsensitive reports whether t's fixture temp directory treats
+// path casing as insignificant — true on the default macOS/APFS
+// configuration, false on ext4 and most Linux setups. It writes a probe
+// file and stats it back under an upper-cased name: a hit means the
+// filesystem folded the case.
+//
+// This matters because git's ground truth for a case-differing pattern
+// match is NOT a fixed, cross-platform fact: `git init` auto-detects
+// the repository's filesystem case sensitivity and sets
+// core.ignorecase accordingly, and check-ignore's pathspec matching
+// honours it — so a pattern like "Foo.txt" DOES ignore "foo.txt" on a
+// case-insensitive filesystem, even though the bytes differ, while it
+// does not on a case-sensitive one. A corpus row built on this pattern
+// shape can't pin a single expected git verdict; it has to ask this
+// fixture what filesystem it is actually running on.
+func fsIsCaseInsensitive(t *testing.T) bool {
+	t.Helper()
+	dir := t.TempDir()
+	probe := filepath.Join(dir, "case-probe")
+	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write case probe: %v", err)
+	}
+	_, err := os.Stat(filepath.Join(dir, "CASE-PROBE"))
+	return err == nil
+}
+
 // knownDivergence documents one of the 6 corners where go-gitignore's
 // verdict disagrees with git's, discovered by this corpus and written up
 // in plan 016's findings report. It freezes BOTH sides' current answers
@@ -281,6 +307,41 @@ func gitignoreCorpus() []gitignoreCase {
 	}
 }
 
+// caseSensitivityRowName identifies the one corpus row ("pattern case
+// does not match a different-case file", under -- Case sensitivity --
+// above) whose correct git verdict is platform-dependent rather than a
+// fixed fact this table can pin — see fsIsCaseInsensitive and
+// assertCaseSensitivityRow. CI caught this the hard way: the row passed
+// on ubuntu-latest and failed on macos-latest, because APFS folds case
+// and ext4 doesn't.
+const caseSensitivityRowName = "pattern case does not match a different-case file"
+
+// assertCaseSensitivityRow is TestGitignoreCharacterization's special
+// case for caseSensitivityRowName. go-gitignore's own match is asserted
+// UNCONDITIONALLY: its regex is always case-sensitive, so it must say
+// "not ignored" regardless of platform. git's answer is not asserted
+// against a fixed expectation — it is compared against a live probe of
+// this fixture's filesystem, because that probe is exactly what git's
+// own core.ignorecase auto-detection is answering under the hood. On a
+// case-insensitive filesystem this makes the row a self-documenting,
+// platform-conditional known divergence (logged, not failed); on a
+// case-sensitive one the two sides simply agree, as they did before CI
+// found the gap.
+func assertCaseSensitivityRow(t *testing.T, libResult, gitResult bool) {
+	t.Helper()
+	if libResult {
+		t.Errorf("go-gitignore's case handling changed: expected case-sensitive (no match) unconditionally, got a match — re-triage this row")
+	}
+	wantGit := fsIsCaseInsensitive(t)
+	if gitResult != wantGit {
+		t.Errorf("git's verdict didn't track this fixture's own case sensitivity: fsIsCaseInsensitive=%v git=%v", wantGit, gitResult)
+	}
+	if wantGit {
+		t.Logf("known divergence (platform-conditional): fixture filesystem is case-insensitive, so git ignores %q under pattern %q via core.ignorecase, while go-gitignore's regex match stays case-sensitive and says no",
+			"foo.txt", "Foo.txt")
+	}
+}
+
 // TestGitignoreCharacterization is plan 016's characterization corpus: for
 // every row it asks a throwaway git repo and the compiled go-gitignore
 // matcher the same question — does this pattern list ignore this path?
@@ -311,6 +372,11 @@ func TestGitignoreCharacterization(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			gitResult := gitGroundTruthAt(t, tc.lines, tc.giDir, tc.probe, tc.isDir)
 			libResult := libraryVerdictAt(tc.lines, tc.giDir, tc.probe, tc.isDir)
+
+			if tc.name == caseSensitivityRowName {
+				assertCaseSensitivityRow(t, libResult, gitResult)
+				return
+			}
 
 			if tc.diverges == nil {
 				if libResult != gitResult {
