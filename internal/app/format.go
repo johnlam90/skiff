@@ -210,8 +210,10 @@ func (a *App) openFormatTrustPrompt(tab *editor.Tab, cfg *format.Config, argv []
 	})
 	// Show the argv. Without this the prompt cannot distinguish
 	// "gofmt -w" from "bash -c curl … | sh", and a Yes is consent to
-	// something the user was never shown.
-	c.Body = formatTrustPromptBody(cfg)
+	// something the user was never shown. Wrapped to the confirm's
+	// actual runtime width (not a constant) so a narrow terminal wraps
+	// instead of silently truncating a command's tail.
+	c.Body = formatTrustPromptBody(cfg, bodyWrapWidth(c))
 	// Cancel/No path: persist a denial so we don't re-prompt every
 	// save. The hook lives on the confirm prefab itself, so an
 	// unrelated future confirm can never inherit the side effect.
@@ -226,7 +228,11 @@ func (a *App) openFormatTrustPrompt(tab *editor.Tab, cfg *format.Config, argv []
 // format.json ($FILE unexpanded) because that is exactly the text the
 // trust hash covers — showing a substituted absolute path would imply
 // the approval is scoped to this one file, which it is not.
-func formatTrustPromptBody(cfg *format.Config) []string {
+//
+// width is the wrap width for each argv row — callers pass
+// bodyWrapWidth(c) so the wrap matches the confirm's actual runtime
+// frame instead of a constant the draw pass then clips.
+func formatTrustPromptBody(cfg *format.Config, width int) []string {
 	body := []string{
 		filepath.Join(format.ConfigDir, format.ConfigFile) + " asks to run these commands",
 		"automatically every time you save a matching file.",
@@ -239,9 +245,40 @@ func formatTrustPromptBody(cfg *format.Config) []string {
 		body = append(body, wrapIndented(
 			fmt.Sprintf("  .%s  ", ext),
 			renderArgv(cfg.Commands[ext]),
-			overlay.ConfirmBodyTextWidth)...)
+			width)...)
 	}
 	return body
+}
+
+// clampBodyWidth keeps a confirm's runtime-computed BodyTextWidth
+// within the range wrapIndented is meant to be used at: never wider
+// than the classic body form (there's nothing to gain from wrapping
+// wider than the prompt was designed for), and never so narrow that
+// an extension prefix like "  .go  " eats the whole row.
+func clampBodyWidth(w int) int {
+	if w > overlay.ConfirmBodyTextWidth {
+		return overlay.ConfirmBodyTextWidth
+	}
+	if w < 20 {
+		return 20
+	}
+	return w
+}
+
+// bodyWrapWidth returns the wrap width to use for a confirm that is
+// about to carry a multi-line Body. Confirm.frameWidth (and so
+// BodyTextWidth) only switches from the classic 54-cell form to the
+// wide 84-cell Body form once Body is non-empty, so asking before the
+// real content is assigned would measure the wrong frame — a
+// terminal wide enough for the full 84-cell form would get wrapped as
+// if it were only 54. Priming Body with a one-row placeholder first
+// makes frameWidth see the same "this is a Body confirm" signal the
+// real content will, so the measured width matches what Draw
+// actually renders. The caller overwrites Body with the real content
+// right after.
+func bodyWrapWidth(c *overlay.Confirm) int {
+	c.Body = []string{""}
+	return clampBodyWidth(c.BodyTextWidth())
 }
 
 // sortedFormatExts returns the extensions a config declares that carry
@@ -351,11 +388,27 @@ func validateFormatterConfig(cfg *format.Config) error {
 
 // openFormatInstallPrompt asks whether to install the user's global
 // default formatter for this extension into the project's
-// .skiff/format.json. Yes merges the entry, auto-trusts the
-// resulting config (the user's consent here implies trust — same
-// reasoning as "you wrote the file yourself"), and runs the
-// formatter on the freshly-saved file. No persists a per-extension
-// decline so the prompt won't fire on every save in this project.
+// .skiff/format.json. The Body previews every command the merged
+// file will end up with — including entries the project already
+// declared, which this prompt is not nominally about — so a Yes here
+// carries the same informed consent the trust prompt requires.
+//
+// What Yes does next depends on what trust already covers for the
+// pre-merge config:
+//
+//   - No prior project config, or the prior config's hash was
+//     already TrustAllowed: the Body the user just read *is* the
+//     complete merged file, so install, trust the resulting hash,
+//     and run the formatter — same one-step flow as before.
+//   - A prior project config still TrustUnknown: that config was
+//     never reviewed by the user, so this Yes — which only asked
+//     about the new extension — cannot extend trust to it. Install
+//     the merge (so it's recorded), but hand off to the standard
+//     trust prompt for the fresh, merged file instead of
+//     auto-trusting it.
+//
+// No persists a per-extension decline so the prompt won't fire on
+// every save in this project.
 //
 // The prompt uses the same Yes/No confirm modal as the trust prompt
 // so we stay within the existing modal vocabulary instead of
@@ -378,37 +431,86 @@ func (a *App) openFormatInstallPrompt(tab *editor.Tab, ext string, argvTemplate 
 	// time the user only cares which formatter is being added.
 	formatterName := argvTemplate[0]
 
+	// preCfg is whatever the project already declares, evaluated
+	// before this install. Its trust state — not this prompt's Yes —
+	// decides whether the merge that follows may be auto-trusted.
+	preCfg, _ := format.Load(root)
+	preTrustState := format.TrustUnknown
+	if preCfg != nil {
+		if tf, err := format.LoadTrust(format.DefaultTrustPath()); err == nil {
+			preTrustState = tf.CheckTrust(root, preCfg.Hash())
+		}
+	}
+
 	title := "Install formatter for this project?"
 	msg := fmt.Sprintf("Add %s for .%s to %s?", formatterName, ext,
 		filepath.Join(format.ConfigDir, format.ConfigFile))
 
 	c := a.openConfirm(title, msg, func(app *App) {
-		// Yes — merge into project config, trust the new hash, run.
+		// Yes — merge into project config.
 		hash, err := format.InstallCommandIntoProject(root, ext, argvTemplate)
 		if err != nil {
 			app.flash("install failed: " + err.Error())
 			return
 		}
-		// Auto-trust: the user just consented to the exact contents
-		// they wrote. Re-prompting would be busywork. Also clear any
-		// past "declined" entry for this ext so installing now means
-		// the prompt was really opt-in, not a leftover dismissal.
-		app.persistTrust(root, hash, true)
-		app.persistInstallDecline(root, ext, false)
 		// Refresh the file tree immediately so the new
 		// .skiff/format.json appears in the sidebar without
 		// waiting for the 10-second tick. Same pair fileops.go uses
-		// after every other directory mutation we make.
+		// after every other directory mutation we make. Clear any
+		// past "declined" entry for this ext too — installing now
+		// means the prompt was really opt-in, not a leftover
+		// dismissal — regardless of which trust branch follows.
 		app.tree.Refresh()
 		app.refreshGitStatusAsync()
-		// Substitute $FILE at run time, never at install time. This
-		// keeps the on-disk template portable while still pointing
-		// the formatter at the file the user just saved.
-		app.execFormatter(tabPath, substituteFile(argvTemplate, tabPath))
+		app.persistInstallDecline(root, ext, false)
+
+		if preCfg == nil || preTrustState == format.TrustAllowed {
+			app.persistTrust(root, hash, true)
+			// Substitute $FILE at run time, never at install time.
+			// This keeps the on-disk template portable while still
+			// pointing the formatter at the file the user just saved.
+			app.execFormatter(tabPath, substituteFile(argvTemplate, tabPath))
+			return
+		}
+		// A pre-existing, never-reviewed config rides along in the
+		// merge. This Yes only covers the entry this prompt showed
+		// alongside it — the standard trust prompt has to ask about
+		// the merged file on its own terms before anything runs.
+		freshCfg, err := format.Load(root)
+		if err != nil || freshCfg == nil {
+			app.flash("format: reload after install failed")
+			return
+		}
+		app.openFormatTrustPrompt(tab, freshCfg, substituteFile(argvTemplate, tabPath))
 	})
+	// Preview every command the merged file will contain — not just
+	// the one entry this prompt is nominally about — so the Body
+	// carries informed consent even when a pre-existing config rides
+	// along silently in the merge. Wrapped to the confirm's actual
+	// runtime width, same as the trust prompt.
+	c.Body = formatTrustPromptBody(previewMergedConfig(preCfg, ext, argvTemplate), bodyWrapWidth(c))
 	c.OnCancel = func() {
 		a.persistInstallDecline(root, ext, true)
 	}
+}
+
+// previewMergedConfig returns an in-memory *format.Config carrying
+// every command the project's format.json would contain after
+// installing (ext, argvTemplate) into preCfg — preCfg's existing
+// entries plus the new one. Used only to render the install prompt's
+// Body; never written to disk or hashed (InstallCommandIntoProject
+// does the actual write, and reload picks up the real hash
+// afterwards). preCfg may be nil when the project has no format.json
+// yet, in which case the preview is just the one new entry.
+func previewMergedConfig(preCfg *format.Config, ext string, argvTemplate []string) *format.Config {
+	commands := map[string][]string{}
+	if preCfg != nil {
+		for e, argv := range preCfg.Commands {
+			commands[e] = argv
+		}
+	}
+	commands[ext] = argvTemplate
+	return &format.Config{Commands: commands}
 }
 
 // substituteFile expands $FILE in every arg of template using the
@@ -506,7 +608,7 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 	// the event loop while the goroutine still reads it.
 	args := append([]string(nil), argv...)
 	a.flash(label + "…")
-	go func() {
+	a.safeGo("format", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), deadline)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
@@ -540,7 +642,7 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 			label:   label,
 			err:     err,
 		})
-	}()
+	})
 }
 
 // indexNewline returns the index of the first newline in s, or -1.
@@ -559,7 +661,10 @@ func indexNewline(s string) int {
 // On success it reloads the affected tab from disk so the buffer
 // shows the formatted output — but only if the user hasn't started
 // editing again in the meantime (Dirty=true). Trampling unsaved
-// edits would be the worst possible UX outcome of this feature.
+// edits would be the worst possible UX outcome of this feature. The
+// reload uses ReloadKeepHistory rather than plain Reload: the user
+// never asked for this reload, so it must not cost them their undo
+// stack the way the disk-conflict prompt's explicit Reload does.
 func (a *App) handleFormatDone(e *formatDoneEvent) {
 	if e == nil {
 		return
@@ -576,7 +681,7 @@ func (a *App) handleFormatDone(e *formatDoneEvent) {
 			a.flash(fmt.Sprintf("%s ran — kept your edits (file on disk was reformatted)", e.label))
 			return
 		}
-		if err := tab.Reload(); err != nil {
+		if err := tab.ReloadKeepHistory(); err != nil {
 			a.flash(fmt.Sprintf("%s ran but reload failed: %v", e.label, err))
 			return
 		}

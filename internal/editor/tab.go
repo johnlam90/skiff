@@ -19,6 +19,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/atomicfile"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -394,7 +395,7 @@ func (t *Tab) Save() error {
 	if t.Path == "" {
 		return fmt.Errorf("no path set for tab")
 	}
-	if err := os.WriteFile(t.Path, []byte(t.Buffer.TextWith(t.LineEnding.Newline())), 0644); err != nil {
+	if err := atomicfile.Replace(t.Path, []byte(t.Buffer.TextWith(t.LineEnding.Newline()))); err != nil {
 		return err
 	}
 	t.Dirty = false
@@ -413,12 +414,41 @@ func (t *Tab) Save() error {
 	return nil
 }
 
-// Reload re-reads the file from disk into the buffer. Cursor and anchor
-// are clamped to the new content (so the user keeps roughly their place
-// instead of getting snapped to line 0); ScrollY is left alone and gets
-// clamped on the next render. Dirty is cleared and the syntax cache is
-// invalidated. Image tabs decode the file again instead of replacing
-// the text buffer.
+// reloadFromDisk re-reads the file from disk into the buffer. Cursor and
+// anchor are clamped to the new content (so the user keeps roughly their
+// place instead of getting snapped to line 0); ScrollY is left alone and
+// gets clamped on the next render. Dirty is cleared and the syntax cache
+// is invalidated. It does NOT touch undo history — that decision belongs
+// to the caller, which is why Reload and ReloadKeepHistory both wrap this
+// and differ only in what they do to the stacks afterwards.
+func (t *Tab) reloadFromDisk() error {
+	data, err := os.ReadFile(t.Path)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(t.Path)
+	if err != nil {
+		return err
+	}
+	t.Buffer = NewBuffer(string(data))
+	t.LineEnding = detectLineEnding(data)
+	t.Cursor = t.Buffer.Clamp(t.Cursor)
+	t.Anchor = t.Cursor // drop any selection — line indices may have shifted.
+	t.Dirty = false
+	t.DiskGone = false
+	t.Mtime = info.ModTime()
+	t.StyleStale = true
+	t.cursorMoved = true
+	return nil
+}
+
+// Reload re-reads the file from disk into the buffer and resets undo
+// history. Image tabs decode the file again instead of replacing the
+// text buffer. Use this for reloads the user explicitly chose (the
+// disk-conflict prompt's "Reload" button) — history is discarded because
+// the user is knowingly taking the disk version. For reloads the user did
+// NOT ask for (format-on-save, the background external-change reconcile),
+// use ReloadKeepHistory instead so their prior edits stay undoable.
 func (t *Tab) Reload() error {
 	if t.Path == "" {
 		return fmt.Errorf("no path set for tab")
@@ -438,28 +468,37 @@ func (t *Tab) Reload() error {
 		t.DiskGone = false
 		return nil
 	}
-	data, err := os.ReadFile(t.Path)
-	if err != nil {
+	if err := t.reloadFromDisk(); err != nil {
 		return err
 	}
-	info, err := os.Stat(t.Path)
-	if err != nil {
-		return err
-	}
-	t.Buffer = NewBuffer(string(data))
-	t.LineEnding = detectLineEnding(data)
-	t.Cursor = t.Buffer.Clamp(t.Cursor)
-	t.Anchor = t.Cursor // drop any selection — line indices may have shifted.
-	t.Dirty = false
-	t.DiskGone = false
-	t.Mtime = info.ModTime()
-	t.StyleStale = true
-	t.cursorMoved = true
 	// Reload re-establishes "what's on disk" as the new baseline. Any
 	// prior undo history is meaningless now (the line indices may have
 	// shifted, and the user explicitly asked to take the disk version),
 	// so reset both stacks and the revert anchor.
 	t.initUndo()
+	return nil
+}
+
+// ReloadKeepHistory re-reads the file from disk like Reload but keeps the
+// tab's undo history, pushing the pre-reload buffer as its own undoable
+// step. This is the right shape for reloads the user did NOT explicitly
+// ask for — format-on-save and the background external-change reconcile —
+// where wiping history would destroy work the user never chose to give up.
+func (t *Tab) ReloadKeepHistory() error {
+	if t.Path == "" {
+		return fmt.Errorf("no path set for tab")
+	}
+	if t.IsImage() {
+		return t.Reload() // image tabs have no text history to keep.
+	}
+	pre := t.captureSnapshot()
+	if err := t.reloadFromDisk(); err != nil {
+		return err
+	}
+	t.pushUndoSnapshot(pre)
+	t.redoStack = nil
+	t.lastUndoGroup = undoGroupNone // the reload never coalesces with typing
+	t.markSaved()                   // disk == buffer now; dirty is measured against this state
 	return nil
 }
 

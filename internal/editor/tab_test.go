@@ -139,6 +139,70 @@ func TestTab_SaveKeepsCRLFAfterEdit(t *testing.T) {
 	}
 }
 
+// TestSavePreservesExecBitAndSymlink fences the two properties a
+// rename-based atomic save is most likely to destroy: an executable
+// file must keep its mode after a save, and a tab opened on a symlink
+// must save through the link to its target instead of replacing the
+// link with a regular file. os.WriteFile happened to give both for
+// free; atomicfile.Replace has to provide them deliberately.
+func TestSavePreservesExecBitAndSymlink(t *testing.T) {
+	t.Run("exec bit", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "run.sh")
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0755); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		tab, err := NewTab(path)
+		if err != nil {
+			t.Fatalf("NewTab: %v", err)
+		}
+		tab.InsertString("# edited\n")
+		if err := tab.Save(); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0755 {
+			t.Fatalf("mode after save = %v, want 0755", got)
+		}
+	})
+
+	t.Run("symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		real := filepath.Join(dir, "real.txt")
+		link := filepath.Join(dir, "link.txt")
+		if err := os.WriteFile(real, []byte("old\n"), 0644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		tab, err := NewTab(link)
+		if err != nil {
+			t.Fatalf("NewTab: %v", err)
+		}
+		tab.InsertString("new ")
+		if err := tab.Save(); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		info, err := os.Lstat(link)
+		if err != nil {
+			t.Fatalf("lstat: %v", err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatal("save replaced the symlink with a regular file")
+		}
+		got, err := os.ReadFile(real)
+		if err != nil {
+			t.Fatalf("read target: %v", err)
+		}
+		if string(got) != "new old\n" {
+			t.Fatalf("target = %q, want %q", got, "new old\n")
+		}
+	})
+}
+
 // TestTab_ReloadRedetectsLineEnding covers a file whose convention
 // changed on disk under an open tab. Reload takes the disk version as
 // the new truth, so the recorded ending has to move with it or the next
@@ -389,6 +453,120 @@ func TestTab_Reload_VanishedFile(t *testing.T) {
 	}
 	if err := tab.Reload(); err == nil {
 		t.Fatal("expected error reloading vanished file")
+	}
+}
+
+// TestReloadKeepHistory_UndoRestoresPreReloadContent pins the whole point
+// of this method: a reload the user didn't ask for (format-on-save, the
+// background reconcile) must not destroy their prior edits. The pre-reload
+// buffer has to still be one Undo away, and Redo has to be able to move
+// forward again to the disk content.
+func TestReloadKeepHistory_UndoRestoresPreReloadContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.txt")
+	if err := os.WriteFile(path, []byte("original"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.InsertString("edited-")
+	if err := tab.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	preReload := tab.Buffer.String()
+
+	if err := os.WriteFile(path, []byte("formatted-on-disk"), 0644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if err := tab.ReloadKeepHistory(); err != nil {
+		t.Fatalf("ReloadKeepHistory: %v", err)
+	}
+	if got := tab.Buffer.String(); got != "formatted-on-disk" {
+		t.Fatalf("buffer after reload = %q, want formatted-on-disk", got)
+	}
+	if !tab.CanUndo() {
+		t.Fatal("expected undo history to survive ReloadKeepHistory")
+	}
+
+	if !tab.Undo() {
+		t.Fatal("Undo should succeed")
+	}
+	if got := tab.Buffer.String(); got != preReload {
+		t.Fatalf("after undo = %q, want %q", got, preReload)
+	}
+
+	if !tab.Redo() {
+		t.Fatal("Redo should succeed")
+	}
+	if got := tab.Buffer.String(); got != "formatted-on-disk" {
+		t.Fatalf("after redo = %q, want formatted-on-disk", got)
+	}
+}
+
+// TestReloadKeepHistory_ShorterFileClampsOnUndo reloads to a file much
+// shorter than the pre-reload buffer, then rounds trip Undo/Redo. The
+// cursor/anchor restored by applySnapshot must stay in range of whatever
+// buffer they're paired with rather than panicking.
+func TestReloadKeepHistory_ShorterFileClampsOnUndo(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.txt")
+	if err := os.WriteFile(path, []byte("line one\nline two\nline three\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.Cursor = Position{Line: 2, Col: 5}
+	tab.Anchor = tab.Cursor
+
+	if err := os.WriteFile(path, []byte("x"), 0644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if err := tab.ReloadKeepHistory(); err != nil {
+		t.Fatalf("ReloadKeepHistory: %v", err)
+	}
+
+	if !tab.Undo() {
+		t.Fatal("Undo should succeed")
+	}
+	if tab.Cursor.Line >= len(tab.Buffer.Lines) {
+		t.Fatalf("cursor line out of range after undo: %+v (lines=%d)", tab.Cursor, len(tab.Buffer.Lines))
+	}
+
+	if !tab.Redo() {
+		t.Fatal("Redo should succeed")
+	}
+	if tab.Cursor.Line >= len(tab.Buffer.Lines) {
+		t.Fatalf("cursor line out of range after redo: %+v (lines=%d)", tab.Cursor, len(tab.Buffer.Lines))
+	}
+}
+
+// TestReload_StillClearsHistory pins that the plain Reload() contract used
+// by the disk-conflict prompt's explicit "Reload" button is unchanged:
+// the user chose to take the disk version, so undo history is wiped.
+func TestReload_StillClearsHistory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.txt")
+	if err := os.WriteFile(path, []byte("original"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.InsertString("edited-")
+
+	if err := os.WriteFile(path, []byte("disk-version"), 0644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if err := tab.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if tab.CanUndo() {
+		t.Fatal("plain Reload should still clear undo history")
 	}
 }
 

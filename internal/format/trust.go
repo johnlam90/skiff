@@ -170,6 +170,9 @@ func LoadTrust(path string) (*TrustFile, error) {
 // SaveTrust writes the trust file atomically via temp-file + rename,
 // so a crash mid-write can't leave the JSON half-flushed and corrupt
 // every future trust check. Creates the parent directory if needed.
+// Owner-only (0600): the file records every project root the user has
+// opened and whether they trusted it, which a shared multi-user box
+// shouldn't hand to other local accounts.
 func SaveTrust(path string, tf *TrustFile) error {
 	if path == "" {
 		return errors.New("no trust path")
@@ -178,7 +181,7 @@ func SaveTrust(path string, tf *TrustFile) error {
 	if err != nil {
 		return err
 	}
-	return atomicfile.Write(path, data, 0644)
+	return atomicfile.Write(path, data, 0600)
 }
 
 // CheckTrust looks up the stored decision for (rootDir, configHash).
