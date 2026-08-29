@@ -8,8 +8,10 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,17 +147,17 @@ func TestFinderKey_ArrowsMoveSelection(t *testing.T) {
 	a.openFinder()
 
 	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
-	if finderOv(t, a).selected != 1 {
-		t.Fatalf("selected after ↓: got %d, want 1", finderOv(t, a).selected)
+	if finderOv(t, a).Sel() != 1 {
+		t.Fatalf("selected after ↓: got %d, want 1", finderOv(t, a).Sel())
 	}
 	a.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
-	if finderOv(t, a).selected != 0 {
-		t.Fatalf("selected after ↑: got %d, want 0", finderOv(t, a).selected)
+	if finderOv(t, a).Sel() != 0 {
+		t.Fatalf("selected after ↑: got %d, want 0", finderOv(t, a).Sel())
 	}
 	// ↑ at the top stays put.
 	a.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
-	if finderOv(t, a).selected != 0 {
-		t.Fatalf("selected at top after ↑: got %d, want 0", finderOv(t, a).selected)
+	if finderOv(t, a).Sel() != 0 {
+		t.Fatalf("selected at top after ↑: got %d, want 0", finderOv(t, a).Sel())
 	}
 }
 
@@ -363,5 +365,116 @@ func TestOpenFinder_NoOpInSingleFileMode(t *testing.T) {
 	}
 	if a.statusMsg == "" {
 		t.Fatal("expected a flash explaining the finder is unavailable")
+	}
+}
+
+// finderWithResults wires an App whose project index holds n files that
+// all match one query, so the result list is deep enough to overflow
+// the modal's window. Returns the app, the project root, and the query
+// that matches every seeded file.
+func finderWithResults(t *testing.T, n int) (a *App, root, query string) {
+	t.Helper()
+	dir := t.TempDir()
+	for i := range n {
+		abs := filepath.Join(dir, fmt.Sprintf("zebra%03d.go", i))
+		if err := os.WriteFile(abs, []byte("x"), 0644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	app := newTestApp(t, dir)
+	app.finder = finder.New(app.rootDir)
+	app.finder.Rebuild(nil)
+	waitForFinderReady(t, app)
+	return app, dir, "zebra"
+}
+
+// finderRowOf returns the screen row painting path inside the finder's
+// result window, or -1 when the path is not on screen at all.
+func finderRowOf(t *testing.T, a *App, path string) int {
+	t.Helper()
+	a.draw()
+	scr, ok := a.screen.(tcell.SimulationScreen)
+	if !ok {
+		t.Fatal("test app should be running on a simulation screen")
+	}
+	scr.Show() // GetContents serves the front buffer.
+	r := finderOv(t, a).rect()
+	for y := r.Y + 4; y < r.Y+r.H-1; y++ {
+		if strings.Contains(screenLine(scr, y), path) {
+			return y
+		}
+	}
+	return -1
+}
+
+// TestFinder_EveryResultIsReachable is the scrolling regression. The
+// finder asks the index for finderSearchLimit matches but only ever
+// painted finderResultsVisible of them, so forty of fifty could be
+// walked to with ↓ and still never appear — and a row that is never
+// painted is a row that can never be clicked. Walking to the last match
+// has to bring the window with it, and the row the user then sees has
+// to be the row a click opens.
+func TestFinder_EveryResultIsReachable(t *testing.T) {
+	a, dir, query := finderWithResults(t, finderSearchLimit+10)
+	a.openFinder()
+	for _, r := range query {
+		a.handleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
+	fo := finderOv(t, a)
+	if len(fo.results) != finderSearchLimit {
+		t.Fatalf("fixture should fill the search limit: got %d results", len(fo.results))
+	}
+
+	last := len(fo.results) - 1
+	for range last {
+		a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	}
+	if fo.Sel() != last {
+		t.Fatalf("↓ should walk to the last result: got %d, want %d", fo.Sel(), last)
+	}
+
+	want := fo.results[last].Path
+	ry := finderRowOf(t, a, want)
+	if ry < 0 {
+		t.Fatalf("the last result %q is not painted — %d matches are unreachable", want, last)
+	}
+
+	r := fo.rect()
+	a.handleMouse(tcell.NewEventMouse(r.X+3, ry, tcell.Button1, 0))
+	tab := a.activeTabPtr()
+	if tab == nil {
+		t.Fatal("clicking the last result should have opened a tab")
+	}
+	if got := tab.Path; got != filepath.Join(dir, want) {
+		t.Fatalf("clicked row opened %q, want %q", got, filepath.Join(dir, want))
+	}
+}
+
+// TestFinder_WheelScrollsTheResultList pins the mouse half of the same
+// window: the wheel moves the result list under a stationary highlight,
+// which is how a mouse user reaches a match forty rows down without
+// pressing ↓ forty times.
+func TestFinder_WheelScrollsTheResultList(t *testing.T) {
+	a, _, query := finderWithResults(t, finderSearchLimit+10)
+	a.openFinder()
+	for _, r := range query {
+		a.handleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
+	fo := finderOv(t, a)
+	first := fo.results[0].Path
+	if finderRowOf(t, a, first) < 0 {
+		t.Fatalf("the first result %q should start on screen", first)
+	}
+
+	rect := fo.rect()
+	for range 4 {
+		a.handleMouse(tcell.NewEventMouse(rect.X+3, rect.Y+5, tcell.WheelDown, 0))
+	}
+	if finderRowOf(t, a, first) >= 0 {
+		t.Fatalf("the wheel should have scrolled %q out of the window", first)
+	}
+	deeper := fo.results[finderResultsVisible+1].Path
+	if finderRowOf(t, a, deeper) < 0 {
+		t.Fatalf("the wheel should have brought %q into the window", deeper)
 	}
 }

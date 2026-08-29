@@ -37,15 +37,17 @@ const contextMenuWidth = 19
 // under the modal. Hand-clearing a subset here is how projFind.replaceOpen
 // once survived an overlay opening on top of the panel.
 func (a *App) closeAllModals() {
-	// A modal opening over a pick cancels it properly — popped first,
-	// hook after — so a preview hook (the theme picker's live preview)
-	// gets reverted rather than stranded. The pop happens before the
-	// hook so the hook can never re-enter this teardown.
-	if pick, ok := a.overlays.Top().(*overlay.Pick); ok {
+	// A modal opening over another tears it down properly — popped
+	// first, hook after — so a preview hook (the theme picker's live
+	// preview) gets reverted rather than stranded. The pop happens
+	// before the hook so the hook can never re-enter this teardown.
+	// Which overlays have a hook is the overlay's own business: this
+	// used to be a type switch naming *overlay.Pick, so the next
+	// surface with something to undo would have been torn down
+	// silently. Dismiss is a no-op on every overlay that has nothing.
+	if top := a.overlays.Top(); top != nil {
 		a.overlays.Close()
-		if pick.OnCancel != nil {
-			pick.OnCancel()
-		}
+		top.Dismiss()
 	}
 	a.overlays.Close()
 	a.menuOpen = false

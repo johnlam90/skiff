@@ -419,6 +419,15 @@ func (d *diffOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	}
 }
 
+// WantsMotion is true: the diff view moves its button focus to
+// whichever of [ Open file ] / [ Close ] the pointer is over, with no
+// button held.
+func (d *diffOverlay) WantsMotion() bool { return true }
+
+// Dismiss is a no-op — closing the diff view neither opens the file nor
+// changes the buffer it was showing.
+func (d *diffOverlay) Dismiss() {}
+
 // runDiffOpenFile fires the Open file button: close the modal first
 // (capture-then-close, same as confirmYes) and jump to the diff's own
 // first changed line. The target line comes from d.rows — the diff

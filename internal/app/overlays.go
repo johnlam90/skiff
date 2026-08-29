@@ -50,3 +50,12 @@ func (o menuOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	o.a.handleMenuMouse(x, y, btn)
 }
 func (o menuOverlay) Draw(tcell.Screen) { o.a.drawMenu() }
+
+// WantsMotion is true: the menu tints the enabled row under the pointer
+// and flashes a clipped label when the hover lands on a new one, both of
+// which need motion reported with no button held.
+func (o menuOverlay) WantsMotion() bool { return true }
+
+// Dismiss is a no-op — a menu torn down by the stack simply runs no
+// action, and closeMenu's own state reset rides on closeAllModals.
+func (o menuOverlay) Dismiss() {}

@@ -74,9 +74,9 @@ func (n *Info) Scroll() int { return n.scroll }
 // Lines. Body text is clipped to r.W-4 cells and so never reaches that
 // column, which is what keeps DiffLineStyle off the bar — a diff
 // preview colors its own lines, not the scrollbar beside them.
-func (n *Info) bar(r Rect) bodyBar {
-	return bodyBar{
-		x:      barColumn(r),
+func (n *Info) bar(r Rect) Bar {
+	return Bar{
+		x:      BarColumn(r),
 		top:    r.Y + 3,
 		viewH:  n.bodyRows(),
 		total:  len(n.Lines),
@@ -136,8 +136,8 @@ func (n *Info) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	// 300-line stderr dump is exactly where a user reaches for the bar,
 	// and losing the report to a stray dismiss would be worse than not
 	// having one.
-	if b := n.bar(r); b.hit(x, y) {
-		n.scroll = b.target(y)
+	if b := n.bar(r); b.Hit(x, y) {
+		n.scroll = b.Target(y)
 		return
 	}
 	if !r.Contains(x, y) {
@@ -175,7 +175,7 @@ func (n *Info) Draw(scr tcell.Screen) {
 		st := DiffLineStyle(th, bg, line)
 		drawText(scr, r.X+2, r.Y+3+i, r.W-4, trimRunes(line, r.W-4), st)
 	}
-	n.bar(r).draw(scr, th)
+	n.bar(r).Draw(scr, th)
 	DrawButton(scr, r.X+(r.W-10)/2, r.Y+r.H-3, "[  OK  ]", bg, th.Accent, true)
 	scr.HideCursor()
 }
@@ -210,3 +210,12 @@ func DiffLineStyle(th theme.Theme, bg tcell.Color, line string) tcell.Style {
 	}
 	return style
 }
+
+// WantsMotion is false. Info is the long-lived surface — a 300-line
+// stderr dump or diff preview the user reads and scrolls — and it
+// ignores everything but the wheel and Button1, so all-motion tracking
+// would buy a continuous uplink flood and nothing else.
+func (n *Info) WantsMotion() bool { return false }
+
+// Dismiss is a no-op: Info reports, it does not decide anything.
+func (n *Info) Dismiss() {}

@@ -249,3 +249,10 @@ func (p *Popup) activate() {
 		pick()
 	}
 }
+
+// WantsMotion is true: the popup's rows highlight on hover, which is
+// the whole affordance telling the user they are clickable.
+func (p *Popup) WantsMotion() bool { return true }
+
+// Dismiss is a no-op — a popup that is replaced simply picks nothing.
+func (p *Popup) Dismiss() {}
