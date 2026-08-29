@@ -143,7 +143,7 @@ internal/userconfig/userconfig.go ~/.config/skiff/config.json (icons, theme,
                               wrap, gitignore)
 internal/icons/icons.go       Nerd Font detection (deadline-bounded) + glyphs
 internal/theme/theme.go       Default Tokyo Night palette + contrast helpers
-internal/theme/palettes.go    Theme registry — 25 druk-ported palettes + ByID
+internal/theme/palettes.go    Theme registry — druk-ported palettes + Offshore + ByID
 internal/theme/degrade.go     Low-color fallback: hue → bold/underline/reverse
 internal/version/version.go   const Version = "x.y.z" — single line, CI bumps it
 ```

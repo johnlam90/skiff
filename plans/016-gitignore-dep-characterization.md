@@ -247,3 +247,29 @@ _Not yet run. The executor replaces this line with:_
 - **Rows run / divergences**: …
 - **Divergence table** (omit if none): pattern | probe | library | git | user impact
 - **Verdict & recommended follow-up**: …
+
+---
+
+## Characterization results (executed 2026-08-29, commit 36732c1)
+
+Corpus: 41 pattern rows verified against real `git check-ignore`
+(hermetic git env). **35 agree; 6 diverge.** The divergent rows are
+pinned as `knownDivergence` entries in
+`internal/filetree/gitignore_characterization_test.go` — the suite is
+green today and fails loudly if either side's behavior changes.
+
+| # | pattern | probe | library | git | root cause | impact |
+|---|---------|-------|---------|-----|-----------|--------|
+| 1 | `?at` | `cat` | no match | match | `?` escaped to a literal instead of single-char wildcard | Low |
+| 2 | `*.tx?` | `file.txt` | no match | match | same `?`-literal bug | Low |
+| 3 | `[!a]x` | `bx` | no match | match | `[!...]` passed raw into RE2, where `!` isn't negation | Low |
+| 4 | `[!a]x` | `ax` | match | no match | same, inverted | Low |
+| 5 | `sub/file` | `x/sub/file` | match | no match | embedded-slash patterns not anchored to their .gitignore dir | **Medium** — common real-world shape; skiff over-hides same-named nested paths |
+| 6 | `trail.txt\ ` | `trail.txt ` | no match | match | escaped-trailing-space rule is an unimplemented TODO upstream | Very low |
+
+**Recommendation (follow-up, operator decision):** divergence #5 alone
+justifies swapping to a maintained implementation (go-git's
+`plumbing/format/gitignore` is the candidate) behind the existing
+two-call-site seam — weighed against the dependency footprint it adds.
+Until then this corpus is the fence: any upstream or replacement change
+shows up as a red row naming the exact pattern.

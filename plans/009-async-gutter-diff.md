@@ -255,3 +255,29 @@ consistent.
   If that reads as a regression to users, the follow-up is a subtle
   "loading" treatment in the scrollbar change-map — deferred; do not
   build it here.
+
+---
+
+## Addendum (2026-08-29, after first execution attempt)
+
+The first execution stopped on an undocumented dependency: 
+`internal/app/gitchanges.go` `openFileAtFirstChange` (called from the
+diff overlay's "Open file" button via `diffview.go`'s `openFileButton`)
+reads `tab.GitLines` synchronously right after `openFile` to jump the
+cursor to the first changed line. Removing the inline gutter load
+breaks that jump silently.
+
+**Resolution (in scope for this plan):** the diff overlay already holds
+the parsed, aligned rows (`d.rows`) — the first `diffRowChange` row's
+`RightNo` (falling back to `LeftNo` for a pure deletion) IS the first
+changed line, with zero git calls. Change `openFileButton` to compute
+that target line from `d.rows` and call a line-taking variant (e.g.
+`openFileAtLine(path, line)`); `openFileAtFirstChange` either becomes
+that variant or is retired. `tab.GitLines` stays out of the click path
+entirely.
+
+Additional in-scope files: `internal/app/gitchanges.go` (the jump
+helper), `internal/app/diffview.go` (`openFileButton`), and their test
+files. Additional test: clicking "Open file" on a diff jumps the cursor
+to the first changed row's line number WITHOUT `GitLines` being
+populated (assert against a tab whose GitLines is nil).

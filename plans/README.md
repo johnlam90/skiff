@@ -13,28 +13,28 @@ and `make lint` (gofmt + vet + pinned staticcheck).
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
-| 001 | Stop the test suite destroying the real session store | P1 | S | — (run FIRST: the suite is destructive until this lands) | TODO |
-| 002 | Make Tab.Save atomic (symlink/mode-preserving, dir-fsync) | P1 | M | — | TODO |
-| 003 | Close the formatter install prompt's auto-trust + consent truncation | P1 | S | — | TODO |
-| 004 | Restore the terminal on every exit path (signals, goroutine panics, trash) | P1 | M | — | TODO |
-| 005 | Stop format-on-save and silent reload wiping undo | P1 | S | — | TODO |
-| 006 | Gate image decoding and Tab.Reload behind NewTab's guards | P1 | S | 005 | TODO |
-| 007 | Stop the false disk-conflict prompt on delete + recreate | P1 | S | — (re-run its tests after 005) | TODO |
-| 008 | Refuse invalid-UTF-8 files instead of corrupting on edit | P2 | S | 006 (inline fallback documented) | TODO |
-| 009 | Take the inline `git diff` off the tab-open/switch path | P2 | M | — (coordinates with 011) | TODO |
-| 010 | Make project-find preview exactly what Replace-All rewrites | P2 | M | 002 (its write step) | TODO |
-| 011 | Make the 10-second refresh tick quiesce when nothing changed | P2 | M | — (coordinates with 004/009) | TODO |
-| 012 | Tighten permissions on per-user state files | P2 | S | — | TODO |
-| 013 | Harden the release pipeline (pins, re-run recovery, signing, dependabot) | P2 | M | — | TODO |
-| 014 | Docs truth pass (brew contradiction, stale claims, website decision) | P2 | S-M | — (website step is operator-gated) | TODO |
-| 015 | Issue templates + CONTRIBUTING + SECURITY | P3 | S | — | TODO |
-| 016 | Characterize go-gitignore against real git (investigate-first) | P2 | M | — | TODO |
-| 017 | Small hardening cluster (dragKind type, /skiff ignore, SafeRef, withinRoot) | P3 | S | — | TODO |
-| 018 | Unify the three App constructors and drive Run() end to end | P2 | M | 001 (soft: 004) | TODO |
-| 019 | Cover projfind mouse/draw, remove time-window flakes, real test-short | P3 | S-M | 001 | TODO |
-| 020 | One width-aware clipped-text helper (internal/textdraw) | P3 | M | — | TODO |
-| 021 | Split internal/filetree into responsibility files | P3 | L | 011, 020, and any pending filetree plans | TODO |
-| 022 | Extract projFindState + gitPanelState from the App struct | P3 | L | 021 + every app-touching plan (run LAST) | TODO |
+| 001 | Stop the test suite destroying the real session store | P1 | S | — (run FIRST: the suite is destructive until this lands) | DONE (46 dead sessions purged from the real store) |
+| 002 | Make Tab.Save atomic (symlink/mode-preserving, dir-fsync) | P1 | M | — | DONE (two failure-path tests skip as root locally; they run in CI) |
+| 003 | Close the formatter install prompt's auto-trust + consent truncation | P1 | S | — | DONE |
+| 004 | Restore the terminal on every exit path (signals, goroutine panics, trash) | P1 | M | — | DONE |
+| 005 | Stop format-on-save and silent reload wiping undo | P1 | S | — | DONE |
+| 006 | Gate image decoding and Tab.Reload behind NewTab's guards | P1 | S | 005 | DONE |
+| 007 | Stop the false disk-conflict prompt on delete + recreate | P1 | S | — (re-run its tests after 005) | DONE |
+| 008 | Refuse invalid-UTF-8 files instead of corrupting on edit | P2 | S | 006 (inline fallback documented) | DONE |
+| 009 | Take the inline `git diff` off the tab-open/switch path | P2 | M | — (coordinates with 011) | DONE (amended mid-run: Open-file jump now derives from d.rows) |
+| 010 | Make project-find preview exactly what Replace-All rewrites | P2 | M | 002 (its write step) | DONE |
+| 011 | Make the 10-second refresh tick quiesce when nothing changed | P2 | M | — (coordinates with 004/009) | DONE (37× faster unchanged-merge, 0 allocs; one batched git diff per tick; filterEpoch soundness addition) |
+| 012 | Tighten permissions on per-user state files | P2 | S | — | DONE |
+| 013 | Harden the release pipeline (pins, re-run recovery, signing, dependabot) | P2 | M | — | DONE (signing E2E-provable only on the first real Actions release) |
+| 014 | Docs truth pass (brew contradiction, stale claims, website decision) | P2 | S-M | — (website step is operator-gated) | DONE (operator chose PUBLISH; pages.yml added — first deploy may need Pages enabled in repo settings) |
+| 015 | Issue templates + CONTRIBUTING + SECURITY | P3 | S | — | DONE (operator: enable private vuln reporting + create `needs-triage` label — two gh one-liners) |
+| 016 | Characterize go-gitignore against real git (investigate-first) | P2 | M | — | DONE (6 divergences pinned; swap recommendation recorded in the plan — operator decision) |
+| 017 | Small hardening cluster (dragKind type, /skiff ignore, SafeRef, withinRoot) | P3 | S | — | DONE |
+| 018 | Unify the three App constructors and drive Run() end to end | P2 | M | 001 (soft: 004) | DONE |
+| 019 | Cover projfind mouse/draw, remove time-window flakes, real test-short | P3 | S-M | 001 | DONE |
+| 020 | One width-aware clipped-text helper (internal/textdraw) | P3 | M | — | DONE |
+| 021 | Split internal/filetree into responsibility files | P3 | L | 011, 020, and any pending filetree plans | DONE (1849→657-line max; no-body-edit verified two ways) |
+| 022 | Extract projFindState + gitPanelState from the App struct | P3 | L | 021 + every app-touching plan (run LAST) | DONE |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale)
 
@@ -78,3 +78,16 @@ Recorded so nobody re-audits them:
 - **Direction options surfaced but not planned** (maintainer's call,
   ask for a design/spike plan if wanted): dirty-buffer autosave & crash
   recovery; hunk-level staging in the git panel; drag-and-drop tree moves.
+
+## Follow-ups discovered during execution
+
+- **`drawProjFindBar` width bug** (found by plan 019's draw coverage):
+  the hint/counter fit-checks in `internal/app/projfind.go` compare only
+  against the label's width, never the three mode chips', so at common
+  widths the query field overwrites the match counter and swallows the
+  `.*` chip. Reproducible with ordinary inputs; documented in
+  `projfind_test.go`'s draw test, deliberately not pinned as passing.
+  Needs its own small fix + test.
+- **go-gitignore swap decision** (plan 016's findings): the `dir/name`
+  anchoring divergence justifies evaluating go-git's gitignore behind
+  the existing two-call-site seam; weigh the dependency footprint.
