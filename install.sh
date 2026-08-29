@@ -9,7 +9,8 @@
 # One-liner installer / upgrader for Skiff. Detects the host OS and
 # architecture, downloads the matching archive from the latest GitHub
 # Release, verifies it against the release's published checksums.txt,
-# extracts the static `skiff` binary, and drops it into ~/.local/bin
+# and, when cosign is installed, verifies the release signature.
+# Extracts the static `skiff` binary and drops it into ~/.local/bin
 # (preferred) or /usr/local/bin. Re-running the script performs an
 # upgrade — same flow, latest version. A missing checksum entry, a
 # mismatch, or a host with no sha256 tool aborts the install; there is

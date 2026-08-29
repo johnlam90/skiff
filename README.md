@@ -252,7 +252,11 @@ the `skiff` binary into `~/.local/bin` (or `/usr/local/bin` when
 upgrade** — it always fetches the latest tagged release. A missing
 checksum entry, a mismatch, or a host with no sha256 tool aborts the
 install; there is deliberately no way to skip verification, because
-this is remote code about to land on your `$PATH`.
+this is remote code about to land on your `$PATH`. The checksum proves
+the download matches what the release published — integrity, not
+authenticity. When `cosign` is installed, the script also verifies the
+release's keyless signature over `checksums.txt`, confirming it was
+published by this repo's own release workflow.
 
 Override behaviour with environment variables:
 
