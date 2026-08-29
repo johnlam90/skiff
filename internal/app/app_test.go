@@ -216,9 +216,10 @@ func TestNewSingleFileApp_ShapeInvariants(t *testing.T) {
 // reason to exist is one draw per burst, not one per event), and the
 // Esc-leader quit must terminate the loop through the same dispatch a
 // user's keystrokes take. The trash teardown is asserted through the
-// Run→Close composition main.go actually runs — emptyTrash moved from
-// Run's tail into Close so signal quits and recovered panics empty it
-// too, and TestClose_EmptiesTrash pins Close's half directly.
+// Run→Close composition main.go actually runs — the trash discard
+// moved from Run's tail into Close so signal quits and recovered
+// panics empty it too, and TestClose_EmptiesTrash pins Close's half
+// directly.
 func TestRun_DrainsBurstAndExits(t *testing.T) {
 	dir := t.TempDir()
 	big := filepath.Join(dir, "big.txt")
@@ -236,12 +237,11 @@ func TestRun_DrainsBurstAndExits(t *testing.T) {
 		t.Fatal("newTestApp must build on a SimulationScreen")
 	}
 	a.openFile(big)
-	if err := a.moveToTrash(doomed); err != nil {
-		t.Fatalf("moveToTrash: %v", err)
+	if _, err := a.files.Trash(doomed); err != nil {
+		t.Fatalf("Trash: %v", err)
 	}
-	stored := a.trashed[len(a.trashed)-1].stored
-	if _, err := os.Stat(stored); err != nil {
-		t.Fatalf("trash copy should exist before Run: %v", err)
+	if !a.files.HasTrash() {
+		t.Fatal("trash entry should exist before Run")
 	}
 
 	// Quiesce before injecting: openFile kicks an async git refresh
@@ -293,7 +293,7 @@ func TestRun_DrainsBurstAndExits(t *testing.T) {
 	// main.go defers Close around Run; the composed exit path is what
 	// discards the delete-undo window.
 	a.Close()
-	if _, err := os.Stat(stored); !os.IsNotExist(err) {
+	if a.files.HasTrash() {
 		t.Fatal("Run+Close should have emptied the trash")
 	}
 }

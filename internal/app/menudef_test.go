@@ -505,7 +505,7 @@ func TestHasFileClipActions_TabOrClipboard(t *testing.T) {
 	if !a.hasFileClipActions() {
 		t.Fatal("a loaded file clipboard should open the drill-in")
 	}
-	a.fileClipPath = ""
+	a.fileClip = fileClip{}
 	a.openFile(target)
 	if !a.hasFileClipActions() {
 		t.Fatal("a file-backed tab should open the drill-in")

@@ -71,7 +71,13 @@ internal/app/overlays.go      Overlay stack wiring: menu adapter + dropOverlay
 internal/app/modals.go        Openers for the prefab overlays + closeAllModals
 internal/app/projfind.go      Project-wide content search panel (Esc-F)
 internal/app/preview.go       Shared file-open path + preview-tab rules
-internal/app/fileclip.go      File clipboard: cut/copy/paste/duplicate tree entries
+internal/app/fileops.go       App side of file ops: the prompts/confirms, the
+                              unsaved-changes gate, and applyChangeset — the ONE
+                              post-op tail (repoint/close/reopen tabs, tree,
+                              git, finder, session) every file op runs
+internal/app/fileclip.go      File clipboard: cut/copy/paste/duplicate tree
+                              entries on a background runner; the done event
+                              carries the manager's Changeset
 internal/app/session_restore.go App ↔ session store bridge (capture/restore)
 internal/app/gitops.go        Git write side: commit/push/pull/branch/stash runner
 internal/editor/buffer.go     Position + Buffer ([]string lines), edit primitives
@@ -106,6 +112,15 @@ internal/filetree/render.go   Painting + row styling: git change
 internal/filetree/scrollbar.go The sidebar's own scrollbar column
 internal/filetree/nav.go      Hit-test, toggle, scroll, Reveal, and
                               expanded-dir session persistence
+internal/filemanager/         The one owner of file operations: Create /
+                              Rename / Trash / Restore / Move / Copy /
+                              Duplicate over a project root, each returning
+                              a Changeset (Added/Removed/Moved). Owns the
+                              session trash, the " copy" ladder, the
+                              cross-device fallback and every guard (root,
+                              escape, into-itself, separator). No tcell,
+                              theme, app or filetree imports — testable
+                              against a t.TempDir() with no screen
 internal/diff/                The one model of a unified diff: Parse (git
                               text) and Lines (buffer vs disk) build it,
                               Rows pairs it for the side-by-side view.

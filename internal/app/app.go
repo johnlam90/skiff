@@ -25,6 +25,7 @@ import (
 
 	"github.com/johnlam90/skiff/internal/customactions"
 	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/filemanager"
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/git"
@@ -296,20 +297,33 @@ type App struct {
 	// editor or fire menu actions.
 	pasting bool
 
-	// Session trash: deleted files/folders are moved here instead of
-	// destroyed, so ≡ → Undo delete can bring them back. trashDir is
-	// created lazily on first delete; trashed is the restore stack.
-	// emptyTrash discards everything when the session ends.
-	trashDir string
-	trashed  []trashEntry
+	// files is the one owner of every file operation — create, rename,
+	// trash / restore, move, copy, duplicate — and of the session trash
+	// that makes Delete undoable (≡ → Undo delete; EmptyTrash on
+	// Close). Every op returns a filemanager.Changeset that
+	// applyChangeset (fileops.go) turns into tab, tree, git, finder
+	// and session updates — the only place that tail lives.
+	files *filemanager.Manager
+
+	// removedTabs remembers, per path a delete removed, the tabs that
+	// delete closed, so a Restore that adds the path back can reopen
+	// them where the user was. Written and consumed by applyChangeset
+	// only. See reopen.go for the record.
+	removedTabs map[string][]closedTabRecord
 
 	// closedTabs is the reopen stack — newest record last. See reopen.go.
 	closedTabs []closedTabRecord
 
-	// File clipboard (cut / copy / paste of tree entries) — see fileclip.go.
-	fileClipPath string // absolute path on the clipboard; "" = empty
-	fileClipCut  bool   // true = paste moves; false = paste copies
-	fileOpBusy   bool   // a background move/copy is running
+	// fileClip is the file clipboard (cut / copy / paste of tree
+	// entries) — see fileclip.go. fileOpBusy gates the one background
+	// move/copy at a time it may run.
+	fileClip   fileClip
+	fileOpBusy bool
+
+	// projReplaceBusy gates the background disk apply of project
+	// replace (projreplace.go). Its own flag, not fileOpBusy: the two
+	// features are unrelated and one running must not block the other.
+	projReplaceBusy bool
 
 	// tabScroll is how many cells the tab strip is scrolled left when
 	// the open tabs are wider than the bar (narrow tmux panes). It is
@@ -589,6 +603,7 @@ func newApp(scr tcell.Screen, rootDir string, tree *filetree.Tree, sidebarShown 
 		theme:          theme.Default(),
 		rootDir:        rootDir,
 		tree:           tree,
+		files:          filemanager.New(rootDir),
 		hoveredMenuRow: -1,
 		diffPanelRow:   -1,
 		sidebarShown:   sidebarShown,
@@ -650,7 +665,7 @@ func (a *App) Close() {
 	// Living here rather than at the tail of Run means a signal quit or
 	// a recovered panic empties it too — every exit path funnels
 	// through Close.
-	a.emptyTrash()
+	a.files.EmptyTrash()
 	a.stopTreeRefresh()
 	a.stopAutoScroll()
 	if a.screen != nil {

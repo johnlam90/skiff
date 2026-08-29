@@ -29,7 +29,7 @@ import (
 func pumpReplaceDone(t *testing.T, a *App) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
-	for a.fileOpBusy {
+	for a.projReplaceBusy {
 		if time.Now().After(deadline) {
 			t.Fatal("replace never finished")
 		}
