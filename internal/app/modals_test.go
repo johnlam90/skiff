@@ -16,6 +16,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
@@ -601,22 +602,28 @@ func TestDirtyTabCount(t *testing.T) {
 func TestCloseAllModals_ClearsReplaceState(t *testing.T) {
 	a := seedFindApp(t, "foo bar foo\n")
 	a.openFind()
-	a.findValue = []rune("foo")
-	a.findApplyQuery()
-	a.replaceOpen = true
-	a.findFocusReplace = true
-	a.replaceValue = []rune("qux")
-	a.replaceCursor = 3
-	a.replaceScroll = 1
+	for _, r := range "foo" {
+		a.handleFindKey(keyEv(tcell.KeyRune, r))
+	}
+	a.handleFindKey(keyEv(tcell.KeyTab, 0)) // grow + focus the replace field
+	for _, r := range strings.Repeat("q", 80) {
+		a.handleFindKey(keyEv(tcell.KeyRune, r))
+	}
+	// The caret window only slides on a draw, and it is part of what
+	// has to be torn down.
+	a.drawFindBar()
+	if a.replaceField.Scroll() == 0 {
+		t.Fatal("precondition: a long replacement should have scrolled the field")
+	}
 
 	a.closeAllModals()
 
 	if a.replaceOpen || a.findFocusReplace {
 		t.Fatal("replace row must not stay armed after closeAllModals")
 	}
-	if a.replaceValue != nil || a.replaceCursor != 0 || a.replaceScroll != 0 {
+	if a.replaceField.Text() != "" || a.replaceField.Cursor != 0 || a.replaceField.Scroll() != 0 {
 		t.Fatalf("replace field state leaked: value=%q cursor=%d scroll=%d",
-			string(a.replaceValue), a.replaceCursor, a.replaceScroll)
+			a.replaceField.Text(), a.replaceField.Cursor, a.replaceField.Scroll())
 	}
 	if tab := a.activeTabPtr(); tab != nil && tab.FindQuery != "" {
 		t.Fatalf("tab find highlights leaked: %q", tab.FindQuery)
@@ -661,27 +668,25 @@ func TestAnyModalOpen_FindStripIsNotOverlay(t *testing.T) {
 func TestCloseAllModals_TearsDownProjectFindThroughOnePath(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.projFind.findOpen = true
-	a.projFind.findValue = []rune("query")
-	a.projFind.findCursor = 5
+	a.projFind.query.SetText("query")
 	a.projFind.findTruncated = true
 	a.projFind.findFolded = map[string]bool{"a.go": true}
 	a.projFind.replaceOpen = true
-	a.projFind.replaceValue = []rune("repl")
-	a.projFind.replaceCursor = 4
+	a.projFind.replace.SetText("repl")
 	a.projFind.focusReplace = true
 	gen := a.projFind.findGen
 
 	a.closeAllModals()
 
-	if a.projFind.findOpen || a.projFind.findValue != nil || a.projFind.findCursor != 0 ||
+	if a.projFind.findOpen || a.projFind.query.Text() != "" || a.projFind.query.Cursor != 0 ||
 		a.projFind.findTruncated || a.projFind.findFolded != nil {
 		t.Fatalf("panel state survived: open=%v value=%q cursor=%d truncated=%v folded=%v",
-			a.projFind.findOpen, string(a.projFind.findValue), a.projFind.findCursor,
+			a.projFind.findOpen, a.projFind.query.Text(), a.projFind.query.Cursor,
 			a.projFind.findTruncated, a.projFind.findFolded)
 	}
-	if a.projFind.replaceOpen || a.projFind.replaceValue != nil || a.projFind.replaceCursor != 0 || a.projFind.focusReplace {
+	if a.projFind.replaceOpen || a.projFind.replace.Text() != "" || a.projFind.replace.Cursor != 0 || a.projFind.focusReplace {
 		t.Fatalf("replace state survived: open=%v value=%q cursor=%d focus=%v",
-			a.projFind.replaceOpen, string(a.projFind.replaceValue), a.projFind.replaceCursor, a.projFind.focusReplace)
+			a.projFind.replaceOpen, a.projFind.replace.Text(), a.projFind.replace.Cursor, a.projFind.focusReplace)
 	}
 	if a.projFind.findGen == gen {
 		t.Fatalf("closeAllModals must invalidate the in-flight sweep; gen still %d", gen)

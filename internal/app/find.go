@@ -10,8 +10,10 @@
 // focused, and the Esc-f / Esc-g leader entry points.
 //
 // The matching logic itself lives on Tab (see internal/editor/find.go) so
-// each tab carries its own query, match list, and current-index. This
-// file only handles UI: the input string, cursor, scroll, and rendering.
+// each tab carries its own query, match list, and current-index. The two
+// input fields are overlay.Field values (the same single-line input the
+// prompt, form and finder use), so this file only owns the strip: which
+// field has the keyboard, the routing keys, and the layout.
 
 package app
 
@@ -19,6 +21,8 @@ import (
 	"fmt"
 
 	"github.com/gdamore/tcell/v2"
+
+	"github.com/johnlam90/skiff/internal/overlay"
 )
 
 // findBarHeight is the cell height of the find bar. Always 1 — the bar is
@@ -26,6 +30,38 @@ import (
 // editorRect / find rect math reads as "subtract the find bar's row" at
 // every call site.
 const findBarHeight = 1
+
+// minFieldWidth is the fewest cells a find bar will shrink its input to
+// before it starts dropping the labels on its right instead. Twelve is
+// about the shortest window a query stays readable in while it is being
+// typed: the caret window slides one cell at a time, so a narrower field
+// degrades into a porthole showing the tail of what you typed. The
+// labels lose that contest on purpose — a dropped hint can be recalled
+// by widening the terminal, and a dropped counter by reading the results
+// list, but text the user is composing exists nowhere else on screen.
+const minFieldWidth = 12
+
+// barLabelsThatFit decides which of a find bar's two right-hand labels
+// get painted. spare is what is left of the bar once the input has been
+// given minFieldWidth cells, and each label costs its own width plus the
+// gap separating it from its neighbour. The counter is offered the space
+// first: it reports what this search found, which the hint — a fixed
+// reminder of the keys — never does.
+//
+// Returning the decision instead of drawing is what lets both bars share
+// one priority order. They used to carry two copies of a check that
+// compared each label against the bar's left-hand label and never
+// against the other label or the input, so both could be drawn onto
+// cells the input needed and the input, painted last, was left to
+// overlap them.
+func barLabelsThatFit(spare, counterCost, hintCost int) (counter, hint bool) {
+	if counterCost > 0 && counterCost <= spare {
+		counter = true
+		spare -= counterCost
+	}
+	hint = hintCost > 0 && hintCost <= spare
+	return counter, hint
+}
 
 // openFind shows the find bar with an empty input. We don't pre-fill
 // the user's last query because closing the bar already clears find
@@ -38,9 +74,7 @@ func (a *App) openFind() {
 	}
 	a.closeAllModals() // a modal would otherwise eat our keystrokes
 	a.findOpen = true
-	a.findValue = nil
-	a.findCursor = 0
-	a.findScroll = 0
+	a.findField = overlay.Field{}
 }
 
 // closeFind hides the find bar AND clears the active tab's find state
@@ -50,13 +84,9 @@ func (a *App) openFind() {
 // a fresh query.
 func (a *App) closeFind() {
 	a.findOpen = false
-	a.findValue = nil
-	a.findCursor = 0
-	a.findScroll = 0
+	a.findField = overlay.Field{}
 	a.replaceOpen = false
-	a.replaceValue = nil
-	a.replaceCursor = 0
-	a.replaceScroll = 0
+	a.replaceField = overlay.Field{}
 	a.findFocusReplace = false
 	if tab := a.activeTabPtr(); tab != nil {
 		tab.ClearFind()
@@ -72,7 +102,7 @@ func (a *App) findApplyQuery() {
 	if tab == nil {
 		return
 	}
-	tab.SetFindQuery(string(a.findValue))
+	tab.SetFindQuery(a.findField.Text())
 	tab.FocusCurrentMatch()
 }
 
@@ -114,21 +144,23 @@ func (a *App) findBarRect() (x, y, w, h int) {
 }
 
 // handleFindKey dispatches a keystroke while the find bar is focused.
-// Behavior:
+// The strip owns only the keys that route rather than type:
 //
 //	Esc                     close the bar
-//	Enter                   jump to the next match
-//	Shift+Enter             jump to the previous match
-//	Backspace / Delete      edit the input (live re-search)
-//	Left / Right / Home/End cursor movement inside the input
-//	printable rune          insert into the input (live re-search)
+//	Tab                     open / swap focus to the replace field
+//	Enter                   next match, or replace when the replace
+//	                        field has the keyboard
+//	Shift+Enter             previous match, or replace-all
 //
-// Anything else is dropped on the floor — the find bar owns the keyboard
-// while it's open.
+// Everything else is text editing and belongs to the focused
+// overlay.Field — the same split prompt.go and form.go use. Keys no
+// field claims (Up/Down, function keys) are dropped on the floor: the
+// find bar owns the keyboard while it's open.
 func (a *App) handleFindKey(ev *tcell.EventKey) {
 	switch ev.Key() {
 	case tcell.KeyEsc:
 		a.closeFind()
+		return
 	case tcell.KeyTab:
 		// Tab grows the bar a replace field (druk's gesture) and then
 		// toggles which field owns the keyboard.
@@ -138,104 +170,53 @@ func (a *App) handleFindKey(ev *tcell.EventKey) {
 		} else {
 			a.findFocusReplace = !a.findFocusReplace
 		}
+		return
 	case tcell.KeyEnter:
-		if a.findFocusReplace {
-			tab := a.activeTabPtr()
-			if tab == nil {
-				return
-			}
-			if ev.Modifiers()&tcell.ModShift != 0 {
-				if n := tab.ReplaceAllMatches(string(a.replaceValue)); n > 0 {
-					a.flash(fmt.Sprintf("Replaced %d match(es)", n))
-				}
-				return
-			}
-			if !tab.ReplaceCurrentMatch(string(a.replaceValue)) {
-				a.flash("Nothing to replace")
-			}
-			return
-		}
-		if ev.Modifiers()&tcell.ModShift != 0 {
+		a.findEnter(ev.Modifiers()&tcell.ModShift != 0)
+		return
+	}
+	a.findEditKey(ev)
+}
+
+// findEnter resolves Enter for whichever field has the keyboard: the
+// query field walks the match list, the replace field rewrites the
+// current match (shift: all of them).
+func (a *App) findEnter(shift bool) {
+	if !a.findFocusReplace {
+		if shift {
 			a.findPrev()
 		} else {
 			a.findNext()
 		}
-	case tcell.KeyLeft:
-		if a.findFocusReplace {
-			if a.replaceCursor > 0 {
-				a.replaceCursor--
-			}
-			return
+		return
+	}
+	tab := a.activeTabPtr()
+	if tab == nil {
+		return
+	}
+	if shift {
+		if n := tab.ReplaceAllMatches(a.replaceField.Text()); n > 0 {
+			a.flash(fmt.Sprintf("Replaced %d match(es)", n))
 		}
-		if a.findCursor > 0 {
-			a.findCursor--
-		}
-	case tcell.KeyRight:
-		if a.findFocusReplace {
-			if a.replaceCursor < len(a.replaceValue) {
-				a.replaceCursor++
-			}
-			return
-		}
-		if a.findCursor < len(a.findValue) {
-			a.findCursor++
-		}
-	case tcell.KeyHome:
-		if a.findFocusReplace {
-			a.replaceCursor = 0
-			return
-		}
-		a.findCursor = 0
-	case tcell.KeyEnd:
-		if a.findFocusReplace {
-			a.replaceCursor = len(a.replaceValue)
-			return
-		}
-		a.findCursor = len(a.findValue)
-	case tcell.KeyBackspace, tcell.KeyBackspace2:
-		if a.findFocusReplace {
-			if a.replaceCursor > 0 {
-				a.replaceValue = append(a.replaceValue[:a.replaceCursor-1], a.replaceValue[a.replaceCursor:]...)
-				a.replaceCursor--
-			}
-			return
-		}
-		if a.findCursor > 0 {
-			a.findValue = append(a.findValue[:a.findCursor-1], a.findValue[a.findCursor:]...)
-			a.findCursor--
-			a.findApplyQuery()
-		}
-	case tcell.KeyDelete:
-		if a.findFocusReplace {
-			if a.replaceCursor < len(a.replaceValue) {
-				a.replaceValue = append(a.replaceValue[:a.replaceCursor], a.replaceValue[a.replaceCursor+1:]...)
-			}
-			return
-		}
-		if a.findCursor < len(a.findValue) {
-			a.findValue = append(a.findValue[:a.findCursor], a.findValue[a.findCursor+1:]...)
-			a.findApplyQuery()
-		}
-	case tcell.KeyRune:
-		r := ev.Rune()
-		if r < 0x20 {
-			return
-		}
-		if a.findFocusReplace {
-			next := make([]rune, 0, len(a.replaceValue)+1)
-			next = append(next, a.replaceValue[:a.replaceCursor]...)
-			next = append(next, r)
-			next = append(next, a.replaceValue[a.replaceCursor:]...)
-			a.replaceValue = next
-			a.replaceCursor++
-			return
-		}
-		next := make([]rune, 0, len(a.findValue)+1)
-		next = append(next, a.findValue[:a.findCursor]...)
-		next = append(next, r)
-		next = append(next, a.findValue[a.findCursor:]...)
-		a.findValue = next
-		a.findCursor++
+		return
+	}
+	if !tab.ReplaceCurrentMatch(a.replaceField.Text()) {
+		a.flash("Nothing to replace")
+	}
+}
+
+// findEditKey hands a non-routing key to the focused field and re-runs
+// the search when the query's text actually changed — a caret move must
+// not re-snap the editor onto the current match. Same "edit, then react
+// to the edit" shape as menu.go's filter and the finder's query.
+func (a *App) findEditKey(ev *tcell.EventKey) {
+	if a.findFocusReplace {
+		a.replaceField.HandleKey(ev)
+		return
+	}
+	before := len(a.findField.Value)
+	a.findField.HandleKey(ev)
+	if len(a.findField.Value) != before {
 		a.findApplyQuery()
 	}
 }
@@ -246,8 +227,13 @@ func (a *App) handleFindKey(ev *tcell.EventKey) {
 //	" Find: <input>                       3 of 12   Enter: next · Esc: close "
 //
 // The hint on the right is dropped first when the window is too narrow
-// to fit it; the match counter is dropped next; the input itself always
-// stays visible because that's the whole point of the bar.
+// to fit it; the match counter is dropped next; the input yields to
+// neither, because it is the whole point of the bar. Where the bar is
+// wide enough to grant it, the input gets at least minFieldWidth cells —
+// that is the budget the labels are measured against. Narrower than
+// that there is nothing left to drop on its behalf, so the input simply
+// takes what remains, down to a single cell; narrower still and the bar
+// paints no field at all and hides the cursor with it.
 func (a *App) drawFindBar() {
 	if !a.findOpen {
 		return
@@ -270,28 +256,34 @@ func (a *App) drawFindBar() {
 	drawAt(a.screen, bx, by, label, labelStyle)
 	inputStart := bx + runeLen(label)
 
-	// Right side: counter + hint, drawn first so we can clip the input
-	// against them on a narrow window.
+	// Right side: counter + hint. They are placed before the input so
+	// the input can be clipped against them, but they only get the cells
+	// left over once the input has minFieldWidth — the input outranks
+	// both, and the counter outranks the hint.
 	hint := " Enter: next · Shift+Enter: prev · Tab: replace · Esc: close "
 	if a.replaceOpen && a.findFocusReplace {
 		hint = " Enter: replace · Shift+Enter: all · Tab: query · Esc: close "
 	}
 	counter := a.findCounterText()
-	rightPadding := 1
-	rightTextStart := bx + bw
+	counterCost := 0
+	if counter != "" {
+		counterCost = runeLen(counter) + 2
+	}
+	hintCost := runeLen(hint) + 1
+	spare := (bx + bw) - (inputStart + minFieldWidth + 1)
+	showCounter, showHint := barLabelsThatFit(spare, counterCost, hintCost)
 
-	if bw > runeLen(label)+runeLen(hint)+10 {
-		rightTextStart -= runeLen(hint) + rightPadding
+	rightTextStart := bx + bw
+	if showHint {
+		rightTextStart -= hintCost
 		drawAt(a.screen, rightTextStart, by, hint, mutedStyle)
 	}
-	if counter != "" && bw > runeLen(label)+runeLen(counter)+4 {
-		// Only draw the counter when there's room; right-align before
-		// the hint (or against the bar's right edge if the hint was
-		// dropped).
-		rightTextStart -= runeLen(counter) + 2
-		// Color the counter red when the query has no matches so the
-		// user gets immediate negative feedback without having to read
-		// the digits.
+	if showCounter {
+		// Right-align before the hint, or against the bar's right edge
+		// when the hint was dropped. Color the counter red on a query
+		// with no matches so the user gets immediate negative feedback
+		// without having to read the digits.
+		rightTextStart -= counterCost
 		style := mutedStyle
 		if a.findHasNoMatches() {
 			style = emptyStyle
@@ -299,11 +291,24 @@ func (a *App) drawFindBar() {
 		drawAt(a.screen, rightTextStart, by, counter, style)
 	}
 
-	// Input field — render the value with horizontal scroll so a long
-	// query keeps the cursor visible.
+	// Input geometry. The fields carry their own caret windows, so the
+	// bar only decides how many cells each gets — and they end one cell
+	// short of the right-hand text, because Field.Draw blanks its whole
+	// box plus a cell either side before painting and would otherwise
+	// erase a label rather than share its cells.
+	//
+	// The labels have already yielded everything they could by here, so
+	// reaching this bail means the bar cannot hold its own label plus a
+	// single cell of input — a terminal narrower than anything the
+	// layout can serve. HideCursor is not optional on that path:
+	// Field.Draw owns this frame's only ShowCursor call, so returning
+	// without it strands the hardware cursor wherever the editor's
+	// render parked it, blinking over static text and pointing at a
+	// buffer that does not have the keyboard.
 	inputEnd := rightTextStart - 1
 	if inputEnd <= inputStart {
-		inputEnd = bx + bw - 1
+		a.screen.HideCursor()
+		return
 	}
 	// With the replace field open, the query keeps the left half and
 	// the replacement takes the right — both always visible, the caret
@@ -320,51 +325,26 @@ func (a *App) drawFindBar() {
 	if inputWidth < 1 {
 		inputWidth = 1
 	}
-	a.adjustFindScroll(inputWidth)
-	for i := 0; i < inputWidth; i++ {
-		idx := a.findScroll + i
-		if idx >= len(a.findValue) {
-			break
-		}
-		a.screen.SetContent(inputStart+i, by, a.findValue[idx], nil, barStyle)
-	}
+	// Field.Draw carries the caret window and the ShowCursor call, so
+	// the focused flag is the whole "where does the caret blink"
+	// decision. It also clears one cell either side of the field, which
+	// the layout leaves blank on purpose: the label's trailing space and
+	// the gap before the " ⇒ " marker / the right-hand text.
+	replaceFocused := a.replaceOpen && a.findFocusReplace
+	a.findField.Draw(a.screen, inputStart, by, inputWidth, barStyle, !replaceFocused)
 	if a.replaceOpen {
-		// The replacement gets the same caret-tracking scroll window as
-		// the query field — a long value used to draw from index 0 and
-		// push the caret (and fresh keystrokes) past the field edge.
 		rw := (rightTextStart - 1) - replaceStart
 		if rw < 1 {
 			rw = 1
 		}
-		a.adjustReplaceScroll(rw)
-		for i := 0; i < rw; i++ {
-			idx := a.replaceScroll + i
-			if idx >= len(a.replaceValue) {
-				break
-			}
-			a.screen.SetContent(replaceStart+i, by, a.replaceValue[idx], nil, barStyle)
-		}
-	}
-
-	// Place the screen cursor in the focused field so the user sees a
-	// blinking caret where their typing will land.
-	if a.replaceOpen && a.findFocusReplace {
-		caret := replaceStart + (a.replaceCursor - a.replaceScroll)
-		if caret >= replaceStart && caret < rightTextStart {
-			a.screen.ShowCursor(caret, by)
-		}
-		return
-	}
-	caret := inputStart + (a.findCursor - a.findScroll)
-	if caret >= inputStart && caret <= inputEnd {
-		a.screen.ShowCursor(caret, by)
+		a.replaceField.Draw(a.screen, replaceStart, by, rw, barStyle, replaceFocused)
 	}
 }
 
 // findCounterText renders the "N of M" indicator. Returns "" when there
 // is no query so the renderer can skip drawing the field entirely.
 func (a *App) findCounterText() string {
-	if len(a.findValue) == 0 {
+	if len(a.findField.Value) == 0 {
 		return ""
 	}
 	tab := a.activeTabPtr()
@@ -380,46 +360,9 @@ func (a *App) findCounterText() string {
 // findHasNoMatches reports whether the user has typed a query that
 // returned zero hits, so the counter can flip color.
 func (a *App) findHasNoMatches() bool {
-	if len(a.findValue) == 0 {
+	if len(a.findField.Value) == 0 {
 		return false
 	}
 	tab := a.activeTabPtr()
 	return tab != nil && len(tab.FindMatches) == 0
-}
-
-// adjustReplaceScroll keeps the replace caret inside the field's visible
-// window — the replace-field twin of adjustFindScroll below.
-func (a *App) adjustReplaceScroll(width int) {
-	if width <= 0 {
-		a.replaceScroll = 0
-		return
-	}
-	if a.replaceCursor < a.replaceScroll {
-		a.replaceScroll = a.replaceCursor
-	}
-	if a.replaceCursor >= a.replaceScroll+width {
-		a.replaceScroll = a.replaceCursor - width + 1
-	}
-	if a.replaceScroll < 0 {
-		a.replaceScroll = 0
-	}
-}
-
-// adjustFindScroll keeps the input cursor inside the visible window of
-// the input field, sliding the scroll offset left or right as needed.
-// Mirrors the prompt modal's adjustPromptScroll.
-func (a *App) adjustFindScroll(width int) {
-	if width <= 0 {
-		a.findScroll = 0
-		return
-	}
-	if a.findCursor < a.findScroll {
-		a.findScroll = a.findCursor
-	}
-	if a.findCursor >= a.findScroll+width {
-		a.findScroll = a.findCursor - width + 1
-	}
-	if a.findScroll < 0 {
-		a.findScroll = 0
-	}
 }

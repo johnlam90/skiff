@@ -42,8 +42,8 @@ func TestOpenFind_OpensBarEmpty(t *testing.T) {
 	if !a.findOpen {
 		t.Fatal("openFind did not flip findOpen")
 	}
-	if len(a.findValue) != 0 {
-		t.Fatalf("input should be empty, got %q", string(a.findValue))
+	if len(a.findField.Value) != 0 {
+		t.Fatalf("input should be empty, got %q", a.findField.Text())
 	}
 }
 
@@ -234,8 +234,8 @@ func TestFindBarReplaceFlow(t *testing.T) {
 	for _, r := range "qux" {
 		a.handleFindKey(tcell.NewEventKey(tcell.KeyRune, r, 0))
 	}
-	if string(a.replaceValue) != "qux" || string(a.findValue) != "foo" {
-		t.Fatalf("typing went to the wrong field: %q / %q", a.replaceValue, a.findValue)
+	if a.replaceField.Text() != "qux" || a.findField.Text() != "foo" {
+		t.Fatalf("typing went to the wrong field: %q / %q", a.replaceField.Text(), a.findField.Text())
 	}
 
 	a.handleFindKey(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
@@ -260,20 +260,181 @@ func TestFindBarReplaceFlow(t *testing.T) {
 // with the caret and back left when the caret returns home.
 func TestDrawFindBar_ScrollsReplaceFieldToCaret(t *testing.T) {
 	a := seedFindApp(t, "hello world\n")
-	a.findOpen = true
-	a.replaceOpen = true
-	a.findFocusReplace = true
-	a.replaceValue = []rune(strings.Repeat("r", 80))
-	a.replaceCursor = len(a.replaceValue)
+	a.openFind()
+	a.handleFindKey(keyEv(tcell.KeyTab, 0)) // grow + focus the replace field
+	for _, r := range strings.Repeat("r", 80) {
+		a.handleFindKey(keyEv(tcell.KeyRune, r))
+	}
 
 	a.drawFindBar()
-	if a.replaceScroll == 0 {
+	if a.replaceField.Scroll() == 0 {
 		t.Fatal("replace field did not scroll; caret sits off-field")
 	}
 
-	a.replaceCursor = 0
+	a.handleFindKey(keyEv(tcell.KeyHome, 0))
 	a.drawFindBar()
-	if a.replaceScroll != 0 {
-		t.Fatalf("scroll should follow the caret home, got %d", a.replaceScroll)
+	if a.replaceField.Scroll() != 0 {
+		t.Fatalf("scroll should follow the caret home, got %d", a.replaceField.Scroll())
+	}
+}
+
+// TestDrawFindBar_ScrollsQueryFieldToCaret is the query field's twin: a
+// query wider than the bar has to slide its own window so the caret (and
+// the tail the user is typing) stay on screen. Both fields ride the same
+// overlay.Field, and this is the test that says so for the query.
+func TestDrawFindBar_ScrollsQueryFieldToCaret(t *testing.T) {
+	a := seedFindApp(t, "hello world\n")
+	a.openFind()
+	for _, r := range strings.Repeat("q", 200) {
+		a.handleFindKey(keyEv(tcell.KeyRune, r))
+	}
+
+	a.drawFindBar()
+	a.screen.Show()
+	if a.findField.Scroll() == 0 {
+		t.Fatal("query field did not scroll; the caret sits off-bar")
+	}
+	// The caret must land inside the bar, not past its right edge.
+	_, by, bw, _ := a.findBarRect()
+	bx := a.sidebarW()
+	cx, cy, visible := a.screen.(tcell.SimulationScreen).GetCursor()
+	if !visible || cy != by || cx < bx || cx >= bx+bw {
+		t.Fatalf("caret (%d,%d) visible=%v is outside the find bar row %d, x in [%d,%d)",
+			cx, cy, visible, by, bx, bx+bw)
+	}
+
+	a.handleFindKey(keyEv(tcell.KeyHome, 0))
+	a.drawFindBar()
+	if a.findField.Scroll() != 0 {
+		t.Fatalf("scroll should follow the caret home, got %d", a.findField.Scroll())
+	}
+}
+
+// runeIndexOf returns the screen column of s inside a rendered row, or
+// -1. Rows are indexed in runes, not bytes: the sidebar's box-drawing
+// glyphs sit ahead of the bar, so a byte index would land short.
+func runeIndexOf(row []rune, s string) int {
+	want := []rune(s)
+	for i := 0; i+len(want) <= len(row); i++ {
+		if string(row[i:i+len(want)]) == s {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestBarLabelsThatFit pins the find bars' right-hand priority order in
+// one place: the counter is offered the space before the hint, and
+// neither is offered any until the input has its minimum. The two bars
+// used to carry two copies of a check that measured each label against
+// the label on the left and never against the other one.
+func TestBarLabelsThatFit(t *testing.T) {
+	cases := []struct {
+		name                  string
+		spare, counter, hint  int
+		wantCounter, wantHint bool
+	}{
+		{"both fit", 40, 10, 20, true, true},
+		{"only the counter fits", 25, 10, 20, true, false},
+		{"counter wins the last cells", 10, 10, 20, true, false},
+		{"nothing fits", 5, 10, 20, false, false},
+		{"no counter to place leaves the hint the room", 20, 0, 20, false, true},
+		{"a negative spare places nothing", -3, 10, 20, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotCounter, gotHint := barLabelsThatFit(c.spare, c.counter, c.hint)
+			if gotCounter != c.wantCounter || gotHint != c.wantHint {
+				t.Fatalf("barLabelsThatFit(%d, %d, %d) = (%v, %v), want (%v, %v)",
+					c.spare, c.counter, c.hint, gotCounter, gotHint, c.wantCounter, c.wantHint)
+			}
+		})
+	}
+}
+
+// TestDrawFindBar_InputSurvivesAWidthThatFitsBothLabels pins the
+// priority the bar's doc comment promises, at the band of widths that
+// used to break it. The two fit checks each measured the label against
+// their own text and never against each other, so both the counter and
+// the hint were drawn on a bar with no room for them; the input was
+// handed the leftovers, which is to say the cells they were already
+// painted in. Now the labels yield: the input keeps minFieldWidth cells
+// and the caret stays inside them.
+func TestDrawFindBar_InputSurvivesAWidthThatFitsBothLabels(t *testing.T) {
+	a := seedFindApp(t, "hello\n")
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.SetSize(109, 24)
+	a.width, a.height = 109, 24
+	a.openFind()
+	query := strings.Repeat("z", minFieldWidth-1) // no matches: counter reads "no results"
+	for _, r := range query {
+		a.handleFindKey(keyEv(tcell.KeyRune, r))
+	}
+
+	a.draw()
+	scr.Show()
+
+	_, by, _, _ := a.findBarRect()
+	row := []rune(screenLine(scr, by))
+	at := runeIndexOf(row, query)
+	if at < 0 {
+		t.Fatalf("the input lost its cells: bar row = %q", string(row))
+	}
+	cx, cy, visible := scr.GetCursor()
+	if !visible || cy != by || cx != at+len(query) {
+		t.Fatalf("caret (%d,%d) visible=%v, want it at (%d,%d) just after the query",
+			cx, cy, visible, at+len(query), by)
+	}
+}
+
+// TestDrawFindBar_HidesTheCaretWhenTheBarHasNoRoomAtAll pins the last
+// resort. When even a minimum field will not fit, the bar paints no
+// field — and Field.Draw owns the frame's only ShowCursor call, so
+// returning without it would leave the hardware cursor wherever the
+// editor's own render parked it: a caret blinking over static text,
+// pointing at a buffer that does not have the keyboard.
+func TestDrawFindBar_HidesTheCaretWhenTheBarHasNoRoomAtAll(t *testing.T) {
+	a := seedFindApp(t, "hello\n")
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.SetSize(60, 24)
+	a.width, a.height = 60, 24
+	// A sidebar dragged this wide leaves the bar too narrow for even the
+	// "Find:" label plus one cell of input, while the editor beside it
+	// is still wide enough to render — and to park the hardware cursor
+	// on its own caret, which is the cursor that must not survive.
+	a.sidebarShown, a.sidebarWidth = true, 52
+	a.openFind()
+
+	a.draw()
+	scr.Show()
+
+	if cx, cy, visible := scr.GetCursor(); visible {
+		t.Fatalf("a bar with no field left a caret at (%d,%d); it must be hidden", cx, cy)
+	}
+}
+
+// TestHandleFindKey_CaretMoveDoesNotReSearch pins the "react to the edit,
+// not to the keystroke" rule the delegation to overlay.Field is built on:
+// Left/Right/Home/End change the caret, not the query, so they must not
+// re-run the search and yank the editor back onto the current match.
+func TestHandleFindKey_CaretMoveDoesNotReSearch(t *testing.T) {
+	a := seedFindApp(t, "foo\nfoo\nfoo")
+	a.openFind()
+	for _, r := range "foo" {
+		a.handleFindKey(keyEv(tcell.KeyRune, r))
+	}
+	tab := a.activeTabPtr()
+	a.handleFindKey(keyEv(tcell.KeyEnter, 0)) // advance to the second match
+	if tab.FindIndex != 1 {
+		t.Fatalf("setup: expected FindIndex=1, got %d", tab.FindIndex)
+	}
+
+	a.handleFindKey(keyEv(tcell.KeyHome, 0))
+	a.handleFindKey(keyEv(tcell.KeyRight, 0))
+	if tab.FindIndex != 1 {
+		t.Fatalf("a caret move re-ran the search: FindIndex=%d", tab.FindIndex)
+	}
+	if a.findField.Cursor != 1 {
+		t.Fatalf("caret should have moved inside the query, cursor=%d", a.findField.Cursor)
 	}
 }

@@ -16,6 +16,7 @@ package app
 import (
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,11 +141,11 @@ func TestProjFindActivateHeaderFolds(t *testing.T) {
 // state so the next open starts fresh.
 func TestProjFindEscCloses(t *testing.T) {
 	a := projFindApp(t, t.TempDir())
-	a.projFind.findValue = []rune("abc")
+	a.projFind.query.SetText("abc")
 	a.projFind.findMatches = fakeMatches()
 
 	a.closeProjFind()
-	if a.projFind.findOpen || a.projFind.findValue != nil || a.projFind.findMatches != nil {
+	if a.projFind.findOpen || a.projFind.query.Text() != "" || a.projFind.findMatches != nil {
 		t.Fatal("close should clear the panel state")
 	}
 }
@@ -157,10 +158,10 @@ func TestProjFindDebounceAndStaleKick(t *testing.T) {
 	mkFile(t, root, "a.go", "xx alpha\n")
 	a := projFindApp(t, root)
 
-	a.projFind.findValue = []rune("al")
+	a.projFind.query.SetText("al")
 	a.projFindQueryChanged() // gen N
 	staleGen := a.projFind.findGen
-	a.projFind.findValue = []rune("alpha")
+	a.projFind.query.SetText("alpha")
 	a.projFindQueryChanged() // gen N+1 supersedes
 	a.handleProjFindKick(&projFindKickEvent{when: time.Now(), gen: staleGen})
 	// The stale kick must be inert: no done event for staleGen can win,
@@ -277,7 +278,7 @@ func TestProjFindMouseClickBelowLastRowIsNoop(t *testing.T) {
 func TestProjFindDraw_PaintsResultsAndBar(t *testing.T) {
 	root := t.TempDir()
 	a := projFindApp(t, root)
-	a.projFind.findValue = []rune("alpha")
+	a.projFind.query.SetText("alpha")
 	a.projFind.findMatches = fakeMatches()
 
 	a.draw()
@@ -302,23 +303,175 @@ func TestProjFindDraw_PaintsResultsAndBar(t *testing.T) {
 	if !containsRunes([]rune(barRow), "Search project:") {
 		t.Fatalf("bar row = %q, want the search label", barRow)
 	}
-	// NOT asserted here: a.projFindCounterText() ("3 matches in 2
-	// files") actually appearing intact in the bar. Writing this test
-	// surfaced a real layout bug in drawProjFindBar: the hint/counter
-	// fit checks (`bw > runeLen(label)+runeLen(hint)+10` and
-	// `bw > runeLen(label)+runeLen(counter)+4`) compare against the
-	// label's width only, never the three mode chips' ~12 cells, so on
-	// this suite's default 120x40 SimulationScreen (30-col sidebar ->
-	// a 90-col bar) they both report "fits" while the chips have
-	// already eaten into that budget. rightTextStart then lands left of
-	// where the chips end, inputEnd <= inputStart trips the "no room"
-	// fallback (inputEnd = bx+bw-1), and the query field's own draw
-	// (which runs last) repaints across the just-drawn counter — here
-	// turning "3 matches in 2 files" into "3 maalpha in 2 files" and
-	// swallowing the ".*" chip entirely. This reproduces with any
-	// nonzero query and match count at this width, not just this
-	// test's data. Out of scope to fix in this test-only plan (plan
-	// 019) — reported for a follow-up bug fix in projfind.go.
+	// Deliberately not asserted here: which of the bar's right-hand
+	// labels survive at this size. Writing this test surfaced a real
+	// layout bug — the fit checks compared the left-hand label against
+	// one piece of right-hand text at a time, never against each other
+	// or the three mode chips, so at this suite's default 120x40 (a
+	// 30-col sidebar leaving a 90-col bar) both the counter and the hint
+	// were committed to cells the query field needed, and the field was
+	// squeezed out. That is fixed: the input is reserved minFieldWidth
+	// cells first and the labels take what is left, counter before hint,
+	// so this geometry now paints the query and the full counter and
+	// drops the hint. The tests that pin it are
+	// TestProjFindDraw_BarKeepsTheInputAtTheDefaultSize (the input and
+	// its caret survive) and TestProjFindDraw_BarDropsLabelsWholeNeverInPieces
+	// (a label is dropped whole or not at all). This test stays about
+	// the results list and the bar's label, which is what its name
+	// promises.
+}
+
+// TestProjFindDraw_BarKeepsTheInputAtTheDefaultSize pins the panel's
+// worst case, which is also its most common one: the suite's default
+// 120x40 with a sidebar and a real match count. The bar's two fit checks
+// measured the label against the hint and the counter but never against
+// each other or the ~12 cells of mode chips, so both labels were drawn
+// on a bar with no room left and the query field was squeezed out of
+// existence — a user typing into an input they cannot see. The input now
+// keeps minFieldWidth cells and the labels yield instead.
+func TestProjFindDraw_BarKeepsTheInputAtTheDefaultSize(t *testing.T) {
+	a := projFindApp(t, t.TempDir())
+	query := strings.Repeat("a", minFieldWidth-1)
+	a.projFind.query.SetText(query)
+	a.projFind.findMatches = fakeMatches()
+
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+
+	row := []rune(screenLine(scr, a.height-2))
+	at := runeIndexOf(row, query)
+	if at < 0 {
+		t.Fatalf("the query field lost its cells: bar row = %q", string(row))
+	}
+	cx, cy, visible := scr.GetCursor()
+	if !visible || cy != a.height-2 || cx != at+len(query) {
+		t.Fatalf("caret (%d,%d) visible=%v, want it at (%d,%d) just after the query",
+			cx, cy, visible, at+len(query), a.height-2)
+	}
+}
+
+// TestProjFindDraw_BarDropsLabelsWholeNeverInPieces pins the other half
+// of the bar's priority order. Which labels appear is a layout decision
+// — the input outranks both, and at this width (the suite's default
+// 120x40, chips and a real match count) the hint is dropped so the
+// counter and the input can have the cells. What must never happen is a
+// label drawn and then half-erased: Field.Draw blanks its whole box plus
+// a cell either side before painting, so a field allowed to overlap the
+// text on its right turns it into rubble. This test was written when it
+// did exactly that, leaving "3 m" of the counter and no hint at all; it
+// now asserts the weaker, correct rule, because "the hint always
+// survives" is not something the bar promises.
+func TestProjFindDraw_BarDropsLabelsWholeNeverInPieces(t *testing.T) {
+	a := projFindApp(t, t.TempDir())
+	a.projFind.query.SetText("alpha")
+	a.projFind.findMatches = fakeMatches()
+
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+
+	bar := []rune(screenLine(scr, a.height-2))
+	// The counter outranks the hint and fits here, so it must be whole.
+	if counter := a.projFindCounterText(); !containsRunes(bar, counter) {
+		t.Errorf("bar row %q lost its counter %q", string(bar), counter)
+	}
+	// The hint may be absent. It may not be a fragment: any of it on
+	// screen means all of it.
+	hint := "Enter: open · Tab: replace · Esc: close"
+	if runeIndexOf(bar, "Enter: open") >= 0 && !containsRunes(bar, hint) {
+		t.Errorf("bar row %q left the hint in pieces", string(bar))
+	}
+	// And the input is never the thing that yields.
+	if !containsRunes(bar, "alpha") {
+		t.Errorf("bar row %q dropped the query the labels are supposed to yield to", string(bar))
+	}
+	// The mode chips are controls, not labels: they never yield either.
+	for _, chip := range []string{"Aa", "⌇w", ".*"} {
+		if !containsRunes(bar, chip) {
+			t.Errorf("bar row %q lost the %q chip", string(bar), chip)
+		}
+	}
+}
+
+// TestHandleProjFindKey_TypingEditsQueryAndCaretMovesDoNotResweep pins
+// the panel's half of the overlay.Field delegation: printable runes and
+// Backspace land in the query and each start a fresh sweep generation,
+// while Home/Right only move the caret. A caret move that spent a
+// generation would launch a redundant disk walk on every arrow press.
+func TestHandleProjFindKey_TypingEditsQueryAndCaretMovesDoNotResweep(t *testing.T) {
+	a := projFindApp(t, t.TempDir())
+	for _, r := range "alpha" {
+		a.handleProjFindKey(keyEv(tcell.KeyRune, r))
+	}
+	if a.projFind.query.Text() != "alpha" {
+		t.Fatalf("typing did not reach the query field: %q", a.projFind.query.Text())
+	}
+
+	gen := a.projFind.findGen
+	a.handleProjFindKey(keyEv(tcell.KeyHome, 0))
+	a.handleProjFindKey(keyEv(tcell.KeyRight, 0))
+	if a.projFind.findGen != gen {
+		t.Fatalf("a caret move started a new sweep generation: %d -> %d", gen, a.projFind.findGen)
+	}
+	if a.projFind.query.Cursor != 1 {
+		t.Fatalf("caret should have moved inside the query, cursor=%d", a.projFind.query.Cursor)
+	}
+
+	a.handleProjFindKey(keyEv(tcell.KeyBackspace2, 0))
+	if a.projFind.query.Text() != "lpha" {
+		t.Fatalf("backspace did not edit the query: %q", a.projFind.query.Text())
+	}
+	if a.projFind.findGen == gen {
+		t.Fatal("an edit must start a new sweep generation")
+	}
+}
+
+// TestProjFindDraw_ShowsCaretInsideALongReplaceField pins the replace
+// field's caret window. The field used to paint from rune 0 forever, so
+// a replacement longer than the field pushed the caret past the field's
+// right edge, where drawProjFindBar's guard dropped the ShowCursor call
+// entirely — the user kept typing into an input with no visible caret.
+// The in-file find bar had already fixed exactly this for its own
+// replace field; the panel's copy had drifted.
+func TestProjFindDraw_ShowsCaretInsideALongReplaceField(t *testing.T) {
+	a := projFindApp(t, t.TempDir())
+	a.handleProjFindKey(keyEv(tcell.KeyTab, 0)) // grow + focus the replace field
+	if !a.projFind.replaceOpen || !a.projFind.focusReplace {
+		t.Fatal("precondition: Tab should open and focus the replace field")
+	}
+	for _, r := range strings.Repeat("r", 80) {
+		a.handleProjFindKey(keyEv(tcell.KeyRune, r))
+	}
+
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+
+	x0, x1 := a.projFind.replaceFieldX0, a.projFind.replaceFieldX1
+	if x1 <= x0 {
+		t.Fatalf("precondition: replace field has no room, [%d,%d)", x0, x1)
+	}
+	cx, cy, visible := scr.GetCursor()
+	if !visible || cy != a.height-2 || cx < x0 || cx > x1 {
+		t.Fatalf("caret (%d,%d) visible=%v is outside the replace field [%d,%d] on bar row %d",
+			cx, cy, visible, x0, x1, a.height-2)
+	}
+}
+
+// TestMatchRuneSpans_NonASCIICapitalStaysCaseSensitive pins the
+// highlighter's smart-case trigger to the engine's. internal/search arms
+// case-sensitivity with unicode.IsUpper, so a query carrying a non-ASCII
+// capital searches case-sensitively there. The highlighter tested
+// r >= 'A' && r <= 'Z', read the same query as all-lowercase, folded
+// both sides, and tinted hits the engine never reported.
+func TestMatchRuneSpans_NonASCIICapitalStaysCaseSensitive(t *testing.T) {
+	if got := matchRuneSpans("été été", "Été"); got != nil {
+		t.Fatalf("capital É should make the query case-sensitive, got spans %v", got)
+	}
+	if got, want := matchRuneSpans("Été été", "Été"), [][2]int{{0, 3}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("case-sensitive hit: got %v, want %v", got, want)
+	}
 }
 
 // TestMatchRuneSpans pins matchRuneSpans' contract: spans are rune
