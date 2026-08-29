@@ -67,6 +67,26 @@ func Write(path string, data []byte, perm os.FileMode) error {
 		_ = os.Remove(tmp)
 		return err
 	}
+	// The data rename already succeeded, so the caller's bytes are the
+	// file's bytes; a failed directory sync must not report the save as
+	// failed. It only narrows the crash window in which the rename
+	// itself could be lost.
+	_ = syncDir(dir)
+	return nil
+}
+
+// syncDir fsyncs a directory so a rename that just landed in it
+// survives a crash — rename(2) is atomic but not durable until the
+// directory entry itself reaches the disk. Best-effort by design: some
+// platforms and filesystems refuse to open or sync a directory, and
+// degrading quietly there is correct where refusing to save is not.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil
+	}
+	defer d.Close()
+	_ = d.Sync()
 	return nil
 }
 

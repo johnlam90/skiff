@@ -114,6 +114,21 @@ func TestWriteCleansUpTempOnFailure(t *testing.T) {
 	}
 }
 
+// TestWriteSyncsDirectory pins the syncDir seam Write relies on for
+// crash safety: userspace can't observe whether the fsync reached the
+// disk, but it can pin that syncDir succeeds on a real directory and
+// degrades to nil (rather than failing the save) when the directory
+// can't be opened — a failed dir sync after a successful rename must
+// never report the save as failed.
+func TestWriteSyncsDirectory(t *testing.T) {
+	if err := syncDir(t.TempDir()); err != nil {
+		t.Fatalf("syncDir on a real directory: %v", err)
+	}
+	if err := syncDir(filepath.Join(t.TempDir(), "does-not-exist")); err != nil {
+		t.Fatalf("syncDir on a missing path must degrade to nil, got %v", err)
+	}
+}
+
 // TestWriteConcurrentWritersNeverTear is the reason the temp name is
 // randomised: two skiff instances (or two goroutines) saving the same
 // file must each land a complete document. A shared "path + .tmp"
