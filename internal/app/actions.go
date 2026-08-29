@@ -70,7 +70,11 @@ func (a *App) handleCustomActionDone(e *customActionDoneEvent) {
 		a.openInfo("Action failed: "+e.label, splitErrorOutput(e.err, e.output))
 		return
 	}
+	// Explicit finder invalidation, not the tick's conditional one: an
+	// action (an scp, a generator) can drop files in directories the
+	// tree never loaded, which the sweep's membership gate cannot see.
 	a.refreshTreeNow()
+	a.invalidateFinder()
 	body := splitActionOutput(e.output, e.duration)
 	if len(body) == 0 {
 		a.flash(e.label + " — done")

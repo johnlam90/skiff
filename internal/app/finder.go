@@ -127,9 +127,13 @@ func (fo *finderOverlay) refreshResults() {
 }
 
 // invalidateFinder marks the index stale and kicks off a rebuild.
-// Called by the file-tree refresh tick and by every fileops
-// mutation (create / rename / delete) so the finder doesn't show
-// ghost paths or miss freshly-created files.
+// Called by every fileops mutation (create / rename / delete / paste /
+// undo-delete), by the git-op and custom-action landing paths (their
+// changes can land in directories the tree never loaded), and by the
+// refresh tick — but the tick only when its sweep actually changed the
+// tree's membership; see handleTreeScan. Keeping the callers explicit
+// is what lets the quiet tick skip the reindex without any of them
+// going stale.
 func (a *App) invalidateFinder() {
 	if a.finder == nil {
 		return
