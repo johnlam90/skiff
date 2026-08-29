@@ -94,6 +94,20 @@ type Node struct {
 	// truncated directory. It is not a filesystem entry: Path is empty
 	// and HitTest refuses to return it, so a click lands on nothing.
 	Sentinel bool
+
+	// lastScan fingerprints the raw listing (plus the HideIgnored flag)
+	// this directory's children were last merged from — see
+	// scanFingerprint for the byte format. merge compares the next scan
+	// against it and returns before the filter/sort/alloc pipeline when
+	// nothing changed, which is the 10-second tick's steady state on
+	// every directory nobody is touching. Empty until the first merge.
+	lastScan []byte
+
+	// mergeEpoch is Tree.filterEpoch as of this node's last merge. A
+	// mismatch means a filter input the listing cannot see (an edited
+	// .gitignore anywhere, a pinned open file) moved since, so the
+	// fingerprint alone must not be trusted and the full merge runs.
+	mergeEpoch int
 }
 
 // TrashPrefix marks in-place session-trash entries: when moving a
@@ -228,6 +242,18 @@ type Tree struct {
 	// by SetOpenFiles on every refresh, so closing a tab un-pins it.
 	openFiles map[string]struct{}
 
+	// filterEpoch versions the merge inputs that live outside the
+	// directory's own DirScan: the compiled ignore chain (an edited
+	// .gitignore in ANY directory changes what its whole subtree
+	// filters to) and the pinned open-file set. Bumped by cacheIgnore,
+	// SetOpenFiles and pin only when their input actually changed, and
+	// stamped onto each node at merge time — so one bump pushes every
+	// loaded directory through exactly one full merge on the next
+	// sweep, then the fast-path re-arms. Both refresh walks visit
+	// ancestors before descendants, which is what lets a parent's
+	// cacheIgnore bump reach its children in the same sweep.
+	filterEpoch int
+
 	// ignoreCache holds one compiled .gitignore per directory that has
 	// one, keyed by the directory's absolute path. Entries are written
 	// by merge, which is the same moment that directory's children are
@@ -290,28 +316,55 @@ func New(root string) (*Tree, error) {
 // reappears carrying the open file, not its whole build output. Call it
 // before a refresh; the next directory read is what acts on it.
 func (t *Tree) SetOpenFiles(paths []string) {
-	if len(paths) == 0 {
-		t.openFiles = nil
+	var set map[string]struct{}
+	if len(paths) > 0 {
+		set = make(map[string]struct{}, len(paths))
+		for _, p := range paths {
+			if p == "" {
+				continue
+			}
+			set[filepath.Clean(p)] = struct{}{}
+		}
+	}
+	// The tick calls this with the same tab set on every sweep; only a
+	// genuine change may bump the epoch, or the merge fast-path would
+	// never arm.
+	if openFilesEqual(t.openFiles, set) {
 		return
 	}
-	set := make(map[string]struct{}, len(paths))
-	for _, p := range paths {
-		if p == "" {
-			continue
-		}
-		set[filepath.Clean(p)] = struct{}{}
-	}
 	t.openFiles = set
+	t.filterEpoch++
+}
+
+// openFilesEqual reports whether two open-file sets pin the same paths.
+// nil and empty compare equal — both mean "nothing pinned".
+func openFilesEqual(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for p := range a {
+		if _, ok := b[p]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // pin adds one absolute path to the open-files set without waiting for
 // the app's next SetOpenFiles. Reveal uses it so the directory read it
 // is about to do already knows the target must survive the filter.
 func (t *Tree) pin(path string) {
+	p := filepath.Clean(path)
+	if _, ok := t.openFiles[p]; ok {
+		return
+	}
 	if t.openFiles == nil {
 		t.openFiles = map[string]struct{}{}
 	}
-	t.openFiles[filepath.Clean(path)] = struct{}{}
+	t.openFiles[p] = struct{}{}
+	// A new pin changes what the filter keeps, so the re-read Reveal is
+	// about to do must not be swallowed by the merge fast-path.
+	t.filterEpoch++
 }
 
 // loadChildren is the lazy-load entry point used the first time a directory
@@ -369,6 +422,12 @@ type ScanEntry struct {
 	// symlinked directories — the only entries a loop can be built out
 	// of. Empty when the link is broken or resolution failed.
 	Real string
+
+	// lowerName is Name lowercased once at scan time — the merge's sort
+	// key. Computing it here (off-thread for the background sweep)
+	// replaces two ToLower allocations per comparison inside the sort.
+	// Hand-built entries may leave it empty; merge fills the gap.
+	lowerName string
 }
 
 // DirScan is one directory's freshly-read contents. Err records a read
@@ -427,7 +486,7 @@ func scanEntries(dir string, entries []os.DirEntry) []ScanEntry {
 		if shouldHide(name) {
 			continue
 		}
-		se := ScanEntry{Name: name, IsDir: e.IsDir()}
+		se := ScanEntry{Name: name, IsDir: e.IsDir(), lowerName: strings.ToLower(name)}
 		if e.Type()&os.ModeSymlink != 0 {
 			se.IsLink = true
 			full := filepath.Join(dir, name)
@@ -467,15 +526,45 @@ func scanEntries(dir string, entries []os.DirEntry) []ScanEntry {
 //
 // A successful merge clears ReadErr: this is the point where a
 // directory that was unreadable last tick proves it is readable again.
-func (t *Tree) merge(n *Node, ds DirScan) {
-	t.cacheIgnore(n.Path, ds.Ignore)
+//
+// The fast-path at the top is the 10-second tick's steady state: when
+// the raw listing, the directory's own ignore bytes and every
+// Tree-level filter input are byte-for-byte what the last merge
+// consumed, the pipeline below would reproduce the children it already
+// built (the pipeline is deterministic in exactly those inputs), so
+// merge returns before touching anything. See scanUnchanged for what
+// "unchanged" has to mean for that claim to hold — symlinks included.
+//
+// The return value reports a membership change: false from the
+// fast-path and from a full merge that reproduced the same raw names;
+// true when names actually came or went — or when the ignore bytes
+// moved, because those change what the finder's index keeps even when
+// this directory's names did not. handleTreeScan gates the finder
+// rebuild on it.
+func (t *Tree) merge(n *Node, ds DirScan) bool {
+	if t.scanUnchanged(n, ds) {
+		return false
+	}
+	// The fingerprint is taken before filterIgnored/sort touch the
+	// slice: the comparison above runs against a raw listing, so the
+	// stamp must record raw order too.
+	fp := scanFingerprint(ds.Entries, t.HideIgnored)
+	ignoreChanged := t.cacheIgnore(n.Path, ds.Ignore)
+	changed := ignoreChanged || !bytes.Equal(fp, n.lastScan)
 	entries := t.filterIgnored(n.Path, ds.Entries)
 
+	// Hand-built entries (tests, future callers) may lack the scan-time
+	// sort key; fill it here so the comparator never re-lowers.
+	for i := range entries {
+		if entries[i].lowerName == "" {
+			entries[i].lowerName = strings.ToLower(entries[i].Name)
+		}
+	}
 	sort.SliceStable(entries, func(i, j int) bool {
 		if entries[i].IsDir != entries[j].IsDir {
 			return entries[i].IsDir
 		}
-		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+		return entries[i].lowerName < entries[j].lowerName
 	})
 	hidden := 0
 	if len(entries) > MaxDirChildren {
@@ -522,6 +611,127 @@ func (t *Tree) merge(n *Node, ds DirScan) {
 	n.Children = children
 	n.Loaded = true
 	n.ReadErr = nil
+	n.lastScan = fp
+	n.mergeEpoch = t.filterEpoch
+	return changed
+}
+
+// scanUnchanged reports whether ds would merge into n's existing
+// children unchanged, so merge can return before the filter/sort/alloc
+// pipeline. True only when every input that pipeline consumes is
+// byte-identical to the last merge: the node holds a healthy listing
+// (Loaded, no ReadErr on either side), the directory's own ignore
+// bytes match the cache, no Tree-level filter input moved
+// (mergeEpoch), and the raw entries match the stamped fingerprint.
+//
+// Symlinks disqualify wholesale — a node that is a link, sits under
+// one (Real != Path), or lists one. Real and Loop are recomputed on
+// every full merge precisely because an ancestor's link target can
+// move without this directory's listing changing, and the fast-path
+// must not cache through that. Plain directories, the overwhelming
+// majority, still win.
+func (t *Tree) scanUnchanged(n *Node, ds DirScan) bool {
+	if !n.Loaded || n.ReadErr != nil || ds.Err != nil {
+		return false
+	}
+	if n.IsLink || n.Real != n.Path {
+		return false
+	}
+	if n.mergeEpoch != t.filterEpoch {
+		return false
+	}
+	if !bytes.Equal(ds.Ignore, t.cachedIgnoreRaw(n.Path)) {
+		return false
+	}
+	return fingerprintMatches(n.lastScan, ds.Entries, t.HideIgnored)
+}
+
+// fingerprintSep terminates each entry record inside a scan
+// fingerprint; the NUL between name and flag can never appear in a
+// file name, so records cannot alias across entries.
+const fingerprintSep = 0x1e
+
+// entryFlag packs a ScanEntry's kind bits into the fingerprint's one
+// flag byte: '0' file, '1' dir, '2' file link, '3' dir link.
+func entryFlag(e ScanEntry) byte {
+	f := byte('0')
+	if e.IsDir {
+		f |= 1
+	}
+	if e.IsLink {
+		f |= 2
+	}
+	return f
+}
+
+// scanFingerprint serialises a raw listing for the fast-path
+// comparison: one leading HideIgnored flag byte ('1'/'0'), then per
+// entry Name, NUL, entryFlag, fingerprintSep. Raw scan order, before
+// filtering — os.ReadDir hands entries back name-sorted, so two reads
+// of an unchanged directory serialise identically. Symlink targets are
+// deliberately not recorded: any link disables the fast-path outright
+// (see scanUnchanged), so a stale target can never hide behind a
+// matching fingerprint.
+func scanFingerprint(entries []ScanEntry, hideIgnored bool) []byte {
+	size := 1
+	for _, e := range entries {
+		size += len(e.Name) + 3
+	}
+	fp := make([]byte, 0, size)
+	if hideIgnored {
+		fp = append(fp, '1')
+	} else {
+		fp = append(fp, '0')
+	}
+	for _, e := range entries {
+		fp = append(fp, e.Name...)
+		fp = append(fp, 0, entryFlag(e), fingerprintSep)
+	}
+	return fp
+}
+
+// fingerprintMatches walks entries against a stamped fingerprint in
+// lockstep, allocating nothing — the comparison every loaded directory
+// pays on every tick, so it must stay cheaper than the merge it
+// short-circuits. Any IsLink entry fails the match by fiat, keeping
+// the symlink refusal in one place whether the link is new or was
+// there at stamp time. An empty fingerprint (never merged) never
+// matches.
+func fingerprintMatches(fp []byte, entries []ScanEntry, hideIgnored bool) bool {
+	if len(fp) == 0 {
+		return false
+	}
+	flag := byte('0')
+	if hideIgnored {
+		flag = '1'
+	}
+	if fp[0] != flag {
+		return false
+	}
+	i := 1
+	for _, e := range entries {
+		if e.IsLink {
+			return false
+		}
+		n := len(e.Name)
+		if len(fp)-i < n+3 {
+			return false
+		}
+		if string(fp[i:i+n]) != e.Name || fp[i+n] != 0 ||
+			fp[i+n+1] != entryFlag(e) || fp[i+n+2] != fingerprintSep {
+			return false
+		}
+		i += n + 3
+	}
+	return i == len(fp)
+}
+
+// cachedIgnoreRaw returns the raw .gitignore bytes dir's matcher was
+// compiled from, or nil when the cache holds no entry — the exact
+// value a scan's Ignore field must equal for the fast-path to trust
+// the cached matcher.
+func (t *Tree) cachedIgnoreRaw(dir string) []byte {
+	return t.ignoreCache[dir].raw
 }
 
 // resolvedPath returns the fully-resolved path of entry e inside parent
@@ -571,21 +781,33 @@ func (n *Node) loops() bool {
 // Unchanged bytes reuse the compiled matcher. go-gitignore builds one
 // regexp per pattern line, and re-paying that every ten seconds for a
 // file nobody edited is the one cost here worth avoiding.
-func (t *Tree) cacheIgnore(dir string, raw []byte) {
+//
+// Returns whether the matcher actually moved (created, recompiled, or
+// dropped). A move bumps filterEpoch, because this directory's matcher
+// filters its whole subtree: descendants with byte-identical listings
+// must still take a full merge on this sweep — both refresh walks
+// visit parents first, so the bump lands before any child's merge.
+func (t *Tree) cacheIgnore(dir string, raw []byte) bool {
 	if len(raw) == 0 {
+		if _, ok := t.ignoreCache[dir]; !ok {
+			return false
+		}
 		delete(t.ignoreCache, dir)
-		return
+		t.filterEpoch++
+		return true
 	}
 	if t.ignoreCache == nil {
 		t.ignoreCache = map[string]ignoreEntry{}
 	}
 	if old, ok := t.ignoreCache[dir]; ok && bytes.Equal(old.raw, raw) {
-		return
+		return false
 	}
 	t.ignoreCache[dir] = ignoreEntry{
 		raw: raw,
 		gi:  gitignore.CompileIgnoreLines(strings.Split(string(raw), "\n")...),
 	}
+	t.filterEpoch++
+	return true
 }
 
 // ignoreLevel is one .gitignore's matcher plus the prefix that turns a
@@ -801,31 +1023,41 @@ func ScanDirs(paths []string) []DirScan {
 // listing and keeps the fresh children its own read just produced; a
 // directory that failed to read keeps the children it had rather than
 // blinking empty, and picks up the ReadErr mark so the row says so.
-func (t *Tree) ApplyScan(scans []DirScan) {
+//
+// Returns whether any directory's membership actually changed — the
+// signal handleTreeScan gates the finder rebuild on, so a quiet tick
+// stops re-indexing a project nobody touched.
+func (t *Tree) ApplyScan(scans []DirScan) bool {
 	byPath := make(map[string]DirScan, len(scans))
 	for _, s := range scans {
 		byPath[s.Path] = s
 	}
-	t.applyScanNode(t.Root, byPath)
+	return t.applyScanNode(t.Root, byPath)
 }
 
 // applyScanNode is ApplyScan's recursive worker. It walks the live graph
 // rather than the scan list because the graph is the authority on what
-// is still Loaded and still reachable.
-func (t *Tree) applyScanNode(n *Node, byPath map[string]DirScan) {
+// is still Loaded and still reachable. The walk never short-circuits on
+// a change: every merged directory must stamp its fingerprint even
+// after the answer is already true, or the next sweep re-merges it.
+func (t *Tree) applyScanNode(n *Node, byPath map[string]DirScan) bool {
 	if n == nil || !n.IsDir || (!n.Loaded && n.ReadErr == nil) {
-		return
+		return false
 	}
+	changed := false
 	if scan, ok := byPath[n.Path]; ok {
 		if scan.Err != nil {
 			n.ReadErr = scan.Err
-		} else {
-			t.merge(n, scan)
+		} else if t.merge(n, scan) {
+			changed = true
 		}
 	}
 	for _, c := range n.Children {
-		t.applyScanNode(c, byPath)
+		if t.applyScanNode(c, byPath) {
+			changed = true
+		}
 	}
+	return changed
 }
 
 // shouldHide is the project's small, opinionated list of names the file
