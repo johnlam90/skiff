@@ -190,6 +190,34 @@ func TestSessionPreservesPreviewFlag(t *testing.T) {
 	}
 }
 
+// TestRestoreSession_SkipsEscapingPaths pins the withinRoot containment
+// guard: a hand-edited or corrupted session entry naming a path that
+// climbs out of the project root via "../" must not open a tab outside
+// the tree, even though the file it names genuinely exists. The real
+// file sits one level above root specifically so the stat succeeds —
+// proving it's the containment guard skipping the entry, not the
+// existing "file missing" check right below it.
+func TestRestoreSession_SkipsEscapingPaths(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	outside := filepath.Join(filepath.Dir(root), "outside.txt")
+	writeFileT(t, outside, "should never open\n")
+	if err := session.Save(root, session.Project{
+		Tabs: []session.TabState{
+			{Path: filepath.Join("..", "outside.txt")},
+		},
+		SavedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	a := newTestApp(t, root)
+	a.restoreSession()
+	if a.tabs.Len() != 0 {
+		t.Fatalf("escaping path should not open a tab; got %d tabs", a.tabs.Len())
+	}
+}
+
 // TestCloseTabSavesSession: closing a tab persists immediately, so a
 // killed terminal after a close still remembers the right set.
 func TestCloseTabSavesSession(t *testing.T) {

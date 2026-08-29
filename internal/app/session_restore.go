@@ -81,6 +81,13 @@ func (a *App) restoreSession() {
 	active, legacyActive := -1, -1
 	for i, ts := range p.Tabs {
 		abs := filepath.Join(a.rootDir, filepath.FromSlash(ts.Path))
+		// A hand-edited or corrupted session entry could name a path
+		// that climbs out of the project root via "../" — skip it
+		// silently, the same shape as the stat/IsDir skip right below:
+		// a stale or malformed session entry isn't worth a flash per tab.
+		if !withinRoot(a.rootDir, abs) {
+			continue
+		}
 		if info, err := os.Stat(abs); err != nil || info.IsDir() {
 			continue
 		}
