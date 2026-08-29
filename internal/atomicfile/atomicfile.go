@@ -40,9 +40,17 @@ import (
 //
 // perm applies to the final file; the temp file is created 0600 and
 // chmod'd before the rename so the bytes are never briefly world
-// readable.
+// readable. Any directory MkdirAll has to create along the way is
+// owner-only (0700) — Write is the path every per-user config/state
+// file (session, trust store) goes through, so a directory it creates
+// from scratch should default to private rather than group/other
+// readable. This only affects directories Write itself creates:
+// MkdirAll never chmods a directory that already exists, so a
+// pre-created project directory (e.g. a project's .skiff/, made
+// group/other readable by format.InstallCommandIntoProject) is left
+// untouched.
 func Write(path string, data []byte, perm os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
 	return replaceFile(path, data, perm)

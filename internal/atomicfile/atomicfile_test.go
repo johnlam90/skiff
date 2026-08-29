@@ -52,6 +52,28 @@ func TestWriteReplacesExistingFile(t *testing.T) {
 	}
 }
 
+// TestWrite_CreatesOwnerOnlyDirectories pins the directory side of the
+// state/config confidentiality story: every caller that lets Write
+// create the parent directory (config.json, the trust store, per-project
+// sessions) relies on that directory being owner-only, not the 0755 a
+// share-friendly project directory would use. Asserted as "no
+// group/other bits" rather than an exact mode because MkdirAll's perm is
+// capped by the process umask.
+func TestWrite_CreatesOwnerOnlyDirectories(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "newdir")
+	path := filepath.Join(dir, "f.json")
+	if err := Write(path, []byte("x"), 0600); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Fatalf("dir mode = %v, want no group/other bits", perm)
+	}
+}
+
 // TestWriteAppliesPerm verifies the final file carries the requested
 // mode, not the 0600 the temp file is created with — config files are
 // expected to be readable by the user's other tools.

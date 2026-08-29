@@ -327,6 +327,34 @@ func TestReadProjectFileRejectsFutureVersion(t *testing.T) {
 	}
 }
 
+// TestSave_OwnerOnlyPermissions pins the session store's
+// confidentiality: every project root and open file path a user has
+// touched lands here, so on a shared box neither the per-project file
+// nor the sessions directory may be readable by anyone but the owner.
+// Asserted as "no group/other bits" rather than an exact mode because
+// the process umask caps what OpenFile/MkdirAll actually produce.
+func TestSave_OwnerOnlyPermissions(t *testing.T) {
+	redirectStore(t)
+	if err := Save("/proj/perm", Project{SavedAt: time.Now()}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	path := pathFor(t, "/proj/perm")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat session file: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Fatalf("session file mode = %v, want no group/other bits", perm)
+	}
+	dirInfo, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("stat sessions dir: %v", err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm&0o077 != 0 {
+		t.Fatalf("sessions dir mode = %v, want no group/other bits", perm)
+	}
+}
+
 // TestStateDirIsRedirectedDuringTests pins the isolation contract this
 // suite relies on: with TestMain's XDG redirect in place, the session
 // store must never resolve under the developer's real home. If this
