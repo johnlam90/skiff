@@ -292,8 +292,14 @@ func TestReconcileOpenTabsWithDisk_DirtyTabKeepsEdits(t *testing.T) {
 }
 
 // TestReconcileOpenTabsWithDisk_DeletedFileMarksTab covers the missing
-// branch: the tab is marked gone and dirty so the buffer reads as the only
-// surviving copy, and the flash fires exactly once.
+// branch: the tab is marked DiskGone so the buffer reads as the only
+// surviving copy, and the flash fires exactly once. Dirty stays false —
+// the buffer has no user edits, and leaving it false is what lets a later
+// delete+recreate (see
+// TestReconcileTab_DeleteThenRecreateCleanTabReloadsSilently) fall through
+// to a silent reload instead of a false conflict prompt. Every consumer
+// that needs to treat this tab as "needs attention" anyway gates on
+// Dirty||DiskGone, not Dirty alone.
 func TestReconcileOpenTabsWithDisk_DeletedFileMarksTab(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "f.txt")
@@ -309,9 +315,11 @@ func TestReconcileOpenTabsWithDisk_DeletedFileMarksTab(t *testing.T) {
 	}
 	a.reconcileOpenTabsWithDisk()
 
-	if !tab.DiskGone || !tab.Dirty {
-		t.Fatalf("deleted file should mark the tab gone+dirty: gone=%v dirty=%v",
-			tab.DiskGone, tab.Dirty)
+	if !tab.DiskGone {
+		t.Fatalf("deleted file should mark the tab gone: gone=%v", tab.DiskGone)
+	}
+	if tab.Dirty {
+		t.Fatal("a deleted-but-unedited tab must not be marked Dirty")
 	}
 	if !strings.Contains(a.statusMsg, "deleted on disk") {
 		t.Fatalf("expected a deletion flash, got %q", a.statusMsg)
@@ -321,6 +329,123 @@ func TestReconcileOpenTabsWithDisk_DeletedFileMarksTab(t *testing.T) {
 	a.reconcileOpenTabsWithDisk()
 	if a.statusMsg != "" {
 		t.Fatalf("deletion flash repeated on a later tick: %q", a.statusMsg)
+	}
+}
+
+// TestReconcileTab_DeleteThenRecreateCleanTabReloadsSilently pins the fix
+// for the false disk-conflict prompt: a clean tab whose file is deleted
+// and then recreated (the shape of `git checkout`, `git stash pop`, or a
+// build tool rewriting its output — one unlink-then-recreate spanning two
+// reconcile ticks) must reload silently, exactly like any other external
+// edit. Before the fix, the delete branch overloaded Dirty to make the
+// deletion feel urgent, so the reappearance was indistinguishable from a
+// real unsaved-edits conflict and popped the Keep-mine/Reload/Diff modal
+// over a buffer that had nothing of the user's to lose.
+func TestReconcileTab_DeleteThenRecreateCleanTabReloadsSilently(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("one"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+
+	// Tick 1: the file vanishes.
+	a.reconcileTab(tab, tabProbe{path: target, err: os.ErrNotExist})
+	if !tab.DiskGone {
+		t.Fatal("expected DiskGone after the file disappeared")
+	}
+
+	// Tick 2: the file reappears with new content and a later mtime —
+	// the shape a `git checkout` or `make` leaves behind.
+	future := tab.Mtime.Add(2 * time.Second)
+	if err := os.WriteFile(target, []byte("two"), 0644); err != nil {
+		t.Fatalf("recreate: %v", err)
+	}
+	if err := os.Chtimes(target, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	a.reconcileTab(tab, tabProbe{path: target, mtime: future})
+
+	if a.anyModalOpen() {
+		t.Fatal("delete+recreate of a clean tab must not open the disk-conflict modal")
+	}
+	if got := tab.Buffer.String(); got != "two" {
+		t.Fatalf("buffer: got %q, want %q", got, "two")
+	}
+	if tab.Dirty {
+		t.Fatal("a silently reloaded tab must not read as dirty")
+	}
+}
+
+// TestReconcileTab_DeleteWhileDirtyStillConflicts guards against
+// overcorrecting the fix above: dropping the synthetic Dirty must not
+// weaken the real-conflict path. A tab with genuine unsaved edits whose
+// file is deleted and then recreated still has something of the user's
+// to lose, so the reappearance must still open the disk-conflict prompt.
+func TestReconcileTab_DeleteWhileDirtyStillConflicts(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("one"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	tab.Buffer.Lines = []string{"mine"}
+	tab.Dirty = true
+
+	// Tick 1: the file vanishes while the buffer has real edits.
+	a.reconcileTab(tab, tabProbe{path: target, err: os.ErrNotExist})
+	if !tab.DiskGone {
+		t.Fatal("expected DiskGone after the file disappeared")
+	}
+	if !tab.Dirty {
+		t.Fatal("genuine edits must survive the delete branch")
+	}
+
+	// Tick 2: the file reappears with different content.
+	future := tab.Mtime.Add(2 * time.Second)
+	if err := os.WriteFile(target, []byte("theirs"), 0644); err != nil {
+		t.Fatalf("recreate: %v", err)
+	}
+	if err := os.Chtimes(target, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	a.reconcileTab(tab, tabProbe{path: target, mtime: future})
+
+	d := dirtyOverlay(t, a)
+	if d.Labels[0] != "[ Keep mine ]" || d.Labels[1] != "[ Reload ]" || d.Labels[2] != "[ Diff ]" {
+		t.Fatalf("conflict prompt labels = %v", d.Labels)
+	}
+	if got := tab.Buffer.String(); got != "mine" {
+		t.Fatalf("opening the prompt must not touch the buffer: got %q", got)
+	}
+}
+
+// TestRequestCloseTab_DiskGoneOnlyWarns guards the close path: a clean
+// tab whose file is DiskGone still has the only surviving copy of that
+// content in its buffer, so closing it must warn exactly like a dirty
+// tab would rather than discarding it silently.
+func TestRequestCloseTab_DiskGoneOnlyWarns(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("one"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	tab.DiskGone = true
+
+	a.requestCloseTab(tab)
+
+	if !a.anyModalOpen() {
+		t.Fatal("a DiskGone-only tab should open the unsaved-changes modal, not close silently")
+	}
+	if a.tabs.IndexOf(tab) < 0 {
+		t.Fatal("requestCloseTab must not have closed the tab before the modal is answered")
 	}
 }
 

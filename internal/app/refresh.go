@@ -332,8 +332,12 @@ func (a *App) applyTabProbes(probes []tabProbe) {
 // reconcileTab decides what one open tab should do about what a Stat
 // found:
 //
-//   - File missing  → flash once, mark the tab dirty so the user knows.
+//   - File missing  → flash once, mark the tab DiskGone so the user
+//     knows. Dirty is untouched: the buffer has no edits of its own, so
+//     a later delete+recreate must still be able to reload silently
+//     instead of reading as a conflict with edits that don't exist.
 //   - Disk newer, tab clean → reload the buffer silently, flash success.
+//     This is also how a DiskGone tab resolves once the file reappears.
 //   - Disk newer, tab dirty → a real conflict: prompt (Keep mine /
 //     Reload / Diff) and leave a marker on the tab until it is resolved.
 //
@@ -350,8 +354,15 @@ func (a *App) applyTabProbes(probes []tabProbe) {
 func (a *App) reconcileTab(tab *editor.Tab, p tabProbe) {
 	if os.IsNotExist(p.err) {
 		if !tab.DiskGone {
+			// Dirty is deliberately NOT set here: the buffer has no user
+			// edits, so marking it dirty would make a later delete+
+			// recreate (a `git checkout`, `git stash pop`, or a build
+			// tool spanning two ticks) look like a real unsaved-edits
+			// conflict when the file reappears. DiskGone alone carries
+			// "needs attention" for every consumer that means that
+			// rather than "has edits" — see the Dirty||DiskGone gates in
+			// tabops.go, actions.go and draw.go.
 			tab.DiskGone = true
-			tab.Dirty = true
 			a.flash(fmt.Sprintf("%s deleted on disk", filepath.Base(tab.Path)))
 		}
 		return

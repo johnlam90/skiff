@@ -544,9 +544,12 @@ func (a *App) menuQuit() {
 	}
 	var message string
 	if dirty == 1 {
-		// Find the one dirty tab so we can name it in the modal.
+		// Find the one tab needing attention so we can name it in the
+		// modal — dirtyTabCount counts Dirty||DiskGone, so this loop
+		// must use the same gate or a DiskGone-only tab leaves message
+		// empty.
 		for _, tab := range a.tabs.Tabs() {
-			if tab.Dirty {
+			if tab.Dirty || tab.DiskGone {
 				name := filepath.Base(tab.Path)
 				if name == "" || name == "." {
 					name = "untitled"
