@@ -18,7 +18,7 @@ import (
 
 // barCol reads the indicator column out of a drawn screen: n rows of
 // the bar starting at its top, as a string.
-func barCol(scr tcell.SimulationScreen, b bodyBar) string {
+func barCol(scr tcell.SimulationScreen, b Bar) string {
 	out := make([]rune, 0, b.viewH)
 	for i := range b.viewH {
 		out = append(out, cellAt(scr, b.x, b.top+i))
@@ -37,7 +37,7 @@ func TestBarColumn_IsTheFramePaddingCell(t *testing.T) {
 	// Prefabs draw content at r.X+2 clipped to r.W-4 cells.
 	lastText := r.X + 2 + (r.W - 4) - 1
 	border := r.X + r.W - 1
-	if got := barColumn(r); got != lastText+1 || got != border-1 {
+	if got := BarColumn(r); got != lastText+1 || got != border-1 {
 		t.Fatalf("bar column %d should sit between text (%d) and border (%d)", got, lastText, border)
 	}
 }
@@ -46,12 +46,12 @@ func TestBarColumn_IsTheFramePaddingCell(t *testing.T) {
 // the editor and the file tree: a window that already shows everything
 // gets no bar, because a full-height thumb tells the reader nothing.
 func TestBodyBar_DrawnOnlyOnOverflow(t *testing.T) {
-	fits := bodyBar{x: 5, top: 2, viewH: 10, total: 10}
-	if fits.drawn() {
+	fits := Bar{x: 5, top: 2, viewH: 10, total: 10}
+	if fits.Drawn() {
 		t.Fatal("a body that fits must not draw a bar")
 	}
-	over := bodyBar{x: 5, top: 2, viewH: 10, total: 11}
-	if !over.drawn() {
+	over := Bar{x: 5, top: 2, viewH: 10, total: 11}
+	if !over.Drawn() {
 		t.Fatal("one row past the window is already overflow")
 	}
 }
@@ -61,15 +61,15 @@ func TestBodyBar_DrawnOnlyOnOverflow(t *testing.T) {
 // rows run out to the padding cell, so a hit that ignored visibility
 // would swallow a legitimate row click on every short list.
 func TestBodyBar_HitNeedsADrawnBar(t *testing.T) {
-	over := bodyBar{x: 5, top: 2, viewH: 4, total: 40}
-	if !over.hit(5, 2) || !over.hit(5, 5) {
+	over := Bar{x: 5, top: 2, viewH: 4, total: 40}
+	if !over.Hit(5, 2) || !over.Hit(5, 5) {
 		t.Fatal("both ends of the span must be hits")
 	}
-	if over.hit(4, 3) || over.hit(5, 1) || over.hit(5, 6) {
+	if over.Hit(4, 3) || over.Hit(5, 1) || over.Hit(5, 6) {
 		t.Fatal("the bar owns exactly one column and exactly its own rows")
 	}
-	fits := bodyBar{x: 5, top: 2, viewH: 4, total: 4}
-	if fits.hit(5, 3) {
+	fits := Bar{x: 5, top: 2, viewH: 4, total: 4}
+	if fits.Hit(5, 3) {
 		t.Fatal("with no bar drawn the column belongs to the surface")
 	}
 }
@@ -79,11 +79,11 @@ func TestBodyBar_HitNeedsADrawnBar(t *testing.T) {
 // last window, so a press anywhere on the bar can reach anywhere in the
 // content.
 func TestBodyBar_TargetSpansTheWholeRange(t *testing.T) {
-	b := bodyBar{x: 5, top: 2, viewH: 10, total: 100}
-	if got := b.target(2); got != 0 {
+	b := Bar{x: 5, top: 2, viewH: 10, total: 100}
+	if got := b.Target(2); got != 0 {
 		t.Fatalf("press on the first bar row: got %d, want 0", got)
 	}
-	if got, want := b.target(2+9), 100-10; got != want {
+	if got, want := b.Target(2+9), 100-10; got != want {
 		t.Fatalf("press on the last bar row: got %d, want %d", got, want)
 	}
 }
@@ -96,8 +96,8 @@ func TestBodyBar_TargetSpansTheWholeRange(t *testing.T) {
 func TestBodyBar_DrawUsesTheSharedGlyphsAndRoles(t *testing.T) {
 	scr := simScreen(t)
 	th := theme.Default()
-	b := bodyBar{x: 10, top: 3, viewH: 8, total: 32, scroll: 0}
-	b.draw(scr, th)
+	b := Bar{x: 10, top: 3, viewH: 8, total: 32, scroll: 0}
+	b.Draw(scr, th)
 	scr.Show()
 
 	wantStart, wantLen, ok := scrollbar.Geom(b.total, b.viewH, b.scroll)

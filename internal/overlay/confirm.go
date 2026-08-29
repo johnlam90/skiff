@@ -161,9 +161,9 @@ func (c *Confirm) buttonOffset() int { return (c.frameWidth() - confirmWidth) / 
 // arithmetically impossible there and the pinned 54×9 geometry keeps
 // every cell it had. Draw and HandleMouse both derive the bar here, so
 // the painted column and the clickable column are the same column.
-func (c *Confirm) bar(r Rect) bodyBar {
-	return bodyBar{
-		x:      barColumn(r),
+func (c *Confirm) bar(r Rect) Bar {
+	return Bar{
+		x:      BarColumn(r),
 		top:    r.Y + 4,
 		viewH:  c.bodyRows(),
 		total:  len(c.Body),
@@ -263,8 +263,8 @@ func (c *Confirm) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	// The indicator owns its column outright — claimed before the
 	// button zones and the outside-click test so the one cell that
 	// looks like a scrollbar can never read as a dismissal.
-	if b := c.bar(r); b.hit(x, y) {
-		c.scroll = b.target(y)
+	if b := c.bar(r); b.Hit(x, y) {
+		c.scroll = b.Target(y)
 		return
 	}
 	if !r.Contains(x, y) {
@@ -304,7 +304,7 @@ func (c *Confirm) Draw(scr tcell.Screen) {
 		// Painted after the rows so the bar is never overwritten by a
 		// body line — the rows clip to r.W-4 and stop two cells short
 		// of it, but the paint order is the guarantee.
-		c.bar(r).draw(scr, th)
+		c.bar(r).Draw(scr, th)
 	}
 
 	btnY := r.Y + c.buttonRow()
@@ -333,3 +333,11 @@ func (c *Confirm) cancel() {
 		hook()
 	}
 }
+
+// WantsMotion is true: Confirm highlights the Yes/No button under the
+// pointer, which needs motion with no button held.
+func (c *Confirm) WantsMotion() bool { return true }
+
+// Dismiss is a no-op — the OnCancel hook a trust prompt attaches fires
+// from the user's own cancel, not from a teardown that replaced it.
+func (c *Confirm) Dismiss() {}

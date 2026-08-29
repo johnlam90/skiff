@@ -112,15 +112,37 @@ func loadGitCommitDiff(rootDir, sha, path string) diff.Patch {
 }
 
 // gitLogOverlay is the commit-history overlay: the loaded entries and
-// the highlight/scroll window. Bespoke — it needs the App for the diff
-// view hand-off and theme — and its state dies with it.
+// the window over them. Bespoke — it needs the App for the diff view
+// hand-off and theme — and its state dies with it. The highlight and
+// the scroll offset are an overlay.List, the same window Pick, the
+// menu, the finder and the git panel scroll.
 type gitLogOverlay struct {
-	app      *App
-	title    string
-	path     string
-	entries  []gitLogEntry
-	selected int
-	scroll   int
+	overlay.List
+	app     *App
+	title   string
+	path    string
+	entries []gitLogEntry
+}
+
+// sync derives the window height from the entry count and the terminal,
+// pushes both into the embedded List, and hands back the frame they
+// size. rect reads the window back out, so every entry point calls this
+// first — including the opener, so a caller can measure the frame
+// before the first event arrives.
+func (g *gitLogOverlay) sync() overlay.Rect {
+	rows := len(g.entries)
+	if rows > gitLogVisible {
+		rows = gitLogVisible
+	}
+	if rows > g.app.height-6 {
+		rows = g.app.height - 6
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	g.SetLen(len(g.entries))
+	g.SetVisible(rows)
+	return g.rect()
 }
 
 // openGitLog shows the history overlay. path narrows it to one file
@@ -133,7 +155,9 @@ func (a *App) openGitLog(title, path string) {
 		return
 	}
 	a.closeAllModals()
-	a.overlays.Open(&gitLogOverlay{app: a, title: title, path: path, entries: entries})
+	g := &gitLogOverlay{app: a, title: title, path: path, entries: entries}
+	g.sync()
+	a.overlays.Open(g)
 }
 
 // menuCommitHistory is the ≡ menu entry for the branch log.
@@ -165,11 +189,11 @@ func (a *App) hasFileHistoryTab() bool {
 // highlighting; branch commits show every file with boundary rows and
 // skip syntax colors (one lexer can't serve many languages).
 func (g *gitLogOverlay) activate() {
-	if g.selected < 0 || g.selected >= len(g.entries) {
+	if g.Sel() < 0 || g.Sel() >= len(g.entries) {
 		return
 	}
 	a := g.app
-	entry := g.entries[g.selected]
+	entry := g.entries[g.Sel()]
 	patch := loadGitCommitDiff(a.rootDir, entry.SHA, g.path)
 	if patch.Empty() {
 		// Merge commits and rename-only commits can produce no diff
@@ -187,51 +211,63 @@ func (g *gitLogOverlay) activate() {
 	a.openDiffView(title, patch, "", langPath)
 }
 
-// HandleKey routes keyboard input while the overlay is open.
+// HandleKey routes keyboard input while the overlay is open. The
+// vertical keys walk the entries and drag the window with them once
+// they step past its edge.
 func (g *gitLogOverlay) HandleKey(ev *tcell.EventKey) {
+	g.sync()
 	switch ev.Key() {
 	case tcell.KeyEsc:
 		g.app.closeAllModals()
 	case tcell.KeyEnter:
 		g.activate()
 	case tcell.KeyUp:
-		if g.selected > 0 {
-			g.selected--
-		}
+		g.Move(-1)
+		g.EnsureVisible()
 	case tcell.KeyDown:
-		if g.selected < len(g.entries)-1 {
-			g.selected++
-		}
+		g.Move(1)
+		g.EnsureVisible()
 	case tcell.KeyPgUp:
-		g.selected -= gitLogVisible
-		if g.selected < 0 {
-			g.selected = 0
-		}
+		g.Move(-gitLogVisible)
+		g.EnsureVisible()
 	case tcell.KeyPgDn:
-		g.selected += gitLogVisible
-		if g.selected > len(g.entries)-1 {
-			g.selected = len(g.entries) - 1
-		}
+		g.Move(gitLogVisible)
+		g.EnsureVisible()
 	}
 }
 
 // HandleMouse mirrors the finder's mouse contract: hover highlights,
-// wheel scrolls, click activates, click outside dismisses.
+// wheel scrolls, click activates, click outside dismisses — except on
+// the scroll indicator's column, which the bar claims for itself.
 func (g *gitLogOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
+	r := g.sync()
 	if btn&tcell.WheelUp != 0 {
-		g.scrollBy(-3)
+		g.ScrollBy(-3)
 		return
 	}
 	if btn&tcell.WheelDown != 0 {
-		g.scrollBy(3)
+		g.ScrollBy(3)
 		return
 	}
-	r := g.rect()
 	rowsStart := r.Y + 3
-	row := g.scroll + (y - rowsStart)
-	inRows := y >= rowsStart && y < r.Y+r.H-1 && x >= r.X && x < r.X+r.W
-	if inRows && row >= 0 && row < len(g.entries) {
-		g.selected = row
+	// Claimed before the row hit-test, the same ordering Pick uses: a
+	// press on the thumb must scroll, never open the diff of whichever
+	// commit happens to sit behind it. The hit is false whenever the
+	// history fits, so the column stays ordinary row surface then.
+	if b := g.bar(r); b.Hit(x, y) {
+		if btn&tcell.Button1 != 0 {
+			g.ScrollToBar(rowsStart, y)
+		}
+		return
+	}
+	row := -1
+	if x >= r.X && x < r.X+r.W {
+		if i, ok := g.RowAt(rowsStart, y); ok {
+			row = i
+		}
+	}
+	if row >= 0 {
+		g.Select(row)
 	}
 	if btn&tcell.Button1 == 0 {
 		return
@@ -240,46 +276,29 @@ func (g *gitLogOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
 		g.app.closeAllModals()
 		return
 	}
-	if inRows && row >= 0 && row < len(g.entries) {
-		g.selected = row
+	if row >= 0 {
 		g.activate()
 	}
 }
 
-// scrollBy nudges the visible window by delta rows, clamped to the
-// list's ends.
-func (g *gitLogOverlay) scrollBy(delta int) {
-	max := len(g.entries) - g.visibleRows()
-	if max < 0 {
-		max = 0
-	}
-	g.scroll += delta
-	if g.scroll > max {
-		g.scroll = max
-	}
-	if g.scroll < 0 {
-		g.scroll = 0
-	}
+// bar describes the history list's scroll indicator inside frame r —
+// the frame's right padding column, over the commit rows only.
+func (g *gitLogOverlay) bar(r overlay.Rect) overlay.Bar {
+	return g.List.Bar(overlay.BarColumn(r), r.Y+3)
 }
 
-// visibleRows returns how many commit rows the overlay shows at once,
-// shrunk on tiny terminals.
-func (g *gitLogOverlay) visibleRows() int {
-	rows := len(g.entries)
-	if rows > gitLogVisible {
-		rows = gitLogVisible
-	}
-	if rows > g.app.height-6 {
-		rows = g.app.height - 6
-	}
-	if rows < 1 {
-		rows = 1
-	}
-	return rows
-}
+// WantsMotion is true: hovering a commit row moves the highlight, the
+// same contract the finder's rows follow.
+func (g *gitLogOverlay) WantsMotion() bool { return true }
+
+// Dismiss is a no-op — the history overlay is read-only, so a teardown
+// leaves nothing to revert.
+func (g *gitLogOverlay) Dismiss() {}
 
 // rect returns the overlay's on-screen rectangle — the same width cap
-// and upper-third anchor as the finder.
+// and upper-third anchor as the finder. The height comes from the
+// List's window, so sync has to have run first; every entry point and
+// the opener do.
 func (g *gitLogOverlay) rect() overlay.Rect {
 	a := g.app
 	w := gitLogModalMaxWidth
@@ -290,7 +309,7 @@ func (g *gitLogOverlay) rect() overlay.Rect {
 		w = 30
 	}
 	// 1 border + 1 title + 1 divider + N rows + 1 border.
-	h := g.visibleRows() + 4
+	h := g.Visible() + 4
 	x := (a.width - w) / 2
 	y := (a.height - h) / 3
 	if x < 0 {
@@ -309,19 +328,21 @@ func (g *gitLogOverlay) rect() overlay.Rect {
 // Layout (relY): 0 border · 1 title · 2 divider · 3..N commit rows ·
 // N+1 border.
 func (g *gitLogOverlay) Draw(scr tcell.Screen) {
-	r := g.rect()
+	r := g.sync()
 	overlay.DrawFrame(scr, r, g.title, g.app.theme)
 
-	visCap := g.visibleRows()
-	g.ensureSelectedVisible(visCap)
+	g.EnsureVisible()
 	rowsStart := r.Y + 3
-	for i := 0; i < visCap; i++ {
-		idx := g.scroll + i
+	for i := range g.Visible() {
+		idx := g.Scroll() + i
 		if idx >= len(g.entries) {
 			break
 		}
-		g.drawRow(scr, r, rowsStart+i, g.entries[idx], idx == g.selected)
+		g.drawRow(scr, r, rowsStart+i, g.entries[idx], idx == g.Sel())
 	}
+	// After the rows: drawRow fills the frame's inner width, padding
+	// column included, so the bar has to land on top of it.
+	g.bar(r).Draw(scr, g.app.theme)
 	scr.HideCursor()
 }
 
@@ -348,18 +369,4 @@ func (g *gitLogOverlay) drawRow(scr tcell.Screen, r overlay.Rect, ry int, entry 
 	drawClipped(scr, ageX, ry, runeLen(age), age, ageStyle)
 	subjectW := ageX - x - 3
 	drawClipped(scr, x+2, ry, subjectW, entry.Subject, rowStyle)
-}
-
-// ensureSelectedVisible keeps the selected row inside the visible
-// window, sliding the window when arrow keys walk past its edges.
-func (g *gitLogOverlay) ensureSelectedVisible(visCap int) {
-	if g.selected < g.scroll {
-		g.scroll = g.selected
-	}
-	if g.selected-g.scroll >= visCap {
-		g.scroll = g.selected - visCap + 1
-	}
-	if g.scroll < 0 {
-		g.scroll = 0
-	}
 }

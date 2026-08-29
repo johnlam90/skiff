@@ -44,8 +44,8 @@ func testPick() (*Pick, *[]string) {
 // quo.
 func TestPick_InitSnapsToCurrent(t *testing.T) {
 	p, _ := testPick()
-	if p.Selected != 1 {
-		t.Fatalf("Init should land on the Current item, got %d", p.Selected)
+	if p.Sel() != 1 {
+		t.Fatalf("Init should land on the Current item, got %d", p.Sel())
 	}
 }
 
@@ -225,15 +225,15 @@ func TestPick_IndicatorTracksScroll(t *testing.T) {
 
 	top := pickBarColumn(t, scr, p)
 	if !strings.HasPrefix(top, string(scrollbar.Thumb)) || !strings.ContainsRune(top, scrollbar.Track) {
-		t.Fatalf("40 items in a %d-row window: got %q", p.visibleRows(), top)
+		t.Fatalf("40 items in a %d-row window: got %q", p.Visible(), top)
 	}
 
-	p.scroll = len(p.Items) - p.visibleRows()
+	p.scroll = len(p.Items) - p.Visible()
 	bottom := pickBarColumn(t, scr, p)
 	if !strings.HasSuffix(bottom, string(scrollbar.Thumb)) {
 		t.Fatalf("at the end the thumb must finish the track, got %q", bottom)
 	}
-	wantStart, wantLen, ok := scrollbar.Geom(len(p.Items), p.visibleRows(), p.scroll)
+	wantStart, wantLen, ok := scrollbar.Geom(len(p.Items), p.Visible(), p.scroll)
 	if !ok {
 		t.Fatal("fixture should overflow")
 	}
@@ -278,7 +278,7 @@ func TestPick_BarPressScrollsInsteadOfPicking(t *testing.T) {
 
 	b := p.bar(p.rect())
 	p.HandleMouse(b.x, b.top+b.viewH-1, tcell.Button1)
-	if want := len(p.Items) - p.visibleRows(); p.scroll != want {
+	if want := len(p.Items) - p.Visible(); p.scroll != want {
 		t.Fatalf("press at the foot of the bar: scroll %d, want %d", p.scroll, want)
 	}
 	if len(*log) != 0 {
@@ -286,16 +286,16 @@ func TestPick_BarPressScrollsInsteadOfPicking(t *testing.T) {
 	}
 
 	// Hovering the bar must not drag the highlight around either.
-	before := p.Selected
+	before := p.Sel()
 	p.HandleMouse(b.x, b.top, tcell.ButtonNone)
-	if p.Selected != before {
-		t.Fatalf("hovering the bar moved the highlight: %d → %d", before, p.Selected)
+	if p.Sel() != before {
+		t.Fatalf("hovering the bar moved the highlight: %d → %d", before, p.Sel())
 	}
 
 	// With the bar gone the same cell is ordinary row surface again.
 	short, shortLog := longPick(5)
 	sr := short.rect()
-	short.HandleMouse(barColumn(sr), sr.Y+4, tcell.Button1)
+	short.HandleMouse(BarColumn(sr), sr.Y+4, tcell.Button1)
 	if len(*shortLog) == 0 {
 		t.Fatal("without a bar the padding column must still pick its row")
 	}
@@ -320,7 +320,7 @@ func TestPick_ClampsToPhoneSizedScreen(t *testing.T) {
 		if r.Y < 0 || r.Y+r.H > scrH {
 			t.Fatalf("%dx%d: frame spans rows %d..%d", scrW, scrH, r.Y, r.Y+r.H)
 		}
-		if p.visibleRows() < 1 {
+		if p.Visible() < 1 {
 			t.Fatalf("%dx%d: no list rows at all", scrW, scrH)
 		}
 	}

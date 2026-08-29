@@ -1059,7 +1059,7 @@ func TestGitPanelScrollbarPressScrollsAndDrags(t *testing.T) {
 
 	_, sy, sw, _ := a.sidebarRect()
 	listH, _ := a.gitPanelBody()
-	barX, ok := a.gitPanelBar(sw, listH)
+	barX, ok := a.gitPanelBar(sw)
 	if !ok {
 		t.Fatal("fixture should draw a bar")
 	}
@@ -1069,29 +1069,29 @@ func TestGitPanelScrollbarPressScrollsAndDrags(t *testing.T) {
 	if a.dragMode != dragGitPanelScrollbar {
 		t.Fatalf("dragMode = %q, want gitpanelscrollbar", a.dragMode)
 	}
-	bottom := a.gitPanel.scroll
+	bottom := a.gitPanel.Scroll()
 	if bottom == 0 {
 		t.Fatal("pressing the bottom of the bar should scroll the list")
 	}
 
 	// Drag back to the first list row.
 	a.handleMouse(tcell.NewEventMouse(barX, sy+gitPanelListTop, tcell.Button1, 0))
-	if a.gitPanel.scroll != 0 {
-		t.Fatalf("dragging to the top should return to 0, got %d", a.gitPanel.scroll)
+	if a.gitPanel.Scroll() != 0 {
+		t.Fatalf("dragging to the top should return to 0, got %d", a.gitPanel.Scroll())
 	}
 	// Off-column motion still tracks the row — that is the whole point
 	// of a grab, and the click-only version could not do it.
 	a.handleMouse(tcell.NewEventMouse(barX-6, lastRow, tcell.Button1, 0))
-	if a.gitPanel.scroll != bottom {
-		t.Fatalf("drag off-column should still track the row: got %d, want %d", a.gitPanel.scroll, bottom)
+	if a.gitPanel.Scroll() != bottom {
+		t.Fatalf("drag off-column should still track the row: got %d, want %d", a.gitPanel.Scroll(), bottom)
 	}
 
 	a.handleMouse(tcell.NewEventMouse(barX, lastRow, tcell.ButtonNone, 0))
 	if a.dragMode != dragNone {
 		t.Fatalf("release should clear dragMode, got %q", a.dragMode)
 	}
-	if a.gitPanel.scroll != bottom {
-		t.Fatalf("release must not move the list, got %d", a.gitPanel.scroll)
+	if a.gitPanel.Scroll() != bottom {
+		t.Fatalf("release must not move the list, got %d", a.gitPanel.Scroll())
 	}
 	if a.overlays.IsOpen() {
 		t.Fatal("a bar drag must never open a diff")
@@ -1109,7 +1109,7 @@ func TestGitPanelScrollbarDragDoesNotStageOrOpen(t *testing.T) {
 
 	_, sy, sw, _ := a.sidebarRect()
 	listH, _ := a.gitPanelBody()
-	barX, ok := a.gitPanelBar(sw, listH)
+	barX, ok := a.gitPanelBar(sw)
 	if !ok {
 		t.Fatal("fixture should draw a bar")
 	}
@@ -1126,8 +1126,8 @@ func TestGitPanelScrollbarDragDoesNotStageOrOpen(t *testing.T) {
 	if a.overlays.IsOpen() {
 		t.Fatal("the drag opened an overlay")
 	}
-	if a.gitPanel.selected != 0 {
-		t.Fatalf("the drag moved the selection to %d", a.gitPanel.selected)
+	if a.gitPanel.Sel() != 0 {
+		t.Fatalf("the drag moved the selection to %d", a.gitPanel.Sel())
 	}
 }
 

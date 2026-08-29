@@ -20,6 +20,8 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/johnlam90/skiff/internal/diff"
+	"github.com/johnlam90/skiff/internal/overlay"
+	"github.com/johnlam90/skiff/internal/scrollbar"
 )
 
 // gitLogOv returns the open commit-history overlay, failing the test
@@ -192,7 +194,7 @@ func TestOpenGitLog_ListsCommitsAndEmptyFlashes(t *testing.T) {
 func TestActivateGitLogRow_OpensCommitDiff(t *testing.T) {
 	a, _, _ := historyRepoApp(t)
 	a.openGitLog("History · main", "")
-	gitLogOv(t, a).selected = 1 // c1 — the two-file commit
+	gitLogOv(t, a).Select(1) // c1 — the two-file commit
 	a.handleKey(keyEv(tcell.KeyEnter, 0))
 	if gitLogIsOpen(a) {
 		t.Fatal("activation should close the history modal")
@@ -300,8 +302,8 @@ func TestHandleGitLogMouse_HoverClickAndDismiss(t *testing.T) {
 	mx, my := gr.X, gr.Y
 
 	g.HandleMouse(mx+4, my+4, 0) // hover row 1
-	if g.selected != 1 {
-		t.Fatalf("hover should select row 1, got %d", g.selected)
+	if g.Sel() != 1 {
+		t.Fatalf("hover should select row 1, got %d", g.Sel())
 	}
 	g.HandleMouse(mx+4, my+4, tcell.Button1)
 	if gitLogIsOpen(a) || !diffIsOpen(a) {
@@ -320,13 +322,14 @@ func TestHandleGitLogMouse_HoverClickAndDismiss(t *testing.T) {
 func TestScrollGitLog_Clamps(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	g := &gitLogOverlay{app: a, entries: make([]gitLogEntry, 40)}
-	g.scrollBy(1000)
-	if want := 40 - gitLogVisible; g.scroll != want {
-		t.Fatalf("scroll past end: got %d, want %d", g.scroll, want)
+	g.sync()
+	g.ScrollBy(1000)
+	if want := 40 - gitLogVisible; g.Scroll() != want {
+		t.Fatalf("scroll past end: got %d, want %d", g.Scroll(), want)
 	}
-	g.scrollBy(-1000)
-	if g.scroll != 0 {
-		t.Fatalf("scroll past top: got %d, want 0", g.scroll)
+	g.ScrollBy(-1000)
+	if g.Scroll() != 0 {
+		t.Fatalf("scroll past top: got %d, want 0", g.Scroll())
 	}
 }
 
@@ -348,5 +351,93 @@ func TestDrawGitLog_Smoke(t *testing.T) {
 	}
 	if !strings.Contains(row0, "ago") {
 		t.Fatalf("row 0 should show a relative age: %q", row0)
+	}
+}
+
+// gitLogBarColumn draws g and reads its scroll-indicator column back
+// off the screen across the commit rows.
+func gitLogBarColumn(t *testing.T, a *App, g *gitLogOverlay) string {
+	t.Helper()
+	a.screen.Clear()
+	g.Draw(a.screen)
+	a.screen.Show()
+	cells, w, _ := a.screen.(tcell.SimulationScreen).GetContents()
+	r := g.rect()
+	barX := overlay.BarColumn(r)
+	var b strings.Builder
+	for row := range g.Visible() {
+		if rs := cells[(r.Y+3+row)*w+barX].Runes; len(rs) > 0 {
+			b.WriteRune(rs[0])
+		}
+	}
+	return b.String()
+}
+
+// TestDrawGitLog_ScrollbarShowsOnlyWhenHistoryOverflows pins the
+// history overlay's half of the shared indicator. A 200-commit log
+// scrolled to the middle of a 14-row window is the case where "there is
+// more below" is not obvious from anything else on screen; a history
+// short enough to fit must paint nothing, so the padding column stays
+// ordinary row surface.
+func TestDrawGitLog_ScrollbarShowsOnlyWhenHistoryOverflows(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+
+	long := &gitLogOverlay{app: a, title: "History", entries: make([]gitLogEntry, 60)}
+	long.sync()
+	// Walk to the last commit rather than wheeling: Draw runs
+	// EnsureVisible, so the selection is what pins the window open.
+	long.Select(long.Len() - 1)
+	col := gitLogBarColumn(t, a, long)
+	if long.Scroll() == 0 {
+		t.Fatalf("test setup: the window should have followed the selection, scroll %d", long.Scroll())
+	}
+	if !strings.ContainsRune(col, scrollbar.Thumb) || !strings.ContainsRune(col, scrollbar.Track) {
+		t.Fatalf("60 commits in a %d-row window must paint a bar, got %q", long.Visible(), col)
+	}
+	wantStart, wantLen, ok := scrollbar.Geom(long.Len(), long.Visible(), long.Scroll())
+	if !ok {
+		t.Fatal("fixture should overflow")
+	}
+	for row, got := range []rune(col) {
+		want := scrollbar.Track
+		if row >= wantStart && row < wantStart+wantLen {
+			want = scrollbar.Thumb
+		}
+		if got != want {
+			t.Fatalf("bar row %d = %q, want %q (col %q)", row, got, want, col)
+		}
+	}
+
+	short := &gitLogOverlay{app: a, title: "History", entries: make([]gitLogEntry, 3)}
+	short.sync()
+	col = gitLogBarColumn(t, a, short)
+	if strings.ContainsAny(col, string([]rune{scrollbar.Track, scrollbar.Thumb})) {
+		t.Fatalf("a history that fits must paint no bar, got %q", col)
+	}
+}
+
+// TestGitLogBarPress_ScrollsInsteadOfOpeningTheCommitBehindIt is the
+// click-steal regression: the bar's column is inside the commit rows,
+// so without the hit-test claiming it first, reaching for the thumb
+// would open the diff of whichever commit sits behind it.
+func TestGitLogBarPress_ScrollsInsteadOfOpeningTheCommitBehindIt(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	g := &gitLogOverlay{app: a, title: "History", entries: make([]gitLogEntry, 60)}
+	g.sync()
+	a.overlays.Open(g)
+	r := g.rect()
+	barX := overlay.BarColumn(r)
+
+	g.HandleMouse(barX, r.Y+3+g.Visible()-1, tcell.Button1)
+	if want := g.MaxScroll(); g.Scroll() != want {
+		t.Fatalf("a press at the foot of the bar: scroll %d, want %d", g.Scroll(), want)
+	}
+	if !gitLogIsOpen(a) {
+		t.Fatal("a bar press must not activate a row or dismiss the overlay")
+	}
+	before := g.Sel()
+	g.HandleMouse(barX, r.Y+3, tcell.ButtonNone)
+	if g.Sel() != before {
+		t.Fatalf("hovering the bar moved the highlight: %d → %d", before, g.Sel())
 	}
 }

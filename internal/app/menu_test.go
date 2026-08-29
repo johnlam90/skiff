@@ -30,6 +30,7 @@ import (
 	"github.com/johnlam90/skiff/internal/customactions"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/overlay"
+	"github.com/johnlam90/skiff/internal/scrollbar"
 )
 
 // stuffMenu appends n custom actions so the menu is guaranteed taller
@@ -625,7 +626,7 @@ func TestMenuDrillIn_RunsThePickedAction(t *testing.T) {
 	if idx < 0 {
 		t.Fatalf("Copy file missing from the drill-in: %v", pick.Items)
 	}
-	pick.Selected = idx
+	pick.Select(idx)
 	pick.Confirm()
 	if a.fileClipPath != path {
 		t.Fatalf("picking Copy file should have loaded the file clipboard, got %q", a.fileClipPath)
@@ -861,7 +862,7 @@ func TestMenuScroll_KeyboardScrollsQuitIntoView(t *testing.T) {
 }
 
 // TestMenuMouse_WheelScrollsAndClamps drives the wheel over the open
-// menu: down-ticks must advance menuScroll toward menuMaxScroll and
+// menu: down-ticks must advance the scroll toward menuMaxScroll and
 // never past it; up-ticks must clamp back at zero.
 func TestMenuMouse_WheelScrollsAndClamps(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
@@ -878,14 +879,14 @@ func TestMenuMouse_WheelScrollsAndClamps(t *testing.T) {
 	for range max + 5 {
 		a.handleMenuMouse(cx, cy, tcell.WheelDown)
 	}
-	if a.menuScroll != max {
-		t.Fatalf("wheel-down should clamp at maxScroll %d, got %d", max, a.menuScroll)
+	if a.menuList.Scroll() != max {
+		t.Fatalf("wheel-down should clamp at maxScroll %d, got %d", max, a.menuList.Scroll())
 	}
 	for range max + 5 {
 		a.handleMenuMouse(cx, cy, tcell.WheelUp)
 	}
-	if a.menuScroll != 0 {
-		t.Fatalf("wheel-up should clamp at 0, got %d", a.menuScroll)
+	if a.menuList.Scroll() != 0 {
+		t.Fatalf("wheel-up should clamp at 0, got %d", a.menuList.Scroll())
 	}
 }
 
@@ -898,8 +899,8 @@ func TestMenuClick_MapsThroughScroll(t *testing.T) {
 	stuffMenu(a, 20)
 	resizeTestApp(t, a, 80, 24)
 	a.openMenu()
-	a.menuScroll = a.menuMaxScroll()
-	if a.menuScroll <= 0 {
+	a.syncMenuList().ScrollBy(a.menuMaxScroll())
+	if a.menuList.Scroll() <= 0 {
 		t.Fatal("test setup needs an overflowing menu")
 	}
 
@@ -913,7 +914,7 @@ func TestMenuClick_MapsThroughScroll(t *testing.T) {
 		t.Fatal("clicking the bottom border must not activate a hidden row")
 	}
 
-	quitY := my + quit.relY - a.menuScroll
+	quitY := my + quit.relY - a.menuList.Scroll()
 	if quitY < my+menuContentY || quitY > my+mh-2 {
 		t.Fatalf("test setup: Quit row not in visible region (y=%d)", quitY)
 	}
@@ -939,7 +940,7 @@ func TestDrawMenu_HoveredShortcutUsesTextFg(t *testing.T) {
 	quit := items[len(items)-1]
 	mx, my, mw, _ := a.menuModalRect()
 	shortcutX := mx + mw - 2 - runeLen(quit.shortcut)
-	cy := my + quit.relY - a.menuScroll
+	cy := my + quit.relY - a.menuList.Scroll()
 
 	cells, w, _ := a.screen.(tcell.SimulationScreen).GetContents()
 	fg, bg, _ := cells[cy*w+shortcutX].Style.Decompose()
@@ -983,7 +984,7 @@ func TestMenuWheel_RecomputesHoverAfterScroll(t *testing.T) {
 	mx, my, _, _ := a.menuModalRect()
 	x, y := mx+6, my+relY
 	a.handleMouse(tcell.NewEventMouse(x, y, tcell.WheelDown, 0))
-	if a.menuScroll == 0 {
+	if a.menuList.Scroll() == 0 {
 		t.Fatal("wheel should have scrolled the menu")
 	}
 	got := a.hoveredMenuRow
@@ -1244,5 +1245,98 @@ func TestMenuModalRect_KeepsModalWidthWhenItFits(t *testing.T) {
 		if _, _, got, _ := a.menuModalRect(); got != a.menuNaturalWidth() {
 			t.Fatalf("%d columns: frame %d, want the natural %d", w, got, a.menuNaturalWidth())
 		}
+	}
+}
+
+// menuBarColumn draws the menu and reads its scroll-indicator column
+// back off the screen across the content rows — the only honest proof
+// of what the bar paints.
+func menuBarColumn(t *testing.T, a *App) string {
+	t.Helper()
+	a.drawMenu()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	mx, my, mw, mh := a.menuModalRect()
+	barX := mx + mw - 2
+	var b strings.Builder
+	for y := my + menuContentY; y <= my+mh-2; y++ {
+		if rs := cells[y*w+barX].Runes; len(rs) > 0 {
+			b.WriteRune(rs[0])
+		}
+	}
+	return b.String()
+}
+
+// TestDrawMenu_ScrollbarShowsOnlyWhenRowsOverflow pins the menu's half
+// of the shared indicator. The ▲/▼ chrome markers say only that more
+// rows exist; the bar says how many and where in them you are, and it
+// is the only one of the three you can grab. A menu that fits must
+// paint nothing — a full-height thumb carries no information, and the
+// column goes back to being row surface.
+func TestDrawMenu_ScrollbarShowsOnlyWhenRowsOverflow(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	stuffMenu(a, 20)
+	resizeTestApp(t, a, 80, 24)
+	a.openMenu()
+	if a.menuMaxScroll() <= 0 {
+		t.Fatal("test setup needs an overflowing menu")
+	}
+	col := menuBarColumn(t, a)
+	if !strings.ContainsRune(col, scrollbar.Thumb) || !strings.ContainsRune(col, scrollbar.Track) {
+		t.Fatalf("an overflowing menu must paint a bar, got %q", col)
+	}
+
+	// Give the same menu a terminal it fits in and the column empties.
+	resizeTestApp(t, a, 80, 60)
+	if got := a.menuMaxScroll(); got != 0 {
+		t.Fatalf("test setup: the menu should fit at 80x60, maxScroll %d", got)
+	}
+	col = menuBarColumn(t, a)
+	if strings.ContainsAny(col, string([]rune{scrollbar.Track, scrollbar.Thumb})) {
+		t.Fatalf("a menu that fits must paint no bar, got %q", col)
+	}
+}
+
+// TestMenuBarPress_ScrollsInsteadOfRunningTheRowBehindIt is the
+// click-steal regression the menu inherits from Pick: the bar's column
+// sits inside the row band, so without the hit-test claiming it first,
+// reaching for the scrollbar would run whatever action hides behind the
+// thumb — in a no-Ctrl editor, that is every destructive verb there is.
+func TestMenuBarPress_ScrollsInsteadOfRunningTheRowBehindIt(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	stuffMenu(a, 20)
+	resizeTestApp(t, a, 80, 24)
+	a.openMenu()
+	a.drawMenu()
+
+	mx, my, mw, mh := a.menuModalRect()
+	barX := mx + mw - 2
+	lastRow := my + mh - 2
+
+	a.handleMenuMouse(barX, lastRow, tcell.Button1)
+	if want := a.menuMaxScroll(); a.menuList.Scroll() != want {
+		t.Fatalf("a press at the foot of the bar: scroll %d, want %d", a.menuList.Scroll(), want)
+	}
+	if !a.menuOpen {
+		t.Fatal("a bar press must not run a row or close the menu")
+	}
+	if a.quit {
+		t.Fatal("a bar press ran the row behind the thumb")
+	}
+
+	// Hovering the bar must not disturb the highlight either — the
+	// menu's hover IS its keyboard selection, so dropping it on the way
+	// to the thumb would leave Enter with nothing to run.
+	a.drawMenu()
+	rowY := my + menuContentY + 1
+	a.updateMenuHover(mx+6, rowY)
+	before := a.hoveredMenuRow
+	if before < 0 {
+		t.Fatalf("test setup: expected a hovered row at y=%d", rowY)
+	}
+	a.updateMenuHover(barX, rowY)
+	if a.hoveredMenuRow != before {
+		t.Fatalf("hovering the bar moved the highlight: %d → %d", before, a.hoveredMenuRow)
 	}
 }

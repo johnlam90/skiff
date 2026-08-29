@@ -480,3 +480,56 @@ func TestBaselineMouse_ShiftWheelStillRidesTheWheelEvent(t *testing.T) {
 		t.Fatalf("wheel handling changed the mode to %v", a.mouseFlags)
 	}
 }
+
+// TestMouseMode_AsksTheOverlayNotItsType is the anti-type-switch fence.
+// wantMouseFlags used to decide hover tracking by switching on
+// *overlay.Info and *overlay.Form, so any surface added later was
+// classified by the branch it failed to match — silently, and always as
+// "hovers". Driving a stand-in through the Overlay interface proves the
+// answer now comes from the overlay itself: the same stack state gives
+// both modes depending only on what WantsMotion returns.
+func TestMouseMode_AsksTheOverlayNotItsType(t *testing.T) {
+	a, _ := ttyApp(t)
+
+	quiet := &motionSpyOverlay{motion: false}
+	a.overlays.Open(quiet)
+	if got := a.wantMouseFlags(); got != mouseBaseFlags {
+		t.Fatalf("an overlay that declines motion: got %v, want baseline", got)
+	}
+
+	hovering := &motionSpyOverlay{motion: true}
+	a.overlays.Open(hovering)
+	if got := a.wantMouseFlags(); got != mouseHoverFlags {
+		t.Fatalf("an overlay that wants motion: got %v, want hover", got)
+	}
+
+	// And the app-side bespoke overlays answer for themselves, which is
+	// what keeps the finder, the git log and the diff view hovering
+	// without mousemode.go naming a single one of them.
+	for _, tc := range []struct {
+		name string
+		ov   overlay.Overlay
+		want tcell.MouseFlags
+	}{
+		{"menu", menuOverlay{a}, mouseHoverFlags},
+		{"finder", &finderOverlay{app: a}, mouseHoverFlags},
+		{"git log", &gitLogOverlay{app: a}, mouseHoverFlags},
+		{"diff view", &diffOverlay{app: a}, mouseHoverFlags},
+	} {
+		a.overlays.Open(tc.ov)
+		if got := a.wantMouseFlags(); got != tc.want {
+			t.Errorf("%s: wantMouseFlags = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// motionSpyOverlay is an Overlay that exists only to answer
+// WantsMotion, so the mode decision can be tested without any real
+// surface — and therefore without any real type to switch on.
+type motionSpyOverlay struct{ motion bool }
+
+func (o *motionSpyOverlay) HandleKey(*tcell.EventKey)              {}
+func (o *motionSpyOverlay) HandleMouse(int, int, tcell.ButtonMask) {}
+func (o *motionSpyOverlay) Draw(tcell.Screen)                      {}
+func (o *motionSpyOverlay) WantsMotion() bool                      { return o.motion }
+func (o *motionSpyOverlay) Dismiss()                               {}

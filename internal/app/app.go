@@ -283,10 +283,14 @@ type App struct {
 	// hunt. Reset by openMenu and closeMenu — it never outlives a
 	// single showing of the menu.
 	menuFilter overlay.Field
-	// menuScroll is how many rows the menu's content region is scrolled
-	// when the natural layout is taller than the terminal (tmux splits,
-	// the 80×24 minimum). 0 whenever everything fits.
-	menuScroll int
+	// menuList is the menu's scroll window: how far the content region
+	// is scrolled when the natural layout is taller than the terminal
+	// (tmux splits, the 80×24 minimum), and the clamp / hit-test / bar
+	// that go with it. It counts VIRTUAL ROWS — dividers included — not
+	// menu items, because that is what the layout's relY positions are
+	// measured in; hoveredMenuRow stays the item-level selection. Reset
+	// by openMenu and closeMenu, so it never outlives one showing.
+	menuList   overlay.List
 	lastEscape time.Time // timestamp of the previous Esc press, for double-tap detection.
 
 	// pasting is true between bracketed-paste markers. While it's set,

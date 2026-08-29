@@ -133,11 +133,14 @@ internal/atomicfile/atomicfile.go Temp-file + fsync + rename write, shared by
 internal/overlay/             Floating surfaces: the Stack (routing truth),
                               Field/chrome primitives, and the prefab
                               overlays (Prompt/Confirm/Info/Dirty/Form/
-                              Popup/Pick). scrollbar.go is the shared
-                              scroll indicator every windowing prefab
-                              paints in its frame's right padding
+                              Popup/Pick). list.go is the one scrolled,
+                              selectable row window — Pick, the action
+                              menu, the finder, the git log and the git
+                              panel all embed it. scrollbar.go is the
+                              shared scroll indicator every windowing
+                              surface paints in its frame's right padding
                               column — Confirm's trust body, Info's
-                              stderr/diff, Pick's list
+                              stderr/diff, every List's rows
 internal/git/                 Git process boundary: Repo over a Runner
                               seam (real exec + in-memory Fake), hardened
                               env + read timeouts on every call, and the

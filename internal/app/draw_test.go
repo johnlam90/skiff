@@ -1088,7 +1088,7 @@ func TestDrawMenu_FiltersAndScrollsAtTheMinimumSize(t *testing.T) {
 	}
 	a.draw()
 	a.screen.Show()
-	if a.menuScroll == 0 {
+	if a.menuList.Scroll() == 0 {
 		t.Error("arrow keys never scrolled the content window")
 	}
 	if !screenHasText(t, a, "▲") || !screenHasText(t, a, "▼") {

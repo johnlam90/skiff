@@ -51,7 +51,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/filetree"
-	"github.com/johnlam90/skiff/internal/scrollbar"
+	"github.com/johnlam90/skiff/internal/overlay"
 	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 )
@@ -84,6 +84,14 @@ type gitChangeRow struct {
 // out of App so the subsystem's fields have a compiler-visible
 // boundary. Held on App as the named field gitPanel.
 type gitPanelState struct {
+	// List is the change list's window: the walk selection, the scroll
+	// offset, the row hit-test and the scroll indicator — the same
+	// overlay.List the action menu, the finder, the commit history and
+	// every Pick scroll. Synced from gitPanelList before it is read,
+	// because the list height moves with the sidebar and the keyboard
+	// hint strip docked under it.
+	overlay.List
+
 	// Git panel state — the sidebar's second tab ("Esc g", ≡ → Git
 	// changes, the GIT header tab, or a click on the status bar's
 	// branch segment). When active the sidebar shows the uncommitted-
@@ -92,7 +100,6 @@ type gitPanelState struct {
 	// while the panel is up.
 	active bool
 	rows   []gitChangeRow
-	scroll int
 
 	// Git panel keyboard mode. The panel is mouse-first, but Button3
 	// and mouse reporting are exactly what macOS Terminal + tmux
@@ -102,10 +109,6 @@ type gitPanelState struct {
 	keys   bool
 	onBtns bool
 	btn    int
-
-	// selected is the panel's keyboard/walk selection (see gitops.go /
-	// gitchanges.go).
-	selected int
 }
 
 // toggleGitPanel is the Esc-g / ≡ menu / status-bar action: flip the
@@ -131,7 +134,10 @@ func (a *App) toggleGitPanel() {
 	}
 	a.sidebarShown = true
 	a.gitPanel.active = true
-	a.gitPanel.scroll = 0
+	// Scroll home without disturbing the walk selection: reopening the
+	// panel should start at the top of the list, but a user who left the
+	// keyboard on row 12 should find it there.
+	a.gitPanel.ScrollBy(-a.gitPanel.Scroll())
 	a.rebuildGitChangesRows()
 	a.refreshGitStatusAsync()
 }
@@ -198,10 +204,8 @@ func (a *App) enterGitPanelKeys() {
 	a.gitPanel.keys = true
 	a.gitPanel.onBtns = false
 	a.gitPanel.btn = 0
-	if a.gitPanel.selected < 0 || a.gitPanel.selected >= len(a.gitPanel.rows) {
-		a.gitPanel.selected = 0
-	}
-	a.ensureGitRowVisible(a.gitPanel.selected)
+	a.gitPanelList().Clamp()
+	a.ensureGitRowVisible(a.gitPanel.Sel())
 }
 
 // exitGitPanelKeys hands the keyboard back to the editor. Called by Esc
@@ -284,15 +288,7 @@ func (a *App) moveGitPanelSel(delta int) {
 	if len(a.gitPanel.rows) == 0 {
 		return
 	}
-	idx := a.gitPanel.selected + delta
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(a.gitPanel.rows) {
-		idx = len(a.gitPanel.rows) - 1
-	}
-	a.gitPanel.selected = idx
-	a.ensureGitRowVisible(idx)
+	a.ensureGitRowVisible(a.gitPanel.Sel() + delta)
 }
 
 // moveGitPanelFocus moves keyboard focus between the change list and
@@ -349,10 +345,10 @@ func (a *App) activateGitPanelFocus(space bool) {
 		b.action(a, sx+b.x0, sy+3)
 		return
 	}
-	if a.gitPanel.selected < 0 || a.gitPanel.selected >= len(a.gitPanel.rows) {
+	if a.gitPanel.Sel() < 0 || a.gitPanel.Sel() >= len(a.gitPanel.rows) {
 		return
 	}
-	row := a.gitPanel.rows[a.gitPanel.selected]
+	row := a.gitPanel.rows[a.gitPanel.Sel()]
 	if space {
 		// Directories are collapsed untracked entries — they commit
 		// file by file once expanded, so they carry no checkbox.
@@ -365,7 +361,7 @@ func (a *App) activateGitPanelFocus(space bool) {
 	if !row.IsDir {
 		// Recorded after activation — openDiffView's closeAllModals
 		// resets the index, and this write is what arms ↑↓ walking.
-		a.diffPanelRow = a.gitPanel.selected
+		a.diffPanelRow = a.gitPanel.Sel()
 	}
 }
 
@@ -386,7 +382,9 @@ func (a *App) rebuildGitChangesRows() {
 		return
 	}
 	a.gitPanel.rows = buildGitChangesRows(a.tree.DirtyFiles, a.tree.Root.Path, a.gitDirtyDirs)
-	a.scrollGitPanel(0)
+	// Both the window and the walk selection can now point past the end
+	// of a list that just lost rows.
+	a.gitPanelList().Clamp()
 	// Drop commit-check entries whose paths are no longer dirty, and
 	// keep the walk selection inside the new list. Without the prune, a
 	// file unchecked, committed elsewhere, and dirtied again would come
@@ -401,12 +399,6 @@ func (a *App) rebuildGitChangesRows() {
 				delete(a.gitCommitChecks, abs)
 			}
 		}
-	}
-	if a.gitPanel.selected >= len(a.gitPanel.rows) {
-		a.gitPanel.selected = len(a.gitPanel.rows) - 1
-	}
-	if a.gitPanel.selected < 0 {
-		a.gitPanel.selected = 0
 	}
 }
 
@@ -462,13 +454,12 @@ func (a *App) gitPanelClick(x, y int) {
 		}
 		return
 	}
-	listH, _ := a.gitPanelBody()
 	// The bar's own column is claimed by handleMouse's press dispatch,
 	// one owner and one place, exactly as the file tree's is — see
 	// gitPanelScrollbarHit. By the time a press reaches here it is not
 	// on the thumb, so the row hit-test below can run unguarded.
-	idx := a.gitPanel.scroll + y - gitPanelListTop
-	if y < gitPanelListTop || y-gitPanelListTop >= listH || idx < 0 || idx >= len(a.gitPanel.rows) {
+	idx, onRow := a.gitPanelList().RowAt(gitPanelListTop, y)
+	if !onRow {
 		return
 	}
 	row := a.gitPanel.rows[idx]
@@ -478,7 +469,7 @@ func (a *App) gitPanelClick(x, y int) {
 		a.toggleCommitCheck(row.Abs)
 		return
 	}
-	a.gitPanel.selected = idx
+	a.gitPanel.Select(idx)
 	a.gitPanel.onBtns = false
 	a.activateGitChangeRow(row)
 	if !row.IsDir {
@@ -508,11 +499,11 @@ const gitPanelBarMinWidth = 6
 // bar, so splitter, bar and rows stay three distinct column ranges at
 // any y. ok is false when the list fits (a full-height thumb says
 // nothing) or the panel cannot spare the cell.
-func (a *App) gitPanelBar(sw, listH int) (x int, ok bool) {
+func (a *App) gitPanelBar(sw int) (x int, ok bool) {
 	if sw < gitPanelBarMinWidth {
 		return 0, false
 	}
-	if _, _, fits := scrollbar.Geom(len(a.gitPanel.rows), listH, a.gitPanel.scroll); !fits {
+	if !a.gitPanelList().Bar(sw-1, gitPanelListTop).Drawn() {
 		return 0, false
 	}
 	return sw - 1, true
@@ -524,17 +515,15 @@ func (a *App) gitPanelBar(sw, listH int) (x int, ok bool) {
 // cells.
 func (a *App) gitPanelBarHit(x, y int) bool {
 	_, _, sw, _ := a.sidebarRect()
-	listH, _ := a.gitPanelBody()
-	barX, ok := a.gitPanelBar(sw, listH)
-	return ok && x == barX && y >= gitPanelListTop && y < gitPanelListTop+listH
+	barX, ok := a.gitPanelBar(sw)
+	return ok && a.gitPanelList().Bar(barX, gitPanelListTop).Hit(x, y)
 }
 
 // gitPanelScrollToBar scrolls the change list so its thumb centers on
 // sidebar-local row y — the click-to-jump gesture the tree's bar
 // answers, sharing the same inverse math so the two cannot drift.
 func (a *App) gitPanelScrollToBar(y int) {
-	listH, _ := a.gitPanelBody()
-	a.gitPanel.scroll = scrollbar.TargetForThumb(len(a.gitPanel.rows), listH, y-gitPanelListTop)
+	a.gitPanelList().ScrollToBar(gitPanelListTop, y)
 }
 
 // drawGitPanelBar paints the change list's one-column bar at screen
@@ -546,25 +535,12 @@ func (a *App) gitPanelScrollToBar(y int) {
 // idle/active language the splitter and the other two bars use. Like
 // them the flag is derived from dragMode at paint time, never latched,
 // so a drag that ends through some other route can't strand it lit.
-func (a *App) drawGitPanelBar(x, top, listH int) {
-	thumbStart, thumbLen, ok := scrollbar.Geom(len(a.gitPanel.rows), listH, a.gitPanel.scroll)
-	if !ok {
-		return
-	}
+func (a *App) drawGitPanelBar(x, top int) {
 	thumbFg := a.theme.Muted
 	if a.dragMode == dragGitPanelScrollbar {
 		thumbFg = a.theme.Accent
 	}
-	bg := a.theme.SidebarBG
-	trackStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Subtle)
-	thumbStyle := tcell.StyleDefault.Background(bg).Foreground(thumbFg)
-	for row := range listH {
-		r, st := scrollbar.Track, trackStyle
-		if row >= thumbStart && row < thumbStart+thumbLen {
-			r, st = scrollbar.Thumb, thumbStyle
-		}
-		a.screen.SetContent(x, top+row, r, nil, st)
-	}
+	a.gitPanelList().Bar(x, top).DrawStyled(a.screen, a.theme.SidebarBG, a.theme.Subtle, thumbFg)
 }
 
 // gitPanelBtn is one clickable action on the panel's button row, with
@@ -672,18 +648,17 @@ func (a *App) toggleCommitCheck(abs string) {
 	a.gitCommitChecks[abs] = false
 }
 
-// ensureGitRowVisible scrolls the panel list so row idx is on screen.
+// ensureGitRowVisible selects row idx and scrolls the panel list so it
+// is on screen. The selection lands even when there is no list to
+// scroll — a sidebar too short to show a row still has a walk position,
+// and the diff walk depends on it surviving.
 func (a *App) ensureGitRowVisible(idx int) {
-	listH, _ := a.gitPanelBody()
-	if listH < 1 {
+	l := a.gitPanelList()
+	l.Select(idx)
+	if l.Visible() < 1 {
 		return
 	}
-	if idx < a.gitPanel.scroll {
-		a.gitPanel.scroll = idx
-	}
-	if idx >= a.gitPanel.scroll+listH {
-		a.gitPanel.scroll = idx - listH + 1
-	}
+	l.EnsureVisible()
 }
 
 // diffWalk moves the panel-opened diff to the previous/next changed
@@ -705,7 +680,6 @@ func (a *App) diffWalk(dir int) bool {
 			break
 		}
 	}
-	a.gitPanel.selected = idx
 	a.ensureGitRowVisible(idx)
 	a.activateGitChangeRow(a.gitPanel.rows[idx])
 	a.diffPanelRow = idx
@@ -748,18 +722,20 @@ func (a *App) activateGitChangeRow(row gitChangeRow) {
 // list can't scroll past its own ends. Delta 0 is a pure re-clamp,
 // used after the row list shrinks under an existing scroll offset.
 func (a *App) scrollGitPanel(delta int) {
+	a.gitPanelList().ScrollBy(delta)
+}
+
+// gitPanelList pushes the change list's live shape — how many rows it
+// holds and how many the sidebar can show under the branch line, the
+// button row and the keyboard hint strip — into the panel's window, and
+// hands the window back. Both move: the row count on every git-status
+// refresh, the height whenever the sidebar resizes or the hint strip
+// docks, so every reader syncs first.
+func (a *App) gitPanelList() *overlay.List {
 	listH, _ := a.gitPanelBody()
-	max := len(a.gitPanel.rows) - listH
-	if max < 0 {
-		max = 0
-	}
-	a.gitPanel.scroll += delta
-	if a.gitPanel.scroll > max {
-		a.gitPanel.scroll = max
-	}
-	if a.gitPanel.scroll < 0 {
-		a.gitPanel.scroll = 0
-	}
+	a.gitPanel.SetLen(len(a.gitPanel.rows))
+	a.gitPanel.SetVisible(listH)
+	return &a.gitPanel.List
 }
 
 // gitPanelHintMaxRows caps the keyboard hint strip. Four rows is what
@@ -994,7 +970,7 @@ func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 	// the bar starts instead of being painted underneath it — the same
 	// ordering Tree.Render uses for the sidebar's other bar.
 	rowW := sw
-	barX, bar := a.gitPanelBar(sw, listH)
+	barX, bar := a.gitPanelBar(sw)
 	if bar {
 		rowW--
 	}
@@ -1005,16 +981,16 @@ func (a *App) drawGitPanel(sx, sy, sw, sh int) {
 	} else {
 		rowFocus := a.gitPanelRowFocus()
 		for i := range listH {
-			idx := a.gitPanel.scroll + i
+			idx := a.gitPanel.Scroll() + i
 			if idx >= len(a.gitPanel.rows) {
 				break
 			}
-			sel := idx == a.gitPanel.selected
+			sel := idx == a.gitPanel.Sel()
 			a.drawGitPanelRow(sx, sy+gitPanelListTop+i, rowW, a.gitPanel.rows[idx], sel, sel && rowFocus)
 		}
 	}
 	if bar {
-		a.drawGitPanelBar(sx+barX, sy+gitPanelListTop, listH)
+		a.drawGitPanelBar(sx+barX, sy+gitPanelListTop)
 	}
 	if len(hint) > 0 {
 		a.drawGitPanelHint(sx, sy, sw, sh, hint)

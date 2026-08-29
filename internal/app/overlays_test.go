@@ -196,3 +196,14 @@ func containsRunes(cells []rune, s string) bool {
 	}
 	return false
 }
+
+// The app's own overlays satisfy the whole contract too — the bespoke
+// four alongside the package's prefabs. Listing them here is the fence
+// against a new App-side surface shipping without WantsMotion or
+// Dismiss, which is exactly the gap the two type switches used to hide.
+var (
+	_ overlay.Overlay = menuOverlay{}
+	_ overlay.Overlay = (*finderOverlay)(nil)
+	_ overlay.Overlay = (*gitLogOverlay)(nil)
+	_ overlay.Overlay = (*diffOverlay)(nil)
+)

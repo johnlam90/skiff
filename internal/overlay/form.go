@@ -351,3 +351,10 @@ func (f *Form) submit() {
 		cb(values)
 	}
 }
+
+// WantsMotion is false. Form's mouse path returns early unless Button1
+// is down, so button-less motion would be pure traffic.
+func (f *Form) WantsMotion() bool { return false }
+
+// Dismiss is a no-op — an abandoned form submits nothing.
+func (f *Form) Dismiss() {}
