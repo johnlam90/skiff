@@ -83,17 +83,28 @@ internal/editor/indent.go     Visual-column math, indent detection, Enter auto-i
 internal/editor/word.go       The single definition of "a word" + word-wise motion
 internal/editor/cluster.go    Grapheme clusters + terminal cell widths (uniseg)
 internal/editor/bracket.go    Bracket match under the caret (+ the render decision)
-internal/filetree/filetree.go Lazy tree, identity-preserving refresh, hit-test,
-                              render — plus the per-directory child cap
-                              (MaxDirChildren + "… N more" sentinel), the
-                              ReadErr "(unreadable)" mark, .gitignore-aware
-                              filtering (HideIgnored + the per-directory
-                              matcher cache), symlink resolution with
-                              ancestor-loop refusal, VS Code-style
-                              compact folder chains (single-child dir
-                              runs fold into one "a/b/c" row anchored on
-                              the deepest dir), and the sidebar's
-                              own scrollbar column
+internal/filetree/filetree.go Tree + Node model: lazy loading, the
+                              identity-preserving merge (+ its
+                              fingerprint fast-path), symlink resolution
+                              with ancestor-loop refusal, the
+                              per-directory child cap (MaxDirChildren +
+                              "… N more" sentinel), synchronous Refresh
+internal/filetree/scan.go     Off-thread disk sweep: readDir/ScanDirs on
+                              a goroutine, ApplyScan's on-loop merge,
+                              and the fixed shouldHide noise list
+internal/filetree/ignore.go   .gitignore-aware filtering: HideIgnored +
+                              the per-directory matcher cache, the
+                              nested-chain scoping, open-tab pins
+internal/filetree/flatten.go  Visible-row list + VS Code-style compact
+                              folder chains (single-child dir runs fold
+                              into one "a/b/c" row anchored on the
+                              deepest dir)
+internal/filetree/render.go   Painting + row styling: git change
+                              letters, the ReadErr "(unreadable)" mark
+                              and the other display labels
+internal/filetree/scrollbar.go The sidebar's own scrollbar column
+internal/filetree/nav.go      Hit-test, toggle, scroll, Reveal, and
+                              expanded-dir session persistence
 internal/scrollbar/           The one definition of a scrollbar: thumb
                               geometry, its click inverse, and the Track/
                               Thumb glyphs. No tcell, no theme — both the
