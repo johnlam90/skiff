@@ -161,7 +161,7 @@ func TestDiffNameStatus_RejectsHostileBase(t *testing.T) {
 	}
 	if fake.CallCount() != 0 {
 		t.Fatalf("hostile base must not reach git, ran %d command(s): %v",
-			fake.CallCount(), fake.Calls)
+			fake.CallCount(), fake.Calls())
 	}
 }
 

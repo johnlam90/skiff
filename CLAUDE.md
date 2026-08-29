@@ -138,12 +138,19 @@ internal/overlay/             Floating surfaces: the Stack (routing truth),
                               paints in its frame's right padding
                               column — Confirm's trust body, Info's
                               stderr/diff, Pick's list
-internal/git/                 Git process boundary: Repo over a Runner
-                              seam (real exec + in-memory Fake), hardened
-                              env + read timeouts on every call, and the
-                              Snapshot model (IsRepo/Branch/Ahead/Behind/
-                              Files) every git-aware surface consumes
-internal/git/ref.go           SafeRef: refuses refs git would read as an option
+internal/git/                 Git process boundary AND vocabulary: Repo
+                              over a Runner seam (real exec + in-memory
+                              Fake), hardened env + timeouts, and typed
+                              verbs — Status/Diff/DiffUntracked/Log/Show/
+                              Branches/Worktrees/Toplevel/LsFiles reads,
+                              Commit/Push/Pull/Fetch/Switch/NewBranch/
+                              Merge/Stash*/Worktree* writes — each
+                              building its own argv and parsing its own
+                              output. snapshot.go is the Snapshot model;
+                              explain.go is *OpError (advice + the
+                              NonFastForward/NotMerged/WorktreeDirty
+                              flags the follow-up offers branch on)
+internal/git/ref.go           SafeRef / safePath: refuse names git would read as an option
 internal/clipboard/clipboard.go OSC 52 to /dev/tty with tmux passthrough wrap,
                               capped at MaxPayloadBytes (ErrTooLarge above it)
 internal/userconfig/userconfig.go ~/.config/skiff/config.json (icons, theme,
@@ -319,6 +326,24 @@ terminator. Any new buffer-to-disk write MUST use
 `String()` is LF-joined and silently rewrites every line of a CRLF
 file. `Tab.Save` is the reference. Inserted newlines stay `"\n"` in the
 buffer on purpose; only the write joins with the file's own ending.
+
+### Git argv lives in `internal/git` only — app calls verbs (git.go)
+`git.Repo` has no `Output(args…)` door. Every git command the editor runs
+is a typed method (`Diff`, `Log`, `Push`, `Switch`, `WorktreeAdd`, …)
+that builds its own argv, applies `SafeRef` to any ref from outside the
+editor, puts `--` before paths, and parses its own output into a model.
+`grep -rn 'git\.Output\|RunSequence' internal/app` must stay empty. Two
+things follow. **A verb probes git for its own argv**: `Push` asks for
+an upstream and `Switch`/`WorktreeAdd` ask whether the tracking local
+exists *inside* the method, on `runGitOp`'s goroutine — never on the
+event loop, where the old builders froze the UI for up to the read
+timeout (`TestMenuGitPush_ReturnsBeforeUpstreamProbe` is the fence).
+**Failures are typed**: a write verb returns `*git.OpError` carrying
+`Advice` and the refusal flags; `handleGitOpDone` branches on the flags
+and renders the advice — it never reads stderr. And `a.readRepo()` is
+the single door app uses to obtain a handle, so `a.gitRunner =
+&git.Fake{}` scripts every surface: status, gutter, diff and log
+overlays, git panel rows, pickers, and every op.
 
 ### Custom tcell events for goroutine → main-loop messaging
 Background work (auto-scroll during drag, 10s tree refresh) posts custom

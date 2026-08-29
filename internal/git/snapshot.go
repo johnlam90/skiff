@@ -66,23 +66,19 @@ func (r *Repo) Status(base string) Snapshot {
 		return Snapshot{}
 	}
 
-	// rev-parse --show-toplevel does double duty: it tells us whether
-	// we're in a git work tree at all (non-zero exit otherwise) and
-	// gives us the absolute path of the repo root, which is the prefix
-	// every porcelain path is reported relative to.
-	topBytes, err := r.Output("rev-parse", "--show-toplevel")
+	// Toplevel does double duty: it tells us whether we're in a git
+	// work tree at all (it fails otherwise) and gives us the absolute
+	// path of the repo root, which is the prefix every porcelain path
+	// is reported relative to.
+	toplevel, err := r.Toplevel()
 	if err != nil {
 		return Snapshot{GitMissing: errors.Is(err, ErrGitMissing)}
-	}
-	toplevel := strings.TrimRight(string(topBytes), "\n\r")
-	if toplevel == "" {
-		return Snapshot{}
 	}
 
 	ahead, behind := r.aheadBehind()
 	// -z is not an optimization: without it a path containing a newline
 	// splits into two garbage records and shreds the rest of the parse.
-	out, err := r.Output("status", "--porcelain", "-z")
+	out, err := r.read("status", "--porcelain", "-z")
 	if err != nil {
 		// We *are* in a repo (rev-parse succeeded) but couldn't read
 		// status. Mark the result as a repo with no known dirty files
@@ -129,7 +125,7 @@ func (r *Repo) diffNameStatus(base, toplevel string) map[string]ChangeKind {
 	if err != nil {
 		return map[string]ChangeKind{}
 	}
-	out, err := r.Output(args...)
+	out, err := r.read(args...)
 	if err != nil {
 		return map[string]ChangeKind{}
 	}
@@ -175,7 +171,7 @@ func parseNameStatus(out []byte, toplevel string) map[string]ChangeKind {
 // detached HEAD, or any git failure yields 0/0 — the arrows simply
 // don't render.
 func (r *Repo) aheadBehind() (ahead, behind int) {
-	out, err := r.Output("rev-list", "--left-right", "--count", "@{upstream}...HEAD")
+	out, err := r.read("rev-list", "--left-right", "--count", "@{upstream}...HEAD")
 	if err != nil {
 		return 0, 0
 	}
@@ -199,10 +195,10 @@ func (r *Repo) aheadBehind() (ahead, behind int) {
 // to distinguish "on a branch" from "detached"; the rev-parse fallback
 // only fires when symbolic-ref's non-zero exit says we're detached.
 func (r *Repo) branch() string {
-	if out, err := r.Output("symbolic-ref", "--short", "HEAD"); err == nil {
+	if out, err := r.read("symbolic-ref", "--short", "HEAD"); err == nil {
 		return strings.TrimRight(string(out), "\n\r")
 	}
-	if out, err := r.Output("rev-parse", "--short", "HEAD"); err == nil {
+	if out, err := r.read("rev-parse", "--short", "HEAD"); err == nil {
 		return strings.TrimRight(string(out), "\n\r")
 	}
 	return ""

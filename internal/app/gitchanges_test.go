@@ -13,6 +13,7 @@
 package app
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/scrollbar"
 	"github.com/johnlam90/skiff/internal/theme"
 )
@@ -391,6 +393,56 @@ func TestActivateGitChangeRow_NoDiffExplainsItself(t *testing.T) {
 	}
 	if !infoIsOpen(a) {
 		t.Fatalf("expected the info prefab to explain itself; top = %T", a.overlays.Top())
+	}
+}
+
+// TestActivateGitChangeRow_FromScriptedFake proves the git panel's row
+// surface goes through readRepo: the diff a row opens is the one a
+// git.Fake scripted, with no repository on disk. The untracked branch
+// is covered too — an empty tracked diff falls through to the scripted
+// --no-index rendering.
+func TestActivateGitChangeRow_FromScriptedFake(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	target := filepath.Join(a.rootDir, "f.txt")
+	fake := &git.Fake{}
+	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target, strings.Join([]string{
+		"diff --git a/f.txt b/f.txt",
+		"index 0000000..1111111 100644",
+		"--- a/f.txt",
+		"+++ b/f.txt",
+		"@@ -1 +1 @@",
+		"-old",
+		"+scripted",
+		"",
+	}, "\n"), nil)
+	a.gitRunner = fake
+
+	a.activateGitChangeRow(gitChangeRow{Rel: "f.txt", Abs: target, Kind: filetree.GitChangeModified})
+	if !diffIsOpen(a) {
+		t.Fatalf("a scripted diff should open the diff view; top = %T", a.overlays.Top())
+	}
+	if body := strings.Join(diffOv(t, a).unified, "\n"); !strings.Contains(body, "+scripted") {
+		t.Fatalf("diff body should come from the script, got:\n%s", body)
+	}
+	a.closeAllModals()
+
+	fresh := filepath.Join(a.rootDir, "new.txt")
+	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+fresh, "", nil)
+	fake.Script("diff --no-index --unified=3 --src-prefix=a/ --dst-prefix=b/ -- "+os.DevNull+" new.txt", strings.Join([]string{
+		"diff --git a/new.txt b/new.txt",
+		"new file mode 100644",
+		"--- /dev/null",
+		"+++ b/new.txt",
+		"@@ -0,0 +1 @@",
+		"+brand new",
+		"",
+	}, "\n"), errors.New("exit status 1"))
+	a.activateGitChangeRow(gitChangeRow{Rel: "new.txt", Abs: fresh, Kind: filetree.GitChangeAdded})
+	if !diffIsOpen(a) {
+		t.Fatalf("an untracked row should open the scripted --no-index diff; top = %T", a.overlays.Top())
+	}
+	if body := strings.Join(diffOv(t, a).unified, "\n"); !strings.Contains(body, "+brand new") {
+		t.Fatalf("untracked diff body should come from the script, got:\n%s", body)
 	}
 }
 

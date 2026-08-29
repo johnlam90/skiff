@@ -20,13 +20,10 @@ package app
 // you the change; rewriting history stays in the shell.
 
 import (
-	"bytes"
 	"path/filepath"
-	"strings"
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/johnlam90/skiff/internal/diff"
 	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/overlay"
 )
@@ -44,90 +41,26 @@ const (
 	gitLogLimit = 200
 )
 
-// gitLogEntry is one commit row: abbreviated SHA, subject line, and
-// git's human-readable relative age ("2 days ago").
-type gitLogEntry struct {
-	SHA     string
-	Subject string
-	Age     string
-}
-
-// loadGitLog returns up to limit commits, newest first. path narrows
-// the log to one file (with --follow so renames don't truncate the
-// story); empty path logs the whole branch. Best-effort like every git
-// loader here: nil on any failure.
-func loadGitLog(rootDir, path string, limit int) []gitLogEntry {
-	if rootDir == "" || limit <= 0 {
-		return nil
-	}
-	args := []string{"log", "--format=%h%x09%s%x09%cr", "-n", itoa(limit)}
-	if path != "" {
-		args = append(args, "--follow", "--", path)
-	}
-	out, err := git.Output(rootDir, args...)
-	if err != nil || len(out) == 0 {
-		return nil
-	}
-	var entries []gitLogEntry
-	for _, raw := range bytes.Split(bytes.TrimRight(out, "\n"), []byte{'\n'}) {
-		parts := strings.SplitN(string(raw), "\t", 3)
-		if len(parts) != 3 || parts[0] == "" {
-			continue
-		}
-		entries = append(entries, gitLogEntry{SHA: parts[0], Subject: parts[1], Age: parts[2]})
-	}
-	return entries
-}
-
-// loadGitCommitDiff returns the unified diff a commit introduced —
-// the whole commit, or just path's part of it when path is non-empty.
-// --format= suppresses the message header so the output starts at the
-// first `diff --git`, which is what the diff view's parser expects.
-//
-// sha is routed through git.SafeRef and the arg list always carries a
-// trailing "--" even with no path, unlike every other loader here that
-// only bothers when path is non-empty. This is defense-in-depth: today
-// sha only ever holds loadGitLog's %h output (hex, single-line), so no
-// current input reaches the refused class, but the gate is what stands
-// between a future caller — or a format-string change upstream — and a
-// repo-supplied string landing on git's argv as an option.
-func loadGitCommitDiff(rootDir, sha, path string) diff.Patch {
-	if rootDir == "" {
-		return diff.Patch{}
-	}
-	safe, err := git.SafeRef(sha)
-	if err != nil {
-		return diff.Patch{}
-	}
-	args := []string{"show", "--format=", safe, "--"}
-	if path != "" {
-		args = append(args, path)
-	}
-	out, err := git.Output(rootDir, args...)
-	if err != nil || len(out) == 0 {
-		return diff.Patch{}
-	}
-	p, _ := diff.Parse(out)
-	return p
-}
-
-// gitLogOverlay is the commit-history overlay: the loaded entries and
+// gitLogOverlay is the commit-history overlay: the loaded commits and
 // the highlight/scroll window. Bespoke — it needs the App for the diff
 // view hand-off and theme — and its state dies with it.
 type gitLogOverlay struct {
 	app      *App
 	title    string
 	path     string
-	entries  []gitLogEntry
+	entries  []git.Commit
 	selected int
 	scroll   int
 }
 
 // openGitLog shows the history overlay. path narrows it to one file
-// (file history); empty path shows the branch log. An empty result
-// flashes instead of opening a hollow modal.
+// (file history); empty path shows the branch log. An empty result —
+// or a git that refused to answer, which outside a repo it will —
+// flashes instead of opening a hollow modal. The read is synchronous
+// (the log is bounded to gitLogLimit rows); it goes through readRepo
+// so a test scripts it like every other surface.
 func (a *App) openGitLog(title, path string) {
-	entries := loadGitLog(a.rootDir, path, gitLogLimit)
+	entries, _ := a.readRepo().Log(gitLogLimit, path)
 	if len(entries) == 0 {
 		a.flash("No commit history found")
 		return
@@ -170,14 +103,20 @@ func (g *gitLogOverlay) activate() {
 	}
 	a := g.app
 	entry := g.entries[g.selected]
-	patch := loadGitCommitDiff(a.rootDir, entry.SHA, g.path)
+	patch, err := a.readRepo().Show(entry.Hash, g.path)
+	if err != nil && patch.Empty() {
+		// Git said no (or the parser could read none of it): the
+		// reason beats a silent empty answer.
+		a.flash("Couldn't load commit " + entry.Hash + ": " + err.Error())
+		return
+	}
 	if patch.Empty() {
 		// Merge commits and rename-only commits can produce no diff
 		// for this path — say so rather than opening an empty modal.
-		a.flash("No diff for commit " + entry.SHA)
+		a.flash("No diff for commit " + entry.Hash)
 		return
 	}
-	title := "Commit " + entry.SHA
+	title := "Commit " + entry.Hash
 	langPath := ""
 	if g.path != "" {
 		title += " · " + filepath.Base(g.path)
@@ -326,7 +265,7 @@ func (g *gitLogOverlay) Draw(scr tcell.Screen) {
 }
 
 // drawRow paints one commit row inside the overlay.
-func (g *gitLogOverlay) drawRow(scr tcell.Screen, r overlay.Rect, ry int, entry gitLogEntry, selected bool) {
+func (g *gitLogOverlay) drawRow(scr tcell.Screen, r overlay.Rect, ry int, entry git.Commit, selected bool) {
 	th := g.app.theme
 	rowBG := th.LineHL
 	if selected {
@@ -341,9 +280,9 @@ func (g *gitLogOverlay) drawRow(scr tcell.Screen, r overlay.Rect, ry int, entry 
 	}
 
 	x := r.X + 2
-	x = drawClipped(scr, x, ry, r.W-4, entry.SHA, shaStyle)
+	x = drawClipped(scr, x, ry, r.W-4, entry.Hash, shaStyle)
 	// Age goes on the right; the subject gets whatever is left between.
-	age := entry.Age
+	age := entry.When
 	ageX := r.X + r.W - 2 - runeLen(age)
 	drawClipped(scr, ageX, ry, runeLen(age), age, ageStyle)
 	subjectW := ageX - x - 3

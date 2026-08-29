@@ -729,11 +729,16 @@ func (a *App) activateGitChangeRow(row gitChangeRow) {
 		return
 	}
 
-	patch := loadGitFileDiff(a.rootDir, a.diffBase, row.Abs, row.Kind == filetree.GitChangeAdded)
+	patch, err := repoFileDiff(a.readRepo(), a.diffBase, row.Abs, row.Kind == filetree.GitChangeAdded)
 	if patch.Empty() {
 		// Nothing to pair into rows — say so in the prefab meant for a
 		// sentence rather than opening a diff view over one line of text.
-		a.openInfo("Diff · "+row.Rel, []string{"No git diff available for this file."})
+		// When git itself said no, its reason follows the sentence.
+		lines := []string{"No git diff available for this file."}
+		if err != nil {
+			lines = append(lines, "", err.Error())
+		}
+		a.openInfo("Diff · "+row.Rel, lines)
 		return
 	}
 	openPath := row.Abs

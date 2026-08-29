@@ -5,48 +5,32 @@
 // Copyright: 2026 John Lam. All rights reserved.
 // =============================================================================
 
-// Tests for the git write side: command builders, the plain-language
-// error explainer, the async-done handler's routing, and end-to-end
-// mutations against real repositories (with a local bare dir as origin
-// where a remote is needed).
+// Tests for the git write side: the async-done handler's routing over
+// the git package's typed errors, the flows driven through a git.Fake
+// with no repository behind them (the seam reaches every verb), and
+// end-to-end mutations against real repositories. The verbs' own argv
+// and behaviour are pinned in internal/git; these tests are about what
+// the app does with them.
 
 package app
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-)
 
-// bareOrigin creates a bare repo and wires it as dir's origin.
-func bareOrigin(t *testing.T, dir string) string {
-	t.Helper()
-	origin := t.TempDir()
-	if out, err := exec.Command("git", "init", "--bare", "-q", origin).CombinedOutput(); err != nil {
-		t.Fatalf("bare init: %v\n%s", err, out)
-	}
-	gitRun(t, dir, "remote", "add", "origin", origin)
-	return origin
-}
+	"github.com/johnlam90/skiff/internal/git"
+)
 
 // commitAll makes a commit of everything so the repo has a HEAD.
 func commitAll(t *testing.T, dir, msg string) {
 	t.Helper()
 	gitRun(t, dir, "add", "-A", ".")
 	gitRun(t, dir, "commit", "-q", "-m", msg)
-}
-
-// porcelain returns git status --porcelain for asserts.
-func porcelain(t *testing.T, dir string) string {
-	t.Helper()
-	out, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
-	if err != nil {
-		t.Fatalf("status: %v", err)
-	}
-	return string(out)
 }
 
 // skipInShortMode gates the git suite's end-to-end tests behind -short:
@@ -62,188 +46,128 @@ func skipInShortMode(t *testing.T) {
 	}
 }
 
-// TestExplainGit_Mappings pins the headline for each recognised
-// failure shape — the sentence is the UX, so it's worth locking down.
-func TestExplainGit_Mappings(t *testing.T) {
-	cases := []struct{ out, want string }{
-		{"! [rejected] main -> main (fetch first)", "origin has commits you don't — pull first, then push"},
-		{"fatal: Not possible to fast-forward, aborting.", "local and origin have diverged — pull needs a merge"},
-		{"CONFLICT (content): Merge conflict in a.go", "merge conflict — fix the marked files, then commit"},
-		{"nothing to commit, working tree clean", "nothing to commit"},
-		{"No stash entries found.", "no stash to pop"},
-		{"fatal: could not read from remote repository", "couldn't reach origin — check network / credentials"},
-		{"error: Your local changes to the following files would be overwritten by checkout:", "uncommitted changes are in the way — commit or stash first"},
-		{"something novel", "git reported an error:"},
+// gatedRunner is a git.Fake whose upstream probe blocks until the test
+// releases it. It is how the "no git on the event loop" contract is
+// made observable: if menuGitPush ran the probe inline, it could not
+// return before release; if it hands the verb to a goroutine, it
+// returns at once and the probe completes only after release.
+type gatedRunner struct {
+	*git.Fake
+	release chan struct{}
+}
+
+// Output blocks the upstream probe on the gate, then answers from the
+// Fake's script like every other read.
+func (g *gatedRunner) Output(root string, timeout time.Duration, args ...string) ([]byte, error) {
+	if len(args) > 1 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+		<-g.release
 	}
-	for _, c := range cases {
-		if got := explainGit(c.out); got != c.want {
-			t.Errorf("explainGit(%q) = %q, want %q", c.out, got, c.want)
-		}
+	return g.Fake.Output(root, timeout, args...)
+}
+
+// fakeRepoApp builds an App over a plain temp directory with a git.Fake
+// installed as its runner and the snapshot marked as a repo, so the
+// hasGitRepo gates open without any repository on disk.
+func fakeRepoApp(t *testing.T) (*App, *git.Fake) {
+	t.Helper()
+	a := newTestApp(t, t.TempDir())
+	fake := &git.Fake{}
+	a.gitRunner = fake
+	a.gitSnap.IsRepo = true
+	a.gitSnap.Branch = "main"
+	return a, fake
+}
+
+// TestMenuGitPush_ReturnsBeforeUpstreamProbe is the "no git on the
+// event loop to decide argv" contract. Push has to ask git whether the
+// branch has an upstream before it knows its own argv; that probe used
+// to run inline in a builder, up to the ten-second read timeout with
+// the UI frozen. Now the verb decides on runGitOp's goroutine: the
+// menu handler returns while the probe is still blocked on the gate,
+// and the push that follows — the first-push --set-upstream shape —
+// reaches the Fake only after the gate opens.
+func TestMenuGitPush_ReturnsBeforeUpstreamProbe(t *testing.T) {
+	a, fake := fakeRepoApp(t)
+	gate := &gatedRunner{Fake: fake, release: make(chan struct{})}
+	a.gitRunner = gate
+	fake.Script("symbolic-ref --short HEAD", "main\n", nil)
+	fake.Script("push --set-upstream origin main", "", nil)
+
+	returned := make(chan struct{})
+	go func() {
+		a.menuGitPush()
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("menuGitPush blocked on the upstream probe — git ran on the event loop to decide argv")
+	}
+	if fake.Called("push --set-upstream origin main") {
+		t.Fatal("the push cannot have run before its upstream probe was answered")
+	}
+	close(gate.release)
+	waitGitIdle(t, a)
+	if !fake.Called("rev-parse --abbrev-ref @{upstream}") || !fake.Called("push --set-upstream origin main") {
+		t.Fatalf("push must reach the runner seam through readRepo, ran %v", fake.Calls())
+	}
+	if a.statusMsg != "Pushed" {
+		t.Fatalf("success should flash, got %q", a.statusMsg)
 	}
 }
 
-// TestGitCommitCmds pins druk's staging semantics: add -A scoped to
-// the paths, then a path-scoped commit.
-func TestGitCommitCmds(t *testing.T) {
-	cmds := gitCommitCmds([]string{"/r/a.go", "/r/b.go"}, "msg")
-	if len(cmds) != 2 {
-		t.Fatalf("want 2 commands, got %d", len(cmds))
+// TestMenuGitPush_ScriptedRejectionOffersPullAndPush drives the push
+// flow against a scripted non-fast-forward refusal with no repository
+// behind it: the done handler reads the OpError's flag (never stderr),
+// offers the one-gesture fix, and accepting it runs the merge-pull then
+// the push through the same seam.
+func TestMenuGitPush_ScriptedRejectionOffersPullAndPush(t *testing.T) {
+	a, fake := fakeRepoApp(t)
+	fake.Script("rev-parse --abbrev-ref @{upstream}", "origin/main\n", nil)
+	fake.Script("push", "! [rejected] main -> main (fetch first)\n", errors.New("exit status 1"))
+
+	a.menuGitPush()
+	waitGitIdle(t, a)
+	c := confirmPrefab(t, a)
+	if c.Title != "Push rejected" {
+		t.Fatalf("a non-fast-forward push should offer pull-then-push, got %q", c.Title)
 	}
-	if got := strings.Join(cmds[0], " "); got != "add -A -- /r/a.go /r/b.go" {
-		t.Fatalf("add: %q", got)
+
+	fake.Script("pull --no-rebase --no-edit", "Merge made by the 'ort' strategy.\n", nil)
+	fake.Script("push", "", nil)
+	confirmYes(a)
+	waitGitIdle(t, a)
+	if !fake.Called("pull --no-rebase --no-edit") {
+		t.Fatalf("accepting the offer must pull first, ran %v", fake.Calls())
 	}
-	if got := strings.Join(cmds[1], " "); got != "commit -m msg -- /r/a.go /r/b.go" {
-		t.Fatalf("commit: %q", got)
+	if a.statusMsg != "Pulled and pushed" {
+		t.Fatalf("the accepted offer should flash its success, got %q", a.statusMsg)
 	}
 }
 
-// TestGitPushCmds_UpstreamVsNot: a branch's first push sets the
-// upstream; later pushes are plain.
-func TestGitPushCmds_UpstreamVsNot(t *testing.T) {
-	skipInShortMode(t)
-	requireGit(t)
-	dir := initRepo(t)
-	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
-	commitAll(t, dir, "seed")
-	bareOrigin(t, dir)
+// TestMenuGitSwitchBranch_ListsScriptedBranches drives the branch
+// picker from a scripted ref list: the names the Fake answers with are
+// the rows the picker shows, and picking one runs the switch verb —
+// whose own existence probe is answered by the Fake too.
+func TestMenuGitSwitchBranch_ListsScriptedBranches(t *testing.T) {
+	a, fake := fakeRepoApp(t)
+	fake.Script("for-each-ref --format=%(HEAD)%00%(refname)%00%(symref) refs/heads refs/remotes",
+		"*\x00refs/heads/main\x00\n \x00refs/heads/side\x00\n \x00refs/remotes/origin/remote-only\x00\n", nil)
+	fake.Script("checkout -b remote-only --track origin/remote-only --", "", nil)
 
-	cmds := gitPushCmds(dir, "main")
-	if got := strings.Join(cmds[0], " "); got != "push --set-upstream origin main" {
-		t.Fatalf("first push: %q", got)
+	a.menuGitSwitchBranch()
+	waitListPick(t, a)
+	items := pickPrefab(t, a).Items
+	if len(items) != 3 || items[0].Label != "main" || items[1].Label != "side" || items[2].Label != "origin/remote-only" {
+		t.Fatalf("picker rows should be the scripted branches, got %+v", items)
 	}
-	if out, err := execGitSequence(dir, cmds); err != nil {
-		t.Fatalf("push: %v\n%s", err, out)
+	pickChoose(t, a, 2)
+	waitGitIdle(t, a)
+	if !fake.Called("checkout -b remote-only --track origin/remote-only --") {
+		t.Fatalf("picking the remote spelling should create the tracking local, ran %v", fake.Calls())
 	}
-	cmds = gitPushCmds(dir, "main")
-	if got := strings.Join(cmds[0], " "); got != "push" {
-		t.Fatalf("second push: %q", got)
-	}
-}
-
-// TestCommitEndToEnd commits one of two dirty files through the real
-// sequence and checks the other stays uncommitted — the path scoping
-// is the whole point of the checkbox column.
-func TestCommitEndToEnd(t *testing.T) {
-	skipInShortMode(t)
-	requireGit(t)
-	dir := initRepo(t)
-	one := filepath.Join(dir, "one.txt")
-	two := filepath.Join(dir, "two.txt")
-	writeFileT(t, one, "1\n")
-	writeFileT(t, two, "2\n")
-	commitAll(t, dir, "seed")
-	writeFileT(t, one, "1 changed\n")
-	writeFileT(t, two, "2 changed\n")
-
-	if out, err := execGitSequence(dir, gitCommitCmds([]string{one}, "only one")); err != nil {
-		t.Fatalf("commit: %v\n%s", err, out)
-	}
-	status := porcelain(t, dir)
-	if strings.Contains(status, "one.txt") {
-		t.Fatalf("one.txt should be committed, status:\n%s", status)
-	}
-	if !strings.Contains(status, "two.txt") {
-		t.Fatalf("two.txt should still be dirty, status:\n%s", status)
-	}
-}
-
-// TestUndoAndStashEndToEnd drives reset --soft and stash push/pop
-// through the same sequences the menu actions use.
-func TestUndoAndStashEndToEnd(t *testing.T) {
-	skipInShortMode(t)
-	requireGit(t)
-	dir := initRepo(t)
-	f := filepath.Join(dir, "a.txt")
-	writeFileT(t, f, "x\n")
-	commitAll(t, dir, "seed")
-	writeFileT(t, f, "y\n")
-	commitAll(t, dir, "second")
-
-	if out, err := execGitSequence(dir, [][]string{{"reset", "--soft", "HEAD~1"}}); err != nil {
-		t.Fatalf("undo: %v\n%s", err, out)
-	}
-	if !strings.Contains(porcelain(t, dir), "a.txt") {
-		t.Fatal("undo should leave the change staged/dirty")
-	}
-
-	if out, err := execGitSequence(dir, [][]string{{"stash", "push", "-u"}}); err != nil {
-		t.Fatalf("stash: %v\n%s", err, out)
-	}
-	if strings.Contains(porcelain(t, dir), "a.txt") {
-		t.Fatal("stash should clean the tree")
-	}
-	if out, err := execGitSequence(dir, [][]string{{"stash", "pop"}}); err != nil {
-		t.Fatalf("pop: %v\n%s", err, out)
-	}
-	if !strings.Contains(porcelain(t, dir), "a.txt") {
-		t.Fatal("pop should bring the change back")
-	}
-}
-
-// TestGitSwitchCmds_Tracking pins druk's remote-pick rule: the first
-// switch to origin/x creates a tracking local x, the second reuses it.
-func TestGitSwitchCmds_Tracking(t *testing.T) {
-	skipInShortMode(t)
-	requireGit(t)
-	dir := initRepo(t)
-	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
-	commitAll(t, dir, "seed")
-	bareOrigin(t, dir)
-	gitRun(t, dir, "checkout", "-q", "-b", "feature")
-	gitRun(t, dir, "push", "-q", "-u", "origin", "feature")
-	gitRun(t, dir, "checkout", "-q", "main")
-	gitRun(t, dir, "branch", "-q", "-D", "feature")
-
-	cmds := gitSwitchCmds(dir, "origin/feature")
-	if got := strings.Join(cmds[0], " "); got != "checkout -b feature --track origin/feature --" {
-		t.Fatalf("first switch: %q", got)
-	}
-	if out, err := execGitSequence(dir, cmds); err != nil {
-		t.Fatalf("switch: %v\n%s", err, out)
-	}
-	gitRun(t, dir, "checkout", "-q", "main")
-	cmds = gitSwitchCmds(dir, "origin/feature")
-	if got := strings.Join(cmds[0], " "); got != "checkout feature --" {
-		t.Fatalf("second switch: %q", got)
-	}
-}
-
-// TestGitSwitchCmds_HardensRefArgv is the regression test for the
-// flag-injection hole: a clone can ship a branch named --output=/tmp/x,
-// and `git checkout <that>` turns a branch switch into an arbitrary
-// file write. Every ref the builder emits is followed by the `--`
-// separator, and a name git's option parser would claim yields no
-// command at all — including one hiding behind a remote prefix, where
-// the local name is what lands in the option position.
-func TestGitSwitchCmds_HardensRefArgv(t *testing.T) {
-	dir := t.TempDir()
-	cmds := gitSwitchCmds(dir, "feature")
-	if got := strings.Join(cmds[0], " "); got != "checkout feature --" {
-		t.Fatalf("local switch: %q, want a trailing -- separator", got)
-	}
-	for _, bad := range []string{"--output=/tmp/x", "-b", "", "origin/--output=/tmp/x"} {
-		if got := gitSwitchCmds(dir, bad); got != nil {
-			t.Fatalf("gitSwitchCmds(%q) = %v, want nil", bad, got)
-		}
-	}
-}
-
-// TestGitPushCmds_UnsafeBranchDropsThePositional pins the push
-// hardening: push takes no `--` separator, so a branch name git would
-// read as an option is dropped instead of passed. Plain `push` then
-// fails with git's own "no upstream" message — an honest error beats
-// running an option we didn't write.
-func TestGitPushCmds_UnsafeBranchDropsThePositional(t *testing.T) {
-	skipInShortMode(t)
-	requireGit(t)
-	dir := initRepo(t)
-	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
-	commitAll(t, dir, "seed")
-	bareOrigin(t, dir)
-
-	cmds := gitPushCmds(dir, "--upload-pack=touch /tmp/pwn")
-	if got := strings.Join(cmds[0], " "); got != "push" {
-		t.Fatalf("unsafe branch: %q, want a bare push", got)
+	if a.statusMsg != "On remote-only" {
+		t.Fatalf("success should flash the local name, got %q", a.statusMsg)
 	}
 }
 
@@ -270,44 +194,15 @@ func TestSetDiffBase_RejectsUnsafeRef(t *testing.T) {
 	}
 }
 
-// TestGitBranchNames filters HEAD noise, hides remote spellings of
-// local branches, and puts the current branch first.
-func TestGitBranchNames(t *testing.T) {
-	skipInShortMode(t)
-	requireGit(t)
-	dir := initRepo(t)
-	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
-	commitAll(t, dir, "seed")
-	bareOrigin(t, dir)
-	gitRun(t, dir, "push", "-q", "-u", "origin", "main")
-	gitRun(t, dir, "branch", "local-only")
-	gitRun(t, dir, "checkout", "-q", "-b", "remote-only")
-	gitRun(t, dir, "push", "-q", "-u", "origin", "remote-only")
-	gitRun(t, dir, "checkout", "-q", "main")
-	gitRun(t, dir, "branch", "-q", "-D", "remote-only")
-
-	names := gitBranchNames(dir, "main")
-	if names[0] != "main" {
-		t.Fatalf("current branch should lead, got %v", names)
-	}
-	joined := strings.Join(names, ",")
-	if !strings.Contains(joined, "local-only") || !strings.Contains(joined, "origin/remote-only") {
-		t.Fatalf("missing branches: %v", names)
-	}
-	if strings.Contains(joined, "origin/main") {
-		t.Fatalf("remote spelling of a local branch should hide: %v", names)
-	}
-	if strings.Contains(joined, "HEAD") {
-		t.Fatalf("HEAD noise should be filtered: %v", names)
-	}
-}
-
-// TestHandleGitOpDone_Routing pins the three outcomes: success
-// flashes, a rejected push offers the pull-then-push confirm, any
-// other failure opens the info modal with the explainer headline.
+// TestHandleGitOpDone_Routing pins the four outcomes: success flashes,
+// a push whose OpError carries NonFastForward offers the pull-then-push
+// confirm, any other OpError opens the info modal led by its advice
+// with git's words below, and a refusal that never ran git (an unsafe
+// ref) shows its one line. The handler reads flags and advice, never
+// the output text — the rejection here is recognisable only by its
+// flag.
 func TestHandleGitOpDone_Routing(t *testing.T) {
-	skipInShortMode(t)
-	a, _, _ := dirtyRepoApp(t)
+	a := newTestApp(t, t.TempDir())
 
 	a.gitOpBusy = true
 	a.handleGitOpDone(&gitOpDoneEvent{when: time.Now(), label: "Push", okFlash: "Pushed"})
@@ -319,8 +214,8 @@ func TestHandleGitOpDone_Routing(t *testing.T) {
 	}
 
 	a.handleGitOpDone(&gitOpDoneEvent{
-		when: time.Now(), label: "Push", err: errFake,
-		output: "! [rejected] main -> main (fetch first)",
+		when: time.Now(), label: "Push",
+		err: &git.OpError{Op: "Push", Output: "opaque", Advice: "n/a", NonFastForward: true},
 	})
 	if c := confirmPrefab(t, a); c.Title != "Push rejected" {
 		t.Fatalf("rejected push should offer pull-then-push, got title %q", c.Title)
@@ -328,11 +223,18 @@ func TestHandleGitOpDone_Routing(t *testing.T) {
 	a.closeAllModals()
 
 	a.handleGitOpDone(&gitOpDoneEvent{
-		when: time.Now(), label: "Pull", err: errFake, output: "CONFLICT (content)",
+		when: time.Now(), label: "Pull",
+		err: &git.OpError{Op: "Pull", Output: "CONFLICT (content)\n\nAutomatic merge failed", Advice: "merge conflict — fix the marked files, then commit"},
 	})
 	n := infoPrefab(t, a)
-	if len(n.Lines) == 0 || !strings.Contains(n.Lines[0], "merge conflict") {
-		t.Fatalf("info should lead with the explainer, got %v", n.Lines)
+	if len(n.Lines) < 3 || !strings.Contains(n.Lines[0], "merge conflict") || n.Lines[2] != "CONFLICT (content)" {
+		t.Fatalf("info should lead with the advice and carry git's words, got %v", n.Lines)
+	}
+	a.closeAllModals()
+
+	a.handleGitOpDone(&gitOpDoneEvent{when: time.Now(), label: "Merge", err: git.ErrUnsafeRef})
+	if n := infoPrefab(t, a); len(n.Lines) != 1 || !strings.Contains(n.Lines[0], "unsafe") {
+		t.Fatalf("a refusal that never ran git should show its one line, got %v", n.Lines)
 	}
 }
 
@@ -394,13 +296,6 @@ func waitGitIdle(t *testing.T, a *App) {
 	}
 }
 
-// errFake is a sentinel error for handler-routing tests.
-var errFake = fakeErr{}
-
-type fakeErr struct{}
-
-func (fakeErr) Error() string { return "exit status 1" }
-
 // waitListPick pumps events until the async branch-list collection
 // opens its picker.
 func waitListPick(t *testing.T, a *App) {
@@ -432,7 +327,11 @@ func TestGitMergeBranchEndToEnd(t *testing.T) {
 	a := newTestApp(t, dir)
 	a.menuGitMergeBranch()
 	waitListPick(t, a)
-	names := otherNames(gitBranchNames(dir, a.gitSnap.Branch), a.gitSnap.Branch, false)
+	all, err := git.Open(dir).Branches()
+	if err != nil {
+		t.Fatalf("branches: %v", err)
+	}
+	names := otherNames(all, a.gitSnap.Branch, false)
 	idx := -1
 	for i, n := range names {
 		if n == "feature" {
@@ -466,7 +365,11 @@ func TestGitDeleteBranchForceOffer(t *testing.T) {
 	a := newTestApp(t, dir)
 	a.menuGitDeleteBranch()
 	waitListPick(t, a)
-	names := otherNames(gitBranchNames(dir, a.gitSnap.Branch), a.gitSnap.Branch, true)
+	all, err := git.Open(dir).Branches()
+	if err != nil {
+		t.Fatalf("branches: %v", err)
+	}
+	names := otherNames(all, a.gitSnap.Branch, true)
 	if len(names) != 1 || names[0] != "orphan" {
 		t.Fatalf("local candidates: %v", names)
 	}
@@ -523,14 +426,14 @@ func TestDiffBaseStatusAndGuard(t *testing.T) {
 	writeFileT(t, f, "two\n")
 	commitAll(t, dir, "second") // worktree clean vs HEAD, dirty vs HEAD~1
 
-	st := loadGitStatus(dir, "HEAD~1")
+	st := git.Open(dir).Status("HEAD~1")
 	if len(st.Files) != 1 {
 		t.Fatalf("vs HEAD~1 should show 1 change, got %+v", st.Files)
 	}
-	if st2 := loadGitStatus(dir, ""); len(st2.Files) != 0 {
+	if st2 := git.Open(dir).Status(""); len(st2.Files) != 0 {
 		t.Fatalf("vs HEAD should be clean, got %+v", st2.Files)
 	}
-	if lines := loadGitLineChanges(dir, "HEAD~1", f); len(lines) == 0 {
+	if lines := repoLineChanges(git.Open(dir), "HEAD~1", f); len(lines) == 0 {
 		t.Fatal("gutter vs base should mark the changed line")
 	}
 

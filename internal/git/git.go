@@ -12,6 +12,18 @@
 // has two adapters — the exec-backed runner and the in-memory Fake — so
 // states real git can't produce on demand (credential hangs, scripted
 // failures) are testable.
+//
+// The Repo's interface is a vocabulary, not a doorway: Status, Diff,
+// Log, Branches, Push, Switch, WorktreeAdd … — each method builds its
+// own argv, applies SafeRef to any ref that came from outside the
+// editor, puts `--` before every path, and parses its own output into
+// a model (Snapshot, diff.Patch, Commit, Worktree). No caller assembles
+// an argument vector, so no caller can forget the separator, and a
+// probe a write verb needs to decide its own shape (Push asking whether
+// an upstream exists) runs inside the verb, on whatever goroutine the
+// caller gave it, never on the event loop. Failures on the write side
+// come back as *OpError, which carries git's words and the advice a
+// surface renders; nothing outside this package reads stderr.
 package git
 
 import (
@@ -20,7 +32,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"time"
 )
 
@@ -132,35 +143,17 @@ func OpenWith(root string, r Runner) *Repo {
 // Root returns the working-tree path the handle is bound to.
 func (r *Repo) Root() string { return r.root }
 
-// Output runs one read-only git command, returning stdout. Hardened
-// env, read timeout.
-func (r *Repo) Output(args ...string) ([]byte, error) {
+// read runs one read-only git command under the read deadline and
+// returns its stdout. Unexported on purpose: the typed methods are the
+// interface, and an exported argv door would let a caller skip the
+// SafeRef and `--` discipline those methods exist to enforce.
+func (r *Repo) read(args ...string) ([]byte, error) {
 	return r.run.Output(r.root, r.timeout, args...)
 }
 
-// RunSequence runs a series of write commands, stopping at the first
-// failure. Output accumulates across commands so an error report shows
-// everything git said.
-func (r *Repo) RunSequence(cmds [][]string) (string, error) {
-	var out strings.Builder
-	for _, args := range cmds {
-		b, err := r.run.Combined(r.root, r.writeTimeout, args...)
-		out.Write(b)
-		if err != nil {
-			return out.String(), err
-		}
-	}
-	return out.String(), nil
-}
-
-// Output is the package-level convenience for call sites that hold only
-// a root path: one read command against real git. The Repo handle is
-// the seam — this is a doorway to it, not a second seam.
-func Output(root string, args ...string) ([]byte, error) {
-	return Open(root).Output(args...)
-}
-
-// RunSequence is the package-level convenience for the write side.
-func RunSequence(root string, cmds [][]string) (string, error) {
-	return Open(root).RunSequence(cmds)
+// write runs one mutating git command under the (generous) write
+// deadline and returns its interleaved stdout+stderr — the words an
+// OpError carries to the user. Same visibility argument as read.
+func (r *Repo) write(args ...string) ([]byte, error) {
+	return r.run.Combined(r.root, r.writeTimeout, args...)
 }

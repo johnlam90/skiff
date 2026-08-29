@@ -29,93 +29,27 @@ import (
 	"github.com/johnlam90/skiff/internal/git"
 )
 
-// Worktree is one parsed row of `git worktree list --porcelain`.
-type Worktree struct {
-	Path   string // absolute worktree path
-	Branch string // short branch name; "" when detached or bare
-	Main   bool   // the main worktree — never removable from here
-	Flags  []string
-}
-
-// parseWorktreeList turns `git worktree list --porcelain` output into
-// rows. Blocks are separated by blank lines and start with `worktree
-// <path>`; `branch refs/heads/x` carries the short name, `bare`,
-// `detached`, `locked` and `prunable` are flags. Anything unrecognised
-// is ignored — porcelain is stable, but a future field must not cost a
-// row. The first row is marked Main: porcelain has no explicit marker,
-// and the main worktree is always listed first.
-func parseWorktreeList(out string) []Worktree {
-	var (
-		wts   []Worktree
-		cur   *Worktree
-		block bool
-	)
-	for _, l := range strings.Split(out, "\n") {
-		l = strings.TrimSpace(l)
-		if l == "" {
-			block = false
-			continue
-		}
-		if strings.HasPrefix(l, "worktree ") {
-			if cur != nil {
-				wts = append(wts, *cur)
-			}
-			cur = &Worktree{Path: strings.TrimSpace(l[len("worktree "):])}
-			block = true
-			continue
-		}
-		if !block || cur == nil {
-			continue
-		}
-		switch {
-		case strings.HasPrefix(l, "branch "):
-			cur.Branch = strings.TrimPrefix(l[len("branch "):], "refs/heads/")
-		case l == "bare", l == "detached", l == "locked", l == "prunable":
-			cur.Flags = append(cur.Flags, l)
-		}
-	}
-	if cur != nil {
-		wts = append(wts, *cur)
-	}
-	// Porcelain carries no explicit "main" marker — the main worktree is
-	// simply listed first. That is the only reliable signal, so the first
-	// row is the one the remove picker must skip.
-	if len(wts) > 0 {
-		wts[0].Main = true
-	}
-	return wts
-}
-
-// gitWorktreeList reads the worktree list from real git. Best-effort like
-// every other loader: nil on any failure, and the caller degrades to a
-// flash rather than a hollow overlay.
-func gitWorktreeList(root string) []Worktree {
-	out, err := git.Output(root, "worktree", "list", "--porcelain")
-	if err != nil {
-		return nil
-	}
-	return parseWorktreeList(string(out))
-}
-
 // worktreeListEvent delivers an asynchronously-collected worktree list
 // to the main loop, tagged with which flow asked for it — the same
 // purpose-tagged pattern as branchListEvent.
 type worktreeListEvent struct {
 	when    time.Time
 	purpose string // "list" | "remove"
-	wts     []Worktree
+	wts     []git.Worktree
 }
 
 // When implements tcell.Event.
 func (e *worktreeListEvent) When() time.Time { return e.when }
 
 // requestWorktreeList collects the list off the UI thread, then reopens
-// the flow via handleWorktreeList.
+// the flow via handleWorktreeList. Best-effort like every read here: a
+// failing git yields no rows, and the flow degrades to a flash rather
+// than a hollow overlay.
 func (a *App) requestWorktreeList(purpose string) {
-	root := a.rootDir
+	repo := a.readRepo()
 	scr := a.screen
 	a.safeGo("git-worktree-list", func() {
-		wts := gitWorktreeList(root)
+		wts, _ := repo.Worktrees()
 		_ = scr.PostEvent(&worktreeListEvent{when: time.Now(), purpose: purpose, wts: wts})
 	})
 }
@@ -202,10 +136,12 @@ func (a *App) defaultWorktreePath() string {
 	return filepath.Join(parent, filepath.Base(a.rootDir)+"-wt")
 }
 
-// doGitNewWorktree validates the inputs, builds the command, and runs it.
-// An existing branch is checked out as-is; a new branch is created from
-// HEAD; a remote-tracking pick creates the tracking local, mirroring
-// gitSwitchCmds.
+// doGitNewWorktree validates the inputs and runs the add. An existing
+// branch is checked out as-is; a new branch is created from HEAD; a
+// remote-tracking pick creates the tracking local — that rule, and the
+// existence probe it needs, live in git.Repo.WorktreeAdd on the op
+// goroutine. The early safeRef is the flash for a hostile name; the
+// verb refuses it again regardless.
 func (a *App) doGitNewWorktree(path, branch string, newBranch bool) {
 	abs, err := filepath.Abs(path)
 	if err != nil || abs == "" || strings.HasPrefix(abs, "-") {
@@ -213,54 +149,20 @@ func (a *App) doGitNewWorktree(path, branch string, newBranch bool) {
 		return
 	}
 	path = abs
-	cmds := gitWorktreeAddCmds(a.rootDir, path, branch, newBranch)
-	if cmds == nil {
-		if newBranch {
-			a.flashUnsafeRef(branch)
-		} else {
-			a.flashUnsafeRef(localBranchName(branch))
-		}
+	if _, ok := a.safeRef(branch); !ok {
 		return
+	}
+	if !newBranch {
+		if _, ok := a.safeRef(localBranchName(branch)); !ok {
+			return
+		}
 	}
 	label := "New worktree"
 	if newBranch {
 		label = "New worktree (new branch)"
 	}
-	a.runGitOp(label, "Created worktree at "+path, false, cmds...)
-}
-
-// gitWorktreeAddCmds builds the `worktree add` invocation for path, or
-// nil when a name can't safely reach git's argv. The path is a user
-// prompt, not a repo ref — it is guarded against the option position
-// (a leading "-") and never needs SafeRef. Branches do: the `-b` value
-// sits in a position no `--` separator protects, and the checkout
-// positional is separated anyway.
-func gitWorktreeAddCmds(root, path, branch string, newBranch bool) [][]string {
-	if strings.HasPrefix(path, "-") {
-		return nil
-	}
-	if newBranch {
-		if _, err := git.SafeRef(branch); err != nil {
-			return nil
-		}
-		return [][]string{{"worktree", "add", path, "-b", branch, "--"}}
-	}
-	if _, err := git.SafeRef(branch); err != nil {
-		return nil
-	}
-	i := strings.IndexByte(branch, '/')
-	if i < 0 {
-		return [][]string{{"worktree", "add", path, branch, "--"}}
-	}
-	local := branch[i+1:]
-	if _, err := git.SafeRef(local); err != nil {
-		return nil
-	}
-	_, err := git.Output(root, "rev-parse", "--verify", "--quiet", "refs/heads/"+local)
-	if err == nil {
-		return [][]string{{"worktree", "add", path, local, "--"}}
-	}
-	return [][]string{{"worktree", "add", path, "-b", local, "--track", branch, "--"}}
+	a.runGitOp(label, "Created worktree at "+path, false,
+		func(r *git.Repo) error { return r.WorktreeAdd(path, branch, newBranch) })
 }
 
 // -----------------------------------------------------------------------------
@@ -278,7 +180,7 @@ func (a *App) menuGitListWorktrees() {
 
 // openWorktreeList renders the collected list as an info overlay: one
 // line per worktree, the main one starred, flags trailing.
-func (a *App) openWorktreeList(wts []Worktree) {
+func (a *App) openWorktreeList(wts []git.Worktree) {
 	if len(wts) == 0 {
 		a.flash("No worktrees")
 		return
@@ -317,7 +219,7 @@ func (a *App) menuGitRemoveWorktree() {
 // openRemoveWorktreePick opens the remove picker over every worktree
 // except the main one — removing the main checkout is a shell job, not
 // an editor one.
-func (a *App) openRemoveWorktreePick(wts []Worktree) {
+func (a *App) openRemoveWorktreePick(wts []git.Worktree) {
 	var items []listPickItem
 	var paths []string
 	for _, w := range wts {
@@ -343,7 +245,7 @@ func (a *App) openRemoveWorktreePick(wts []Worktree) {
 				func(app2 *App) {
 					app2.gitWorktreeTarget = path
 					app2.runGitOp("Remove worktree", "Removed worktree", false,
-						[]string{"worktree", "remove", "--", path})
+						func(r *git.Repo) error { return r.WorktreeRemove(path, false) })
 				})
 		}, nil, nil)
 }

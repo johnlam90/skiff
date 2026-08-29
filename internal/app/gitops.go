@@ -9,12 +9,17 @@
 // pull, fetch, branch switching/creation, stash, and undo-commit —
 // druk's source-control verbs, skiff-shaped (≡ menu + Git panel
 // buttons, no new key chords). Mutations run one at a time in a
-// background goroutine and report back through a gitOpDoneEvent;
-// failures surface git's own words behind a plain-language headline.
+// background goroutine and report back through a gitOpDoneEvent.
+// Every verb is a typed method on the repo handle: this file decides
+// WHICH verb runs and what to say when it lands; it never assembles an
+// argument vector, and it never reads stderr — a refusal arrives as a
+// *git.OpError already carrying the advice and the flags the follow-up
+// offers (pull-then-push, force delete, force remove) branch on.
 
 package app
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -29,37 +34,38 @@ type gitOpDoneEvent struct {
 	when        time.Time
 	label       string // human verb for error titles ("Push", "Commit")
 	okFlash     string // success flash text
-	output      string // combined stdout+stderr of the sequence
-	err         error
-	touchesTree bool // the op may have rewritten working-tree files
+	err         error  // nil, a *git.OpError, or a refusal such as git.ErrUnsafeRef
+	touchesTree bool   // the op may have rewritten working-tree files
 }
 
 // When implements tcell.Event.
 func (e *gitOpDoneEvent) When() time.Time { return e.when }
 
-// execGitSequence runs a series of git commands in root, stopping at
-// the first failure — a thin door to the git package's write side,
-// which owns the environment hardening.
-func execGitSequence(root string, cmds [][]string) (string, error) {
-	return git.RunSequence(root, cmds)
-}
+// gitOp is one write verb bound to a repo handle — a method value such
+// as (*git.Repo).Push, or a closure over the verb's arguments.
+type gitOp func(*git.Repo) error
 
-// runGitOp launches cmds in the background, guarded by the one-at-a-
-// time gate (mutations share a repository — racing them helps nobody).
-// Returns false when another op is still running.
-func (a *App) runGitOp(label, okFlash string, touchesTree bool, cmds ...[]string) bool {
+// runGitOp launches op in the background, guarded by the one-at-a-time
+// gate (mutations share a repository — racing them helps nobody).
+// Returns false when another op is still running. The handle is opened
+// here, on the main thread, through readRepo — so a test's git.Fake
+// scripts the write side exactly as it scripts the reads — and every
+// probe the verb needs to shape its own argv (Push asking for an
+// upstream, Switch asking whether the tracking local exists) runs on
+// this goroutine, never on the event loop.
+func (a *App) runGitOp(label, okFlash string, touchesTree bool, op gitOp) bool {
 	if a.gitOpBusy {
 		a.flash("Another git operation is still running")
 		return false
 	}
 	a.gitOpBusy = true
-	root := a.rootDir
+	repo := a.readRepo()
 	scr := a.screen
 	a.safeGo("git-op", func() {
-		out, err := execGitSequence(root, cmds)
+		err := op(repo)
 		_ = scr.PostEvent(&gitOpDoneEvent{
 			when: time.Now(), label: label, okFlash: okFlash,
-			output: out, err: err, touchesTree: touchesTree,
+			err: err, touchesTree: touchesTree,
 		})
 	})
 	return true
@@ -67,18 +73,23 @@ func (a *App) runGitOp(label, okFlash string, touchesTree bool, cmds ...[]string
 
 // handleGitOpDone lands a finished mutation: report, then refresh
 // everything the op may have changed. A rejected push gets druk's
-// one-gesture fix offered instead of a wall of stderr.
+// one-gesture fix offered instead of a wall of stderr; the two
+// force ladders (delete branch, remove worktree) get their second,
+// explicit confirm. The routing reads the OpError's flags, never its
+// text — the git package classified the refusal when it built the
+// error.
 func (a *App) handleGitOpDone(e *gitOpDoneEvent) {
 	a.gitOpBusy = false
+	var opErr *git.OpError
+	errors.As(e.err, &opErr)
 	switch {
 	case e.err == nil:
 		a.flash(e.okFlash)
-	case e.label == "Push" && isPushNonFastForward(e.output):
+	case opErr != nil && opErr.NonFastForward && e.label == "Push":
 		a.openConfirm("Push rejected",
 			"origin has commits you don't. Pull (merge), then push?",
 			func(app *App) { app.doGitPullAndPush() })
-	case e.label == "Delete branch" && a.gitDeleteTarget != "" &&
-		strings.Contains(e.output, "not fully merged"):
+	case opErr != nil && opErr.NotMerged && e.label == "Delete branch" && a.gitDeleteTarget != "":
 		// `-d` refused an unmerged branch — losing work needs its own
 		// explicit yes, so the force delete is a second confirm, never
 		// the default.
@@ -87,10 +98,10 @@ func (a *App) handleGitOpDone(e *gitOpDoneEvent) {
 		a.openConfirm("Branch not merged",
 			name+" has commits that aren't merged anywhere. Force delete?",
 			func(app *App) {
-				app.runGitOp("Force delete", "Deleted "+name, false, []string{"branch", "-D", "--", name})
+				app.runGitOp("Force delete", "Deleted "+name, false,
+					func(r *git.Repo) error { return r.DeleteBranch(name, true) })
 			})
-	case e.label == "Remove worktree" && a.gitWorktreeTarget != "" &&
-		strings.Contains(e.output, "contains modified or untracked files"):
+	case opErr != nil && opErr.WorktreeDirty && e.label == "Remove worktree" && a.gitWorktreeTarget != "":
 		// A plain remove refused uncommitted work — force is a second
 		// confirm, mirroring the branch-delete ladder.
 		path := a.gitWorktreeTarget
@@ -99,12 +110,16 @@ func (a *App) handleGitOpDone(e *gitOpDoneEvent) {
 			path+" has uncommitted or untracked files. Force remove?",
 			func(app *App) {
 				app.runGitOp("Force remove worktree", "Removed worktree", false,
-					[]string{"worktree", "remove", "--force", "--", path})
+					func(r *git.Repo) error { return r.WorktreeRemove(path, true) })
 			})
-	default:
-		lines := []string{explainGit(e.output), ""}
-		lines = append(lines, splitNonEmptyLines(e.output)...)
+	case opErr != nil:
+		lines := []string{opErr.Advice, ""}
+		lines = append(lines, splitNonEmptyLines(opErr.Output)...)
 		a.openInfo(e.label+" failed", lines)
+	default:
+		// Git never ran: the verb refused its own input (an unsafe ref
+		// or path). One line says which.
+		a.openInfo(e.label+" failed", []string{e.err.Error()})
 	}
 	a.refreshGitStatusAsync()
 	if e.touchesTree {
@@ -116,66 +131,6 @@ func (a *App) handleGitOpDone(e *gitOpDoneEvent) {
 		// cannot see.
 		a.refreshTreeNow()
 		a.invalidateFinder()
-	}
-}
-
-// isPushRejected recognises any push refusal (for the explainer);
-// isPushNonFastForward recognises the specific refusal whose fix is
-// "pull, then push". A hook / permission rejection must NOT get that
-// offer — pulling won't help, and the merge it creates just muddies
-// the water.
-func isPushRejected(output string) bool {
-	return strings.Contains(output, "[rejected]") ||
-		strings.Contains(output, "[remote rejected]") ||
-		strings.Contains(output, "failed to push some refs")
-}
-
-// isPushNonFastForward reports whether a rejected push failed because
-// origin has commits we don't — the one case pull-then-push repairs.
-func isPushNonFastForward(output string) bool {
-	return strings.Contains(output, "fetch first") ||
-		strings.Contains(output, "non-fast-forward")
-}
-
-// explainGit turns git's stderr into one plain-language headline. The
-// raw output still follows in the modal — this is the sentence that
-// tells the user what to *do*.
-func explainGit(output string) string {
-	low := strings.ToLower(output)
-	switch {
-	case isPushNonFastForward(output):
-		return "origin has commits you don't — pull first, then push"
-	case strings.Contains(output, "[remote rejected]") ||
-		strings.Contains(low, "hook declined"):
-		return "the server refused the push — a hook or permission said no"
-	case isPushRejected(output):
-		return "push rejected — see git's reason below"
-	case strings.Contains(low, "not possible to fast-forward") ||
-		strings.Contains(low, "divergent branches"):
-		return "local and origin have diverged — pull needs a merge"
-	case strings.Contains(low, "conflict"):
-		return "merge conflict — fix the marked files, then commit"
-	case strings.Contains(low, "nothing to commit"):
-		return "nothing to commit"
-	case strings.Contains(low, "no stash entries"):
-		return "no stash to pop"
-	case strings.Contains(low, "no upstream branch"):
-		return "this branch has no upstream yet"
-	case strings.Contains(low, "could not read from remote") ||
-		strings.Contains(low, "could not resolve host") ||
-		strings.Contains(low, "authentication failed") ||
-		strings.Contains(low, "terminal prompts disabled"):
-		return "couldn't reach origin — check network / credentials"
-	case strings.Contains(low, "would be overwritten by checkout"):
-		return "uncommitted changes are in the way — commit or stash first"
-	case strings.Contains(low, "already checked out at"):
-		return "that branch is checked out in another worktree — remove or switch it first"
-	case strings.Contains(low, "already exists"):
-		return "that path or branch already exists — pick another"
-	case strings.Contains(low, "is locked"):
-		return "that worktree is locked — unlock it first (git worktree unlock)"
-	default:
-		return "git reported an error:"
 	}
 }
 
@@ -191,12 +146,6 @@ func splitNonEmptyLines(s string) []string {
 	return out
 }
 
-// gitHasUpstream reports whether the current branch tracks an upstream.
-func gitHasUpstream(root string) bool {
-	_, err := git.Output(root, "rev-parse", "--abbrev-ref", "@{upstream}")
-	return err == nil
-}
-
 // flashUnsafeRef reports a ref skiff refused to place on git's argv.
 // Flash, not a modal: it is either a hostile clone or a typo, and
 // neither deserves ceremony.
@@ -206,6 +155,9 @@ func (a *App) flashUnsafeRef(name string) {
 
 // safeRef validates a ref that arrived from a picker row, a prompt, or
 // the refs a cloned repository shipped, before it reaches git's argv.
+// The verbs re-check on their own goroutine; this early, pure-string
+// check exists so a typo gets its flash while the prompt is still the
+// thing the user is looking at.
 func (a *App) safeRef(name string) (string, bool) {
 	ref, err := git.SafeRef(name)
 	if err != nil {
@@ -213,31 +165,6 @@ func (a *App) safeRef(name string) (string, bool) {
 		return "", false
 	}
 	return ref, true
-}
-
-// gitPushCmds builds the push command: plain when an upstream exists,
-// --set-upstream origin <branch> for a branch's first push (druk's
-// rule — the second push shouldn't need a shell visit either). push
-// takes no `--` separator, so an unsafe branch name loses the
-// positional entirely: plain `push` then fails with git's own "no
-// upstream" message instead of handing git an option we didn't write.
-func gitPushCmds(root, branch string) [][]string {
-	if gitHasUpstream(root) {
-		return [][]string{{"push"}}
-	}
-	if _, err := git.SafeRef(branch); err != nil {
-		return [][]string{{"push"}}
-	}
-	return [][]string{{"push", "--set-upstream", "origin", branch}}
-}
-
-// gitCommitCmds stages and commits exactly paths: add -A scoped to the
-// paths is what stages a deletion or an untracked file, and the commit
-// is path-scoped so anything else already in the index stays out.
-func gitCommitCmds(paths []string, message string) [][]string {
-	add := append([]string{"add", "-A", "--"}, paths...)
-	commit := append([]string{"commit", "-m", message, "--"}, paths...)
-	return [][]string{add, commit}
 }
 
 // -----------------------------------------------------------------------------
@@ -291,43 +218,42 @@ func (a *App) menuGitCommit() {
 	})
 }
 
-// doGitCommit runs the add+commit sequence for paths.
+// doGitCommit runs the path-scoped commit for paths.
 func (a *App) doGitCommit(paths []string, message string) {
 	ok := fmt.Sprintf("Committed %d file(s)", len(paths))
-	a.runGitOp("Commit", ok, false, gitCommitCmds(paths, message)...)
+	a.runGitOp("Commit", ok, false, func(r *git.Repo) error { return r.Commit(paths, message) })
 }
 
 // -----------------------------------------------------------------------------
 // Push / pull / fetch
 // -----------------------------------------------------------------------------
 
-// menuGitPush pushes the current branch, setting the upstream on a
-// branch's first push.
+// menuGitPush pushes the current branch. Whether this is the branch's
+// first push (and so needs --set-upstream) is the verb's own question,
+// answered on the op goroutine — nothing here asks git anything.
 func (a *App) menuGitPush() {
 	a.closeMenu()
 	if !a.hasGitRepo() {
 		return
 	}
-	a.runGitOp("Push", "Pushed", false, gitPushCmds(a.rootDir, a.gitSnap.Branch)...)
+	a.runGitOp("Push", "Pushed", false, (*git.Repo).Push)
 }
 
 // doGitPullAndPush is the accepted "Push rejected" offer: merge-pull,
 // then push — one operation, stopping at the pull if it conflicts.
 func (a *App) doGitPullAndPush() {
-	cmds := [][]string{{"pull", "--no-rebase", "--no-edit"}}
-	cmds = append(cmds, gitPushCmds(a.rootDir, a.gitSnap.Branch)...)
-	a.runGitOp("Pull & push", "Pulled and pushed", true, cmds...)
+	a.runGitOp("Pull & push", "Pulled and pushed", true, (*git.Repo).PullAndPush)
 }
 
 // menuGitPull fast-forwards from origin. A real merge wants an editor
-// and a conflict UI — --ff-only fails fast instead, and explainGit
-// tells the user why.
+// and a conflict UI — --ff-only fails fast instead, and the OpError's
+// advice tells the user why.
 func (a *App) menuGitPull() {
 	a.closeMenu()
 	if !a.hasGitRepo() {
 		return
 	}
-	a.runGitOp("Pull", "Pulled", true, []string{"pull", "--ff-only"})
+	a.runGitOp("Pull", "Pulled", true, func(r *git.Repo) error { return r.Pull(true) })
 }
 
 // menuGitFetch refreshes the remote-tracking refs (and with them the
@@ -337,7 +263,7 @@ func (a *App) menuGitFetch() {
 	if !a.hasGitRepo() {
 		return
 	}
-	a.runGitOp("Fetch", "Fetched", false, []string{"fetch"})
+	a.runGitOp("Fetch", "Fetched", false, (*git.Repo).Fetch)
 }
 
 // -----------------------------------------------------------------------------
@@ -356,14 +282,15 @@ type branchListEvent struct {
 func (e *branchListEvent) When() time.Time { return e.when }
 
 // requestBranchList collects the branch list off the UI thread — on a
-// network-mounted repo `git branch --all` can stall, and a menu click
-// must never freeze the event loop — then reopens the flow via
-// handleBranchList.
+// network-mounted repo listing refs can stall, and a menu click must
+// never freeze the event loop — then reopens the flow via
+// handleBranchList. Best-effort like every read here: a failing git
+// yields no names, and the picker explains the empty list.
 func (a *App) requestBranchList(purpose string) {
-	root, current := a.rootDir, a.gitSnap.Branch
+	repo := a.readRepo()
 	scr := a.screen
 	a.safeGo("git-branch-list", func() {
-		names := gitBranchNames(root, current)
+		names, _ := repo.Branches()
 		_ = scr.PostEvent(&branchListEvent{when: time.Now(), purpose: purpose, names: names})
 	})
 }
@@ -441,42 +368,6 @@ func (a *App) menuGitCompareAgainst() {
 	a.requestBranchList("base")
 }
 
-// gitBranchNames lists local then remote branch names, current first,
-// origin/HEAD noise filtered, remote duplicates of locals dropped.
-func gitBranchNames(root, current string) (names []string) {
-	out, err := git.Output(root, "branch", "--all", "--format=%(refname:short)")
-	if err != nil {
-		return nil
-	}
-	seen := map[string]bool{}
-	if current != "" {
-		names = append(names, current)
-		seen[current] = true
-	}
-	var remotes []string
-	for _, l := range strings.Split(string(out), "\n") {
-		name := strings.TrimSpace(l)
-		if name == "" || seen[name] || strings.Contains(name, "HEAD") {
-			continue
-		}
-		seen[name] = true
-		if i := strings.IndexByte(name, '/'); i >= 0 {
-			remotes = append(remotes, name)
-			continue
-		}
-		names = append(names, name)
-	}
-	for _, r := range remotes {
-		// origin/x duplicates a local x — switching to it via the local
-		// is what the user means, so hide the remote spelling.
-		if i := strings.IndexByte(r, '/'); i >= 0 && seen[r[i+1:]] {
-			continue
-		}
-		names = append(names, r)
-	}
-	return names
-}
-
 // menuGitSwitchBranch opens a select of every branch. Picking a
 // remote-tracking name creates (or reuses) the local branch that
 // tracks it — checking out origin/x directly would only detach HEAD.
@@ -511,44 +402,23 @@ func branchPickItems(names []string, current string) []listPickItem {
 	return items
 }
 
-// doGitSwitchBranch checks out name with druk's tracking rule for
-// remote picks: first switch creates local x tracking origin/x, later
-// ones just move to x.
+// doGitSwitchBranch checks out name. The tracking rule for remote picks
+// (first switch creates local x tracking origin/x, later ones just move
+// to x) and the existence probe it needs live in git.Repo.Switch, on
+// the op goroutine. The early safeRef is the flash for a hostile name;
+// the verb refuses it again regardless.
 func (a *App) doGitSwitchBranch(name string) {
 	if name == "" || name == a.gitSnap.Branch {
 		return
 	}
-	cmds := gitSwitchCmds(a.rootDir, name)
-	if cmds == nil {
-		a.flashUnsafeRef(name)
+	if _, ok := a.safeRef(name); !ok {
 		return
 	}
-	a.runGitOp("Switch branch", "On "+localBranchName(name), true, cmds...)
-}
-
-// gitSwitchCmds picks the checkout invocation for name (local or
-// remote-tracking spelling), or nil when the name can't safely reach
-// git's argv. Every ref is followed by `--`: without the separator a
-// branch a clone shipped named `--output=/tmp/x` is read as an option
-// rather than a ref. SafeRef covers the same hole for the `-b` value,
-// which sits in a position no separator protects.
-func gitSwitchCmds(root, name string) [][]string {
-	if _, err := git.SafeRef(name); err != nil {
-		return nil
+	if _, ok := a.safeRef(localBranchName(name)); !ok {
+		return
 	}
-	i := strings.IndexByte(name, '/')
-	if i < 0 {
-		return [][]string{{"checkout", name, "--"}}
-	}
-	local := name[i+1:]
-	if _, err := git.SafeRef(local); err != nil {
-		return nil
-	}
-	_, err := git.Output(root, "rev-parse", "--verify", "--quiet", "refs/heads/"+local)
-	if err == nil {
-		return [][]string{{"checkout", local, "--"}}
-	}
-	return [][]string{{"checkout", "-b", local, "--track", name, "--"}}
+	a.runGitOp("Switch branch", "On "+localBranchName(name), true,
+		func(r *git.Repo) error { return r.Switch(name) })
 }
 
 // localBranchName strips the remote prefix from a remote-tracking
@@ -574,7 +444,8 @@ func (a *App) menuGitNewBranch() {
 		if _, ok := app.safeRef(name); !ok {
 			return
 		}
-		app.runGitOp("New branch", "On "+name, false, []string{"checkout", "-b", name, "--"})
+		app.runGitOp("New branch", "On "+name, false,
+			func(r *git.Repo) error { return r.NewBranch(name, "") })
 	})
 }
 
@@ -589,7 +460,7 @@ func (a *App) menuGitStash() {
 	if !a.hasGitRepo() {
 		return
 	}
-	a.runGitOp("Stash", "Stashed working tree", true, []string{"stash", "push", "-u"})
+	a.runGitOp("Stash", "Stashed working tree", true, (*git.Repo).StashPush)
 }
 
 // menuGitStashPop pops the most recent stash back onto the tree.
@@ -598,7 +469,7 @@ func (a *App) menuGitStashPop() {
 	if !a.hasGitRepo() {
 		return
 	}
-	a.runGitOp("Pop stash", "Stash popped", true, []string{"stash", "pop"})
+	a.runGitOp("Pop stash", "Stash popped", true, (*git.Repo).StashPop)
 }
 
 // menuGitUndoCommit soft-resets HEAD~1 behind a confirm: the commit
@@ -612,8 +483,7 @@ func (a *App) menuGitUndoCommit() {
 		"Remove the last commit? Its changes stay in your working tree. "+
 			"If it was already pushed, the next push will need a merge.",
 		func(app *App) {
-			app.runGitOp("Undo commit", "Last commit undone", false,
-				[]string{"reset", "--soft", "HEAD~1"})
+			app.runGitOp("Undo commit", "Last commit undone", false, (*git.Repo).UndoCommit)
 		})
 }
 
@@ -638,10 +508,12 @@ func (a *App) openMergeBranchPick(all []string) {
 	}
 	a.openListPick("Merge into "+a.gitSnap.Branch, branchPickItems(names, ""),
 		func(app *App, i int) {
-			if _, ok := app.safeRef(names[i]); !ok {
+			name := names[i]
+			if _, ok := app.safeRef(name); !ok {
 				return
 			}
-			app.runGitOp("Merge", "Merged "+names[i], true, []string{"merge", "--no-edit", names[i], "--"})
+			app.runGitOp("Merge", "Merged "+name, true,
+				func(r *git.Repo) error { return r.Merge(name) })
 		}, nil, nil)
 }
 
@@ -660,7 +532,8 @@ func (a *App) menuGitRenameBranch() {
 		if _, ok := app.safeRef(name); !ok {
 			return
 		}
-		app.runGitOp("Rename branch", "Renamed to "+name, false, []string{"branch", "-m", "--", old, name})
+		app.runGitOp("Rename branch", "Renamed to "+name, false,
+			func(r *git.Repo) error { return r.RenameBranch(old, name) })
 	})
 }
 
@@ -692,7 +565,8 @@ func (a *App) openDeleteBranchPick(all []string) {
 				"Delete "+name+"? Unmerged work on it would be lost.",
 				func(app2 *App) {
 					app2.gitDeleteTarget = name
-					app2.runGitOp("Delete branch", "Deleted "+name, false, []string{"branch", "-d", "--", name})
+					app2.runGitOp("Delete branch", "Deleted "+name, false,
+						func(r *git.Repo) error { return r.DeleteBranch(name, false) })
 				})
 		}, nil, nil)
 }

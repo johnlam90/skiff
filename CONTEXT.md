@@ -93,7 +93,10 @@ _Avoid_: newline mode, EOL setting (there is no setting — it is detected)
 
 **Repo**:
 The project root's git repository as skiff sees it. "Not a repo" is an
-explicit state, not an empty branch name.
+explicit state, not an empty branch name. Its interface is a vocabulary
+of typed verbs (Diff, Log, Branches, Push, Switch, …), each owning its
+own argv and parse; a refusal on the write side is an OpError carrying
+advice. No surface assembles a git command line.
 
 **Snapshot**:
 One consistent read of repo state — branch, ahead/behind counts, and the
