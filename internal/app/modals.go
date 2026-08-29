@@ -46,11 +46,14 @@ func (a *App) closeAllModals() {
 	// used to be a type switch naming *overlay.Pick, so the next
 	// surface with something to undo would have been torn down
 	// silently. Dismiss is a no-op on every overlay that has nothing.
+	// One Close is the whole teardown: the stack holds at most one
+	// overlay, so a second call here could only ever pop something a
+	// Dismiss hook had just pushed — which is exactly the re-entrant
+	// case the pop-before-hook order exists to make impossible.
 	if top := a.overlays.Top(); top != nil {
 		a.overlays.Close()
 		top.Dismiss()
 	}
-	a.overlays.Close()
 	a.menuOpen = false
 	a.dropStrip()
 	a.diffPanelRow = -1

@@ -567,8 +567,11 @@ func (t *Tab) SelectionText() string {
 //
 // Two things stay the caller's job. The mutator keeps its own undo group
 // (typing coalesces, structural edits don't), and it keeps every no-op
-// guard: reaching edit always costs an undo entry, so an edit call must
-// only happen when a mutation will actually happen.
+// guard: reaching edit always records undo state — pushUndo either
+// opens a new entry or, when the group coalesces, extends the one
+// already open (so a typing burst is one entry, not one per keystroke)
+// — so an edit call must only happen when a mutation will actually
+// happen.
 func (t *Tab) edit(group undoGroup, mutate func()) {
 	t.pushUndo(group)
 	mutate()

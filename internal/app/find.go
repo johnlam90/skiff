@@ -22,6 +22,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/overlay"
 )
 
@@ -51,6 +52,16 @@ const minFieldWidth = 12
 // reset.
 type findStrip struct {
 	a *App
+
+	// tab is the tab this bar searches, pinned when the bar opened. It
+	// is deliberately NOT re-read from the active tab on each use: the
+	// bar passes the mouse through (ADR-0001), so the user can click
+	// another tab — or the tab strip — while it is up, and a bar that
+	// followed the active tab would set a query on one buffer and clear
+	// it on another. The orphan that leaves is not inert: a live
+	// FindQuery makes every later edit to that tab re-run FindAll
+	// through Tab.edit. Read it through boundTab, never directly.
+	tab *editor.Tab
 
 	// query and replace (Tab opens the second one) are the same
 	// overlay.Field the prompt, form and finder use: the strip owns
@@ -97,7 +108,7 @@ func (a *App) openFind() {
 		return
 	}
 	a.closeAllModals() // a modal (or the other strip) would eat our keystrokes
-	a.strip = &findStrip{a: a}
+	a.strip = &findStrip{a: a, tab: tab}
 }
 
 // findBar returns the find bar when it is the strip that is up, else
@@ -113,8 +124,9 @@ func (a *App) findBarOpen() bool {
 	return a.findBar() != nil
 }
 
-// closeFind hides the find bar, and findStrip.close clears the active
-// tab's find state so the highlights disappear with it. Leaving them
+// closeFind hides the find bar, and findStrip.close clears the find
+// state of the tab it opened on so the highlights disappear with it.
+// Leaving them
 // painted after close is surprising — users expect Esc to mean "I'm
 // done searching." It drops the slot only when the bar is the strip
 // that is up, so a stray call can't dismiss the project-find panel.
@@ -128,11 +140,25 @@ func (a *App) closeFind() {
 // status bar, and editorRect gives up exactly that much.
 func (s *findStrip) rows() int { return findBarHeight }
 
-// close clears the active tab's find state. The bar owns no highlights
-// itself; this is the one thing it leaves behind, so dropping the slot
-// has to take it too.
+// boundTab returns the tab this bar searches, or nil when it is gone.
+// The pin is checked against the live tab list rather than trusted: a
+// clean tab closes without running closeAllModals (see closeTab in
+// tabops.go), so the bar can outlive the tab it opened on and would
+// otherwise keep writing find state into a buffer that is off screen —
+// and, once the reopen stack drops it, unreachable. Every read of the
+// pin goes through here so "the tab closed" is answered in one place.
+func (s *findStrip) boundTab() *editor.Tab {
+	if s.tab == nil || s.a.tabs.IndexOf(s.tab) < 0 {
+		return nil
+	}
+	return s.tab
+}
+
+// close clears the find state of the tab the bar opened on. The bar
+// owns no highlights itself; this is the one thing it leaves behind, so
+// dropping the slot has to take it too.
 func (s *findStrip) close() {
-	if tab := s.a.activeTabPtr(); tab != nil {
+	if tab := s.boundTab(); tab != nil {
 		tab.ClearFind()
 	}
 }
@@ -180,12 +206,13 @@ func (s *findStrip) handleKey(ev *tcell.EventKey) {
 	s.editKey(ev)
 }
 
-// applyQuery pushes the current input text into the active tab's find
-// state and snaps the cursor to the new "current" match (so the user can
-// see their result while still typing). Called on every input change so
-// the highlights track the query live.
+// applyQuery pushes the current input text into the find state of the
+// tab the bar opened on and snaps that tab's cursor to the new
+// "current" match (so the user can see their result while still
+// typing). Called on every input change so the highlights track the
+// query live.
 func (s *findStrip) applyQuery() {
-	tab := s.a.activeTabPtr()
+	tab := s.boundTab()
 	if tab == nil {
 		return
 	}
@@ -196,14 +223,14 @@ func (s *findStrip) applyQuery() {
 // next is the Enter-in-the-bar action: jump to the next match (with
 // wrap).
 func (s *findStrip) next() {
-	if tab := s.a.activeTabPtr(); tab != nil {
+	if tab := s.boundTab(); tab != nil {
 		tab.FindNext()
 	}
 }
 
 // prev is the Shift-Enter action: jump to the previous match.
 func (s *findStrip) prev() {
-	if tab := s.a.activeTabPtr(); tab != nil {
+	if tab := s.boundTab(); tab != nil {
 		tab.FindPrev()
 	}
 }
@@ -220,7 +247,7 @@ func (s *findStrip) enter(shift bool) {
 		}
 		return
 	}
-	tab := s.a.activeTabPtr()
+	tab := s.boundTab()
 	if tab == nil {
 		return
 	}
@@ -383,13 +410,14 @@ func (s *findStrip) draw(r rect) {
 	}
 }
 
-// counterText renders the "N of M" indicator. Returns "" when there is
-// no query so the renderer can skip drawing the field entirely.
+// counterText renders the "N of M" indicator for the tab the bar
+// opened on. Returns "" when there is no query — or no tab left to
+// count against — so the renderer can skip drawing the field entirely.
 func (s *findStrip) counterText() string {
 	if len(s.query.Value) == 0 {
 		return ""
 	}
-	tab := s.a.activeTabPtr()
+	tab := s.boundTab()
 	if tab == nil {
 		return ""
 	}
@@ -400,11 +428,13 @@ func (s *findStrip) counterText() string {
 }
 
 // hasNoMatches reports whether the user has typed a query that returned
-// zero hits, so the counter can flip color.
+// zero hits in the bar's own tab, so the counter can flip color. A tab
+// that has been closed is not a failed search — the counter is blank
+// there, so there is nothing to color.
 func (s *findStrip) hasNoMatches() bool {
 	if len(s.query.Value) == 0 {
 		return false
 	}
-	tab := s.a.activeTabPtr()
+	tab := s.boundTab()
 	return tab != nil && len(tab.FindMatches) == 0
 }

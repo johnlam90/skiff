@@ -359,9 +359,10 @@ func (t *Tab) ReplaceLines(newLines map[int]string) int {
 	if t.IsImage() || len(newLines) == 0 {
 		return 0
 	}
-	// Count the in-range swaps first: an edit always costs an undo entry,
-	// so a map naming only vanished lines must not leave the user with a
-	// history step that changed nothing.
+	// Count the in-range swaps first: an edit always records undo state
+	// (a new entry, or an extension of the open one when the group
+	// coalesces), so a map naming only vanished lines must not reach
+	// edit and leave the history claiming a change that never happened.
 	n := 0
 	for i := range newLines {
 		if i >= 0 && i < len(t.Buffer.Lines) {

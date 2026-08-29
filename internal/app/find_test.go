@@ -454,3 +454,124 @@ func TestHandleFindKey_CaretMoveDoesNotReSearch(t *testing.T) {
 		t.Fatalf("caret should have moved inside the query, cursor=%d", findBarOf(t, a).query.Cursor)
 	}
 }
+
+// seedTwoTabApp opens two files as permanent tabs and returns the app
+// plus both tabs, with the second one active. The find-bar-vs-tab-switch
+// tests all need the same two-tab shape, and building it by hand invites
+// the preview slot silently collapsing the pair back into one tab.
+func seedTwoTabApp(t *testing.T) (*App, *editor.Tab, *editor.Tab) {
+	t.Helper()
+	dir := t.TempDir()
+	first := filepath.Join(dir, "a.txt")
+	second := filepath.Join(dir, "b.txt")
+	if err := os.WriteFile(first, []byte("foo bar foo\n"), 0644); err != nil {
+		t.Fatalf("seed a.txt: %v", err)
+	}
+	if err := os.WriteFile(second, []byte("foo baz\n"), 0644); err != nil {
+		t.Fatalf("seed b.txt: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(first)
+	tabA := a.activeTabPtr()
+	a.openFile(second)
+	tabB := a.activeTabPtr()
+	if tabA == nil || tabB == nil || tabA == tabB {
+		t.Fatalf("setup wanted two distinct tabs, got %p and %p", tabA, tabB)
+	}
+	return a, tabA, tabB
+}
+
+// TestFindStrip_ClearsTheTabItOpenedOn pins the bar to the tab it was
+// opened against. The bar passes the mouse through (ADR-0001), so the
+// user can click another tab while it is up; before this, Esc ran
+// ClearFind on whatever tab happened to be active, leaving the original
+// tab's FindQuery live — and a live query re-runs FindAll through
+// Tab.edit on every subsequent edit to that orphaned buffer.
+func TestFindStrip_ClearsTheTabItOpenedOn(t *testing.T) {
+	a, tabA, tabB := seedTwoTabApp(t)
+	a.tabs.Activate(tabA)
+	a.openFind()
+	for _, r := range "foo" {
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
+	}
+	if tabA.FindQuery != "foo" {
+		t.Fatalf("setup: tab A should carry the query, got %q", tabA.FindQuery)
+	}
+
+	// The user clicks tab B's tab strip entry while the bar is still up.
+	a.tabs.Activate(tabB)
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyEsc, 0))
+
+	if a.findBarOpen() {
+		t.Fatal("Esc should close the find bar")
+	}
+	if tabA.FindQuery != "" || tabA.FindMatches != nil || tabA.FindIndex != -1 {
+		t.Fatalf("Esc must clear the tab the bar opened on, got query=%q matches=%d idx=%d",
+			tabA.FindQuery, len(tabA.FindMatches), tabA.FindIndex)
+	}
+	if tabB.FindQuery != "" || tabB.FindMatches != nil {
+		t.Fatalf("the tab the bar never searched must be untouched, got query=%q matches=%d",
+			tabB.FindQuery, len(tabB.FindMatches))
+	}
+}
+
+// TestFindStrip_SearchesTheTabItOpenedOn is the same pin on the other
+// half of the strip's surface: typing, Enter/Shift+Enter and the counter
+// all act on the bar's own tab, not on whichever tab the user clicked
+// to afterwards. A bar whose Esc clears tab A but whose Enter walks
+// tab B's matches would be worse than either bug alone.
+func TestFindStrip_SearchesTheTabItOpenedOn(t *testing.T) {
+	a, tabA, tabB := seedTwoTabApp(t)
+	a.tabs.Activate(tabA)
+	a.openFind()
+	a.tabs.Activate(tabB)
+	for _, r := range "foo" {
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
+	}
+	if len(tabA.FindMatches) != 2 {
+		t.Fatalf("typing should search tab A, got %d matches", len(tabA.FindMatches))
+	}
+	if tabB.FindQuery != "" {
+		t.Fatalf("tab B must stay unsearched, got query=%q", tabB.FindQuery)
+	}
+	if got := findBarOf(t, a).counterText(); got != "1 of 2" {
+		t.Fatalf("counter should report tab A's matches, got %q", got)
+	}
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyEnter, 0))
+	if tabA.FindIndex != 1 {
+		t.Fatalf("Enter should walk tab A's match list, got idx=%d", tabA.FindIndex)
+	}
+}
+
+// TestFindStrip_ToleratesItsTabBeingClosed guards the pinned pointer
+// against the one way it can go stale: closing a clean tab does not run
+// closeAllModals, so the bar outlives the tab it was opened on. Every
+// path that reads the pin — the counter, the paint, Enter, Esc — must
+// treat a removed tab as "no tab" rather than mutating a buffer that is
+// no longer on screen.
+func TestFindStrip_ToleratesItsTabBeingClosed(t *testing.T) {
+	a, tabA, tabB := seedTwoTabApp(t)
+	a.tabs.Activate(tabA)
+	a.openFind()
+	for _, r := range "foo" {
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
+	}
+	a.closeTab(tabA)
+	if a.tabs.Active() != tabB {
+		t.Fatalf("setup: closing A should leave B active, got %p", a.tabs.Active())
+	}
+
+	bar := findBarOf(t, a)
+	if got := bar.counterText(); got != "" {
+		t.Fatalf("a closed tab has no counter to report, got %q", got)
+	}
+	if bar.hasNoMatches() {
+		t.Fatal("a closed tab is not a query with zero hits")
+	}
+	bar.handleKey(keyEv(tcell.KeyEnter, 0))
+	bar.draw(rect{x: 0, y: 0, w: 80, h: 1})
+	bar.handleKey(keyEv(tcell.KeyEsc, 0))
+	if tabB.FindQuery != "" {
+		t.Fatalf("the surviving tab must not inherit the closed tab's query, got %q", tabB.FindQuery)
+	}
+}

@@ -279,7 +279,10 @@ trailer by hand again** — `grep -n 'Dirty = true' internal/editor/*.go`
 must stay at exactly one hit, inside `edit`.
 Two things stay with the mutator: its undo group (typing coalesces,
 structural edits don't) and every no-op guard, because reaching `edit`
-always costs an undo entry. `dropSelection` is the raw
+always records undo state — `pushUndo` either opens a new entry or, when
+the group coalesces, extends the one already open — so a call that
+mutates nothing still tells the history a change happened.
+`dropSelection` is the raw
 delete-the-selection half for the insert paths that replace a selection
 inside their own single step. `RestoreView` is the matching seam on the
 view side — the app never assigns `Cursor` / `Anchor` / `ScrollY`
