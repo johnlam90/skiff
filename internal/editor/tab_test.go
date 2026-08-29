@@ -139,6 +139,70 @@ func TestTab_SaveKeepsCRLFAfterEdit(t *testing.T) {
 	}
 }
 
+// TestSavePreservesExecBitAndSymlink fences the two properties a
+// rename-based atomic save is most likely to destroy: an executable
+// file must keep its mode after a save, and a tab opened on a symlink
+// must save through the link to its target instead of replacing the
+// link with a regular file. os.WriteFile happened to give both for
+// free; atomicfile.Replace has to provide them deliberately.
+func TestSavePreservesExecBitAndSymlink(t *testing.T) {
+	t.Run("exec bit", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "run.sh")
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0755); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		tab, err := NewTab(path)
+		if err != nil {
+			t.Fatalf("NewTab: %v", err)
+		}
+		tab.InsertString("# edited\n")
+		if err := tab.Save(); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0755 {
+			t.Fatalf("mode after save = %v, want 0755", got)
+		}
+	})
+
+	t.Run("symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		real := filepath.Join(dir, "real.txt")
+		link := filepath.Join(dir, "link.txt")
+		if err := os.WriteFile(real, []byte("old\n"), 0644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		tab, err := NewTab(link)
+		if err != nil {
+			t.Fatalf("NewTab: %v", err)
+		}
+		tab.InsertString("new ")
+		if err := tab.Save(); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		info, err := os.Lstat(link)
+		if err != nil {
+			t.Fatalf("lstat: %v", err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatal("save replaced the symlink with a regular file")
+		}
+		got, err := os.ReadFile(real)
+		if err != nil {
+			t.Fatalf("read target: %v", err)
+		}
+		if string(got) != "new old\n" {
+			t.Fatalf("target = %q, want %q", got, "new old\n")
+		}
+	})
+}
+
 // TestTab_ReloadRedetectsLineEnding covers a file whose convention
 // changed on disk under an open tab. Reload takes the disk version as
 // the new truth, so the recorded ending has to move with it or the next

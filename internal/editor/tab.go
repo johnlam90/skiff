@@ -19,6 +19,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/atomicfile"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -394,7 +395,7 @@ func (t *Tab) Save() error {
 	if t.Path == "" {
 		return fmt.Errorf("no path set for tab")
 	}
-	if err := os.WriteFile(t.Path, []byte(t.Buffer.TextWith(t.LineEnding.Newline())), 0644); err != nil {
+	if err := atomicfile.Replace(t.Path, []byte(t.Buffer.TextWith(t.LineEnding.Newline()))); err != nil {
 		return err
 	}
 	t.Dirty = false
