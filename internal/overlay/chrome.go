@@ -10,6 +10,7 @@ package overlay
 import (
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -26,9 +27,14 @@ func DrawFrame(scr tcell.Screen, r Rect, title string, th theme.Theme) {
 	fillRect(scr, r.X, r.Y, r.W, r.H, bgStyle)
 	drawBorder(scr, r.X, r.Y, r.W, r.H, borderStyle)
 	drawHDivider(scr, r.X, r.Y+2, r.W, borderStyle)
-	drawText(scr, r.X+1, r.Y+1, " "+title, titleStyle)
+	// The title's budget is the interior (r.W-2) minus the right-aligned
+	// hint and one gap cell before it — a long path used to paint
+	// straight through the ┐ border onto whatever sat behind the frame.
 	hint := "esc "
-	drawText(scr, r.X+r.W-1-runeLen(hint), r.Y+1, hint, mutedStyle)
+	hintW := runeLen(hint)
+	titleBudget := r.W - 2 - hintW - 1
+	drawText(scr, r.X+1, r.Y+1, titleBudget, trimRunes(" "+title, titleBudget), titleStyle)
+	drawText(scr, r.X+r.W-1-hintW, r.Y+1, hintW, hint, mutedStyle)
 }
 
 // DrawButton renders a bracketed-label button at (x, y). The focused
@@ -39,7 +45,10 @@ func DrawButton(scr tcell.Screen, x, y int, label string, modalBG, fg tcell.Colo
 	if focused {
 		st = tcell.StyleDefault.Background(fg).Foreground(modalBG).Bold(true)
 	}
-	drawText(scr, x, y, label, st)
+	// The label is its own budget: buttons are fixed chrome whose fit is
+	// guaranteed by the app's minWidth floor (see CLAUDE.md), and
+	// DrawButton has no rect to derive a tighter bound from.
+	drawText(scr, x, y, runeLen(label), label, st)
 }
 
 // fillRect paints a w×h cell rectangle with st.
@@ -77,37 +86,27 @@ func drawHDivider(scr tcell.Screen, x, y, w int, st tcell.Style) {
 	}
 }
 
-// drawText writes s left-to-right starting at (x, y), one cell per rune.
-func drawText(scr tcell.Screen, x, y int, s string, st tcell.Style) {
-	col := 0
-	for _, r := range s {
-		scr.SetContent(x+col, y, r, nil, st)
-		col++
-	}
+// drawText writes s left-to-right starting at (x, y), clipped to maxW
+// cells and cluster-aware — CJK, combining marks and ZWJ emoji advance
+// by their real cell widths. There is deliberately no unbounded variant:
+// every caller passes a budget derived from its frame rect, because the
+// old clip-free drawText let long titles paint through the border.
+func drawText(scr tcell.Screen, x, y, maxW int, s string, st tcell.Style) {
+	textdraw.DrawClipped(scr, x, y, maxW, s, st)
 }
 
-// runeLen returns the visible cell count of s (one cell per rune).
+// runeLen returns the visible cell count of s, measured cluster-aware
+// via textdraw — a CJK ideograph counts 2, a combining mark 0 — so
+// right-aligned hints, tags and centered messages line up for non-ASCII
+// text too.
 func runeLen(s string) int {
-	n := 0
-	for range s {
-		n++
-	}
-	return n
+	return textdraw.Width(s)
 }
 
-// trimRunes truncates s to max visible cells, rune-safe, appending an
+// trimRunes truncates s to max visible cells, cluster-safe, appending an
 // ellipsis when anything was cut — a byte-slice truncation once split
-// multibyte filenames into replacement garbage.
+// multibyte filenames into replacement garbage, and a rune-count cut
+// still overflowed the frame on wide glyphs.
 func trimRunes(s string, max int) string {
-	if max <= 0 {
-		return ""
-	}
-	if runeLen(s) <= max {
-		return s
-	}
-	if max == 1 {
-		return "…"
-	}
-	rs := []rune(s)
-	return string(rs[:max-1]) + "…"
+	return textdraw.ClipEllipsis(s, max)
 }

@@ -216,10 +216,10 @@ func (p *Popup) Draw(scr tcell.Screen) {
 			for cx := r.X + 1; cx < r.X+r.W-1; cx++ {
 				scr.SetContent(cx, cy, ' ', nil, hoverStyle)
 			}
-			drawText(scr, r.X+2, cy, "▸", hoverChevStyle)
+			drawText(scr, r.X+2, cy, r.W-3, "▸", hoverChevStyle)
 			drawClippedText(scr, r.X+4, cy, labelW, item.Label, hoverStyle)
 		} else {
-			drawText(scr, r.X+2, cy, "▸", chevStyle)
+			drawText(scr, r.X+2, cy, r.W-3, "▸", chevStyle)
 			drawClippedText(scr, r.X+4, cy, labelW, item.Label, bgStyle)
 		}
 	}
@@ -229,10 +229,10 @@ func (p *Popup) Draw(scr tcell.Screen) {
 	// Painted into the chrome, so they cost the list nothing.
 	moreStyle := tcell.StyleDefault.Background(bg).Foreground(th.Accent)
 	if p.scroll > 0 {
-		drawText(scr, r.X+2, r.Y, " ▲ ", moreStyle)
+		drawText(scr, r.X+2, r.Y, r.W-3, " ▲ ", moreStyle)
 	}
 	if p.scroll < p.maxScroll() {
-		drawText(scr, r.X+2, r.Y+r.H-1, " ▼ ", moreStyle)
+		drawText(scr, r.X+2, r.Y+r.H-1, r.W-3, " ▼ ", moreStyle)
 	}
 	scr.HideCursor()
 }
