@@ -37,6 +37,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/johnlam90/skiff/internal/filemanager"
 	"github.com/johnlam90/skiff/internal/git"
 )
 
@@ -107,7 +108,10 @@ type Node struct {
 // rename), the item is renamed to a hidden sibling carrying this
 // prefix instead. The tree and the finder both filter the prefix so
 // a trashed item never resurfaces in the UI before Undo restores it.
-const TrashPrefix = ".skifftrash-"
+// The value is the file manager's — it produces the names, so it owns
+// the definition; this alias keeps the filters reading their own
+// package's name without a second copy that could drift.
+const TrashPrefix = filemanager.TrashPrefix
 
 // MaxDirChildren caps how many entries of one directory the tree
 // retains. The sidebar is a navigation aid, not a file manager — past a
