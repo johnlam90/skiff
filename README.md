@@ -922,9 +922,10 @@ them while still making it one click to opt a project in.
 │   ├── icons/                # Nerd Font detection + per-file glyphs
 │   ├── theme/                # the theme registry + the low-color fallback
 │   └── version/              # Single-line version constant
-├── .github/workflows/        # Test pipeline + auto-release pipeline
+├── .github/workflows/        # Test, auto-release, and Pages-deploy pipelines
 ├── .goreleaser.yml           # Cross-compile + brew formula config
 ├── Formula/                  # Homebrew formula (written by CI)
+├── website/                  # Hugo + Tailwind site (johnlam90.github.io/skiff)
 └── Makefile
 ```
 

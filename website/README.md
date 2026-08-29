@@ -16,7 +16,7 @@ npm run build:css        # produces static/css/site.css
 hugo --minify            # produces public/
 ```
 
-`public/` contains the deployable static site. Drop it on any host (GitHub Pages, Cloudflare Pages, S3 + CloudFront, etc.). The `static/CNAME` ships through to `public/CNAME` automatically.
+`public/` contains the deployable static site. The live site deploys to GitHub Pages (johnlam90.github.io/skiff) via `.github/workflows/pages.yml`, which runs this same build and also rewrites `params.version` from `internal/version/version.go`. There is no custom domain, so no `CNAME` file — add one under `static/` only if a domain ever gets pointed here.
 
 ## Develop
 
@@ -53,7 +53,7 @@ npm run dev
   - `docs/list.html` — docs index
   - `404.html` — custom 404
   - `partials/` — shared building blocks (head, header, footer, install-block, code-block, docs-sidebar, feature-icon)
-- `static/` — verbatim files: `CNAME`, `robots.txt`, `favicon.svg`. Tailwind output (`static/css/site.css`) is gitignored and produced by `build:css`.
+- `static/` — verbatim files: `robots.txt`, `favicon.svg`, `apple-touch-icon.png`, `img/`. Tailwind output (`static/css/site.css`) is gitignored and produced by `build:css`.
 
 ## Customizing
 

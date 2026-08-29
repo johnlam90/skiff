@@ -126,8 +126,10 @@ site-dev:
 	cd $(SITE_DIR) && npm run dev
 
 # site-build produces the production-ready static site at $(SITE_DIR)/public.
-# This is what the GitHub Pages workflow ships. The Tailwind build runs first
-# so the minified CSS is on disk before Hugo reads its static directory.
+# This is what the Pages deploy (.github/workflows/pages.yml) builds and
+# ships — same command there as here, so local and CI builds can't drift.
+# The Tailwind build runs first so the minified CSS is on disk before Hugo
+# reads its static directory.
 site-build:
 	cd $(SITE_DIR) && npm run build
 
