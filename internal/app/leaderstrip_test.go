@@ -78,11 +78,11 @@ func TestLeaderStripVisibility(t *testing.T) {
 		t.Fatal("strip must hide under the menu")
 	}
 	a.closeMenu()
-	a.findOpen = true // strips are still flag-tracked (not on the stack)
+	a.strip = &findStrip{a: a} // strips live in their own slot, not on the stack
 	if a.leaderStripVisible() {
 		t.Fatal("strip must hide under the find bar")
 	}
-	a.findOpen = false
+	a.strip = nil
 	a.lastEscape = time.Now().Add(-doubleEscWindow - time.Millisecond)
 	if a.leaderStripVisible() {
 		t.Fatal("strip should expire with the leader window")

@@ -69,6 +69,8 @@ internal/app/gitchanges.go    Git panel: rows, buttons, keyboard mode, hint
 internal/app/gitstatus.go     Best-effort `git status` read behind the tree tint
 internal/app/overlays.go      Overlay stack wiring: menu adapter + dropOverlay
 internal/app/modals.go        Openers for the prefab overlays + closeAllModals
+internal/app/strip.go         The strip interface + App's one strip slot: what a
+                              docked bar reserves, routes, paints and tears down
 internal/app/projfind.go      Project-wide content search panel (Esc-F)
 internal/app/preview.go       Shared file-open path + preview-tab rules
 internal/app/fileops.go       App side of file ops: the prompts/confirms, the
@@ -401,8 +403,13 @@ booleans. Opening replaces (at most one overlay is ever up), openers run
 `closeAllModals()` first, and activate paths are capture-then-close so a
 callback that opens the next overlay is never popped by the previous
 one's teardown. Strips (find bar, project-find bar, leader strip) are
-NOT overlays — see `docs/adr/0001-strips-are-not-overlays.md` before
-"fixing" the find bar's mouse pass-through.
+NOT overlays — they implement `strip` and live in App's one strip slot
+(`a.strip`, strip.go), which is the same "one surface, one owner" rule
+applied to the docked bars: layout, keys, mouse and draw consult the
+slot and nothing else, and whether a click passes through to the editor
+is the strip's own answer. See
+`docs/adr/0001-strips-are-not-overlays.md` before "fixing" the find
+bar's mouse pass-through.
 
 ### Modal layout via `relY` and dynamic `labelFor`
 The action menu uses named struct literals with an optional `labelFor`

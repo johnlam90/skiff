@@ -883,7 +883,7 @@ func TestHandleMouse_FindBarPressDoesNotArmEditorDrag(t *testing.T) {
 	a.openFile(target)
 	a.openFind()
 
-	_, fy, _, _ := a.findBarRect()
+	fy := a.stripRect().y
 	x := a.sidebarW() + 10
 	a.handleMouse(tcell.NewEventMouse(x, fy, tcell.Button1, tcell.ModNone))
 

@@ -21,27 +21,63 @@ import (
 	"github.com/johnlam90/skiff/internal/textdraw"
 )
 
+// leaderStrip is the cheat-strip as a strip (strip.go) — and the one
+// strip that deliberately never takes the slot. Two reasons, both
+// structural rather than stylistic. It must not own the keyboard: a
+// rune typed inside the armed window that no binding claims has to
+// reach the buffer, and strip.handleKey has no way to decline a key.
+// And it reserves no rows — it overlays the editor for the
+// ~half-second the window is armed instead of reflowing it, and it
+// expires on a timer that posts no event of its own, so nothing would
+// be left to clear a slot it had taken. So draw() paints it only when
+// the slot is empty, which is also how it stays out from under a bar
+// that owns those rows without naming the other strips.
+type leaderStrip struct{ a *App }
+
+// rows is zero: the strip paints over the editor rather than taking
+// rows off it, so layout has nothing to reserve. See the type comment.
+func (s leaderStrip) rows() int { return 0 }
+
+// handleKey is a no-op — the leader window's dispatch lives in
+// handleKey / leaderWindowIntercept precisely so an unbound rune can
+// fall through to the buffer, which a strip that owned the keyboard
+// could not offer.
+func (s leaderStrip) handleKey(*tcell.EventKey) {}
+
+// handleMouse passes everything through: the strip is a momentary
+// reference, and the editor under it stays live (ADR-0001).
+func (s leaderStrip) handleMouse(int, int, tcell.ButtonMask) bool { return false }
+
+// close is a no-op — the strip holds no state; the armed window it
+// renders expires on its own.
+func (s leaderStrip) close() {}
+
 // leaderStripVisible reports whether the cheat-strip should draw:
 // the leader window is armed and nothing that owns the keyboard (menu,
-// modals, bars — states where a leader key can't fire) is open.
+// modals, a docked strip — states where a leader key can't fire) is up.
 func (a *App) leaderStripVisible() bool {
 	if a.lastEscape.IsZero() || time.Since(a.lastEscape) >= doubleEscWindow {
 		return false
 	}
-	if a.overlays.IsOpen() || a.findOpen || a.projFind.findOpen {
+	if a.overlays.IsOpen() || a.strip != nil {
 		return false
 	}
 	return true
 }
 
-// drawLeaderStrip paints the key overview above the status bar. On a
-// wide terminal it is one row; when the full table doesn't fit, it
-// wraps onto as many rows as the table needs rather than silently
-// dropping bindings — the strip exists precisely for people who don't
-// have the table memorised, so a fixed row cap that clips the tail
-// defeats it. It overlays the editor for the ~half-second the leader
-// window is armed, which is a fair trade.
-func (a *App) drawLeaderStrip() {
+// draw paints the key overview above the status bar. On a wide terminal
+// it is one row; when the full table doesn't fit, it wraps onto as many
+// rows as the table needs rather than silently dropping bindings — the
+// strip exists precisely for people who don't have the table memorised,
+// so a fixed row cap that clips the tail defeats it. It overlays the
+// editor for the ~half-second the leader window is armed, which is a
+// fair trade.
+//
+// r is the floor it stacks up from, not a box it paints inside: the
+// table spans the full terminal width, sidebar included, and grows
+// upward from the row above r.
+func (s leaderStrip) draw(r rect) {
+	a := s.a
 	if !a.leaderStripVisible() {
 		return
 	}
@@ -79,7 +115,7 @@ func (a *App) drawLeaderStrip() {
 		}
 		simX += w
 	}
-	topY := a.height - 1 - rows
+	topY := r.y - rows
 	if topY < 0 {
 		return
 	}

@@ -21,10 +21,19 @@ open one — at most one overlay is ever up.
 _Avoid_: modal cascade, routing lists
 
 **Strip**:
-A bottom bar that reflows the editor and captures keys while letting mouse
-actions pass through to the editor — the find bar, the project-find bar,
-the leader strip. A strip is not an overlay and never sits on the stack.
+A bottom bar that reflows the editor and owns the keyboard while it is up,
+answering for itself whether a mouse event is consumed or passed through to
+the editor — the find bar, the project-find bar, the leader strip. Every
+strip implements the `strip` interface (`internal/app/strip.go`): the rows
+it reserves, its key and mouse handlers, its draw, its teardown. A strip is
+not an overlay and never sits on the stack.
 _Avoid_: bar, bottom panel
+
+**Strip slot**:
+The single owner of which strip is docked (`App.strip`, nil = none). Every
+opener runs `closeAllModals` first, which empties it, so at most one strip
+is ever up — which is why layout can subtract one strip's rows.
+_Avoid_: per-bar open flags, findOpen
 
 **Shortcut reference**:
 The `Esc ?` overlay: the whole leader table under its group headings plus

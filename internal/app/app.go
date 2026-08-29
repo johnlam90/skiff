@@ -348,21 +348,15 @@ type App struct {
 	// overlay.Popup prefabs — see formmodal.go and modals.go for the
 	// openers; they carry all their own state.
 
-	// Find bar — opened with Esc-f or the "Find in file" menu entry. The
-	// bar is a 1-row strip pinned above the status bar; while it's open
-	// it owns the keyboard. The active tab carries the query and match
-	// list (see editor.Tab.SetFindQuery), so each tab remembers its own
-	// search across closes / reopens.
-	//
-	// findField and replaceField (Tab opens the second one) are the same
-	// overlay.Field the prompt, form and finder use: the strip owns
-	// which field has the keyboard, the field owns the text, the caret
-	// and its horizontal window. See find.go.
-	findOpen         bool
-	findField        overlay.Field
-	replaceOpen      bool
-	replaceField     overlay.Field
-	findFocusReplace bool
+	// strip is the one docked bar under the editor — the find bar
+	// (Esc-f) or the project-find panel's query row (Esc-F). nil means
+	// none, and at most one is ever up by construction: every opener
+	// runs closeAllModals first, which empties the slot. Layout, key
+	// routing, mouse routing and the draw pass consult this and nothing
+	// else, so "which strip is up" has exactly one answer. Strips are
+	// NOT overlays and never reach a.overlays — see strip.go and
+	// docs/adr/0001-strips-are-not-overlays.md.
+	strip strip
 
 	// The list picker is an overlay.Pick prefab — see listpick.go for
 	// the opener; it carries all its own state.
