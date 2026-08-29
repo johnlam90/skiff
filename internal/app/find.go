@@ -227,10 +227,13 @@ func (a *App) findEditKey(ev *tcell.EventKey) {
 //	" Find: <input>                       3 of 12   Enter: next · Esc: close "
 //
 // The hint on the right is dropped first when the window is too narrow
-// to fit it; the match counter is dropped next; the input keeps at least
-// minFieldWidth cells because that's the whole point of the bar. Only a
-// bar too narrow for the label plus one cell of input drops the input,
-// and then it drops everything.
+// to fit it; the match counter is dropped next; the input yields to
+// neither, because it is the whole point of the bar. Where the bar is
+// wide enough to grant it, the input gets at least minFieldWidth cells —
+// that is the budget the labels are measured against. Narrower than
+// that there is nothing left to drop on its behalf, so the input simply
+// takes what remains, down to a single cell; narrower still and the bar
+// paints no field at all and hides the cursor with it.
 func (a *App) drawFindBar() {
 	if !a.findOpen {
 		return

@@ -303,23 +303,22 @@ func TestProjFindDraw_PaintsResultsAndBar(t *testing.T) {
 	if !containsRunes([]rune(barRow), "Search project:") {
 		t.Fatalf("bar row = %q, want the search label", barRow)
 	}
-	// NOT asserted here: the query text appearing in the bar at all.
-	// Writing this test surfaced a real layout bug in drawProjFindBar:
-	// the hint/counter fit checks (`bw > runeLen(label)+runeLen(hint)+10`
-	// and `bw > runeLen(label)+runeLen(counter)+4`) compare against the
-	// label's width only, never the three mode chips' ~12 cells, so on
-	// this suite's default 120x40 SimulationScreen (30-col sidebar ->
-	// a 90-col bar) they both report "fits" while the chips have
-	// already eaten into that budget. rightTextStart then lands left of
-	// where the chips end and the query field has no box at all, so the
-	// bar draws the counter and hint and skips the input — see
-	// TestProjFindDraw_BarKeepsItsCounterAndHint, which pins that the
-	// right-hand text survives. The input losing instead is the visible
-	// symptom of the same fit-check bug, and it reproduces with any
-	// nonzero query and match count at this width, not just this test's
-	// data. Out of scope for the plan that added this test (plan 019)
-	// and for the one that moved the fields onto overlay.Field —
-	// reported for a follow-up bug fix in projfind.go.
+	// Deliberately not asserted here: which of the bar's right-hand
+	// labels survive at this size. Writing this test surfaced a real
+	// layout bug — the fit checks compared the left-hand label against
+	// one piece of right-hand text at a time, never against each other
+	// or the three mode chips, so at this suite's default 120x40 (a
+	// 30-col sidebar leaving a 90-col bar) both the counter and the hint
+	// were committed to cells the query field needed, and the field was
+	// squeezed out. That is fixed: the input is reserved minFieldWidth
+	// cells first and the labels take what is left, counter before hint,
+	// so this geometry now paints the query and the full counter and
+	// drops the hint. The tests that pin it are
+	// TestProjFindDraw_BarKeepsTheInputAtTheDefaultSize (the input and
+	// its caret survive) and TestProjFindDraw_BarDropsLabelsWholeNeverInPieces
+	// (a label is dropped whole or not at all). This test stays about
+	// the results list and the bar's label, which is what its name
+	// promises.
 }
 
 // TestProjFindDraw_BarKeepsTheInputAtTheDefaultSize pins the panel's
