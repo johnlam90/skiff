@@ -429,16 +429,35 @@ func ApplyReplace(rootDir string, matches []Match, query, repl string, opts Opti
 			mode = fi.Mode().Perm()
 		}
 		lines := strings.Split(string(data), "\n")
-		changedLines, fileOcc := 0, 0
+
+		// Matches are per-occurrence now, but ReplaceLine rewrites a
+		// WHOLE line in one pass — group by line and touch each one
+		// once, or a second same-line match would verify against the
+		// line ReplaceLine already rewrote (an always-false compare
+		// against stale Text) and get double-counted as skipped.
+		byLine := map[int][]Match{}
+		var lineOrder []int
 		for _, m := range group {
-			i := m.Line - 1
-			if i < 0 || i >= len(lines) || !VerifyLine(lines[i], m.Text) {
-				rep.Skipped++
+			if _, seen := byLine[m.Line]; !seen {
+				lineOrder = append(lineOrder, m.Line)
+			}
+			byLine[m.Line] = append(byLine[m.Line], m)
+		}
+
+		changedLines, fileOcc := 0, 0
+		for _, ln := range lineOrder {
+			ms := byLine[ln]
+			i := ln - 1
+			// All matches recorded for one line share the same recorded
+			// Text (the sweep captured the whole line once per hit), so
+			// verifying against the first is verifying them all.
+			if i < 0 || i >= len(lines) || !VerifyLine(lines[i], ms[0].Text) {
+				rep.Skipped += len(ms)
 				continue
 			}
 			newLine, n := ReplaceLine(lines[i], query, repl, opts)
 			if n == 0 {
-				rep.Skipped++
+				rep.Skipped += len(ms)
 				continue
 			}
 			lines[i] = newLine
@@ -450,12 +469,12 @@ func ApplyReplace(rootDir string, matches []Match, query, repl string, opts Opti
 		}
 		tmp := abs + ".skiff-replace"
 		if err := os.WriteFile(tmp, []byte(strings.Join(lines, "\n")), mode); err != nil {
-			rep.Skipped += changedLines
+			rep.Skipped += fileOcc
 			continue
 		}
 		if err := os.Rename(tmp, abs); err != nil {
 			_ = os.Remove(tmp)
-			rep.Skipped += changedLines
+			rep.Skipped += fileOcc
 			continue
 		}
 		rep.Replaced += fileOcc
