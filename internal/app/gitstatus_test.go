@@ -927,6 +927,36 @@ func TestCollectGitStatus_NoTabsSkipsDiffFork(t *testing.T) {
 	}
 }
 
+// TestCollectGitStatus_CarriesIsDirForUntrackedDirs pins step 4 of the
+// quiet tick: the collection itself (already off the event loop) stats
+// the dirty paths and carries which ones are directories, so the Git
+// panel's row builder needs no filesystem at all. A deleted path — the
+// stat that fails — must come back unmarked, preserving the old
+// stat-on-the-loop semantics exactly.
+func TestCollectGitStatus_CarriesIsDirForUntrackedDirs(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	writeFileT(t, filepath.Join(repo, "doomed.txt"), "x\n")
+	gitRun(t, repo, "add", ".")
+	gitRun(t, repo, "commit", "-m", "init")
+	if err := os.Mkdir(filepath.Join(repo, "newdir"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFileT(t, filepath.Join(repo, "newdir", "inside.txt"), "y\n")
+	if err := os.Remove(filepath.Join(repo, "doomed.txt")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	res := collectGitStatus(repo, "", nil, false)
+	if !res.isDir[filepath.Join(repo, "newdir")] {
+		t.Fatalf("untracked dir should be flagged, got %v (dirty: %v)",
+			res.isDir, sortedKeys(res.st.Files))
+	}
+	if res.isDir[filepath.Join(repo, "doomed.txt")] {
+		t.Fatal("a deleted path must never be flagged as a directory")
+	}
+}
+
 // TestUnquoteGitPath covers the C-style quoting git applies to header
 // paths with control or non-ASCII bytes — the escapes quote.c emits,
 // octal included — plus the malformed shapes that must fail closed

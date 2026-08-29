@@ -33,12 +33,22 @@ import (
 )
 
 // gitStatusResult bundles everything one status collection produces:
-// the repo-level snapshot and the per-tab gutter line changes. Built by
-// collectGitStatus — possibly on a background goroutine — and applied
-// to the UI in one shot by App.applyGitStatus on the main thread.
+// the repo-level snapshot, the per-tab gutter line changes, and which
+// dirty paths are directories on disk (the Git panel's trailing-slash
+// answer, stat'd here so the row builder never touches the filesystem
+// on the event loop). Built by collectGitStatus — possibly on a
+// background goroutine — and applied to the UI in one shot by
+// App.applyGitStatus on the main thread.
 type gitStatusResult struct {
 	st       gitStatus
 	tabLines map[string]map[int]editor.GitLineChange
+
+	// isDir holds true for each snapshot path that stats as a
+	// directory — untracked dirs, which porcelain reports as one
+	// collapsed entry. Paths that fail to stat (deleted) are simply
+	// absent, so a lookup answers false for them, exactly like the
+	// on-loop stat used to.
+	isDir map[string]bool
 }
 
 // gitStatusEvent carries a finished background collection back to the
@@ -66,6 +76,7 @@ func collectGitStatus(rootDir, base string, tabPaths []string, skipStatus bool) 
 	res := gitStatusResult{tabLines: map[string]map[int]editor.GitLineChange{}}
 	if !skipStatus {
 		res.st = loadGitStatus(rootDir, base)
+		res.isDir = statDirtyDirs(res.st.Files)
 	}
 	switch len(tabPaths) {
 	case 0:
@@ -349,19 +360,50 @@ func (a *App) readRepo() *git.Repo {
 	return git.Open(a.rootDir)
 }
 
+// statDirtyDirs stats each dirty path and returns the set that are
+// directories on disk. Runs inside the collection (off the event loop
+// when async) so buildGitChangesRows can stay pure — this used to be a
+// stat per changed path on the main thread every time the Git panel
+// rebuilt. Only true entries are stored: a deleted path's failed stat
+// is the absence a lookup reads as false.
+func statDirtyDirs(files map[string]git.ChangeKind) map[string]bool {
+	if len(files) == 0 {
+		return nil
+	}
+	var isDir map[string]bool
+	for abs := range files {
+		if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
+			if isDir == nil {
+				isDir = map[string]bool{}
+			}
+			isDir[abs] = true
+		}
+	}
+	return isDir
+}
+
 // rebaseGitPaths rewrites dirty paths to match the file tree root casing.
 func rebaseGitPaths(paths map[string]filetree.GitChangeKind, treeRoot string) map[string]filetree.GitChangeKind {
+	return rebaseByRoot(paths, treeRoot)
+}
+
+// rebaseByRoot is rebaseGitPaths' shape-generic core: every key that
+// resolves under treeRoot (case drift tolerated) is rewritten onto the
+// tree root's own casing so lookups keyed by tree paths hit. Shared by
+// the dirty-kind map and the isDir map, which must be rebased the same
+// way or the panel's directory flags would miss on macOS.
+func rebaseByRoot[V any](paths map[string]V, treeRoot string) map[string]V {
 	if len(paths) == 0 || treeRoot == "" {
 		return paths
 	}
-	rebased := map[string]filetree.GitChangeKind{}
-	for path, kind := range paths {
+	rebased := make(map[string]V, len(paths))
+	for path, v := range paths {
 		rel, ok := relFromRoot(path, treeRoot)
 		if !ok {
-			rebased[path] = kind
+			rebased[path] = v
 			continue
 		}
-		rebased[filepath.Join(treeRoot, rel)] = kind
+		rebased[filepath.Join(treeRoot, rel)] = v
 	}
 	return rebased
 }
@@ -693,6 +735,7 @@ func (a *App) applyGitStatus(res gitStatusResult) {
 		if !res.st.IsRepo {
 			a.tree.DirtyFiles = nil
 			a.tree.DirtyFolders = nil
+			a.gitDirtyDirs = nil
 			// No repo, no Git panel — fall back to the explorer rather
 			// than strand the user on a view with nothing behind it.
 			a.gitPanelActive = false
@@ -701,6 +744,9 @@ func (a *App) applyGitStatus(res gitStatusResult) {
 			dirtyFiles := rebaseGitPaths(res.st.Files, a.tree.Root.Path)
 			a.tree.DirtyFiles = dirtyFiles
 			a.tree.DirtyFolders = dirtyFolderSet(dirtyFiles, a.tree.Root.Path)
+			// Same rebase as the kinds, or the flags would miss the
+			// tree-cased keys buildGitChangesRows looks up.
+			a.gitDirtyDirs = rebaseByRoot(res.isDir, a.tree.Root.Path)
 		}
 	}
 	// Tabs opened after the collection started aren't in the map — they
