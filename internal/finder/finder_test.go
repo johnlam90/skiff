@@ -79,20 +79,23 @@ func TestFinder_RebuildCoalescesConcurrent(t *testing.T) {
 		f.Rebuild(cb)
 	}
 
-	// Wait for state to settle. The first Rebuild fires; the rest
-	// are no-ops. We expect exactly one onDone call.
+	// f.running.Load() == 0 is the deterministic quiescence point, not a
+	// wall-clock guess: onDone() is called from inside the rebuild
+	// goroutine's body (see build() in Rebuild), and `defer
+	// f.running.Store(0)` is the only defer registered in that body, so
+	// it runs last — strictly after onDone returns. Once running reads
+	// 0, every callback from that rebuild has already landed, so a
+	// mismatched doneCount can't still be in flight.
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if f.State() == StateReady {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+	for time.Now().Before(deadline) && f.running.Load() != 0 {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if f.running.Load() != 0 {
+		t.Fatal("rebuild never quiesced (running stuck busy)")
 	}
 	if f.State() != StateReady {
-		t.Fatal("state never reached StateReady")
+		t.Fatalf("state: got %v, want StateReady", f.State())
 	}
-	// Give any spurious extra callbacks a moment to fire.
-	time.Sleep(50 * time.Millisecond)
 	mu.Lock()
 	got := doneCount
 	mu.Unlock()

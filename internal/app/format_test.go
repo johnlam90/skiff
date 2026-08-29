@@ -204,7 +204,7 @@ func TestRunFormatOnSave_DeniedIsNoop(t *testing.T) {
 	// No hook assertion needed: the cancel hook lives on the confirm
 	// prefab itself, so with no confirm up there is structurally
 	// nothing to leak.
-	expectNoFormatEvent(t, a, 150*time.Millisecond)
+	expectNoFormatEvent(t, a)
 	onDisk, err := os.ReadFile(target)
 	if err != nil {
 		t.Fatalf("reread: %v", err)
@@ -857,21 +857,44 @@ func plantRepoBinary(t *testing.T, root, rel, marker string) {
 	}
 }
 
-// expectNoFormatEvent drains whatever is queued for a short window and
-// fails if a formatDoneEvent turns up — the assertion "the formatter
-// never ran" needs the absence checked, not assumed.
-func expectNoFormatEvent(t *testing.T, a *App, within time.Duration) {
+// formatSentinelEvent is a test-local marker, shaped like the real
+// events format.go declares (a time.Time plus a When() method), that
+// expectNoFormatEvent posts onto the queue itself right after the
+// refusal path under test has already returned.
+type formatSentinelEvent struct{ when time.Time }
+
+// When satisfies the tcell.Event interface.
+func (e *formatSentinelEvent) When() time.Time { return e.when }
+
+// expectNoFormatEvent asserts a formatter refusal never posts a
+// formatDoneEvent. format.go's execution goroutine (format.go:509's
+// `go func`) is only ever spawned past the refusal checks these tests
+// exercise, so a refused run returns synchronously with nothing in
+// flight — which makes a sentinel posted right here a strict
+// happens-after marker: any formatDoneEvent that attempt could still
+// produce is already queued (or never will be) by the time the
+// sentinel lands, so draining until the sentinel arrives is equivalent
+// to waiting out that attempt in full, without guessing how long that
+// takes. The 5s deadline only trips if the queue is genuinely stuck
+// (a caller whose refusal path turns out to be asynchronous would hang
+// here instead of racing silently).
+func expectNoFormatEvent(t *testing.T, a *App) {
 	t.Helper()
-	deadline := time.Now().Add(within)
+	_ = a.screen.PostEvent(&formatSentinelEvent{when: time.Now()})
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if !a.screen.HasPendingEvent() {
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(2 * time.Millisecond)
 			continue
 		}
-		if fe, ok := a.screen.PollEvent().(*formatDoneEvent); ok {
-			t.Fatalf("formatter ran when it should have been refused: %+v", fe)
+		switch ev := a.screen.PollEvent().(type) {
+		case *formatDoneEvent:
+			t.Fatalf("formatter ran when it should have been refused: %+v", ev)
+		case *formatSentinelEvent:
+			return
 		}
 	}
+	t.Fatal("timed out waiting for the sentinel event — event queue appears stuck")
 }
 
 // TestRunFormatOnSave_RepoShippedBinaryRefused is the second half of the
@@ -904,7 +927,7 @@ func TestRunFormatOnSave_RepoShippedBinaryRefused(t *testing.T) {
 		if !strings.Contains(a.statusMsg, "refused") {
 			t.Fatalf("trusted=%v: user needs a reason, got status %q", trusted, a.statusMsg)
 		}
-		expectNoFormatEvent(t, a, 150*time.Millisecond)
+		expectNoFormatEvent(t, a)
 		if _, err := os.Stat(marker); err == nil {
 			t.Fatalf("trusted=%v: the repo's binary executed", trusted)
 		}
@@ -926,7 +949,7 @@ func TestExecFormatter_RefusesPathRootedArgv(t *testing.T) {
 	if !strings.Contains(a.statusMsg, "refused") {
 		t.Fatalf("status should explain the refusal, got %q", a.statusMsg)
 	}
-	expectNoFormatEvent(t, a, 150*time.Millisecond)
+	expectNoFormatEvent(t, a)
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("execFormatter ran a path-rooted binary")
 	}

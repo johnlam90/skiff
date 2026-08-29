@@ -291,6 +291,9 @@ func TestPrintHelpMatchesBehaviour(t *testing.T) {
 // behaviour, not resolveArgs' — the refusal has to actually be
 // non-zero for `skiff a.go b.go && …` in a script to stop.
 func TestMainExitCodes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the full binary — slow; run without -short")
+	}
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go toolchain not on PATH; can't build the binary under test")
 	}
