@@ -331,7 +331,18 @@ func (g *gitLogOverlay) Draw(scr tcell.Screen) {
 	r := g.sync()
 	overlay.DrawFrame(scr, r, g.title, g.app.theme)
 
-	g.EnsureVisible()
+	// Re-clamp the WINDOW against the height sync just measured — a
+	// terminal that grew can leave the offset past the new end. This
+	// used to be EnsureVisible, which also dragged the window back to
+	// the selection on every single frame: with the highlight on row 0
+	// — the state on every fresh open — a wheel tick or a press on the
+	// bar moved the list for zero frames, so the scroll indicator this
+	// overlay draws could not be dragged at all. Scrolling is looking,
+	// not choosing (overlay.List), and every path that MOVES the
+	// selection ensures its own visibility: HandleKey after each Move,
+	// and the hover path only ever selects a row RowAt already found
+	// inside the window.
+	g.ScrollBy(0)
 	rowsStart := r.Y + 3
 	for i := range g.Visible() {
 		idx := g.Scroll() + i

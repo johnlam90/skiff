@@ -12,6 +12,7 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -384,12 +385,13 @@ func TestDrawGitLog_ScrollbarShowsOnlyWhenHistoryOverflows(t *testing.T) {
 
 	long := &gitLogOverlay{app: a, title: "History", entries: make([]gitLogEntry, 60)}
 	long.sync()
-	// Walk to the last commit rather than wheeling: Draw runs
-	// EnsureVisible, so the selection is what pins the window open.
-	long.Select(long.Len() - 1)
+	// Scroll the way a user does — the wheel — and leave the highlight
+	// on row 0, which is the state a fresh open is in and the one that
+	// used to have the window snapped back on the next frame.
+	long.ScrollBy(20)
 	col := gitLogBarColumn(t, a, long)
-	if long.Scroll() == 0 {
-		t.Fatalf("test setup: the window should have followed the selection, scroll %d", long.Scroll())
+	if long.Scroll() != 20 {
+		t.Fatalf("the paint moved the window: scroll %d, want 20", long.Scroll())
 	}
 	if !strings.ContainsRune(col, scrollbar.Thumb) || !strings.ContainsRune(col, scrollbar.Track) {
 		t.Fatalf("60 commits in a %d-row window must paint a bar, got %q", long.Visible(), col)
@@ -429,8 +431,12 @@ func TestGitLogBarPress_ScrollsInsteadOfOpeningTheCommitBehindIt(t *testing.T) {
 	barX := overlay.BarColumn(r)
 
 	g.HandleMouse(barX, r.Y+3+g.Visible()-1, tcell.Button1)
+	// Paint before asserting. A scroll that survives the press but not
+	// the next frame is a scrollbar the user cannot drag at all, and
+	// asserting straight off the press would never notice.
+	g.Draw(a.screen)
 	if want := g.MaxScroll(); g.Scroll() != want {
-		t.Fatalf("a press at the foot of the bar: scroll %d, want %d", g.Scroll(), want)
+		t.Fatalf("a press at the foot of the bar: scroll %d after a paint, want %d", g.Scroll(), want)
 	}
 	if !gitLogIsOpen(a) {
 		t.Fatal("a bar press must not activate a row or dismiss the overlay")
@@ -439,5 +445,57 @@ func TestGitLogBarPress_ScrollsInsteadOfOpeningTheCommitBehindIt(t *testing.T) {
 	g.HandleMouse(barX, r.Y+3, tcell.ButtonNone)
 	if g.Sel() != before {
 		t.Fatalf("hovering the bar moved the highlight: %d → %d", before, g.Sel())
+	}
+}
+
+// gitLogEntriesN builds n identifiable commit rows so a test can read
+// off the screen WHICH commit the window starts on, rather than only
+// trusting the offset the overlay reports about itself.
+func gitLogEntriesN(n int) []gitLogEntry {
+	out := make([]gitLogEntry, n)
+	for i := range out {
+		out[i] = gitLogEntry{
+			SHA:     fmt.Sprintf("sha%03d", i),
+			Subject: fmt.Sprintf("commit %d", i),
+			Age:     "1 day ago",
+		}
+	}
+	return out
+}
+
+// TestGitLogWheel_SurvivesAPaint is the other half of the same defect
+// the bar press exposes. Draw used to call EnsureVisible on every
+// frame, so with the selection on row 0 — the state on every fresh
+// open — any offset the wheel set was pulled straight back to 0 by the
+// next paint: the history scrolled for zero frames and the user saw
+// nothing move. Scrolling is looking, not choosing (see overlay.List),
+// so a wheel tick has to outlive the frame that follows it, and the
+// commit it brings to the top of the window has to be the one painted
+// there.
+func TestGitLogWheel_SurvivesAPaint(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	g := &gitLogOverlay{app: a, title: "History", entries: gitLogEntriesN(60)}
+	g.sync()
+	a.overlays.Open(g)
+	r := g.rect()
+
+	g.HandleMouse(r.X+4, r.Y+4, tcell.WheelDown)
+	scrolled := g.Scroll()
+	if scrolled == 0 {
+		t.Fatal("the wheel should have scrolled the history")
+	}
+	if g.Sel() != 0 {
+		t.Fatalf("the wheel must not drag the highlight, got %d", g.Sel())
+	}
+
+	g.Draw(a.screen)
+	if g.Scroll() != scrolled {
+		t.Fatalf("a paint undid the wheel: scroll %d → %d", scrolled, g.Scroll())
+	}
+	a.screen.Show()
+	scr := a.screen.(tcell.SimulationScreen)
+	top := screenLine(scr, r.Y+3)
+	if want := g.entries[scrolled].SHA; !strings.Contains(top, want) {
+		t.Fatalf("the window's first row should paint %q, got %q", want, top)
 	}
 }
