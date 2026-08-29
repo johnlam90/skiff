@@ -454,10 +454,12 @@ func VerifyLine(actual, recorded string) bool {
 
 // ApplyReplace rewrites matches on disk: per file, verify each matched
 // line still reads as recorded, rewrite the survivors, and write the
-// file back atomically (temp + rename). Matches whose file or line
-// drifted are counted as skipped, never guessed at. The caller is
-// expected to have routed open-buffer files elsewhere — this function
-// only ever sees paths whose truth lives on disk.
+// file back via atomicfile.Replace — symlink-resolving and
+// mode-preserving, so a save through a link updates the target and a
+// 0755 script stays executable. Matches whose file or line drifted are
+// counted as skipped, never guessed at. The caller is expected to have
+// routed open-buffer files elsewhere — this function only ever sees
+// paths whose truth lives on disk.
 func ApplyReplace(rootDir string, matches []Match, query, repl string, opts Options) ReplaceReport {
 	var rep ReplaceReport
 	byFile := map[string][]Match{}
@@ -475,10 +477,6 @@ func ApplyReplace(rootDir string, matches []Match, query, repl string, opts Opti
 		if err != nil {
 			rep.Skipped += len(group)
 			continue
-		}
-		mode := os.FileMode(0644)
-		if fi, statErr := os.Stat(abs); statErr == nil {
-			mode = fi.Mode().Perm()
 		}
 		lines := strings.Split(string(data), "\n")
 
@@ -519,13 +517,7 @@ func ApplyReplace(rootDir string, matches []Match, query, repl string, opts Opti
 		if changedLines == 0 {
 			continue
 		}
-		tmp := abs + ".skiff-replace"
-		if err := os.WriteFile(tmp, []byte(strings.Join(lines, "\n")), mode); err != nil {
-			rep.Skipped += fileOcc
-			continue
-		}
-		if err := os.Rename(tmp, abs); err != nil {
-			_ = os.Remove(tmp)
+		if err := atomicfile.Replace(abs, []byte(strings.Join(lines, "\n"))); err != nil {
 			rep.Skipped += fileOcc
 			continue
 		}

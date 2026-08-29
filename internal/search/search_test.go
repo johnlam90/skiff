@@ -371,6 +371,44 @@ func TestApplyReplaceRegexGroups(t *testing.T) {
 	}
 }
 
+// TestApplyReplace_WriteFailureLeavesOriginal pins the atomic-write
+// contract ApplyReplace now gets from atomicfile.Replace: when the final
+// write can't land, the original file must be untouched and the matches
+// that were about to be rewritten must count as skipped, never guessed
+// at as replaced. Provoked by making the target's directory read-only —
+// same technique as atomicfile.TestReplaceFailureKeepsOriginal, and the
+// same root exemption, since root ignores directory permission bits.
+func TestApplyReplace_WriteFailureLeavesOriginal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions; the failure can't be provoked")
+	}
+	root := t.TempDir()
+	f := seed(t, root, "ro.txt", "old value\n")
+	dir := filepath.Dir(filepath.Join(root, f))
+
+	matches, _ := Search(root, []string{f}, "old", DefaultOptions())
+	if len(matches) != 1 {
+		t.Fatalf("seed matches: %d", len(matches))
+	}
+
+	if err := os.Chmod(dir, 0555); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+
+	rep := ApplyReplace(root, matches, "old", "new", DefaultOptions())
+	if rep.Replaced != 0 || rep.Skipped != 1 {
+		t.Fatalf("report: %+v, want Replaced=0 Skipped=1", rep)
+	}
+	data, err := os.ReadFile(filepath.Join(root, f))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(data) != "old value\n" {
+		t.Fatalf("original clobbered by a failed write: %q", data)
+	}
+}
+
 // TestReplaceLineZeroWidthMatchAtEnd is the regression for the crash
 // FuzzReplaceLine found: a regex that can match empty (`a*`) fires once
 // more at end-of-line after consuming the whole string, and the
