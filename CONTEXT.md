@@ -46,6 +46,14 @@ _Avoid_: help screen, cheat sheet (that's the strip's job), keymap
 A ready-made overlay kind (prompt, confirm, pick, form) that a feature
 fills with text and callbacks instead of drawing its own surface.
 
+**List**:
+The one scrolled, selectable window every row surface embeds — the
+list pick, the action menu, the finder, the git log and the git panel:
+the highlight, the scroll offset, the row hit-test and the scrollbar.
+The surface pushes its row count and window height in each frame
+(`sync()` first); the list never measures a frame itself.
+_Avoid_: viewport, menu model, cursor (that's the editor's)
+
 **Drill-in**:
 A single menu row that opens a pick of the rows it demoted — "Git…",
 "File clipboard…". A drill-in keeps a cluster reachable from the action
@@ -98,6 +106,15 @@ hold unterminated lines and every write restores the file's own ending,
 so editing one line of a CRLF file never rewrites the whole file.
 _Avoid_: newline mode, EOL setting (there is no setting — it is detected)
 
+**Changeset**:
+What a file operation reports back: the paths it added, removed and
+moved (old → new pairs; a folder move is one pair). `applyChangeset` is
+the one place the app reacts — repointing tabs, closing and reopening
+them, then refreshing the tree, the git tint, the finder index and the
+session. An empty changeset still runs that tail, which is how a failed
+op leaves nothing stale.
+_Avoid_: refresh list, diff (that's git's), result
+
 ### Git
 
 **Repo**:
@@ -127,6 +144,17 @@ kinds, replacing the explorer tree while active. Mouse-first, but it can
 take keyboard focus (`Esc g`) to walk rows, stage them, and reach the
 action buttons without a mouse.
 
+### Background work
+
+**Job**:
+One unit of background work with a policy — Coalesce (one in flight,
+at most one queued follow-up), Supersede (the newest start wins and a
+stale landing is dropped), Refuse (busy means refused, with a flash) or
+Concurrent (no gate) — that always lands on the event loop through one
+event type. Every goroutine → main-loop hand-off is a job or a Notify;
+nothing else posts custom events.
+_Avoid_: task, worker, async callback, in-flight flag
+
 ### Text
 
 **Grapheme cluster**:
@@ -139,3 +167,11 @@ double-click selects whole. Widths come from `uniseg`, the same
 engine tcell measures a cell with.
 _Avoid_: character, glyph, rune (a rune is a different unit — name
 which one you mean)
+
+**Edit**:
+One text mutation of a tab, made through the `edit` seam: undo state is
+recorded under the caller's group, the mutation runs, then the trailer —
+dirty, styles stale, caret follow, find matches refreshed — is applied
+once. Nothing writes the trailer by hand; `RestoreView` is the matching
+seam for putting a tab back on a remembered place.
+_Avoid_: change, mutation (that's what happens *inside* an edit)
