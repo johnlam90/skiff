@@ -79,6 +79,30 @@ changelog:
 # GITHUB_TOKEN the workflow already holds is enough to push it — no PAT,
 # no separate tap repo. The [skip ci] marker on the formula-update commit
 # stops the new push from triggering a second release run.
+#
+# NOTE(deprecation): goreleaser v2 deprecates top-level `brews:` in favor
+# of Cask-based publishing (`homebrew_casks`). As of the GoReleaser
+# version release.yml now pins (v2.18.0), this is no longer a soft
+# warning: `goreleaser check` HARD-FAILS with "configuration is valid,
+# but uses deprecated properties" whenever brews: is present (confirmed
+# 2026-08-29 — a real `release --snapshot --clean --skip=publish` build
+# still succeeds past the warning, so this only blocks the strict check
+# gate, not an actual release, for now). Treat that as reason to migrate
+# SOON: `goreleaser check` has been red on this key since this pass
+# pinned the tool, and a future GoReleaser bump could turn the warning
+# into a real release-time removal, not just a check-time one. Migration
+# changes the install mechanism for existing formula users
+# (quarantine/caveats differ) and the tap pull-sync consumes
+# Formula/skiff.rb — migrate ONLY on a prerelease tag first, and verify
+# `brew upgrade` from an existing formula install before letting a real
+# release use it.
+#
+# For whoever does this: release.yml's cosign-installer and
+# attest-build-provenance steps (added alongside signs: in the same
+# hardening pass as this pin) were resolved to these SHAs on 2026-08-29 —
+# reuse them or re-resolve fresh ones if you're bumping while in here:
+#   sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+#   actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
 brews:
   - name: skiff
     repository:
