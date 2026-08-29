@@ -70,14 +70,15 @@ changelog:
       - "Merge branch"
 
 # Homebrew formula committed straight back into this repo under Formula/.
-# Users install via:
+# That file is the source of truth: the johnlam90/homebrew-skiff tap repo
+# pull-syncs it on a cron, and users install with a single command (brew
+# resolves the tap automatically):
 #
-#   brew tap johnlam90/skiff https://github.com/johnlam90/skiff
 #   brew install johnlam90/skiff/skiff
 #
 # Because the formula lives in the same repo as the source, the default
 # GITHUB_TOKEN the workflow already holds is enough to push it — no PAT,
-# no separate tap repo. The [skip ci] marker on the formula-update commit
+# no cross-repo secret. The [skip ci] marker on the formula-update commit
 # stops the new push from triggering a second release run.
 #
 # NOTE(deprecation): goreleaser v2 deprecates top-level `brews:` in favor
