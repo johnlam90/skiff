@@ -52,11 +52,18 @@ checksum:
 # Keyless cosign signature over checksums.txt: signing the checksum file
 # covers every archive it lists. Verification is optional in install.sh
 # (when cosign is on PATH) so BusyBox/minimal targets keep working.
+#
+# cosign v4 (installed by cosign-installer v4.1.2 in release.yml) defaults
+# to the bundle format: --output-signature/--output-certificate are
+# deprecated and silently ignored, and omitting --bundle fails with
+# "create bundle file: open : no such file or directory" (confirmed on
+# the first real release run under this pin). One bundle file replaces
+# the separate .sig/.pem pair.
 signs:
   - cmd: cosign
-    args: ["sign-blob", "--yes", "--output-signature=${signature}", "--output-certificate=${certificate}", "${artifact}"]
+    args: ["sign-blob", "--yes", "--bundle=${signature}", "${artifact}"]
     artifacts: checksum
-    certificate: "${artifact}.pem"
+    signature: "${artifact}.cosign.bundle"
 
 changelog:
   sort: asc

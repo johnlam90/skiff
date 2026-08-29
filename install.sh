@@ -169,28 +169,30 @@ verify_checksum() {
 # release published; this proves the release itself was published by this
 # repo's own release workflow (keyless OIDC signing), not a swapped
 # publishing path. It is the ceiling, not the floor: cosign missing, or a
-# release published before signing landed (no .sig/.pem assets), is
+# release published before signing landed (no .cosign.bundle asset), is
 # reported and the install continues on the checksum alone.
+#
+# cosign v4 defaults to the bundle format (one file carries both the
+# signature and the certificate) rather than separate .sig/.pem assets —
+# .goreleaser.yml's signs: block publishes checksums.txt.cosign.bundle
+# to match.
 verify_signature() {
 	sums_file="$1"
-	sig_url="$2"
-	cert_url="$3"
-	tmp_dir="$4"
+	bundle_url="$2"
+	tmp_dir="$3"
 
 	if ! command -v cosign >/dev/null 2>&1; then
 		info "  cosign not found — skipping signature check (checksum already verified)"
 		return
 	fi
 
-	if ! fetch "$sig_url" "$tmp_dir/checksums.txt.sig" 2>/dev/null \
-		|| ! fetch "$cert_url" "$tmp_dir/checksums.txt.pem" 2>/dev/null; then
+	if ! fetch "$bundle_url" "$tmp_dir/checksums.txt.cosign.bundle" 2>/dev/null; then
 		info "  no signature published for ${version} — skipping signature check (checksum already verified)"
 		return
 	fi
 
 	cosign verify-blob \
-		--certificate "$tmp_dir/checksums.txt.pem" \
-		--signature "$tmp_dir/checksums.txt.sig" \
+		--bundle "$tmp_dir/checksums.txt.cosign.bundle" \
 		--certificate-identity-regexp "https://github.com/${REPO}/\.github/workflows/release\.yml@.*" \
 		--certificate-oidc-issuer https://token.actions.githubusercontent.com \
 		"$sums_file" >/dev/null 2>&1 \
@@ -313,8 +315,7 @@ main() {
 	verify_checksum "$tmp/$archive" "$archive" "$tmp/checksums.txt"
 	info "  sha256 verified"
 	verify_signature "$tmp/checksums.txt" \
-		"https://github.com/${REPO}/releases/download/${version}/checksums.txt.sig" \
-		"https://github.com/${REPO}/releases/download/${version}/checksums.txt.pem" \
+		"https://github.com/${REPO}/releases/download/${version}/checksums.txt.cosign.bundle" \
 		"$tmp"
 
 	tar -xzf "$tmp/$archive" -C "$tmp" \
