@@ -278,12 +278,14 @@ func (a *App) drawTabBar() {
 		}
 		tab := a.tabs.At(r.Index)
 		col := r.X + 1
-		if tab.Dirty && col >= stripX && col < tx+tw {
-			// Same story for the dirty dot: Modified is ColorDefault
-			// once the palette degrades, so the marker leans on
-			// Attrs.Modified to stay distinguishable from the name.
-			// Decompose keeps the row's own attributes (bold/italic)
-			// instead of clobbering them.
+		if (tab.Dirty || tab.DiskGone) && col >= stripX && col < tx+tw {
+			// The dot means "needs attention", not just "has edits" — a
+			// DiskGone tab (its file deleted, not yet recreated or
+			// re-saved) shows it too, same as Dirty. Modified is
+			// ColorDefault once the palette degrades, so the marker
+			// leans on Attrs.Modified to stay distinguishable from the
+			// name. Decompose keeps the row's own attributes
+			// (bold/italic) instead of clobbering them.
 			_, _, rowAttrs := st.Decompose()
 			dot := st.Foreground(a.theme.Modified).
 				Attributes(rowAttrs | a.theme.Attrs.Modified)
@@ -644,8 +646,11 @@ func (a *App) statusLeftText() string {
 			return fmt.Sprintf(" %s · %d×%d · %s",
 				strings.ToUpper(tab.ImageFmt), b.Dx(), b.Dy(), filepath.Base(tab.Path))
 		}
+		// Same "needs attention" gate as the tab-strip dot: DiskGone
+		// alone (a deleted-but-not-yet-recreated file) shows the marker
+		// too, not just Dirty.
 		dirty := ""
-		if tab.Dirty {
+		if tab.Dirty || tab.DiskGone {
 			dirty = " · ●"
 		}
 		return fmt.Sprintf(" %s · Ln %d, Col %d · %d lines%s",
