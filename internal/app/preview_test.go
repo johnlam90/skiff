@@ -213,6 +213,31 @@ func TestPreviewCoachMark_FiresOnceThenStaysQuiet(t *testing.T) {
 	}
 }
 
+// TestNewTab_DoesNotBlockOnGit pins the async-gutter contract (plan 009):
+// newTab must not shell out to `git diff` inline. Session restore calls
+// newTab in a loop, and a slow/huge/network-mounted repo would otherwise
+// serialize N subprocess waits before the first paint. GitLines arrives
+// later via the git-status pipeline (refreshGitStatusAsync), not
+// synchronously on construction.
+func TestNewTab_DoesNotBlockOnGit(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	target := filepath.Join(repo, "a.txt")
+	writeFileT(t, target, "one\ntwo\nthree\n")
+	gitRun(t, repo, "add", "a.txt")
+	gitRun(t, repo, "commit", "-m", "init")
+	writeFileT(t, target, "one\nchanged\nthree\n")
+
+	a := newTestApp(t, repo)
+	tab, err := a.newTab(target)
+	if err != nil {
+		t.Fatalf("newTab: %v", err)
+	}
+	if tab.GitLines != nil {
+		t.Fatalf("newTab must not load git lines inline, got %v", tab.GitLines)
+	}
+}
+
 // TestPreviewCoachMark_SilentForPermanentOpens keeps the hint attached
 // to the behavior it describes. A finder / menu / CLI open pins its tab
 // and has nothing surprising to explain, so it must announce the file

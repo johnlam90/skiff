@@ -604,6 +604,61 @@ func TestHandleDiffKey_EnterOpensFocusedFile(t *testing.T) {
 	}
 }
 
+// TestFirstChangedLine_PrefersRightNoFallsBackToLeftNo pins the diff
+// view's own line-number arithmetic for the Open file jump target: the
+// new-side line wins when both sides exist (a modification), a pure
+// deletion — which has no new side — falls back to the old-side line,
+// and a diff with no change rows at all yields 0 ("nothing to jump
+// to").
+func TestFirstChangedLine_PrefersRightNoFallsBackToLeftNo(t *testing.T) {
+	if got := firstChangedLine(parseSideBySideDiff(sampleDiff())); got != 2 {
+		t.Fatalf("modification: got %d, want 2 (the new-side line)", got)
+	}
+	pureDeletion := []string{"@@ -5,1 +4,0 @@", "-gone"}
+	if got := firstChangedLine(parseSideBySideDiff(pureDeletion)); got != 5 {
+		t.Fatalf("pure deletion: got %d, want 5 (falls back to the old-side line)", got)
+	}
+	contextOnly := []string{"@@ -1,1 +1,1 @@", " unchanged"}
+	if got := firstChangedLine(parseSideBySideDiff(contextOnly)); got != 0 {
+		t.Fatalf("no change rows: got %d, want 0", got)
+	}
+}
+
+// TestOpenFileButton_JumpsToFirstChangeWithoutGitLines pins the plan
+// 009 addendum: the Open file button derives its jump target from the
+// diff overlay's own parsed rows (d.rows), never from tab.GitLines —
+// which is nil right after a fresh open now that the inline `git diff`
+// is off the tab-open path (see TestNewTab_DoesNotBlockOnGit). Without
+// this, "click Open file → cursor jumps to what changed" would
+// silently stop working the moment GitLines went async: the tab would
+// open but the cursor would just sit at 0,0.
+func TestOpenFileButton_JumpsToFirstChangeWithoutGitLines(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("ctx one\nnew line\nctx two\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openDiffView("Diff · f.txt", sampleDiff(), target, target)
+
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+	if diffIsOpen(a) {
+		t.Fatal("Enter should close the diff view")
+	}
+	tab := a.activeTabPtr()
+	if tab == nil || tab.Path != target {
+		t.Fatalf("expected %s open", target)
+	}
+	if tab.GitLines != nil {
+		t.Fatalf("the jump must not depend on GitLines, but it was populated: %v", tab.GitLines)
+	}
+	// sampleDiff's one change row pairs "old line"/"new line" at file
+	// line 2 (1-based) — zero-based Cursor.Line 1.
+	if tab.Cursor.Line != 1 {
+		t.Fatalf("cursor should land on the diff's first changed line, got %d", tab.Cursor.Line)
+	}
+}
+
 // TestHandleDiffKey_TabDeclinesAction verifies Tab moves focus to
 // Close and Enter then dismisses without opening anything; Esc always
 // dismisses.

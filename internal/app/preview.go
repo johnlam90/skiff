@@ -89,14 +89,18 @@ func (a *App) openFileMode(path string, preview bool) {
 // newTab constructs a tab for path with the app-wide settings applied —
 // the ONE construction path, shared by openFileMode and restoreSession,
 // so a new per-tab step can never be added to one and forgotten in the
-// other.
+// other. Deliberately does NOT load git gutter lines inline: that used
+// to be one `git diff` subprocess per call, so session restore's loop
+// serialized N subprocess waits before the first paint. GitLines starts
+// nil and arrives via the async git-status pipeline instead (see
+// refreshGitStatusAsync / applyGitStatus) — a fresh tab renders without
+// gutter marks for one round trip.
 func (a *App) newTab(path string) (*editor.Tab, error) {
 	t, err := editor.NewTab(path)
 	if err != nil {
 		return nil, err
 	}
 	t.Wrap = a.wrapOn
-	t.GitLines = loadGitLineChanges(a.rootDir, a.diffBase, path)
 	return t, nil
 }
 
