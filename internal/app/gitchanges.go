@@ -521,7 +521,7 @@ func (a *App) drawGitPanelBar(x, top, listH int) {
 		return
 	}
 	thumbFg := a.theme.Muted
-	if a.dragMode == "gitpanelscrollbar" {
+	if a.dragMode == dragGitPanelScrollbar {
 		thumbFg = a.theme.Accent
 	}
 	bg := a.theme.SidebarBG

@@ -53,7 +53,7 @@ func (a *App) closeAllModals() {
 	a.diffPanelRow = -1
 	a.closeProjFind()
 	a.hoveredMenuRow = -1
-	a.dragMode = ""
+	a.dragMode = dragNone
 	a.stopAutoScroll()
 }
 

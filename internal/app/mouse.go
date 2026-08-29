@@ -144,21 +144,21 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	// Drag continuation: while we're mid-drag in the editor, every event
 	// with the button held extends the selection — even if the cursor has
 	// wandered out of the editor pane.
-	if leftDown && a.dragMode == "editor" {
+	if leftDown && a.dragMode == dragEditor {
 		a.editorDrag(x, y)
 		return
 	}
 
 	// Sidebar resize drag: keep the splitter glued to the mouse x so the
 	// panel reshapes live as the user drags.
-	if leftDown && a.dragMode == "sidebar" {
+	if leftDown && a.dragMode == dragSidebar {
 		a.resizeSidebar(x + 1)
 		return
 	}
 
 	// Scrollbar thumb drag: the thumb stays glued to the mouse row even
 	// when the pointer wanders off the bar column.
-	if leftDown && a.dragMode == "scrollbar" {
+	if leftDown && a.dragMode == dragScrollbar {
 		_, ey, _, _ := a.editorRect()
 		a.scrollbarTo(y - ey)
 		return
@@ -167,7 +167,7 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	// File-tree thumb drag: same contract as the editor's — the tree
 	// keeps following the pointer's row once the grab has started, even
 	// when the pointer leaves the bar's column.
-	if leftDown && a.dragMode == "treescrollbar" {
+	if leftDown && a.dragMode == dragTreeScrollbar {
 		_, sy, _, _ := a.sidebarRect()
 		a.treeScrollbarTo(y - sy)
 		return
@@ -175,13 +175,13 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 
 	// Git-panel thumb drag: the change list is the sidebar's other
 	// mode, so its bar gets the same grab contract as the tree's.
-	if leftDown && a.dragMode == "gitpanelscrollbar" {
+	if leftDown && a.dragMode == dragGitPanelScrollbar {
 		a.gitPanelScrollbarTo(y)
 		return
 	}
 
 	// Initial press dispatch.
-	if leftDown && a.dragMode == "" {
+	if leftDown && a.dragMode == dragNone {
 		sw := a.sidebarW()
 		splitX := a.splitterX()
 		// A press anywhere but the sidebar means the user has moved on
@@ -192,7 +192,7 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		}
 		switch {
 		case splitX >= 0 && x == splitX:
-			a.dragMode = "sidebar"
+			a.dragMode = dragSidebar
 		case sw > 0 && x < splitX:
 			// The tree's bar and the Git panel's sit on the column
 			// just left of the splitter — whichever panel is up, that
@@ -201,12 +201,12 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 			// two can hit: each opts out when its panel is hidden.
 			if a.treeScrollbarHit(x, y) {
 				a.treeScrollbarTo(y)
-				a.dragMode = "treescrollbar"
+				a.dragMode = dragTreeScrollbar
 				return
 			}
 			if a.gitPanelScrollbarHit(x, y) {
 				a.gitPanelScrollbarTo(y)
-				a.dragMode = "gitpanelscrollbar"
+				a.dragMode = dragGitPanelScrollbar
 				return
 			}
 			a.sidebarClick(x, y)
@@ -217,7 +217,7 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		case y > 0 && y < a.height-1:
 			if localY, ok := a.scrollbarHit(x, y); ok {
 				a.scrollbarTo(localY)
-				a.dragMode = "scrollbar"
+				a.dragMode = dragScrollbar
 				return
 			}
 			// Only a press editorPress claims as its own arms the drag.
@@ -228,7 +228,7 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 			// a selection the user never started — and the release copy
 			// it to the clipboard.
 			if a.editorPress(x, y) {
-				a.dragMode = "editor"
+				a.dragMode = dragEditor
 			}
 		}
 		return
@@ -240,12 +240,12 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	// any multiplexer never see a selection of their own, so Cmd+C at
 	// the terminal level has nothing to grab. A plain click collapses
 	// the selection before release, so caret placement never copies.
-	if a.dragMode == "editor" {
+	if a.dragMode == dragEditor {
 		if t := a.activeTabPtr(); t != nil && t.HasSelection() {
 			a.copySelection()
 		}
 	}
-	a.dragMode = ""
+	a.dragMode = dragNone
 	a.stopAutoScroll()
 }
 
@@ -581,7 +581,7 @@ func (a *App) stopAutoScroll() {
 // suggests the user is no longer drag-selecting (button released, menu
 // opened, no active tab).
 func (a *App) handleAutoScroll() {
-	if a.autoScrollDir == 0 || a.dragMode != "editor" || a.anyModalOpen() {
+	if a.autoScrollDir == 0 || a.dragMode != dragEditor || a.anyModalOpen() {
 		a.stopAutoScroll()
 		return
 	}
