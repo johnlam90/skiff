@@ -211,6 +211,93 @@ func TestNewSingleFileApp_ShapeInvariants(t *testing.T) {
 	}
 }
 
+// TestRun_DrainsBurstAndExits drives the real event loop end to end: a
+// queued wheel burst must be fully applied (the drain loop's whole
+// reason to exist is one draw per burst, not one per event), and the
+// Esc-leader quit must terminate the loop through the same dispatch a
+// user's keystrokes take. The trash teardown is asserted through the
+// Run→Close composition main.go actually runs — emptyTrash moved from
+// Run's tail into Close so signal quits and recovered panics empty it
+// too, and TestClose_EmptiesTrash pins Close's half directly.
+func TestRun_DrainsBurstAndExits(t *testing.T) {
+	dir := t.TempDir()
+	big := filepath.Join(dir, "big.txt")
+	if err := os.WriteFile(big, []byte(strings.Repeat("line\n", 200)), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	doomed := filepath.Join(dir, "doomed.txt")
+	if err := os.WriteFile(doomed, []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	a := newTestApp(t, dir)
+	scr, ok := a.screen.(tcell.SimulationScreen)
+	if !ok {
+		t.Fatal("newTestApp must build on a SimulationScreen")
+	}
+	a.openFile(big)
+	if err := a.moveToTrash(doomed); err != nil {
+		t.Fatalf("moveToTrash: %v", err)
+	}
+	stored := a.trashed[len(a.trashed)-1].stored
+	if _, err := os.Stat(stored); err != nil {
+		t.Fatalf("trash copy should exist before Run: %v", err)
+	}
+
+	// Quiesce before injecting: openFile kicks an async git refresh
+	// whose completion event would otherwise share the simulation
+	// screen's 10-slot queue with the burst below (postEvent blocks
+	// when it is full).
+	deadline := time.Now().Add(3 * time.Second)
+	for (a.gitRefreshInFlight || scr.HasPendingEvent()) && time.Now().Before(deadline) {
+		if scr.HasPendingEvent() {
+			a.handleEvent(scr.PollEvent())
+		} else {
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+
+	// Queue the whole session up front: a wheel burst in the editor pane,
+	// then the two-keystroke Esc-leader quit. 7 events stay safely under
+	// the queue's 10-event capacity.
+	const burst = 5
+	x, y := a.sidebarW()+10, 5
+	for i := 0; i < burst; i++ {
+		scr.InjectMouse(x, y, tcell.WheelDown, tcell.ModNone)
+	}
+	scr.InjectKey(tcell.KeyEscape, 0, tcell.ModNone)
+	scr.InjectKey(tcell.KeyRune, 'q', tcell.ModNone)
+
+	done := make(chan error, 1)
+	go func() { done <- a.Run() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run hung: Esc q never terminated the loop (blocked in PollEvent?)")
+	}
+
+	if !a.quit {
+		t.Fatal("Run returned without quit set")
+	}
+	tab := a.activeTabPtr()
+	if tab == nil {
+		t.Fatal("no active tab after Run")
+	}
+	if want := burst * wheelLines; tab.ScrollY != want {
+		t.Fatalf("ScrollY = %d, want the full burst %d", tab.ScrollY, want)
+	}
+
+	// main.go defers Close around Run; the composed exit path is what
+	// discards the delete-undo window.
+	a.Close()
+	if _, err := os.Stat(stored); !os.IsNotExist(err) {
+		t.Fatal("Run+Close should have emptied the trash")
+	}
+}
+
 // TestNewFileLabel_Plain shows the bare label when the active folder is the
 // project root.
 func TestNewFileLabel_Plain(t *testing.T) {
