@@ -1,0 +1,23 @@
+name: Feature request
+description: Suggest something Skiff should do.
+labels: ["needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you running into?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: fit
+    attributes:
+      label: How does this fit a mouse-first, no-Ctrl-shortcuts editor?
+      description: Skiff is opinionated — see the project's identity rules before proposing keybindings or config options.
+    validations:
+      required: true
