@@ -661,7 +661,10 @@ func indexNewline(s string) int {
 // On success it reloads the affected tab from disk so the buffer
 // shows the formatted output — but only if the user hasn't started
 // editing again in the meantime (Dirty=true). Trampling unsaved
-// edits would be the worst possible UX outcome of this feature.
+// edits would be the worst possible UX outcome of this feature. The
+// reload uses ReloadKeepHistory rather than plain Reload: the user
+// never asked for this reload, so it must not cost them their undo
+// stack the way the disk-conflict prompt's explicit Reload does.
 func (a *App) handleFormatDone(e *formatDoneEvent) {
 	if e == nil {
 		return
@@ -678,7 +681,7 @@ func (a *App) handleFormatDone(e *formatDoneEvent) {
 			a.flash(fmt.Sprintf("%s ran — kept your edits (file on disk was reformatted)", e.label))
 			return
 		}
-		if err := tab.Reload(); err != nil {
+		if err := tab.ReloadKeepHistory(); err != nil {
 			a.flash(fmt.Sprintf("%s ran but reload failed: %v", e.label, err))
 			return
 		}

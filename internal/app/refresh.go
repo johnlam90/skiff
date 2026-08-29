@@ -337,6 +337,11 @@ func (a *App) applyTabProbes(probes []tabProbe) {
 //   - Disk newer, tab dirty → a real conflict: prompt (Keep mine /
 //     Reload / Diff) and leave a marker on the tab until it is resolved.
 //
+// The clean-tab reload uses ReloadKeepHistory, not plain Reload: the user
+// never asked for this reload (a background git checkout or `make` wrote
+// the file), so it must not erase the undo history of edits the user made
+// before those bytes were last saved.
+//
 // The reload's ReadFile stays synchronous on purpose: it only fires when
 // a file actually changed under a clean tab, which is an event rather
 // than a per-tick cost, and reading the bytes off-thread would need a
@@ -390,7 +395,7 @@ func (a *App) reconcileTab(tab *editor.Tab, p tabProbe) {
 		tab.Mtime = p.mtime
 		return
 	}
-	if err := tab.Reload(); err != nil {
+	if err := tab.ReloadKeepHistory(); err != nil {
 		a.flash(fmt.Sprintf("%s reload failed: %v", filepath.Base(tab.Path), err))
 		return
 	}

@@ -316,6 +316,45 @@ func TestHandleFormatDone_ReloadsCleanBuffer(t *testing.T) {
 	}
 }
 
+// TestFormatOnSave_PreservesUndoHistory pins the fix for the bug where
+// every save with a formatter configured destroyed the user's undo
+// stack: handleFormatDone's reload was never something the user asked
+// for, so it must keep history instead of wiping it the way the
+// disk-conflict prompt's explicit Reload does.
+func TestFormatOnSave_PreservesUndoHistory(t *testing.T) {
+	useTestTrustFile(t)
+	root := t.TempDir()
+	a := newTestApp(t, root)
+	target := filepath.Join(root, "main.go")
+	if err := os.WriteFile(target, []byte("original\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab := openTabAtPath(t, a, target)
+	tab.InsertString("edited-")
+	if err := tab.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	preFormat := tab.Buffer.String()
+
+	if err := os.WriteFile(target, []byte("formatted\n"), 0644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	a.handleFormatDone(&formatDoneEvent{tabPath: target, label: "fmt"})
+
+	if got := tab.Buffer.String(); got != "formatted\n" {
+		t.Fatalf("buffer after format reload: got %q, want %q", got, "formatted\n")
+	}
+	if !tab.CanUndo() {
+		t.Fatal("expected undo history to survive a format-on-save reload")
+	}
+	if !tab.Undo() {
+		t.Fatal("Undo should succeed")
+	}
+	if got := tab.Buffer.String(); got != preFormat {
+		t.Fatalf("after undo = %q, want pre-format text %q", got, preFormat)
+	}
+}
+
 // TestHandleFormatDone_PreservesDirtyBuffer is the most important
 // invariant of the whole feature: if the user typed during a slow
 // formatter run, their unsaved edits must survive. Tramping them
