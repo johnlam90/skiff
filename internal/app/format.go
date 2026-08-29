@@ -575,9 +575,9 @@ var formatTimeout = formatTimeoutDefault
 // substituted in. Runs on the formatter job and lands through
 // handleFormatDone so the main loop can reload the buffer and flash a
 // status — exactly the same pattern runCustomAction uses. The job is
-// Refuse: a second save while a formatter is still running is saved
-// unformatted and told so, rather than racing two formatters over one
-// project or silently losing the first run's reload.
+// Concurrent: format-on-save is per tab, so a second tab saved while
+// the first's formatter still runs gets its own run and its own
+// landing, exactly as before the job existed.
 //
 // We deliberately use exec.CommandContext (not sh -c) with an explicit
 // argv so a shell-injection vector via a malicious format.json is just
@@ -603,7 +603,8 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 	// Copy the argv: the caller's slice may be reused or mutated on
 	// the event loop while the goroutine still reads it.
 	args := append([]string(nil), argv...)
-	started := a.formatter.Start(func(context.Context) (formatResult, error) {
+	a.flash(label + "…")
+	a.formatter.Start(func(context.Context) (formatResult, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), deadline)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
@@ -633,11 +634,6 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 		}
 		return formatResult{tabPath: tabPath, label: label}, err
 	})
-	if !started {
-		a.flash(label + " skipped — another formatter is still running; saved unformatted")
-		return
-	}
-	a.flash(label + "…")
 }
 
 // indexNewline returns the index of the first newline in s, or -1.

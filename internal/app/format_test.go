@@ -709,14 +709,27 @@ func TestMaybeOfferInstall_FreshProjectStillAutoTrusts(t *testing.T) {
 }
 
 // waitFormatterQuiet pumps until the formatter run lands through the
-// real handler and then asserts it landed without an error: the
-// handler's failure path is the one flash that says "failed", so its
-// absence is the success signal a test can read.
+// real handler and asserts, positively, that a landing was observed and
+// that it carried no error — the same "a done event arrived with err ==
+// nil" the pre-job tests read off the event. Observing the landing
+// (rather than the absence of a "failed" flash) is what separates "ran
+// and succeeded" from "never started".
 func waitFormatterQuiet(t *testing.T, a *App) {
 	t.Helper()
+	inner := a.formatter.OnDone
+	landed, lastErr := 0, error(nil)
+	a.formatter.OnDone = func(r formatResult, err error) {
+		landed++
+		lastErr = err
+		inner(r, err)
+	}
 	pumpUntil(t, a, "formatter", idle(&a.formatter))
-	if strings.Contains(a.statusMsg, "failed") {
-		t.Fatalf("formatter failed: %q", a.statusMsg)
+	a.formatter.OnDone = inner
+	if landed == 0 {
+		t.Fatal("no formatter landing was observed — the run never started")
+	}
+	if lastErr != nil {
+		t.Fatalf("formatter failed: %v", lastErr)
 	}
 }
 

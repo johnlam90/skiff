@@ -13,7 +13,7 @@
 // second start piles up, queues, or is refused, and the rule that a
 // result never touches UI state anywhere but the loop.
 //
-// Three policies cover every job the editor has:
+// Four policies cover every job the editor has:
 //
 //   - Coalesce: one run in flight, at most one queued follow-up. A start
 //     during a run does not spawn; it is remembered and runs once the
@@ -25,10 +25,13 @@
 //     sweep (project find).
 //   - Refuse: while a run is in flight, Start returns false and spawns
 //     nothing. Mutations that must not race themselves — a git verb, a
-//     file move, a project replace, a formatter.
+//     file move, a project replace.
+//   - Concurrent: every start spawns and every landing applies. Runs
+//     that are independent of each other and each owe the user their
+//     own report — a formatter per saved tab, a user's shell-outs.
 //
-// Invalidate is the fourth verb every policy shares: it retires whatever
-// is in flight (the landing is dropped, the run's context is cancelled)
+// Invalidate is the verb every policy shares: it retires whatever is
+// in flight (the landing is dropped, the run's context is cancelled)
 // without starting anything — a main-thread mutation that made the
 // sweep's answer stale, or a panel closing under its own search.
 //
@@ -42,13 +45,23 @@ package asyncjob
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
 )
 
 // Policy is what a Job does when Start is called while a run is already
-// in flight. See the package comment for the three.
+// in flight. The first three each say that at most one result matters —
+// the latest state (Coalesce), the newest gesture (Supersede), or an
+// exclusive mutation (Refuse) — which is why a job that had no gate at
+// all could not be expressed in them: Refuse would refuse a second
+// tab's save, Supersede would drop the first tab's reload, Coalesce
+// would replace the middle member of a burst. Concurrent is the fourth
+// member for exactly those jobs, where every run is independent and
+// every landing owes the user its own report. It is not a default: a
+// job that reads shared state or mutates the same resource belongs to
+// one of the other three.
 type Policy int
 
 const (
@@ -59,6 +72,10 @@ const (
 	Supersede
 	// Refuse spawns nothing while a run is in flight; Start returns false.
 	Refuse
+	// Concurrent spawns every start and applies every landing, in the
+	// order they reach the loop. No queue, no refusal, and Start never
+	// bumps the generation — only Invalidate does.
+	Concurrent
 )
 
 // String names the policy for messages and test failures.
@@ -70,9 +87,22 @@ func (p Policy) String() string {
 		return "Supersede"
 	case Refuse:
 		return "Refuse"
+	case Concurrent:
+		return "Concurrent"
 	}
 	return fmt.Sprintf("Policy(%d)", int(p))
 }
+
+// postRetries and postRetryDelay bound how long a worker keeps trying to
+// hand its landing to the loop when Post refuses it. tcell's terminal
+// screen queues 256 events and PostEvent returns ErrEventQFull rather
+// than block, so a refusal means the loop is badly behind; a second of
+// retries from a goroutine that has nothing else to do rides that out
+// without costing the loop anything. postRetryDelay is a var only so
+// tests can shorten the wait — production never reassigns it.
+const postRetries = 40
+
+var postRetryDelay = 25 * time.Millisecond
 
 // Job is one background job's whole lifecycle: its policy, the seams it
 // spawns and posts through, and the on-loop landing. The exported fields
@@ -90,9 +120,10 @@ type Job[T any] struct {
 	// guard (safeGo); a panic in work reaches it unwrapped.
 	Spawn func(name string, fn func())
 	// Post hands the finished run's Event to the event loop. The app
-	// passes its screen's PostEvent. A post that fails is dropped the
-	// way every hand-rolled job dropped it, and the run then never
-	// lands — see the note on Start.
+	// passes its screen's PostEvent. A refusal is retried from the
+	// worker (postRetries × postRetryDelay); a run whose landing still
+	// cannot be posted is recorded as lost and stops counting as in
+	// flight, so a dropped event can never strand a gate.
 	Post func(tcell.Event) error
 	// OnDone lands a current run's result on the event loop. A run
 	// retired by Invalidate or superseded by a newer Start never
@@ -103,12 +134,23 @@ type Job[T any] struct {
 	// it for every policy; Supersede bumps it on every Start too. A
 	// landing whose gen no longer matches is stale and dropped.
 	gen int
+	// genCtx is the context every run of the current generation gets,
+	// and genCancel retires it. One context per generation rather than
+	// per run keeps "retire whatever is in flight" a single call under
+	// every policy: Invalidate and a superseding Start cancel it and
+	// let the next Start mint a fresh one.
+	genCtx    context.Context
+	genCancel context.CancelFunc
 	// inFlight counts runs spawned but not yet landed: 0 or 1 under
-	// Coalesce and Refuse, any number under Supersede.
+	// Coalesce and Refuse, any number under Supersede and Concurrent.
+	// A run whose landing was lost (see lost) is subtracted the next
+	// time the main thread looks.
 	inFlight int
-	// cancel retires the newest run's context. Invalidate and a
-	// superseding Start call it so a cooperative worker can stop early.
-	cancel context.CancelFunc
+	// lost counts runs whose landing the worker could not post after
+	// every retry. Written by workers, drained by the main thread in
+	// reconcileLost — the one piece of job state that crosses
+	// goroutines, and it crosses atomically.
+	lost atomic.Int32
 	// queued is the Coalesce follow-up: the work of the most recent
 	// Start that arrived during a run, captured with the values that
 	// Start saw. It spawns when the in-flight run lands.
@@ -127,14 +169,18 @@ type Job[T any] struct {
 // on the loop: it never sees the job or the app, and its return value is
 // the only thing that crosses back.
 //
-// If Post fails (a full or closed queue) the run never lands, which under
-// Refuse leaves the gate closed. That is the standing behaviour of every
-// job before this package and tcell's PostEvent contract, not a choice
-// made here.
+// A Post the loop refuses (tcell's queue is bounded and PostEvent does
+// not block) is retried from the worker for about a second. If it still
+// fails the landing is lost — OnDone never sees it — but the run stops
+// counting as in flight, so a Refuse gate reopens and a Coalesce job
+// runs again on its next kick rather than queueing behind a run that
+// will never land. Every hand-rolled job before this package left its
+// busy flag set forever in that case.
 func (j *Job[T]) Start(work func(ctx context.Context) (T, error)) bool {
 	if j.Spawn == nil || j.Post == nil {
 		panic(fmt.Sprintf("asyncjob: job %q started without its Spawn/Post seams", j.Name))
 	}
+	j.reconcileLost()
 	if j.inFlight > 0 {
 		switch j.Policy {
 		case Refuse:
@@ -144,22 +190,62 @@ func (j *Job[T]) Start(work func(ctx context.Context) (T, error)) bool {
 			return true
 		}
 	}
-	if j.Policy == Supersede {
-		j.gen++
-		if j.cancel != nil {
-			j.cancel()
-		}
+	if j.Policy == Coalesce {
+		// Spawning now with the latest capture makes any follow-up
+		// queued behind a lost run redundant: this IS the follow-up.
+		j.queued = nil
 	}
-	gen := j.gen
-	ctx, cancel := context.WithCancel(context.Background())
-	j.cancel = cancel
+	if j.Policy == Supersede {
+		j.retire()
+	}
+	if j.genCtx == nil {
+		j.genCtx, j.genCancel = context.WithCancel(context.Background())
+	}
+	ctx, gen := j.genCtx, j.gen
 	j.inFlight++
 	j.Spawn(j.Name, func() {
-		defer cancel()
 		res, err := work(ctx)
-		_ = j.Post(&Event{when: time.Now(), land: func() { j.land(gen, res, err) }})
+		ev := &Event{when: time.Now(), land: func() { j.land(gen, res, err) }}
+		if !j.post(ev) {
+			j.lost.Add(1)
+		}
 	})
 	return true
+}
+
+// post hands one landing to the loop, retrying a refusal on a short
+// bounded schedule. Runs on the worker goroutine; reports whether the
+// event was accepted.
+func (j *Job[T]) post(ev *Event) bool {
+	for attempt := 0; ; attempt++ {
+		if err := j.Post(ev); err == nil {
+			return true
+		}
+		if attempt >= postRetries {
+			return false
+		}
+		time.Sleep(postRetryDelay)
+	}
+}
+
+// reconcileLost folds landings the workers gave up on into the in-flight
+// count. Called on the main thread before any decision that reads the
+// count, so a lost landing is invisible to callers: Busy clears, a
+// Refuse gate reopens, a Coalesce kick spawns instead of queueing.
+func (j *Job[T]) reconcileLost() {
+	if n := j.lost.Swap(0); n > 0 {
+		j.inFlight -= int(n)
+	}
+}
+
+// retire bumps the generation and cancels the context every in-flight
+// run of the old one shares; the next Start mints a fresh one.
+func (j *Job[T]) retire() {
+	j.gen++
+	if j.genCancel != nil {
+		j.genCancel()
+		j.genCtx, j.genCancel = nil, nil
+	}
 }
 
 // land is the on-loop half of a run: count it finished, hand a current
@@ -171,10 +257,8 @@ func (j *Job[T]) Start(work func(ctx context.Context) (T, error)) bool {
 // Start made by OnDone is not raced by it; that run's landing picks the
 // queued work up instead.
 func (j *Job[T]) land(gen int, res T, err error) {
+	j.reconcileLost()
 	j.inFlight--
-	if j.inFlight == 0 {
-		j.cancel = nil
-	}
 	if gen == j.gen && j.OnDone != nil {
 		j.OnDone(res, err)
 	}
@@ -187,24 +271,23 @@ func (j *Job[T]) land(gen int, res T, err error) {
 
 // Busy reports whether any run is in flight — a landing still owed to
 // the loop. Tests drain on it; the git panel greys its buttons on it.
-func (j *Job[T]) Busy() bool { return j.inFlight > 0 }
+func (j *Job[T]) Busy() bool {
+	j.reconcileLost()
+	return j.inFlight > 0
+}
 
 // Queued reports whether a Coalesce follow-up is waiting on the
 // in-flight run. Always false under the other policies.
 func (j *Job[T]) Queued() bool { return j.queued != nil }
 
-// Invalidate retires the in-flight run: its landing is dropped and its
-// context cancelled. Nothing new starts, and a queued Coalesce follow-up
-// is kept — it has not read anything yet, so its answer will be fresh.
-// This is "a main-thread mutation made the sweep stale" and "the panel
-// closed under its search", both of which used to be a hand-bumped
-// generation. Main-thread only.
+// Invalidate retires every in-flight run: their landings are dropped and
+// their shared context cancelled. Nothing new starts, and a queued
+// Coalesce follow-up is kept — it has not read anything yet, so its
+// answer will be fresh. This is "a main-thread mutation made the sweep
+// stale" and "the panel closed under its search", both of which used to
+// be a hand-bumped generation. Main-thread only.
 func (j *Job[T]) Invalidate() {
-	j.gen++
-	if j.cancel != nil {
-		j.cancel()
-		j.cancel = nil
-	}
+	j.retire()
 }
 
 // Event is the one tcell event every job lands through. The loop

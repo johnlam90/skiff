@@ -247,17 +247,16 @@ func (a *App) runCustomAction(idx int) {
 // execCustomAction is the actual shell-out. Pulled out of
 // runCustomAction so both the prompt-less and prompted paths share
 // the env-var, logging, and landing wiring without diverging. The job
-// is Refuse: a second action while one is still running is refused
-// with a flash rather than run concurrently — of the three policies it
-// is the only one that cannot silently lose the first action's report,
-// which is the "did my scp actually work?" complaint the report exists
-// to answer.
+// is Concurrent: actions are the user's own shell commands, each with
+// its own report, and two of them running side by side (a deploy and a
+// lint) was always allowed — every landing applies.
 func (a *App) execCustomAction(act customactions.Action, promptValues map[string]string) {
 	vars := a.captureActionVars()
 	env := append(os.Environ(), vars.envSlice()...)
 	env = append(env, promptValuesEnv(act.Prompts, promptValues)...)
 
-	accepted := a.customAction.Start(func(context.Context) (customActionResult, error) {
+	a.flash(act.Label + "…")
+	a.customAction.Start(func(context.Context) (customActionResult, error) {
 		started := time.Now()
 		cmd := exec.Command("sh", "-c", act.Command)
 		cmd.Env = env
@@ -281,11 +280,6 @@ func (a *App) execCustomAction(act customactions.Action, promptValues map[string
 
 		return customActionResult{label: act.Label, output: out, duration: duration}, runErr
 	})
-	if !accepted {
-		a.flash("Another action is still running")
-		return
-	}
-	a.flash(act.Label + "…")
 }
 
 // menuSave runs the Save action and dismisses the menu.

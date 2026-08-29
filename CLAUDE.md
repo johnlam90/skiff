@@ -143,8 +143,8 @@ internal/session/session.go   Session store — one file per project under
                               ~/.local/state/skiff/sessions/ (legacy
                               sessions.json is migrated + renamed aside)
 internal/asyncjob/            The one shape of a background job: Job[T]
-                              with a Policy (Coalesce / Supersede / Refuse),
-                              injected Spawn + Post seams, and an OnDone
+                              with a Policy (Coalesce / Supersede / Refuse /
+                              Concurrent), injected Spawn + Post seams, and an OnDone
                               that runs only when the loop lands the single
                               *asyncjob.Event. Every goroutine-backed
                               feature in app is one Job field; Notify is
@@ -377,10 +377,14 @@ tree-refresh tick, the signal forwarder) post their own tiny events
 that runs once and lands a result is an `asyncjob.Job[T]` field on
 `App` — tree sweep, git status, diff load, file op, project replace,
 git verb, branch/worktree list, formatter, custom action, the
-project-find sweep — wired in `wireJobs` with one of three policies:
+project-find sweep — wired in `wireJobs` with one of four policies:
 `Coalesce` (one in flight, one queued follow-up), `Supersede` (every
 start spawns; only the newest landing applies), `Refuse` (busy →
-`Start` returns false). The job owns the busy/queued/generation
+`Start` returns false), `Concurrent` (every start spawns, every landing
+applies — the formatter and custom actions, which never had a gate). A
+landing the loop's queue refuses is retried from the worker and, if
+still lost, stops counting as in flight, so no gate can strand. The job
+owns the busy/queued/generation
 bookkeeping; `handleEvent` has ONE `*asyncjob.Event` case whose `Land`
 runs the stale check, the handler, and any follow-up. `Invalidate` is
 the "a main-thread mutation retired the in-flight run" verb (tree

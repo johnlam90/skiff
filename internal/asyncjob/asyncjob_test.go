@@ -31,14 +31,41 @@ type loop struct {
 	queue  []tcell.Event
 	panics []any
 	wg     sync.WaitGroup
+
+	// refuse makes post fail while it is > 0 (decremented per call) or
+	// while refuseAll is set, playing a full tcell queue.
+	refuse    atomic.Int32
+	refuseAll atomic.Bool
+	posts     atomic.Int32
 }
 
 // post is the Post seam.
 func (l *loop) post(ev tcell.Event) error {
+	l.posts.Add(1)
+	if l.refuseAll.Load() {
+		return tcell.ErrEventQFull
+	}
+	if l.refuse.Load() > 0 {
+		l.refuse.Add(-1)
+		return tcell.ErrEventQFull
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.queue = append(l.queue, ev)
 	return nil
+}
+
+// shortPostRetry shrinks the worker's retry delay for the test and
+// restores it once every worker the loop spawned has exited — the
+// workers read it, so restoring under a running one would race.
+func shortPostRetry(t *testing.T, l *loop) {
+	t.Helper()
+	orig := postRetryDelay
+	postRetryDelay = time.Millisecond
+	t.Cleanup(func() {
+		l.wg.Wait()
+		postRetryDelay = orig
+	})
 }
 
 // spawn is the Spawn seam: a guarded goroutine.
@@ -293,11 +320,159 @@ func TestRefuse_SecondStartReturnsFalse(t *testing.T) {
 	l.landAll()
 }
 
+// TestConcurrent_OverlappingStartsBothLand pins the no-gate policy: two
+// starts during each other both spawn, both landings apply — in the
+// order they reach the loop, the second-started run first here — and
+// nothing is queued, refused or superseded.
+func TestConcurrent_OverlappingStartsBothLand(t *testing.T) {
+	l := &loop{}
+	var landed []int
+	j := newJob(l, Concurrent, &landed)
+	first, second := newGate(), newGate()
+
+	if !j.Start(first.work(1)) || !j.Start(second.work(2)) {
+		t.Fatal("Concurrent accepts every start")
+	}
+	first.waitRuns(t, 1)
+	second.waitRuns(t, 1)
+	if j.Queued() {
+		t.Fatal("Concurrent never queues")
+	}
+
+	close(second.release)
+	l.waitPosted(t, 1)
+	l.landAll()
+	if len(landed) != 1 || landed[0] != 2 {
+		t.Fatalf("the second run's landing should apply on arrival, got %v", landed)
+	}
+	if !j.Busy() {
+		t.Fatal("the first run is still in flight")
+	}
+
+	close(first.release)
+	l.waitPosted(t, 1)
+	l.landAll()
+	if len(landed) != 2 || landed[1] != 1 {
+		t.Fatalf("both landings should apply in arrival order, got %v", landed)
+	}
+	if j.Busy() {
+		t.Fatal("nothing in flight once both have landed")
+	}
+}
+
+// TestConcurrent_InvalidateRetiresEveryRun: the one verb Concurrent
+// shares with the gated policies retires all of its in-flight runs at
+// once — their shared context is cancelled and no landing applies.
+func TestConcurrent_InvalidateRetiresEveryRun(t *testing.T) {
+	l := &loop{}
+	var landed []int
+	j := newJob(l, Concurrent, &landed)
+	var ctxs [2]context.Context
+	for i := range ctxs {
+		i := i
+		j.Start(func(ctx context.Context) (int, error) {
+			ctxs[i] = ctx
+			<-ctx.Done()
+			return i, ctx.Err()
+		})
+	}
+	j.Invalidate()
+	l.waitPosted(t, 2)
+	for i, ctx := range ctxs {
+		if ctx == nil || ctx.Err() == nil {
+			t.Fatalf("run %d's context should be cancelled by Invalidate", i)
+		}
+	}
+	l.landAll()
+	if len(landed) != 0 || j.Busy() {
+		t.Fatalf("retired runs must not land: landed=%v busy=%v", landed, j.Busy())
+	}
+}
+
+// TestPost_RefusedThenAccepted: a Post the loop refuses is retried from
+// the worker, and a run whose retry succeeds lands exactly once, so a
+// momentarily full queue costs nothing but the wait.
+func TestPost_RefusedThenAccepted(t *testing.T) {
+	l := &loop{}
+	shortPostRetry(t, l)
+	var landed []int
+	j := newJob(l, Refuse, &landed)
+	l.refuse.Store(3)
+
+	j.Start(func(context.Context) (int, error) { return 1, nil })
+	l.waitPosted(t, 1)
+	if got := l.posts.Load(); got != 4 {
+		t.Fatalf("the worker should have retried past 3 refusals, made %d posts", got)
+	}
+	l.landAll()
+	if len(landed) != 1 || landed[0] != 1 {
+		t.Fatalf("a retried landing should apply once, got %v", landed)
+	}
+	if j.Busy() {
+		t.Fatal("nothing in flight after the retried landing")
+	}
+}
+
+// TestPost_LostLandingDoesNotStrandTheGate is the self-heal: a landing
+// the worker gives up on never reaches OnDone, but the run stops
+// counting as in flight — a Refuse gate reopens and a Coalesce job's
+// next kick spawns instead of queueing behind a run that will never
+// land. Before, every hand-rolled busy flag stayed set for the session.
+func TestPost_LostLandingDoesNotStrandTheGate(t *testing.T) {
+	for _, p := range []Policy{Refuse, Coalesce, Supersede, Concurrent} {
+		t.Run(p.String(), func(t *testing.T) {
+			l := &loop{}
+			shortPostRetry(t, l)
+			var landed []int
+			j := newJob(l, p, &landed)
+			g := newGate()
+			l.refuseAll.Store(true)
+
+			j.Start(func(context.Context) (int, error) { return 1, nil })
+			if p == Coalesce {
+				// A kick during the doomed run queues behind it.
+				j.Start(g.work(2))
+				if !j.Queued() {
+					t.Fatal("a kick during the run should queue")
+				}
+			}
+			l.wg.Wait() // the worker exhausted its retries
+			if got := l.posts.Load(); got != postRetries+1 {
+				t.Fatalf("the worker should try %d times before giving up, made %d posts", postRetries+1, got)
+			}
+			if len(landed) != 0 {
+				t.Fatalf("a lost landing must not apply, got %v", landed)
+			}
+			if j.Busy() {
+				t.Fatal("a lost landing must not count as in flight")
+			}
+
+			// The loop is healthy again: the next start must run and land.
+			l.refuseAll.Store(false)
+			if !j.Start(g.work(3)) {
+				t.Fatal("the gate must reopen after a lost landing")
+			}
+			if p == Coalesce && j.Queued() {
+				t.Fatal("the kick that spawns is the follow-up; nothing should stay queued")
+			}
+			close(g.release)
+			l.waitPosted(t, 1)
+			l.landAll()
+			if len(landed) != 1 || landed[0] != 3 {
+				t.Fatalf("the run after a lost landing should land, got %v", landed)
+			}
+			if j.Busy() {
+				t.Fatal("nothing in flight after the healthy landing")
+			}
+		})
+	}
+}
+
 // TestInvalidate_DropsInFlightResult is the "a mutation retired the
 // sweep" verb: the in-flight run's context is cancelled, its landing
 // is dropped, and the job is idle afterwards — nothing new starts.
 func TestInvalidate_DropsInFlightResult(t *testing.T) {
-	for _, p := range []Policy{Coalesce, Supersede, Refuse} {
+	for _, p := range []Policy{Coalesce, Supersede, Refuse, Concurrent} {
 		t.Run(p.String(), func(t *testing.T) {
 			l := &loop{}
 			var landed []int
@@ -464,7 +639,8 @@ func TestNotify_LandsOnTheLoop(t *testing.T) {
 
 // TestPolicy_String keeps the names readable in test output.
 func TestPolicy_String(t *testing.T) {
-	if Coalesce.String() != "Coalesce" || Supersede.String() != "Supersede" || Refuse.String() != "Refuse" {
+	if Coalesce.String() != "Coalesce" || Supersede.String() != "Supersede" ||
+		Refuse.String() != "Refuse" || Concurrent.String() != "Concurrent" {
 		t.Fatal("policy names drifted")
 	}
 	if Policy(9).String() != "Policy(9)" {

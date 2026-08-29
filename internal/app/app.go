@@ -356,11 +356,10 @@ type App struct {
 	branchList   asyncjob.Job[branchListResult]
 	worktreeList asyncjob.Job[worktreeListResult]
 	// formatter is the format-on-save shell-out (format.go) and
-	// customAction the user's shell-out (actions.go): Refuse. Neither
-	// had a gate; of the three policies Refuse is the only one that
-	// cannot silently lose a landing (Supersede would drop the first
-	// formatter's reload) or a distinct unit of work (Coalesce would
-	// replace a queued action), and the refusal is flashed.
+	// customAction the user's shell-out (actions.go): Concurrent.
+	// Neither ever had a gate — a formatter is per saved tab and an
+	// action is the user's own command with its own report — so every
+	// start spawns and every landing applies, as before.
 	formatter    asyncjob.Job[formatResult]
 	customAction asyncjob.Job[customActionResult]
 
@@ -650,8 +649,8 @@ func (a *App) wireJobs() {
 	wireJob(a, &a.gitOp, "git-op", asyncjob.Refuse, a.handleGitOpDone)
 	wireJob(a, &a.branchList, "git-branch-list", asyncjob.Supersede, a.handleBranchList)
 	wireJob(a, &a.worktreeList, "git-worktree-list", asyncjob.Supersede, a.handleWorktreeList)
-	wireJob(a, &a.formatter, "format", asyncjob.Refuse, a.handleFormatDone)
-	wireJob(a, &a.customAction, "custom-action", asyncjob.Refuse, a.handleCustomActionDone)
+	wireJob(a, &a.formatter, "format", asyncjob.Concurrent, a.handleFormatDone)
+	wireJob(a, &a.customAction, "custom-action", asyncjob.Concurrent, a.handleCustomActionDone)
 	wireJob(a, &a.projFind.sweep, "project-find", asyncjob.Supersede, a.handleProjFindDone)
 }
 
