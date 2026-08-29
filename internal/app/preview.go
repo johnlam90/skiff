@@ -66,7 +66,10 @@ func (a *App) openFileMode(path string, preview bool) {
 		}
 		a.tabs.Activate(t)
 		a.ensureActiveTabVisible()
-		t.GitLines = loadGitLineChanges(a.rootDir, a.diffBase, t.Path)
+		// Same rationale as newTab: no inline `git diff` on a click. The
+		// coalescing async refresh converges the gutter shortly after —
+		// see refreshGitStatusAsync's doc comment.
+		a.refreshGitStatusAsync()
 		return
 	}
 	t, err := a.newTab(path)
@@ -81,6 +84,10 @@ func (a *App) openFileMode(path string, preview bool) {
 		a.tabs.Append(t)
 	}
 	a.finishOpen(t, path)
+	// A newly opened tab starts with GitLines nil (see newTab) — kick the
+	// async refresh so its gutter arrives without waiting for the 10s
+	// tick.
+	a.refreshGitStatusAsync()
 	if preview {
 		a.notePreviewCreated()
 	}

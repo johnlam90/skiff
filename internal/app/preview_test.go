@@ -238,6 +238,34 @@ func TestNewTab_DoesNotBlockOnGit(t *testing.T) {
 	}
 }
 
+// TestOpenFile_SwitchToOpenTabDoesNotBlockOnGit pins the second half of
+// plan 009: re-opening an already-open tab (a plain tab-strip click,
+// exercised here via openFile on a path that's already open) must not
+// shell out to `git diff` inline either — it kicks the existing async
+// git-status refresh instead of loading the gutter synchronously.
+func TestOpenFile_SwitchToOpenTabDoesNotBlockOnGit(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	target := filepath.Join(repo, "a.txt")
+	writeFileT(t, target, "one\ntwo\nthree\n")
+	gitRun(t, repo, "add", "a.txt")
+	gitRun(t, repo, "commit", "-m", "init")
+
+	a := newTestApp(t, repo)
+	a.openFile(target) // first open — tab created, GitLines nil
+	writeFileT(t, target, "one\nchanged\nthree\n")
+	a.tabs.ActivateAt(-1) // simulate switching away
+
+	a.openFile(target) // switch back — the path under test
+	tab := a.activeTabPtr()
+	if tab == nil || tab.GitLines != nil {
+		t.Fatalf("switching to an already-open tab must not load git lines inline, got %v", tab.GitLines)
+	}
+	if !a.gitRefreshInFlight {
+		t.Fatal("switching to an already-open tab should kick the async git-status refresh")
+	}
+}
+
 // TestPreviewCoachMark_SilentForPermanentOpens keeps the hint attached
 // to the behavior it describes. A finder / menu / CLI open pins its tab
 // and has nothing surprising to explain, so it must announce the file

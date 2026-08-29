@@ -111,6 +111,11 @@ func (a *App) restoreSession() {
 		}
 		a.tabs.ActivateAt(active)
 		a.syncActiveTreeFile()
+		// Every tab just came through newTab with GitLines nil (plan
+		// 009 took the inline `git diff` off that path) — kick the
+		// async refresh so a restored session's gutters converge
+		// shortly after startup instead of waiting for the 10s tick.
+		a.refreshGitStatusAsync()
 	}
 }
 

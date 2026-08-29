@@ -485,9 +485,11 @@ func (a *App) applyGitStatus(res gitStatusResult) {
 			a.tree.DirtyFolders = dirtyFolderSet(dirtyFiles, a.tree.Root.Path)
 		}
 	}
-	// Tabs opened after the collection started aren't in the map and
-	// keep the gutter lines they loaded on open; tabs closed since are
-	// simply skipped by the path lookup.
+	// Tabs opened after the collection started aren't in the map — they
+	// render without gutter marks until the queued follow-up collection
+	// lands (the coalescer's gitRefreshQueued guarantees one; see
+	// refreshGitStatusAsync and newTab). Tabs closed since are simply
+	// skipped by the path lookup.
 	for _, tab := range a.tabs.Tabs() {
 		if tab == nil || tab.Path == "" || tab.IsImage() {
 			continue
