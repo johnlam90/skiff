@@ -507,26 +507,10 @@ func New(rootDir string) (*App, error) {
 	if abs, err := filepath.Abs(rootDir); err == nil {
 		rootDir = abs
 	}
-	scr, err := tcell.NewScreen()
+	scr, err := newTerminalScreen()
 	if err != nil {
 		return nil, err
 	}
-	if err := scr.Init(); err != nil {
-		return nil, err
-	}
-	// Baseline mouse reporting only — clicks, drags and the wheel. The
-	// all-motion mode (`?1003h`) is switched on per-overlay by
-	// syncMouseMode; see mousemode.go for why it is not the default.
-	scr.EnableMouse(mouseBaseFlags)
-	// Bracketed paste: without it, pasted text arrives as raw
-	// keystrokes and any ESC byte inside the paste arms the leader —
-	// pasting "\x1bq" would quit the editor. See handleKey's pasting
-	// guard.
-	scr.EnablePaste()
-
-	th := theme.Default()
-	scr.SetStyle(tcell.StyleDefault.Background(th.BG).Foreground(th.Text))
-	scr.Clear()
 
 	tree, err := filetree.New(rootDir)
 	if err != nil {
@@ -534,26 +518,8 @@ func New(rootDir string) (*App, error) {
 		return nil, err
 	}
 
-	a := &App{
-		screen:         scr,
-		mouseFlags:     mouseBaseFlags,
-		theme:          th,
-		rootDir:        rootDir,
-		tree:           tree,
-		hoveredMenuRow: -1,
-		diffPanelRow:   -1,
-		sidebarShown:   true,
-		sidebarWidth:   defaultSidebarWidth,
-		wrapOn:         true,
-	}
-	a.setActiveFolder(tree.Root.Path)
-	a.loadUserConfig()
-	// The config may have swapped in a different palette, so the
-	// colour-depth fallback is resolved last — it must degrade the
-	// theme the user will actually see, not the default it replaced.
-	a.applyColorDepth()
+	a := newApp(scr, rootDir, tree, true)
 	a.refreshGitStatus()
-	a.loadCustomActions()
 	a.flash("Welcome — click a file to open · click  ≡  for the menu")
 	a.startTreeRefresh()
 	// Kick off the project file index in the background so that by
@@ -588,23 +554,10 @@ func New(rootDir string) (*App, error) {
 // actions that need a base directory — Save As, New File, the
 // relative/absolute path helpers — have somewhere to anchor.
 func NewSingleFile(filePath string) (*App, error) {
-	scr, err := tcell.NewScreen()
+	scr, err := newTerminalScreen()
 	if err != nil {
 		return nil, err
 	}
-	if err := scr.Init(); err != nil {
-		return nil, err
-	}
-	// Same baseline-mouse rationale as New: no all-motion tracking
-	// until an overlay that hovers is actually up.
-	scr.EnableMouse(mouseBaseFlags)
-	// Same bracketed-paste rationale as New: pasted ESC bytes must be
-	// content, not commands.
-	scr.EnablePaste()
-
-	th := theme.Default()
-	scr.SetStyle(tcell.StyleDefault.Background(th.BG).Foreground(th.Text))
-	scr.Clear()
 
 	rootDir := filepath.Dir(filePath)
 	if rootDir == "" {
@@ -615,29 +568,75 @@ func NewSingleFile(filePath string) (*App, error) {
 		rootDir = abs
 	}
 
-	a := &App{
-		screen:         scr,
-		mouseFlags:     mouseBaseFlags,
-		theme:          th,
-		rootDir:        rootDir,
-		tree:           nil,
-		hoveredMenuRow: -1,
-		diffPanelRow:   -1,
-		sidebarShown:   false,
-		sidebarWidth:   defaultSidebarWidth,
-		wrapOn:         true,
-	}
-	a.setActiveFolder(rootDir)
-	a.loadUserConfig()
-	// Same rationale as New: degrade the resolved palette, not the
-	// default one.
-	a.applyColorDepth()
-	a.loadCustomActions()
+	a := newApp(scr, rootDir, nil, false)
 	// openFile loads the file's git gutter markers itself (a file-scoped
 	// `git diff`), so single-file mode shows change bars on open without
 	// the whole-repo status or tree walk that New performs.
 	a.openFile(filePath)
 	return a, nil
+}
+
+// newTerminalScreen builds and initialises the real tcell screen both
+// production constructors share: baseline mouse reporting, bracketed
+// paste, and the default-theme background painted before the first
+// event. Kept apart from newApp so tests can hand newApp a
+// SimulationScreen instead of a live terminal.
+func newTerminalScreen() (tcell.Screen, error) {
+	scr, err := tcell.NewScreen()
+	if err != nil {
+		return nil, err
+	}
+	if err := scr.Init(); err != nil {
+		return nil, err
+	}
+	// Baseline mouse reporting only — clicks, drags and the wheel. The
+	// all-motion mode (`?1003h`) is switched on per-overlay by
+	// syncMouseMode; see mousemode.go for why it is not the default.
+	scr.EnableMouse(mouseBaseFlags)
+	// Bracketed paste: without it, pasted text arrives as raw
+	// keystrokes and any ESC byte inside the paste arms the leader —
+	// pasting "\x1bq" would quit the editor. See handleKey's pasting
+	// guard.
+	scr.EnablePaste()
+
+	th := theme.Default()
+	scr.SetStyle(tcell.StyleDefault.Background(th.BG).Foreground(th.Text))
+	scr.Clear()
+	return scr, nil
+}
+
+// newApp builds the App core every construction path shares: the struct
+// literal with its sentinels, the active folder, user config, the
+// colour-depth degrade, and custom actions. Callers layer on what their
+// mode needs — New adds the git/finder/session machinery, NewSingleFile
+// opens the one file, tests inject a SimulationScreen. Any new
+// construction-time step belongs here unless it is genuinely
+// mode-specific, in which case its caller should say why in a comment.
+func newApp(scr tcell.Screen, rootDir string, tree *filetree.Tree, sidebarShown bool) *App {
+	a := &App{
+		screen:         scr,
+		mouseFlags:     mouseBaseFlags,
+		theme:          theme.Default(),
+		rootDir:        rootDir,
+		tree:           tree,
+		hoveredMenuRow: -1,
+		diffPanelRow:   -1,
+		sidebarShown:   sidebarShown,
+		sidebarWidth:   defaultSidebarWidth,
+		wrapOn:         true,
+	}
+	if tree != nil {
+		a.setActiveFolder(tree.Root.Path)
+	} else {
+		a.setActiveFolder(rootDir)
+	}
+	a.loadUserConfig()
+	// The config may have swapped in a different palette, so the
+	// colour-depth fallback is resolved last — it must degrade the
+	// theme the user will actually see, not the default it replaced.
+	a.applyColorDepth()
+	a.loadCustomActions()
+	return a
 }
 
 // applyColorDepth re-derives the live palette for whatever the terminal

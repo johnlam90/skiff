@@ -96,6 +96,55 @@ func newTestApp(t *testing.T, root string) *App {
 	return a
 }
 
+// TestNewApp_SharedShape pins the construction core every mode shares:
+// the sentinels, the baseline mouse flags, the wrap default, and the
+// active-folder anchor. These fields used to be hand-copied across three
+// constructors and drifted (the test constructor shipped without
+// mouseFlags, so 38 test files validated an App shape production never
+// has); newApp is now the single place they are set.
+func TestNewApp_SharedShape(t *testing.T) {
+	dir := t.TempDir()
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	t.Cleanup(func() { scr.Fini() })
+
+	tree, err := filetree.New(dir)
+	if err != nil {
+		t.Fatalf("tree: %v", err)
+	}
+	a := newApp(scr, tree.Root.Path, tree, true)
+	if a.mouseFlags != mouseBaseFlags {
+		t.Fatalf("mouseFlags = %v, want baseline %v", a.mouseFlags, mouseBaseFlags)
+	}
+	if a.hoveredMenuRow != -1 || a.diffPanelRow != -1 {
+		t.Fatalf("sentinels not seeded: hoveredMenuRow=%d diffPanelRow=%d",
+			a.hoveredMenuRow, a.diffPanelRow)
+	}
+	if !a.wrapOn {
+		t.Fatal("wrapOn should default to true")
+	}
+	if a.sidebarWidth != defaultSidebarWidth {
+		t.Fatalf("sidebarWidth = %d, want %d", a.sidebarWidth, defaultSidebarWidth)
+	}
+	if !a.sidebarShown {
+		t.Fatal("tree mode should show the sidebar when asked")
+	}
+	if a.activeFolder != tree.Root.Path {
+		t.Fatalf("activeFolder = %q, want tree root %q", a.activeFolder, tree.Root.Path)
+	}
+
+	// The tree-less path anchors the active folder on rootDir instead.
+	b := newApp(scr, dir, nil, false)
+	if b.tree != nil || b.sidebarShown {
+		t.Fatal("tree-less mode should have no tree and a hidden sidebar")
+	}
+	if b.activeFolder != dir {
+		t.Fatalf("activeFolder = %q, want rootDir %q", b.activeFolder, dir)
+	}
+}
+
 // TestNewFileLabel_Plain shows the bare label when the active folder is the
 // project root.
 func TestNewFileLabel_Plain(t *testing.T) {
