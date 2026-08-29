@@ -16,6 +16,14 @@
 // .gitignore prefix-joining. This is that verification, run as a
 // permanent fence against a real `git check-ignore` subprocess. See
 // plans/016-gitignore-dep-characterization.md for the full brief.
+//
+// The corpus found 6 known divergences from git — see gitignoreCorpus's
+// knownDivergence entries below and plan 016's findings report for the
+// full detail and the impact assessment. This test PINS CURRENT
+// BEHAVIOR, it does not bless it: the divergent rows assert today's
+// (buggy) library answer so the suite stays green, and fail loudly the
+// moment either side's behavior changes. Whether to swap the dependency
+// over it is a follow-up decision for a future plan, not settled here.
 package filetree
 
 import (
@@ -148,93 +156,147 @@ func libraryVerdictAt(patterns []string, giDir, probe string, isDir bool) bool {
 	return gi.MatchesPath(rel)
 }
 
+// knownDivergence documents one of the 6 corners where go-gitignore's
+// verdict disagrees with git's, discovered by this corpus and written up
+// in plan 016's findings report. It freezes BOTH sides' current answers
+// — not just the library's — so the row still fails loudly if either
+// one's behavior ever changes: a library fix that starts agreeing with
+// git, or (far less likely) a change in git's own reading of the
+// pattern. Either is worth a human re-triaging the row, possibly
+// deleting the divergence so it rejoins the plain agreement check.
+type knownDivergence struct {
+	libraryVerdict bool   // go-gitignore's current (buggy) answer
+	gitVerdict     bool   // git's answer — the one skiff actually wants
+	cause          string // why the library disagrees, in one sentence
+}
+
 // gitignoreCase is one row of the characterization corpus: a pattern
 // list, where the .gitignore holding it lives (giDir), the repo-relative
-// path being probed, and whether that path is a directory.
+// path being probed, whether that path is a directory, and — for the 6
+// rows where go-gitignore is simply wrong — the knownDivergence that
+// keeps the suite green without hiding the bug. nil means "expected to
+// agree with git," which is true for the other 35 rows.
 type gitignoreCase struct {
-	name  string
-	lines []string
-	giDir string
-	probe string
-	isDir bool
+	name     string
+	lines    []string
+	giDir    string
+	probe    string
+	isDir    bool
+	diverges *knownDivergence
 }
 
 // gitignoreCorpus is the ~30-plus-row table plan 016 asks for, grouped by
-// pattern class. Each row's expectation is NOT hand-computed here — the
-// test below asks both real git and the library the same question and
-// compares their answers, which is the whole point of a characterization
-// test: git is the ground truth, not a value baked into this table.
+// pattern class. Most rows carry no expectation of their own: the test
+// below asks real git and the library the same question and requires
+// they agree, which is the point of a characterization test — git is
+// the ground truth, not a value baked into this table. The 6 rows with
+// a non-nil diverges field are the exception: go-gitignore is provably
+// wrong on them, so diverges freezes today's answer from both sides
+// instead (see TestGitignoreCharacterization for how that's enforced).
 func gitignoreCorpus() []gitignoreCase {
 	return []gitignoreCase{
 		// -- Basic --
-		{"star extension matches a file", []string{"*.log"}, "", "build.log", false},
-		{"exact name matches a file", []string{"notes.txt"}, "", "notes.txt", false},
-		{"unqualified name matches a file", []string{"foo"}, "", "foo", false},
-		{"unqualified name matches a directory", []string{"foo"}, "", "foo", true},
+		{"star extension matches a file", []string{"*.log"}, "", "build.log", false, nil},
+		{"exact name matches a file", []string{"notes.txt"}, "", "notes.txt", false, nil},
+		{"unqualified name matches a file", []string{"foo"}, "", "foo", false, nil},
+		{"unqualified name matches a directory", []string{"foo"}, "", "foo", true, nil},
 
 		// -- Negation & ordering --
-		{"negation excludes a file from a later ignore", []string{"*.log", "!keep.log"}, "", "keep.log", false},
-		{"negation before the ignore rule does not survive", []string{"!keep.log", "*.log"}, "", "keep.log", false},
-		{"re-ignoring after a negation wins", []string{"*.log", "!keep.log", "keep.log"}, "", "keep.log", false},
+		{"negation excludes a file from a later ignore", []string{"*.log", "!keep.log"}, "", "keep.log", false, nil},
+		{"negation before the ignore rule does not survive", []string{"!keep.log", "*.log"}, "", "keep.log", false, nil},
+		{"re-ignoring after a negation wins", []string{"*.log", "!keep.log", "keep.log"}, "", "keep.log", false, nil},
 
 		// -- Directory-only (trailing slash) --
-		{"trailing-slash pattern matches a directory", []string{"dist/"}, "", "dist", true},
-		{"trailing-slash pattern spares a same-named file", []string{"dist/"}, "", "dist", false},
-		{"no-slash pattern matches a directory too", []string{"dist"}, "", "dist", true},
-		{"no-slash pattern matches a file too", []string{"dist"}, "", "dist", false},
+		{"trailing-slash pattern matches a directory", []string{"dist/"}, "", "dist", true, nil},
+		{"trailing-slash pattern spares a same-named file", []string{"dist/"}, "", "dist", false, nil},
+		{"no-slash pattern matches a directory too", []string{"dist"}, "", "dist", true, nil},
+		{"no-slash pattern matches a file too", []string{"dist"}, "", "dist", false, nil},
 
 		// -- Doublestar --
-		{"leading **/ matches a nested file", []string{"**/foo"}, "", "a/b/foo", false},
-		{"leading **/ also matches at the root", []string{"**/foo"}, "", "foo", false},
-		{"trailing /** matches everything inside", []string{"foo/**"}, "", "foo/bar/baz", false},
-		{"a/**/b matches zero segments between", []string{"a/**/b"}, "", "a/b", false},
-		{"a/**/b matches multiple segments between", []string{"a/**/b"}, "", "a/x/y/b", false},
-		{"leading /**/x matches at the root", []string{"/**/x"}, "", "x", false},
+		{"leading **/ matches a nested file", []string{"**/foo"}, "", "a/b/foo", false, nil},
+		{"leading **/ also matches at the root", []string{"**/foo"}, "", "foo", false, nil},
+		{"trailing /** matches everything inside", []string{"foo/**"}, "", "foo/bar/baz", false, nil},
+		{"a/**/b matches zero segments between", []string{"a/**/b"}, "", "a/b", false, nil},
+		{"a/**/b matches multiple segments between", []string{"a/**/b"}, "", "a/x/y/b", false, nil},
+		{"leading /**/x matches at the root", []string{"/**/x"}, "", "x", false, nil},
 
 		// -- Anchoring --
-		{"leading-slash pattern anchors to the root - matches there", []string{"/top.log"}, "", "top.log", false},
-		{"leading-slash pattern anchors to the root - spares a nested file", []string{"/top.log"}, "", "sub/top.log", false},
-		{"unanchored name matches at the root", []string{"top.log"}, "", "top.log", false},
-		{"unanchored name matches nested too", []string{"top.log"}, "", "sub/top.log", false},
-		{"embedded-slash pattern matches at its anchored location", []string{"sub/file"}, "", "sub/file", false},
-		{"embedded-slash pattern is root-relative, not matched deeper", []string{"sub/file"}, "", "x/sub/file", false},
+		{"leading-slash pattern anchors to the root - matches there", []string{"/top.log"}, "", "top.log", false, nil},
+		{"leading-slash pattern anchors to the root - spares a nested file", []string{"/top.log"}, "", "sub/top.log", false, nil},
+		{"unanchored name matches at the root", []string{"top.log"}, "", "top.log", false, nil},
+		{"unanchored name matches nested too", []string{"top.log"}, "", "sub/top.log", false, nil},
+		{"embedded-slash pattern matches at its anchored location", []string{"sub/file"}, "", "sub/file", false, nil},
+		{"embedded-slash pattern is root-relative, not matched deeper — KNOWN DIVERGENCE", []string{"sub/file"}, "", "x/sub/file", false, &knownDivergence{
+			libraryVerdict: true,
+			gitVerdict:     false,
+			cause:          "go-gitignore only anchors a pattern to the .gitignore's directory when it literally begins with '/'; git anchors on any embedded slash, not just a leading one, so 'sub/file' should match only at that exact location — not at any depth",
+		}},
 
 		// -- Escapes & specials --
-		{"escaped hash is a literal pattern, not a comment", []string{`\#literal`}, "", "#literal", false},
-		{"escaped bang is a literal pattern, not a negation", []string{`\!bang`}, "", "!bang", false},
-		{"unescaped trailing space in the pattern is stripped", []string{"trail.txt "}, "", "trail.txt", false},
-		{"escaped trailing space in the pattern is kept", []string{`trail.txt\ `}, "", "trail.txt ", false},
+		{"escaped hash is a literal pattern, not a comment", []string{`\#literal`}, "", "#literal", false, nil},
+		{"escaped bang is a literal pattern, not a negation", []string{`\!bang`}, "", "!bang", false, nil},
+		{"unescaped trailing space in the pattern is stripped", []string{"trail.txt "}, "", "trail.txt", false, nil},
+		{"escaped trailing space in the pattern is kept — KNOWN DIVERGENCE", []string{`trail.txt\ `}, "", "trail.txt ", false, &knownDivergence{
+			libraryVerdict: false,
+			gitVerdict:     true,
+			cause:          "go-gitignore's own source marks the escaped-trailing-space rule (gitignore rule 3) as an unimplemented TODO; it strips the trailing space unconditionally, ignoring the backslash escape",
+		}},
 
 		// -- Globs --
-		{"? matches exactly one char - hit", []string{"?at"}, "", "cat", false},
-		{"? matches exactly one char - miss on extra char", []string{"?at"}, "", "scat", false},
-		{"bracket set matches a member", []string{"[abc].txt"}, "", "a.txt", false},
-		{"bracket range matches a member", []string{"[a-c].txt"}, "", "b.txt", false},
-		{"negated bracket matches a non-member", []string{"[!a]x"}, "", "bx", false},
-		{"negated bracket spares the excluded member", []string{"[!a]x"}, "", "ax", false},
-		{"*.tx? matches with the required extra char", []string{"*.tx?"}, "", "file.txt", false},
-		{"*.tx? does not match without the extra char", []string{"*.tx?"}, "", "file.tx", false},
+		{"? matches exactly one char - hit — KNOWN DIVERGENCE", []string{"?at"}, "", "cat", false, &knownDivergence{
+			libraryVerdict: false,
+			gitVerdict:     true,
+			cause:          "go-gitignore escapes '?' to a literal character instead of implementing git's single-char glob wildcard",
+		}},
+		{"? matches exactly one char - miss on extra char", []string{"?at"}, "", "scat", false, nil},
+		{"bracket set matches a member", []string{"[abc].txt"}, "", "a.txt", false, nil},
+		{"bracket range matches a member", []string{"[a-c].txt"}, "", "b.txt", false, nil},
+		{"negated bracket matches a non-member — KNOWN DIVERGENCE", []string{"[!a]x"}, "", "bx", false, &knownDivergence{
+			libraryVerdict: false,
+			gitVerdict:     true,
+			cause:          "'[!a]' is passed straight into Go's regexp engine, where '!' is not a negation operator — it becomes a positive class containing the literal characters '!' and 'a', which excludes 'b'",
+		}},
+		{"negated bracket spares the excluded member — KNOWN DIVERGENCE", []string{"[!a]x"}, "", "ax", false, &knownDivergence{
+			libraryVerdict: true,
+			gitVerdict:     false,
+			cause:          "same broken '[!...]' translation as the non-member case; the positive class containing the literal 'a' matches 'a' where git's negation would exclude it",
+		}},
+		{"*.tx? matches with the required extra char — KNOWN DIVERGENCE", []string{"*.tx?"}, "", "file.txt", false, &knownDivergence{
+			libraryVerdict: false,
+			gitVerdict:     true,
+			cause:          "same '?'-as-literal bug as the bare '?at' case",
+		}},
+		{"*.tx? does not match without the extra char", []string{"*.tx?"}, "", "file.tx", false, nil},
 
 		// -- Case sensitivity --
-		{"pattern case does not match a different-case file", []string{"Foo.txt"}, "", "foo.txt", false},
-		{"pattern case matches the exact case", []string{"Foo.txt"}, "", "Foo.txt", false},
+		{"pattern case does not match a different-case file", []string{"Foo.txt"}, "", "foo.txt", false, nil},
+		{"pattern case matches the exact case", []string{"Foo.txt"}, "", "Foo.txt", false, nil},
 
 		// -- Nested-level relativity: .gitignore written INTO sub/, probed
 		// through the same prefix convention ignoreChain builds --
-		{"nested gitignore, unanchored, direct child", []string{"*.log"}, "sub", "sub/build.log", false},
-		{"nested gitignore, unanchored, grandchild still matches", []string{"*.log"}, "sub", "sub/deeper/build.log", false},
-		{"nested gitignore, anchored, matches its own directory", []string{"/anchored.log"}, "sub", "sub/anchored.log", false},
-		{"nested gitignore, anchored, spares a grandchild", []string{"/anchored.log"}, "sub", "sub/deeper/anchored.log", false},
+		{"nested gitignore, unanchored, direct child", []string{"*.log"}, "sub", "sub/build.log", false, nil},
+		{"nested gitignore, unanchored, grandchild still matches", []string{"*.log"}, "sub", "sub/deeper/build.log", false, nil},
+		{"nested gitignore, anchored, matches its own directory", []string{"/anchored.log"}, "sub", "sub/anchored.log", false, nil},
+		{"nested gitignore, anchored, spares a grandchild", []string{"/anchored.log"}, "sub", "sub/deeper/anchored.log", false, nil},
 	}
 }
 
 // TestGitignoreCharacterization is plan 016's characterization corpus: for
 // every row it asks a throwaway git repo and the compiled go-gitignore
-// matcher the same question — does this pattern list ignore this path? —
-// and reports every row where they disagree. It is a permanent fence, not
-// a one-off investigation: green means the library's semantics still
-// agree with git's on this corpus, and a future change to either side
-// that regresses one of these rows should show up here first.
+// matcher the same question — does this pattern list ignore this path?
+// It is a permanent fence, not a one-off investigation.
+//
+// 35 rows have no diverges field and must agree with git outright; a
+// disagreement there is a NEW divergence plan 016 didn't find, and fails
+// loudly. The other 6 rows carry a knownDivergence — go-gitignore is
+// provably wrong on them today (see plan 016's findings report for the
+// full detail) — and instead of failing on a bug this project can't fix
+// upstream, they assert BOTH sides still match what knownDivergence
+// recorded. That keeps the suite green today while still catching any
+// future change: a library update that starts agreeing with git, or git
+// itself changing how it reads the pattern, either fails this row and
+// sends someone back to re-triage it. This test pins current behavior;
+// it does not bless it.
 //
 // git is a hard external requirement (the whole point is comparing
 // against it), so the test skips — rather than fails — when no git
@@ -249,9 +311,24 @@ func TestGitignoreCharacterization(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			gitResult := gitGroundTruthAt(t, tc.lines, tc.giDir, tc.probe, tc.isDir)
 			libResult := libraryVerdictAt(tc.lines, tc.giDir, tc.probe, tc.isDir)
-			if libResult != gitResult {
-				t.Errorf("divergence: patterns=%v giDir=%q probe=%q isDir=%v — library=%v git=%v",
-					tc.lines, tc.giDir, tc.probe, tc.isDir, libResult, gitResult)
+
+			if tc.diverges == nil {
+				if libResult != gitResult {
+					t.Errorf("new divergence from git (not previously known): patterns=%v giDir=%q probe=%q isDir=%v — library=%v git=%v; see plan 016's findings before documenting it as known",
+						tc.lines, tc.giDir, tc.probe, tc.isDir, libResult, gitResult)
+				}
+				return
+			}
+
+			d := tc.diverges
+			t.Logf("known divergence: library=%v git=%v — %s", d.libraryVerdict, d.gitVerdict, d.cause)
+			if gitResult != d.gitVerdict {
+				t.Errorf("git's own answer changed: patterns=%v probe=%q — was %v, now %v; re-triage this row (plan 016)",
+					tc.lines, tc.probe, d.gitVerdict, gitResult)
+			}
+			if libResult != d.libraryVerdict {
+				t.Errorf("go-gitignore's behavior changed: patterns=%v probe=%q — was %v, now %v (documented cause: %q); re-triage this row, it may no longer diverge from git",
+					tc.lines, tc.probe, d.libraryVerdict, libResult, d.cause)
 			}
 		})
 	}
