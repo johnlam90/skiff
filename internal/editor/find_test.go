@@ -404,6 +404,78 @@ func TestReplaceLines(t *testing.T) {
 	}
 }
 
+// TestRefreshFindMatches_TypingAheadOfAHitMovesIt is the regression test
+// for stale find highlights. Before Tab.edit owned the trailer only the
+// Replace* trio re-ran the query, so typing with the find bar open left
+// every hit on the line painted one column short of the text it names —
+// and matchAtRune's findRowsFor guard could not catch it, because the
+// match COUNT never changed. Any edit has to move the spans.
+func TestRefreshFindMatches_TypingAheadOfAHitMovesIt(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("foo and foo")}
+	tab.initUndo()
+	tab.SetFindQuery("foo")
+	if len(tab.FindMatches) != 2 {
+		t.Fatalf("seed: %d matches, want 2", len(tab.FindMatches))
+	}
+
+	// A space at column 0 sits ahead of both hits, so both slide one
+	// column right and neither is destroyed.
+	tab.MoveCursorTo(Position{}, false)
+	tab.InsertRune(' ')
+
+	want := []Match{{Line: 0, Col: 1, Width: 3}, {Line: 0, Col: 9, Width: 3}}
+	if !reflect.DeepEqual(tab.FindMatches, want) {
+		t.Fatalf("matches after insert: %+v, want %+v", tab.FindMatches, want)
+	}
+	// The renderer asks through matchAtRune, so the per-line index has to
+	// have moved with the list rather than serving the pre-edit spans.
+	if got := tab.matchAtRune(0, 0); got != -1 {
+		t.Fatalf("matchAtRune(0,0) = %d, want -1 — the typed space is not a hit", got)
+	}
+	if got := tab.matchAtRune(0, 1); got != 0 {
+		t.Fatalf("matchAtRune(0,1) = %d, want 0 — the first hit starts here now", got)
+	}
+}
+
+// TestRefreshFindMatches_KeepsTheCurrentMatchIndex pins the index policy
+// the refresh applies: "3 of 7" must not renumber itself just because the
+// user typed, so a surviving index is preserved; an edit that destroyed
+// the current match falls back to the hit nearest the caret, and an edit
+// that destroyed every match collapses the index to -1.
+func TestRefreshFindMatches_KeepsTheCurrentMatchIndex(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("foo\nfoo\nfoo")}
+	tab.initUndo()
+	tab.SetFindQuery("foo")
+	tab.FindIndex = 2
+
+	// Typing on line 0 leaves all three hits alive: the walk stays put.
+	tab.MoveCursorTo(Position{}, false)
+	tab.InsertRune('x')
+	if tab.FindIndex != 2 || len(tab.FindMatches) != 3 {
+		t.Fatalf("index %d of %d matches, want 2 of 3", tab.FindIndex, len(tab.FindMatches))
+	}
+
+	// Deleting the last line destroys the current match — the index has
+	// to land inside the surviving list rather than dangle past its end.
+	tab.Anchor = Position{Line: 1, Col: 3}
+	tab.Cursor = Position{Line: 2, Col: 3}
+	tab.DeleteSelection()
+	if len(tab.FindMatches) != 2 {
+		t.Fatalf("matches after delete: %d, want 2", len(tab.FindMatches))
+	}
+	if tab.FindIndex < 0 || tab.FindIndex >= len(tab.FindMatches) {
+		t.Fatalf("index %d dangles outside %d matches", tab.FindIndex, len(tab.FindMatches))
+	}
+
+	// Nothing left to point at.
+	tab.Anchor = Position{}
+	tab.Cursor = tab.Buffer.EndPos()
+	tab.DeleteSelection()
+	if len(tab.FindMatches) != 0 || tab.FindIndex != -1 {
+		t.Fatalf("index %d of %d matches, want -1 of 0", tab.FindIndex, len(tab.FindMatches))
+	}
+}
+
 // FuzzFindAll pins the span contract the find UI is built on. The renderer
 // asks "is this cell inside a match?" once per painted cell and FindNext /
 // FindPrev walk the slice assuming document order, so a match that

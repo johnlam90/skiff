@@ -69,9 +69,7 @@ func (a *App) menuReopenTab() {
 		}
 		a.openFile(rec.Path)
 		if tab := a.activeTabPtr(); tab != nil && tab.Path == rec.Path && !tab.IsImage() {
-			tab.Cursor = tab.Buffer.Clamp(rec.Cursor)
-			tab.Anchor = tab.Cursor
-			tab.ScrollY = rec.ScrollY
+			tab.RestoreView(rec.Cursor, rec.ScrollY)
 		}
 		return
 	}

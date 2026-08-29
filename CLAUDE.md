@@ -225,6 +225,24 @@ consumes the flag and clears it. **Do not** call `EnsureVisible`
 unconditionally — that re-introduces the "scroll yanks back to cursor
 on every tick" bug.
 
+### One seam for "an edit happened" (tab.go)
+Every text mutation goes through the unexported
+`(*Tab).edit(group, mutate)`: it pushes the undo snapshot under the
+caller's group, runs the mutation, then applies the trailer — `Dirty`,
+`StyleStale`, `cursorMoved`, and a re-run of the active find query. That
+trailer used to be hand-typed at ten sites and had already drifted (only
+the `Replace*` trio refreshed `FindMatches`, so typing with the find bar
+open painted the highlights one column off the text). **Don't write the
+trailer by hand again** — `grep -n 'Dirty = true' internal/editor/*.go`
+must stay at exactly one hit, inside `edit`.
+Two things stay with the mutator: its undo group (typing coalesces,
+structural edits don't) and every no-op guard, because reaching `edit`
+always costs an undo entry. `dropSelection` is the raw
+delete-the-selection half for the insert paths that replace a selection
+inside their own single step. `RestoreView` is the matching seam on the
+view side — the app never assigns `Cursor` / `Anchor` / `ScrollY`
+itself, so a restore can't forget `cursorMoved` or the undo-group break.
+
 ### Scroll clamping with overscroll
 `tab.clampScroll(viewH)` allows the last line to scroll roughly to the
 middle (`overscroll = max(viewH/2, 3)`). This is intentional — without

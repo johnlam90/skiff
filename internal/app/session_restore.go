@@ -95,9 +95,7 @@ func (a *App) restoreSession() {
 		if err != nil {
 			continue
 		}
-		t.Cursor = t.Buffer.Clamp(editor.Position{Line: ts.Line, Col: ts.Col})
-		t.Anchor = t.Cursor
-		t.ScrollY = ts.ScrollY
+		t.RestoreView(editor.Position{Line: ts.Line, Col: ts.Col}, ts.ScrollY)
 		t.Preview = ts.Preview
 		a.tabs.Append(t)
 		if p.ActivePath != "" && ts.Path == p.ActivePath {

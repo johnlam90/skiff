@@ -555,6 +555,43 @@ func (t *Tab) SelectionText() string {
 	return t.Buffer.Substring(t.Anchor, t.Cursor)
 }
 
+// edit is the one seam every text mutation goes through. It records the
+// pre-state for undo under group, runs mutate, then applies the trailer
+// the rest of the editor reads: the buffer differs from disk (Dirty), the
+// highlight cache no longer describes it (StyleStale), the caret needs
+// scrolling back into view (cursorMoved), and the find match list has to
+// be re-run against the new text. That trailer used to be hand-typed at
+// ten call sites and had already drifted — only the Replace* trio
+// refreshed the matches, so typing with the find bar open painted the
+// highlights at stale offsets.
+//
+// Two things stay the caller's job. The mutator keeps its own undo group
+// (typing coalesces, structural edits don't), and it keeps every no-op
+// guard: reaching edit always costs an undo entry, so an edit call must
+// only happen when a mutation will actually happen.
+func (t *Tab) edit(group undoGroup, mutate func()) {
+	t.pushUndo(group)
+	mutate()
+	t.Dirty = true
+	t.StyleStale = true
+	t.cursorMoved = true
+	t.refreshFindMatches()
+}
+
+// dropSelection is the raw half of DeleteSelection: it removes the
+// selected range and collapses the caret to its start WITHOUT the edit
+// trailer. It exists so the insert paths can replace a selection inside
+// their own single edit step — pushing a second undo entry there would
+// make the user undo twice to get back to the pre-paste state.
+func (t *Tab) dropSelection() {
+	if !t.HasSelection() {
+		return
+	}
+	pos := t.Buffer.DeleteRange(t.Anchor, t.Cursor)
+	t.Cursor = pos
+	t.Anchor = pos
+}
+
 // DeleteSelection removes the selected range and collapses the cursor to the
 // start of the selection. A no-op when nothing is selected.
 func (t *Tab) DeleteSelection() {
@@ -565,13 +602,7 @@ func (t *Tab) DeleteSelection() {
 	// out a lot in one stroke, and merging them into adjacent typing
 	// would make the next undo recover content the user thought was
 	// just-deleted.
-	t.pushUndo(undoGroupStructural)
-	pos := t.Buffer.DeleteRange(t.Anchor, t.Cursor)
-	t.Cursor = pos
-	t.Anchor = pos
-	t.Dirty = true
-	t.StyleStale = true
-	t.cursorMoved = true
+	t.edit(undoGroupStructural, t.dropSelection)
 }
 
 // InsertString inserts s at the cursor (replacing any selection first) and
@@ -582,19 +613,14 @@ func (t *Tab) InsertString(s string) {
 	if t.IsImage() {
 		return
 	}
-	if t.HasSelection() {
-		// DeleteSelection records its own structural step. Don't push a
-		// second one here or the user would have to undo twice to get
-		// back to the pre-paste-with-selection state.
-		t.DeleteSelection()
-	} else {
-		t.pushUndo(undoGroupStructural)
-	}
-	t.Cursor = t.Buffer.InsertString(t.Cursor, s)
-	t.Anchor = t.Cursor
-	t.Dirty = true
-	t.StyleStale = true
-	t.cursorMoved = true
+	// Replacing a selection is one step: the delete and the insert share
+	// this edit's single undo entry, so one undo gets back to the
+	// pre-paste-with-selection state.
+	t.edit(undoGroupStructural, func() {
+		t.dropSelection()
+		t.Cursor = t.Buffer.InsertString(t.Cursor, s)
+		t.Anchor = t.Cursor
+	})
 }
 
 // InsertNewline is what Enter does: split the line at the caret and open
@@ -638,18 +664,18 @@ func (t *Tab) InsertRune(r rune) {
 	if t.IsImage() {
 		return
 	}
+	// The first rune typed over a selection is structural, not typing:
+	// coalescing it into the surrounding burst would let one undo bring
+	// the replaced text back in the middle of a word.
+	group := undoGroupTyping
 	if t.HasSelection() {
-		// First-rune-after-selection: let DeleteSelection capture the
-		// pre-state, then run the insert without a second push.
-		t.DeleteSelection()
-	} else {
-		t.pushUndo(undoGroupTyping)
+		group = undoGroupStructural
 	}
-	t.Cursor = t.Buffer.InsertString(t.Cursor, string(r))
-	t.Anchor = t.Cursor
-	t.Dirty = true
-	t.StyleStale = true
-	t.cursorMoved = true
+	t.edit(group, func() {
+		t.dropSelection()
+		t.Cursor = t.Buffer.InsertString(t.Cursor, string(r))
+		t.Anchor = t.Cursor
+	})
 }
 
 // Backspace deletes the character before the cursor (or the selection if any).
@@ -669,12 +695,10 @@ func (t *Tab) Backspace() {
 	if t.Cursor.Line == 0 && t.Cursor.Col == 0 {
 		return
 	}
-	t.pushUndo(undoGroupBackspace)
-	t.Cursor = t.Buffer.DeleteRange(t.clusterLeftOf(t.Cursor), t.Cursor)
-	t.Anchor = t.Cursor
-	t.Dirty = true
-	t.StyleStale = true
-	t.cursorMoved = true
+	t.edit(undoGroupBackspace, func() {
+		t.Cursor = t.Buffer.DeleteRange(t.clusterLeftOf(t.Cursor), t.Cursor)
+		t.Anchor = t.Cursor
+	})
 }
 
 // Delete removes the character after the cursor (or the selection if any),
@@ -692,12 +716,10 @@ func (t *Tab) Delete() {
 	if t.Cursor == t.Buffer.EndPos() {
 		return
 	}
-	t.pushUndo(undoGroupDelete)
-	t.Cursor = t.Buffer.DeleteRange(t.Cursor, t.clusterRightOf(t.Cursor))
-	t.Anchor = t.Cursor
-	t.Dirty = true
-	t.StyleStale = true
-	t.cursorMoved = true
+	t.edit(undoGroupDelete, func() {
+		t.Cursor = t.Buffer.DeleteRange(t.Cursor, t.clusterRightOf(t.Cursor))
+		t.Anchor = t.Cursor
+	})
 }
 
 // clusterLeftOf returns the position one grapheme cluster before p,
@@ -842,12 +864,28 @@ func (t *Tab) CenterOnCursor(viewH int) {
 	t.clampScroll(viewH)
 }
 
-// SelectAll selects the entire buffer (anchor at start, cursor at end).
-func (t *Tab) SelectAll() {
-	t.Anchor = Position{Line: 0, Col: 0}
-	t.Cursor = t.Buffer.EndPos()
-	t.cursorMoved = true
-	t.breakUndoGroup()
+// RestoreView puts a tab back on a remembered place: the caret at cursor
+// (clamped, selection collapsed) and the viewport at scrollY. It is the
+// seam the app restores a session, a reopened tab, or any other saved
+// spot through, so nothing outside this package has to assign Cursor,
+// Anchor and ScrollY by hand — which is what used to let a restore skip
+// cursorMoved (the next Render would not scroll the caret into view) and
+// skip the undo-group break (typing right after a restore would coalesce
+// into whatever burst was in flight before it).
+//
+// ScrollSeg resets because scrollY names a BUFFER LINE: a remembered
+// place carries no segment to go with it, and wrap.go's anchor is the
+// pair (ScrollY, ScrollSeg) — a stale segment left behind would open the
+// file part-way down a wrapped line. Row 0 of that line is the honest
+// reading of "scrolled to line N", and it is what CenterOnCursor settles
+// on for the same reason.
+func (t *Tab) RestoreView(cursor Position, scrollY int) {
+	t.MoveCursorTo(cursor, false)
+	if scrollY < 0 {
+		scrollY = 0
+	}
+	t.ScrollY = scrollY
+	t.ScrollSeg = 0
 }
 
 // hlEdgeGuard is how close (in lines) the viewport may drift toward the
