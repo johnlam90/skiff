@@ -409,6 +409,80 @@ func TestEditorDrag_AutoScroll(t *testing.T) {
 	}
 }
 
+// TestHandleMouse_AutoScrollDrivenThroughEventLoop exercises the full
+// auto-scroll circuit for the first time: the ticker goroutine posting
+// autoScrollEvents onto the screen's queue and handleAutoScroll consuming
+// them — not just the armed autoScrollDir flag the sibling test above
+// pins. A drag below the editor's bottom edge must actually advance the
+// viewport once events are pumped, and releasing the button must stop the
+// scrolling even if one already-posted tick straggles in afterwards.
+func TestHandleMouse_AutoScrollDrivenThroughEventLoop(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "tall.txt")
+	if err := os.WriteFile(target, []byte(strings.Repeat("some text here\n", 60)), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	scr, ok := a.screen.(tcell.SimulationScreen)
+	if !ok {
+		t.Fatal("newTestApp must build on a SimulationScreen")
+	}
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	if tab == nil {
+		t.Fatal("no active tab after openFile")
+	}
+	ex, ey, _, eh := a.editorRect()
+
+	// Arm through the real mouse path: press on text, then drag past the
+	// bottom edge with the button held.
+	a.handleMouse(tcell.NewEventMouse(ex+10, ey+2, tcell.Button1, tcell.ModNone))
+	if a.dragMode != dragEditor {
+		t.Fatalf("press should arm the editor drag, got %q", a.dragMode)
+	}
+	a.handleMouse(tcell.NewEventMouse(ex+10, ey+eh+1, tcell.Button1, tcell.ModNone))
+	if a.autoScrollDir != 1 {
+		t.Fatalf("drag below the edge should arm auto-scroll down, got %d", a.autoScrollDir)
+	}
+
+	// Pump the event loop by hand until a tick lands: the goroutine posts
+	// to the SimulationScreen's queue exactly as it would to a real one.
+	deadline := time.Now().Add(2 * time.Second)
+	for tab.ScrollY < 1 && time.Now().Before(deadline) {
+		if scr.HasPendingEvent() {
+			a.handleEvent(scr.PollEvent())
+		} else {
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+	if tab.ScrollY < 1 {
+		t.Fatalf("auto-scroll never advanced the viewport (ScrollY=%d)", tab.ScrollY)
+	}
+
+	// Release stops the feed. At most one tick posted before the stop
+	// signal can still be queued; drain past several tick periods and
+	// hold the viewport still.
+	a.handleMouse(tcell.NewEventMouse(ex+10, ey+eh+1, tcell.ButtonNone, tcell.ModNone))
+	if a.autoScrollDir != 0 {
+		t.Fatalf("release should disarm auto-scroll, got %d", a.autoScrollDir)
+	}
+	settled := tab.ScrollY
+	quiet := time.Now().Add(4 * autoScrollTick)
+	for time.Now().Before(quiet) {
+		if scr.HasPendingEvent() {
+			a.handleEvent(scr.PollEvent())
+		} else {
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+	if tab.ScrollY != settled {
+		t.Fatalf("viewport moved after release: %d -> %d", settled, tab.ScrollY)
+	}
+	if a.autoScrollDir != 0 {
+		t.Fatalf("straggler tick re-armed auto-scroll: %d", a.autoScrollDir)
+	}
+}
+
 // TestHandleMouse_Wheel routes scroll events to the panel under the cursor.
 func TestHandleMouse_Wheel(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
