@@ -17,9 +17,27 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+// TestMain redirects every XDG base directory to a throwaway root before
+// any test runs. Most tests here already call redirectStore per-test, but
+// TestMain is the backstop that makes a forgotten redirect in a future
+// test harmless instead of a write into the developer's real
+// ~/.local/state/skiff/sessions/.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "skiff-test-xdg-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+	os.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 // redirectStore points the store at a temp dir for the test.
 func redirectStore(t *testing.T) string {
@@ -306,5 +324,24 @@ func TestReadProjectFileRejectsFutureVersion(t *testing.T) {
 	}
 	if _, ok := Load("/proj"); ok {
 		t.Fatal("future version should not load")
+	}
+}
+
+// TestStateDirIsRedirectedDuringTests pins the isolation contract this
+// suite relies on: with TestMain's XDG redirect in place, the session
+// store must never resolve under the developer's real home. If this
+// fails, some test cleared XDG_STATE_HOME or TestMain was removed —
+// either way the suite is about to write into ~/.local/state/skiff.
+func TestStateDirIsRedirectedDuringTests(t *testing.T) {
+	dir, err := stateDir()
+	if err != nil {
+		t.Fatalf("stateDir: %v", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	if strings.HasPrefix(dir, filepath.Join(home, ".local")) {
+		t.Fatalf("stateDir resolved under the real home during tests: %s", dir)
 	}
 }

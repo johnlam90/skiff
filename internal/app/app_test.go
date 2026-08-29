@@ -28,6 +28,24 @@ import (
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
+// TestMain redirects every XDG base directory to a throwaway root before
+// any test runs. App tests exercise paths that persist sessions and config
+// (closeTab's deferred saveSession, quit flows); without this, each run
+// wrote temp-project sessions into the developer's real
+// ~/.local/state/skiff/sessions/ and the 50-file prune evicted their real
+// project sessions. Per-test t.Setenv overrides still compose on top.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "skiff-test-xdg-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+	os.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 // newTestApp builds a fully-wired App against a tcell.SimulationScreen. It
 // mirrors what New() does, but skips the background tree-refresh goroutine
 // because we don't want a ticker firing while tests run.
