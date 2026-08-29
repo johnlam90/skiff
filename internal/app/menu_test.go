@@ -627,8 +627,8 @@ func TestMenuDrillIn_RunsThePickedAction(t *testing.T) {
 	}
 	pick.Selected = idx
 	pick.Confirm()
-	if a.fileClipPath != path {
-		t.Fatalf("picking Copy file should have loaded the file clipboard, got %q", a.fileClipPath)
+	if a.fileClip.path != path {
+		t.Fatalf("picking Copy file should have loaded the file clipboard, got %q", a.fileClip.path)
 	}
 }
 

@@ -227,8 +227,9 @@ func (a *App) projReplaceConfirmAll() {
 }
 
 // doProjReplaceAll applies everywhere: open buffers synchronously (the
-// editor owns them), closed files in the background behind the shared
-// file-op gate. One combined report lands via projReplaceDoneEvent.
+// editor owns them), closed files in the background behind the
+// replace's own gate (projReplaceBusy — not the file clipboard's, the
+// two are unrelated). One combined report lands via projReplaceDoneEvent.
 //
 // Re-saving a clean tab can fail (the file turned into a directory, the
 // disk filled, permissions changed under us). Those failures are
@@ -237,8 +238,8 @@ func (a *App) projReplaceConfirmAll() {
 // count for a write that never landed is the one outcome worse than the
 // failure itself.
 func (a *App) doProjReplaceAll(matches []search.Match, query, repl string, opts search.Options) {
-	if a.fileOpBusy {
-		a.flash("Another file operation is still running")
+	if a.projReplaceBusy {
+		a.flash("Another replace is still running")
 		return
 	}
 	var diskMatches []search.Match
@@ -275,7 +276,7 @@ func (a *App) doProjReplaceAll(matches []search.Match, query, repl string, opts 
 	sort.Strings(saveFailed)
 	root := a.rootDir
 	scr := a.screen
-	a.fileOpBusy = true
+	a.projReplaceBusy = true
 	a.safeGo("project-replace", func() {
 		rep := search.ApplyReplace(root, diskMatches, query, repl, opts)
 		_ = scr.PostEvent(&projReplaceDoneEvent{
@@ -293,7 +294,7 @@ func (a *App) doProjReplaceAll(matches []search.Match, query, repl string, opts 
 // — which is exactly the tab whose save just failed. Flashing first
 // would let that generic warning bury the specific report.
 func (a *App) handleProjReplaceDone(e *projReplaceDoneEvent) {
-	a.fileOpBusy = false
+	a.projReplaceBusy = false
 	occ := e.rep.Replaced + e.bufOcc
 	files := e.rep.Files + e.bufFiles
 	skipped := e.rep.Skipped + e.bufSkip

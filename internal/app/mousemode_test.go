@@ -30,6 +30,7 @@ import (
 	"github.com/gdamore/tcell/v2/terminfo"
 
 	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/filemanager"
 	"github.com/johnlam90/skiff/internal/overlay"
 	"github.com/johnlam90/skiff/internal/theme"
 )
@@ -129,10 +130,12 @@ func ttyApp(t *testing.T) (*App, *recTty) {
 	}
 	t.Cleanup(func() { scr.Fini() })
 
+	root := t.TempDir()
 	a := &App{
 		screen:         scr,
 		theme:          theme.Default(),
-		rootDir:        t.TempDir(),
+		rootDir:        root,
+		files:          filemanager.New(root),
 		hoveredMenuRow: -1,
 		diffPanelRow:   -1,
 		sidebarWidth:   defaultSidebarWidth,
