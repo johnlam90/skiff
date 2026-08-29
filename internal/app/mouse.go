@@ -552,7 +552,7 @@ func (a *App) startAutoScroll(dir int) {
 	a.autoScrollStop = make(chan struct{})
 	stop := a.autoScrollStop
 	scr := a.screen
-	go func() {
+	a.safeGo("auto-scroll", func() {
 		ticker := time.NewTicker(autoScrollTick)
 		defer ticker.Stop()
 		for {
@@ -563,7 +563,7 @@ func (a *App) startAutoScroll(dir int) {
 				_ = scr.PostEvent(&autoScrollEvent{when: t})
 			}
 		}
-	}()
+	})
 }
 
 // stopAutoScroll signals the auto-scroll goroutine to exit (idempotent).

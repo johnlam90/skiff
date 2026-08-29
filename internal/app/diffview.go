@@ -190,7 +190,7 @@ func (a *App) requestDiff(kind diffLoadKind, title, tabPath string, load func(*g
 	// Acknowledge the click immediately: the diff is a git round trip
 	// away, and a click that paints nothing reads as a dropped click.
 	a.flash("Loading diff…")
-	go func() {
+	a.safeGo("diff-load", func() {
 		lines := load(repo)
 		_ = scr.PostEvent(&diffLoadEvent{
 			when:    time.Now(),
@@ -200,7 +200,7 @@ func (a *App) requestDiff(kind diffLoadKind, title, tabPath string, load func(*g
 			tabPath: tabPath,
 			lines:   lines,
 		})
-	}()
+	})
 }
 
 // handleDiffLoaded opens the diff a background load produced, or

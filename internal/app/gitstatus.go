@@ -432,10 +432,10 @@ func (a *App) refreshGitStatusAsync() {
 	a.gitRefreshInFlight = true
 	rootDir, base, paths, skipStatus := a.rootDir, a.diffBase, a.openTabPaths(), a.tree == nil
 	scr := a.screen
-	go func() {
+	a.safeGo("git-status", func() {
 		res := collectGitStatus(rootDir, base, paths, skipStatus)
 		_ = scr.PostEvent(&gitStatusEvent{when: time.Now(), res: res})
-	}()
+	})
 }
 
 // handleGitStatusEvent applies a finished background collection and
