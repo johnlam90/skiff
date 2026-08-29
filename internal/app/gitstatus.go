@@ -33,12 +33,22 @@ import (
 )
 
 // gitStatusResult bundles everything one status collection produces:
-// the repo-level snapshot and the per-tab gutter line changes. Built by
-// collectGitStatus — possibly on a background goroutine — and applied
-// to the UI in one shot by App.applyGitStatus on the main thread.
+// the repo-level snapshot, the per-tab gutter line changes, and which
+// dirty paths are directories on disk (the Git panel's trailing-slash
+// answer, stat'd here so the row builder never touches the filesystem
+// on the event loop). Built by collectGitStatus — possibly on a
+// background goroutine — and applied to the UI in one shot by
+// App.applyGitStatus on the main thread.
 type gitStatusResult struct {
 	st       gitStatus
 	tabLines map[string]map[int]editor.GitLineChange
+
+	// isDir holds true for each snapshot path that stats as a
+	// directory — untracked dirs, which porcelain reports as one
+	// collapsed entry. Paths that fail to stat (deleted) are simply
+	// absent, so a lookup answers false for them, exactly like the
+	// on-loop stat used to.
+	isDir map[string]bool
 }
 
 // gitStatusEvent carries a finished background collection back to the
@@ -54,18 +64,237 @@ func (e *gitStatusEvent) When() time.Time { return e.when }
 
 // collectGitStatus runs the git side of a status refresh: the repo
 // snapshot (skipped in single-file mode, which deliberately avoids the
-// whole-repo walk) plus one `git diff` of gutter lines per open tab.
-// It only shells out and builds data — no App state — so it is safe to
-// run off the main thread.
+// whole-repo walk) plus ONE `git diff` of gutter lines covering every
+// open tab — ten tabs used to mean ten diff forks per collection,
+// every ten seconds, forever. It only shells out and builds data — no
+// App state — so it is safe to run off the main thread.
+//
+// A single tab keeps the single-path loader: one fork either way, and
+// the per-path form needs no header attribution at all. No tabs forks
+// nothing.
 func collectGitStatus(rootDir, base string, tabPaths []string, skipStatus bool) gitStatusResult {
 	res := gitStatusResult{tabLines: map[string]map[int]editor.GitLineChange{}}
 	if !skipStatus {
 		res.st = loadGitStatus(rootDir, base)
+		res.isDir = statDirtyDirs(res.st.Files)
 	}
-	for _, path := range tabPaths {
-		res.tabLines[path] = loadGitLineChanges(rootDir, base, path)
+	switch len(tabPaths) {
+	case 0:
+	case 1:
+		res.tabLines[tabPaths[0]] = loadGitLineChanges(rootDir, base, tabPaths[0])
+	default:
+		batchGitLineChanges(res.tabLines, rootDir, base, res.st.Root, tabPaths)
 	}
 	return res
+}
+
+// batchGitLineChanges fills dst with gutter line changes for every path
+// using one `git diff --unified=0 <ref> -- p1 … pN` invocation, split
+// on its per-file headers. Every requested path gets an entry — nil
+// for a clean (or unattributable) tab — because applyGitStatus clears
+// stale gutters only for keys it finds.
+//
+// toplevel is the repo root the diff's header paths are relative to,
+// normally free from the snapshot the same collection just took; when
+// the caller has none (multi-tab single-file mode, a failed status) one
+// rev-parse resolves it — still a win over one diff per tab. base is
+// repo-controlled (a clone can ship a branch named anything), so it
+// goes through SafeRef and the paths sit behind `--`, same as
+// diffNameStatus. Any failure degrades to nil markers, the package's
+// standing best-effort contract.
+func batchGitLineChanges(dst map[string]map[int]editor.GitLineChange, rootDir, base, toplevel string, paths []string) {
+	for _, p := range paths {
+		dst[p] = nil
+	}
+	if rootDir == "" {
+		return
+	}
+	if toplevel == "" {
+		out, err := git.Output(rootDir, "rev-parse", "--show-toplevel")
+		if err != nil {
+			return
+		}
+		toplevel = strings.TrimRight(string(out), "\n\r")
+		if toplevel == "" {
+			return
+		}
+	}
+	ref := "HEAD"
+	if base != "" {
+		safe, err := git.SafeRef(base)
+		if err != nil {
+			return
+		}
+		ref = safe
+	}
+	// The explicit prefixes pin the header shape the attribution parses
+	// against a user's diff.noprefix/diff.mnemonicPrefix config.
+	args := append([]string{"diff", "--unified=0", "--src-prefix=a/", "--dst-prefix=b/", ref, "--"}, paths...)
+	out, err := git.Output(rootDir, args...)
+	if err != nil || len(out) == 0 {
+		return
+	}
+	byRel := make(map[string]string, len(paths))
+	for _, p := range paths {
+		// relFromRoot rather than a plain Rel: tab paths can disagree
+		// with the repo root on casing (macOS), and an unmatched tab
+		// must simply keep nil markers, exactly like a tab outside the
+		// repo.
+		if rel, ok := relFromRoot(p, toplevel); ok {
+			byRel[filepath.ToSlash(rel)] = p
+		}
+	}
+	for rel, lines := range parseGitDiffBatch(out) {
+		if abs, ok := byRel[rel]; ok {
+			dst[abs] = lines
+		}
+	}
+}
+
+// parseGitDiffBatch splits a multi-file unified diff into per-file
+// sections and runs the existing hunk parser over each, keyed by the
+// section's repo-relative path. Sections that name no usable path (a
+// binary file note, a mode-only change) are dropped — they carry no
+// hunks anyway.
+func parseGitDiffBatch(out []byte) map[string]map[int]editor.GitLineChange {
+	res := map[string]map[int]editor.GitLineChange{}
+	for _, section := range splitGitDiffSections(out) {
+		if rel := sectionTargetRel(section); rel != "" {
+			res[rel] = parseGitDiffLines(section)
+		}
+	}
+	return res
+}
+
+// splitGitDiffSections cuts a combined diff at each `diff --git ` file
+// header, returning subslices of out (no copying). Only a line START
+// can open a section: inside hunk bodies every line carries a +/-/space
+// prefix, so patch content can never fake the header.
+func splitGitDiffSections(out []byte) [][]byte {
+	header := []byte("diff --git ")
+	var starts []int
+	for i := 0; i >= 0 && i < len(out); {
+		if bytes.HasPrefix(out[i:], header) {
+			starts = append(starts, i)
+		}
+		j := bytes.IndexByte(out[i:], '\n')
+		if j < 0 {
+			break
+		}
+		i += j + 1
+	}
+	sections := make([][]byte, 0, len(starts))
+	for k, s := range starts {
+		end := len(out)
+		if k+1 < len(starts) {
+			end = starts[k+1]
+		}
+		sections = append(sections, out[s:end])
+	}
+	return sections
+}
+
+// sectionTargetRel extracts the repo-relative path a diff section
+// belongs to. The `+++ b/<new>` line answers for everything a tab can
+// hold — modifications, renames (the tab has the new name) — and the
+// `--- a/<old>` line covers deletions, where +++ is /dev/null. The
+// scan stops at the first hunk: body lines may legitimately start with
+// "+++ " or "--- " (an added line whose text begins "++ "), and only
+// the header block above the hunks may be trusted.
+func sectionTargetRel(section []byte) string {
+	oldRel := ""
+	for _, line := range bytes.Split(section, []byte{'\n'}) {
+		text := string(line)
+		switch {
+		case strings.HasPrefix(text, "@@ "):
+			return oldRel
+		case strings.HasPrefix(text, "+++ "):
+			if rel := headerPath(text[4:], "b/"); rel != "" {
+				return rel
+			}
+		case strings.HasPrefix(text, "--- "):
+			oldRel = headerPath(text[4:], "a/")
+		}
+	}
+	return oldRel
+}
+
+// headerPath turns one `---`/`+++` header operand into a repo-relative
+// path: unquote git's C-style form when present, reject /dev/null, and
+// strip the expected a// b/ prefix — anything else fails closed to ""
+// so a section is dropped rather than mis-attributed. An UNQUOTED name
+// containing blanks arrives with one trailing TAB (git's GNU-patch
+// compatibility marker for "the name ends here"); the quoted form
+// never carries it, and a real tab inside a name forces quoting, so
+// stripping one from the unquoted form is unambiguous.
+func headerPath(raw, prefix string) string {
+	if strings.HasPrefix(raw, `"`) {
+		raw = unquoteGitPath(raw)
+		if raw == "" {
+			return ""
+		}
+	} else {
+		raw = strings.TrimSuffix(raw, "\t")
+	}
+	if raw == os.DevNull || raw == "/dev/null" {
+		return ""
+	}
+	if !strings.HasPrefix(raw, prefix) {
+		return ""
+	}
+	return raw[len(prefix):]
+}
+
+// unquoteGitPath decodes the C-style quoting git applies to header
+// paths containing control or non-ASCII bytes (quote.c: \a \b \f \n
+// \r \t \v, \\, \", and three-digit octal). Returns "" for anything
+// malformed — failing closed beats guessing at a path. Content after
+// the closing quote is ignored; git writes none.
+func unquoteGitPath(q string) string {
+	if len(q) < 2 || q[0] != '"' {
+		return ""
+	}
+	var b strings.Builder
+	for i := 1; i < len(q); i++ {
+		c := q[i]
+		if c == '"' {
+			return b.String()
+		}
+		if c != '\\' {
+			b.WriteByte(c)
+			continue
+		}
+		i++
+		if i >= len(q) {
+			return ""
+		}
+		switch e := q[i]; e {
+		case 'a':
+			b.WriteByte('\a')
+		case 'b':
+			b.WriteByte('\b')
+		case 'f':
+			b.WriteByte('\f')
+		case 'n':
+			b.WriteByte('\n')
+		case 'r':
+			b.WriteByte('\r')
+		case 't':
+			b.WriteByte('\t')
+		case 'v':
+			b.WriteByte('\v')
+		case '\\', '"':
+			b.WriteByte(e)
+		default:
+			if e < '0' || e > '7' || i+2 >= len(q) ||
+				q[i+1] < '0' || q[i+1] > '7' || q[i+2] < '0' || q[i+2] > '7' {
+				return ""
+			}
+			b.WriteByte((e-'0')<<6 | (q[i+1]-'0')<<3 | (q[i+2] - '0'))
+			i += 2
+		}
+	}
+	return "" // unterminated quote
 }
 
 // gitStatus is the git package's Snapshot under its historical
@@ -131,19 +360,50 @@ func (a *App) readRepo() *git.Repo {
 	return git.Open(a.rootDir)
 }
 
+// statDirtyDirs stats each dirty path and returns the set that are
+// directories on disk. Runs inside the collection (off the event loop
+// when async) so buildGitChangesRows can stay pure — this used to be a
+// stat per changed path on the main thread every time the Git panel
+// rebuilt. Only true entries are stored: a deleted path's failed stat
+// is the absence a lookup reads as false.
+func statDirtyDirs(files map[string]git.ChangeKind) map[string]bool {
+	if len(files) == 0 {
+		return nil
+	}
+	var isDir map[string]bool
+	for abs := range files {
+		if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
+			if isDir == nil {
+				isDir = map[string]bool{}
+			}
+			isDir[abs] = true
+		}
+	}
+	return isDir
+}
+
 // rebaseGitPaths rewrites dirty paths to match the file tree root casing.
 func rebaseGitPaths(paths map[string]filetree.GitChangeKind, treeRoot string) map[string]filetree.GitChangeKind {
+	return rebaseByRoot(paths, treeRoot)
+}
+
+// rebaseByRoot is rebaseGitPaths' shape-generic core: every key that
+// resolves under treeRoot (case drift tolerated) is rewritten onto the
+// tree root's own casing so lookups keyed by tree paths hit. Shared by
+// the dirty-kind map and the isDir map, which must be rebased the same
+// way or the panel's directory flags would miss on macOS.
+func rebaseByRoot[V any](paths map[string]V, treeRoot string) map[string]V {
 	if len(paths) == 0 || treeRoot == "" {
 		return paths
 	}
-	rebased := map[string]filetree.GitChangeKind{}
-	for path, kind := range paths {
+	rebased := make(map[string]V, len(paths))
+	for path, v := range paths {
 		rel, ok := relFromRoot(path, treeRoot)
 		if !ok {
-			rebased[path] = kind
+			rebased[path] = v
 			continue
 		}
-		rebased[filepath.Join(treeRoot, rel)] = kind
+		rebased[filepath.Join(treeRoot, rel)] = v
 	}
 	return rebased
 }
@@ -475,6 +735,7 @@ func (a *App) applyGitStatus(res gitStatusResult) {
 		if !res.st.IsRepo {
 			a.tree.DirtyFiles = nil
 			a.tree.DirtyFolders = nil
+			a.gitDirtyDirs = nil
 			// No repo, no Git panel — fall back to the explorer rather
 			// than strand the user on a view with nothing behind it.
 			a.gitPanelActive = false
@@ -483,6 +744,9 @@ func (a *App) applyGitStatus(res gitStatusResult) {
 			dirtyFiles := rebaseGitPaths(res.st.Files, a.tree.Root.Path)
 			a.tree.DirtyFiles = dirtyFiles
 			a.tree.DirtyFolders = dirtyFolderSet(dirtyFiles, a.tree.Root.Path)
+			// Same rebase as the kinds, or the flags would miss the
+			// tree-cased keys buildGitChangesRows looks up.
+			a.gitDirtyDirs = rebaseByRoot(res.isDir, a.tree.Root.Path)
 		}
 	}
 	// Tabs opened after the collection started aren't in the map — they

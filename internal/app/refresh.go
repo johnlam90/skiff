@@ -173,13 +173,20 @@ func (a *App) stopTreeRefresh() {
 
 // refreshTreeNow re-runs the same refresh pipeline the 10s timer
 // fires: rescan the file tree (preserving expansion state), reconcile
-// any open tabs with disk, refresh git status, and invalidate the
-// finder index so a freshly-pulled file shows up everywhere at once.
-// The session store piggybacks on the same tick, so a killed terminal
-// loses at most ten seconds of tab state instead of the whole session.
-// Called from the periodic event and from runCustomAction's success
-// path so a Copy-from-remote action's output is visible immediately
-// instead of after the next tick.
+// any open tabs with disk, and refresh git status. The session store
+// piggybacks on the same tick, so a killed terminal loses at most ten
+// seconds of tab state instead of the whole session. Called from the
+// periodic event and from the git-op / custom-action / project-replace
+// landing paths so their output is visible immediately instead of
+// after the next tick.
+//
+// The finder is deliberately NOT invalidated here any more: the sweep
+// itself reports whether any directory's membership changed, and
+// handleTreeScan reindexes only then — so a quiet tick stops re-running
+// `git ls-files` (or a full walk) on a project nobody touched. Callers
+// whose changes can land in directories the tree never loaded (git
+// ops, custom actions) invalidate explicitly at their own call sites,
+// because the scan gate cannot see those.
 //
 // Every stage is off-thread now. The tick used to run a recursive
 // ReadDir of the whole loaded tree, a Stat per open tab, and a session
@@ -188,7 +195,6 @@ func (a *App) stopTreeRefresh() {
 func (a *App) refreshTreeNow() {
 	a.refreshTreeAsync()
 	a.refreshGitStatusAsync()
-	a.invalidateFinder()
 }
 
 // refreshTreeAsync starts one background disk sweep: the session write,
@@ -260,11 +266,17 @@ func (a *App) refreshTreeAsync() {
 // predates that change, so applying it would resurrect the file the user
 // just deleted until the next tick. Drop it; the mutation already
 // refreshed the tree correctly.
+//
+// The finder reindexes only when ApplyScan reports a membership change
+// — names actually came or went, or a .gitignore moved. Tab
+// reconciliation is deliberately outside the gate: it consumes the
+// per-tab Stat probes, never the directory listings, so external-edit
+// detection on open tabs cannot be starved by a quiet tree.
 func (a *App) handleTreeScan(e *treeScanEvent) {
 	a.treeScanInFlight = false
 	if e.gen == a.treeScanGen {
-		if a.tree != nil {
-			a.tree.ApplyScan(e.dirs)
+		if a.tree != nil && a.tree.ApplyScan(e.dirs) {
+			a.invalidateFinder()
 		}
 		a.applyTabProbes(e.tabs)
 	}

@@ -52,7 +52,7 @@ func TestBuildGitChangesRows_SortsByRelPath(t *testing.T) {
 		filepath.Join(root, "alpha.go"):      filetree.GitChangeAdded,
 		filepath.Join(root, "sub", "mid.go"): filetree.GitChangeDeleted,
 	}
-	rows := buildGitChangesRows(dirty, root)
+	rows := buildGitChangesRows(dirty, root, nil)
 	if len(rows) != 3 {
 		t.Fatalf("expected 3 rows, got %d", len(rows))
 	}
@@ -64,21 +64,21 @@ func TestBuildGitChangesRows_SortsByRelPath(t *testing.T) {
 	}
 }
 
-// TestBuildGitChangesRows_MarksUntrackedDirs verifies a dirty path that
-// is a directory on disk gets IsDir plus a trailing slash — that's how
-// the row communicates "this reveals in the tree, not a diff". A
-// deleted path (stat fails) must never be marked as a directory.
+// TestBuildGitChangesRows_MarksUntrackedDirs verifies a dirty path the
+// collection flagged as a directory gets IsDir plus a trailing slash —
+// that's how the row communicates "this reveals in the tree, not a
+// diff". A deleted path (absent from the carried map, because its stat
+// failed off-thread) must never be marked as a directory. Neither path
+// exists on disk here: the builder is pure now, the stat happened in
+// collectGitStatus's goroutine.
 func TestBuildGitChangesRows_MarksUntrackedDirs(t *testing.T) {
-	root := t.TempDir()
+	root := filepath.Join(t.TempDir(), "proj")
 	sub := filepath.Join(root, "newdir")
-	if err := os.Mkdir(sub, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
 	dirty := map[string]filetree.GitChangeKind{
 		sub:                             filetree.GitChangeAdded,
 		filepath.Join(root, "gone.txt"): filetree.GitChangeDeleted,
 	}
-	rows := buildGitChangesRows(dirty, root)
+	rows := buildGitChangesRows(dirty, root, map[string]bool{sub: true})
 	if len(rows) != 2 {
 		t.Fatalf("expected 2 rows, got %d", len(rows))
 	}
@@ -100,8 +100,45 @@ func TestBuildGitChangesRows_SkipsPathsOutsideRoot(t *testing.T) {
 	dirty := map[string]filetree.GitChangeKind{
 		"/somewhere/else/file.go": filetree.GitChangeModified,
 	}
-	if rows := buildGitChangesRows(dirty, root); len(rows) != 0 {
+	if rows := buildGitChangesRows(dirty, root, nil); len(rows) != 0 {
 		t.Fatalf("expected no rows for out-of-root paths, got %+v", rows)
+	}
+}
+
+// TestApplyGitStatus_CarriesIsDirToPanelRows drives the whole off-thread
+// IsDir pipeline against a real repo: collectGitStatus stats the dirty
+// paths on its own (background-safe) side, applyGitStatus rebases and
+// stores the flags, and the panel rebuild consumes them — so
+// buildGitChangesRows never has to touch the filesystem on the event
+// loop again.
+func TestApplyGitStatus_CarriesIsDirToPanelRows(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	writeFileT(t, filepath.Join(repo, "tracked.txt"), "x\n")
+	gitRun(t, repo, "add", ".")
+	gitRun(t, repo, "commit", "-m", "init")
+	if err := os.Mkdir(filepath.Join(repo, "newdir"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFileT(t, filepath.Join(repo, "newdir", "inside.txt"), "y\n")
+
+	// newTestApp runs the synchronous refreshGitStatus, which flows
+	// through the same collect → apply pipeline as the async tick.
+	a := newTestApp(t, repo)
+	a.gitPanelActive = true
+	a.rebuildGitChangesRows()
+
+	var dirRow *gitChangeRow
+	for i := range a.gitPanelRows {
+		if a.gitPanelRows[i].Abs == filepath.Join(repo, "newdir") {
+			dirRow = &a.gitPanelRows[i]
+		}
+	}
+	if dirRow == nil {
+		t.Fatalf("untracked dir missing from panel rows: %+v", a.gitPanelRows)
+	}
+	if !dirRow.IsDir || dirRow.Rel != "newdir/" {
+		t.Fatalf("untracked dir row should carry IsDir + trailing slash: %+v", dirRow)
 	}
 }
 

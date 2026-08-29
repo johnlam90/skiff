@@ -458,6 +458,13 @@ type App struct {
 	gitPanelRows   []gitChangeRow
 	gitPanelScroll int
 
+	// gitDirtyDirs flags which dirty paths are directories, keyed by
+	// tree-cased absolute path. Stat'd off-thread by collectGitStatus
+	// and rebased alongside DirtyFiles in applyGitStatus, so panel
+	// rebuilds between collections (activation, key nav) read the last
+	// collection's answer instead of stat'ing on the event loop.
+	gitDirtyDirs map[string]bool
+
 	// Git panel keyboard mode (gitchanges.go). The panel is mouse-first,
 	// but Button3 and mouse reporting are exactly what macOS Terminal +
 	// tmux swallow, so Esc-g / ≡ → Git changes arm a keyboard focus that

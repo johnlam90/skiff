@@ -28,6 +28,7 @@ import (
 
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/icons"
 	"github.com/johnlam90/skiff/internal/session"
 )
@@ -674,4 +675,115 @@ func findTreeChild(a *App, name string) *filetree.Node {
 		}
 	}
 	return nil
+}
+
+// installReadyFinder wires a Ready finder onto the app and returns a
+// counter of rebuild kicks. The PanicGuard seam intercepts the build
+// goroutine after the first (real) index lands, so a test can assert
+// "no rebuild started" without racing a goroutine that would flip the
+// state back to Ready before the assert runs.
+func installReadyFinder(t *testing.T, a *App) *int {
+	t.Helper()
+	f := finder.New(a.rootDir)
+	f.Rebuild(nil)
+	deadline := time.Now().Add(5 * time.Second)
+	for f.State() != finder.StateReady && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if f.State() != finder.StateReady {
+		t.Fatalf("finder never reached Ready: state=%v", f.State())
+	}
+	kicks := 0
+	f.PanicGuard = func(name string, fn func()) { kicks++ }
+	a.finder = f
+	return &kicks
+}
+
+// TestHandleTreeScan_QuietScanSkipsFinderRebuild pins the quiet tick:
+// a background sweep that reproduces the tree's current membership
+// must not invalidate the finder index. Before the gate, every tick
+// re-ran `git ls-files` (or a full walk) and left Esc-p showing
+// "Indexing…" for a slice of every ten-second window, forever, on a
+// project nobody was touching.
+func TestHandleTreeScan_QuietScanSkipsFinderRebuild(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	kicks := installReadyFinder(t, a)
+
+	a.handleTreeScan(&treeScanEvent{
+		when: time.Now(),
+		gen:  a.treeScanGen,
+		dirs: filetree.ScanDirs(a.tree.LoadedDirs()),
+	})
+
+	if *kicks != 0 {
+		t.Fatalf("an unchanged scan kicked %d finder rebuild(s), want 0", *kicks)
+	}
+	if a.finder.State() != finder.StateReady {
+		t.Fatalf("an unchanged scan moved the finder off Ready: %v", a.finder.State())
+	}
+}
+
+// TestHandleTreeScan_NewNameTriggersFinderRebuild is the other
+// direction of the gate: a sweep that lands an actual membership
+// change must reindex, or a file pulled in behind the editor would
+// stay invisible to Esc-p until some file op happened to invalidate.
+func TestHandleTreeScan_NewNameTriggersFinderRebuild(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	kicks := installReadyFinder(t, a)
+
+	if err := os.WriteFile(filepath.Join(dir, "appeared.txt"), []byte("hi"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a.handleTreeScan(&treeScanEvent{
+		when: time.Now(),
+		gen:  a.treeScanGen,
+		dirs: filetree.ScanDirs(a.tree.LoadedDirs()),
+	})
+
+	if *kicks != 1 {
+		t.Fatalf("a scan with a new name kicked %d finder rebuild(s), want 1", *kicks)
+	}
+	if findTreeChild(a, "appeared.txt") == nil {
+		t.Fatal("the scan should still land the new file in the tree")
+	}
+}
+
+// TestHandleGitOpDone_TreeTouchingOpStillReindexesFinder guards the
+// call refreshTreeNow used to make for everyone: a pull/checkout/stash
+// can create files in directories the tree never loaded, which the
+// scan-change gate cannot see, so the git-op landing must invalidate
+// the finder explicitly.
+func TestHandleGitOpDone_TreeTouchingOpStillReindexesFinder(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	kicks := installReadyFinder(t, a)
+
+	a.handleGitOpDone(&gitOpDoneEvent{
+		when: time.Now(), label: "Pull", okFlash: "Pulled", touchesTree: true,
+	})
+
+	if *kicks != 1 {
+		t.Fatalf("a tree-touching git op kicked %d finder rebuild(s), want 1", *kicks)
+	}
+	pumpTreeScan(t, a)
+}
+
+// TestHandleCustomActionDone_StillReindexesFinder: same reasoning as
+// the git-op case — a custom action (an scp, a generator) can drop
+// files anywhere, so its success path keeps an explicit invalidation
+// rather than riding the tick's now-conditional one.
+func TestHandleCustomActionDone_StillReindexesFinder(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	kicks := installReadyFinder(t, a)
+
+	a.handleCustomActionDone(&customActionDoneEvent{when: time.Now(), label: "Sync"})
+
+	if *kicks != 1 {
+		t.Fatalf("a finished custom action kicked %d finder rebuild(s), want 1", *kicks)
+	}
+	pumpTreeScan(t, a)
 }

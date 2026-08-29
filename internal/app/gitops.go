@@ -110,8 +110,12 @@ func (a *App) handleGitOpDone(e *gitOpDoneEvent) {
 	if e.touchesTree {
 		// Pull / stash / checkout rewrite files under open buffers —
 		// refreshTreeNow reloads clean tabs, warns on dirty ones, and
-		// re-tints everything in one pass.
+		// re-tints everything in one pass. The finder is invalidated
+		// here explicitly: these ops can create files in directories
+		// the tree never loaded, which the sweep's membership gate
+		// cannot see.
 		a.refreshTreeNow()
+		a.invalidateFinder()
 	}
 }
 

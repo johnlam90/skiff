@@ -2832,3 +2832,250 @@ func TestRender_DotDirChainRendersMuted(t *testing.T) {
 		t.Fatalf("dot chain row fg = %v, want Muted", fg)
 	}
 }
+
+// realTempDir returns a t.TempDir with symlinks resolved. The merge
+// fast-path deliberately refuses nodes whose Real differs from Path
+// (an ancestor symlink can retarget under us), and on macOS the temp
+// root itself lives behind /var -> /private/var — resolving up front
+// keeps these tests about the fast-path, not the platform.
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	return dir
+}
+
+// childrenBacking returns the address of a node's children backing
+// array — the cheap witness that distinguishes the fast-path (slice
+// untouched) from a full merge (fresh slice, even when every pointer
+// in it survived).
+func childrenBacking(n *Node) *(*Node) {
+	if len(n.Children) == 0 {
+		return nil
+	}
+	return &n.Children[0]
+}
+
+// TestMerge_FastPathPreservesNodes pins the tick's quiescent case: an
+// unchanged scan of an unchanged directory returns before the filter/
+// sort/alloc pipeline, so the children slice — not just the *Node
+// pointers in it — is exactly the one the previous merge built, and
+// merge reports no membership change.
+func TestMerge_FastPathPreservesNodes(t *testing.T) {
+	root := realTempDir(t)
+	mustMkdir(t, filepath.Join(root, "sub"))
+	mustWrite(t, filepath.Join(root, "a.txt"), "a")
+	mustWrite(t, filepath.Join(root, "b.txt"), "b")
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if len(tr.Root.lastScan) == 0 {
+		t.Fatal("the first merge should stamp the raw-scan fingerprint")
+	}
+	before := tr.Root.Children
+	beforeBacking := childrenBacking(tr.Root)
+
+	if changed := tr.merge(tr.Root, readDir(root)); changed {
+		t.Fatal("an unchanged scan must not report a membership change")
+	}
+	if childrenBacking(tr.Root) != beforeBacking {
+		t.Fatal("an unchanged scan must keep the children slice, not rebuild it")
+	}
+	for i, c := range tr.Root.Children {
+		if c != before[i] {
+			t.Fatalf("child %d lost node identity across the fast-path", i)
+		}
+	}
+}
+
+// TestMerge_FastPathDisabledForSymlinks pins the safety rule: Real and
+// Loop are recomputed on every full merge precisely because an
+// ancestor's link target can move, so a listing containing any symlink
+// must take the full path every time.
+func TestMerge_FastPathDisabledForSymlinks(t *testing.T) {
+	root := realTempDir(t)
+	target := filepath.Join(root, "target")
+	mustMkdir(t, target)
+	mustSymlink(t, target, filepath.Join(root, "linked"))
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	beforeBacking := childrenBacking(tr.Root)
+
+	tr.merge(tr.Root, readDir(root))
+	if childrenBacking(tr.Root) == beforeBacking {
+		t.Fatal("a listing with a symlink must take the full merge")
+	}
+}
+
+// TestMerge_ChangeInIgnoreBytesForcesFullMerge: the directory's own
+// .gitignore is one of the merge's filter inputs, so edited bytes must
+// defeat the fast-path and refilter — and count as a change, because
+// they move the finder's membership too.
+func TestMerge_ChangeInIgnoreBytesForcesFullMerge(t *testing.T) {
+	root := realTempDir(t)
+	mustWrite(t, filepath.Join(root, ".gitignore"), "a.txt\n")
+	mustWrite(t, filepath.Join(root, "a.txt"), "a")
+	mustWrite(t, filepath.Join(root, "b.txt"), "b")
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if findChild(tr.Root, "a.txt") != nil {
+		t.Fatal("setup: a.txt should start hidden")
+	}
+
+	mustWrite(t, filepath.Join(root, ".gitignore"), "b.txt\n")
+	if changed := tr.merge(tr.Root, readDir(root)); !changed {
+		t.Fatal("edited ignore bytes must report a change")
+	}
+	if findChild(tr.Root, "a.txt") == nil || findChild(tr.Root, "b.txt") != nil {
+		t.Fatal("edited ignore bytes must refilter the children")
+	}
+}
+
+// TestMerge_EntryAddedForcesFullMerge: a name appearing or vanishing is
+// exactly what the fast-path exists to distinguish from noise — both
+// directions must rebuild and report the change.
+func TestMerge_EntryAddedForcesFullMerge(t *testing.T) {
+	root := realTempDir(t)
+	mustWrite(t, filepath.Join(root, "a.txt"), "a")
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	mustWrite(t, filepath.Join(root, "new.txt"), "n")
+	if changed := tr.merge(tr.Root, readDir(root)); !changed {
+		t.Fatal("an added entry must report a membership change")
+	}
+	if findChild(tr.Root, "new.txt") == nil {
+		t.Fatal("the added entry must appear")
+	}
+
+	if err := os.Remove(filepath.Join(root, "new.txt")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if changed := tr.merge(tr.Root, readDir(root)); !changed {
+		t.Fatal("a removed entry must report a membership change")
+	}
+	if findChild(tr.Root, "new.txt") != nil {
+		t.Fatal("the removed entry must vanish")
+	}
+}
+
+// TestMerge_PinChangeForcesFullMerge guards the open-tab exemption
+// against the fast-path: pinning a path inside an ignored directory is
+// a filter-input change the raw listing cannot see, so the epoch bump
+// must force the full merge that surfaces the entry — and un-pinning
+// must re-hide it, exactly as before the fast-path existed.
+func TestMerge_PinChangeForcesFullMerge(t *testing.T) {
+	root := realTempDir(t)
+	mustWrite(t, filepath.Join(root, ".gitignore"), "dist/\n")
+	mustMkdir(t, filepath.Join(root, "dist"))
+	mustWrite(t, filepath.Join(root, "dist", "bundle.js"), "// built")
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if findChild(tr.Root, "dist") != nil {
+		t.Fatal("setup: dist/ should start hidden")
+	}
+
+	tr.SetOpenFiles([]string{filepath.Join(root, "dist", "bundle.js")})
+	tr.merge(tr.Root, readDir(root))
+	if findChild(tr.Root, "dist") == nil {
+		t.Fatal("pinning must defeat the fast-path and surface the directory")
+	}
+
+	tr.SetOpenFiles(nil)
+	tr.merge(tr.Root, readDir(root))
+	if findChild(tr.Root, "dist") != nil {
+		t.Fatal("un-pinning must defeat the fast-path and re-hide the directory")
+	}
+}
+
+// TestMerge_HideIgnoredFlipForcesFullMerge: the visibility toggle is a
+// merge input carried in the fingerprint's flag byte, so flipping it
+// must refilter even though the raw listing is byte-identical.
+func TestMerge_HideIgnoredFlipForcesFullMerge(t *testing.T) {
+	root := realTempDir(t)
+	mustWrite(t, filepath.Join(root, ".gitignore"), "a.txt\n")
+	mustWrite(t, filepath.Join(root, "a.txt"), "a")
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if findChild(tr.Root, "a.txt") != nil {
+		t.Fatal("setup: a.txt should start hidden")
+	}
+
+	tr.HideIgnored = false
+	tr.merge(tr.Root, readDir(root))
+	if findChild(tr.Root, "a.txt") == nil {
+		t.Fatal("flipping HideIgnored off must defeat the fast-path")
+	}
+}
+
+// TestMerge_AncestorIgnoreEditRefiltersChildren is the cross-directory
+// soundness case the per-directory bytes check alone cannot catch: an
+// edited root .gitignore changes what a SUBDIRECTORY's unchanged
+// listing filters to, so the epoch bump must push every later merge in
+// the same sweep (ancestors merge first — both Refresh and ApplyScan
+// walk top-down) through the full path.
+func TestMerge_AncestorIgnoreEditRefiltersChildren(t *testing.T) {
+	root := realTempDir(t)
+	mustWrite(t, filepath.Join(root, ".gitignore"), "nothing\n")
+	mustMkdir(t, filepath.Join(root, "sub"))
+	mustWrite(t, filepath.Join(root, "sub", "gen.txt"), "g")
+	mustWrite(t, filepath.Join(root, "sub", "keep.txt"), "k")
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	sub := findChild(tr.Root, "sub")
+	tr.Toggle(sub)
+	if findChild(sub, "gen.txt") == nil {
+		t.Fatal("setup: gen.txt should start visible")
+	}
+
+	mustWrite(t, filepath.Join(root, ".gitignore"), "gen.txt\n")
+	tr.Refresh()
+	if findChild(sub, "gen.txt") != nil {
+		t.Fatal("an ancestor ignore edit must refilter the subdirectory on the same sweep")
+	}
+	if findChild(sub, "keep.txt") == nil {
+		t.Fatal("the refilter must keep unignored entries")
+	}
+}
+
+// BenchmarkMergeUnchanged measures the tick's steady state: one merge
+// of a 1000-entry directory whose scan is identical to the last one.
+// The fast-path turns this from a filter+sort+alloc pass per loaded
+// directory every ten seconds into a fingerprint walk with no
+// allocations.
+func BenchmarkMergeUnchanged(b *testing.B) {
+	root, err := filepath.EvalSymlinks(b.TempDir())
+	if err != nil {
+		b.Fatalf("EvalSymlinks: %v", err)
+	}
+	for i := 0; i < 1000; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("file-%04d.txt", i)), []byte("x"), 0o644); err != nil {
+			b.Fatalf("write: %v", err)
+		}
+	}
+	tr, err := New(root)
+	if err != nil {
+		b.Fatalf("New: %v", err)
+	}
+	ds := readDir(root)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		tr.merge(tr.Root, ds)
+	}
+}

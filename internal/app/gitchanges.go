@@ -44,7 +44,6 @@ package app
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -357,7 +356,7 @@ func (a *App) rebuildGitChangesRows() {
 		a.gitPanelRows = nil
 		return
 	}
-	a.gitPanelRows = buildGitChangesRows(a.tree.DirtyFiles, a.tree.Root.Path)
+	a.gitPanelRows = buildGitChangesRows(a.tree.DirtyFiles, a.tree.Root.Path, a.gitDirtyDirs)
 	a.scrollGitPanel(0)
 	// Drop commit-check entries whose paths are no longer dirty, and
 	// keep the walk selection inside the new list. Without the prune, a
@@ -383,10 +382,13 @@ func (a *App) rebuildGitChangesRows() {
 }
 
 // buildGitChangesRows converts the dirty-path map into display rows
-// sorted by relative path. Pure so tests can drive it without a repo;
-// the only filesystem touch is a stat to spot untracked directories
-// (which is why deleted paths — stat fails — never get IsDir).
-func buildGitChangesRows(dirty map[string]filetree.GitChangeKind, root string) []gitChangeRow {
+// sorted by relative path. Pure — zero filesystem work, so tests can
+// drive it without a repo and the event loop pays nothing per rebuild.
+// isDir carries the collection's off-thread stat answers (see
+// statDirtyDirs): flagged paths are untracked directories and get the
+// trailing slash; deleted paths were never flagged, so they never read
+// as directories, exactly as when the stat happened here.
+func buildGitChangesRows(dirty map[string]filetree.GitChangeKind, root string, isDir map[string]bool) []gitChangeRow {
 	rows := make([]gitChangeRow, 0, len(dirty))
 	for abs, kind := range dirty {
 		rel, ok := relFromRoot(abs, root)
@@ -394,7 +396,7 @@ func buildGitChangesRows(dirty map[string]filetree.GitChangeKind, root string) [
 			continue
 		}
 		row := gitChangeRow{Rel: filepath.ToSlash(rel), Abs: abs, Kind: kind}
-		if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
+		if isDir[abs] {
 			row.IsDir = true
 			row.Rel += "/"
 		}
