@@ -484,7 +484,7 @@ func (a *App) openGitHunkAt(tab *editor.Tab, localX, localY int) bool {
 	}
 	path := tab.Path
 	a.requestDiff(diffLoadHunk, "Git change · "+filepath.Base(path), path,
-		func(repo *git.Repo) diff.Patch { return repoHunkPreview(repo, path, line) })
+		func(repo *git.Repo) (diff.Patch, error) { return repoHunkPreview(repo, path, line) })
 	return true
 }
 

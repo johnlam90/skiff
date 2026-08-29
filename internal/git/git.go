@@ -157,27 +157,3 @@ func (r *Repo) read(args ...string) ([]byte, error) {
 func (r *Repo) write(args ...string) ([]byte, error) {
 	return r.run.Combined(r.root, r.writeTimeout, args...)
 }
-
-// Output is the argv doorway the typed verbs replace. It survives this
-// commit only so the callers still compile; the migration that follows
-// deletes it together with RunSequence.
-func (r *Repo) Output(args ...string) ([]byte, error) { return r.read(args...) }
-
-// RunSequence is the write-side doorway, kept for the same one commit.
-func (r *Repo) RunSequence(cmds [][]string) (string, error) {
-	o := r.op("sequence")
-	for _, args := range cmds {
-		if err := o.run(args...); err != nil {
-			return o.out.String(), err
-		}
-	}
-	return o.out.String(), nil
-}
-
-// Output is the package-level doorway, kept for the same one commit.
-func Output(root string, args ...string) ([]byte, error) { return Open(root).Output(args...) }
-
-// RunSequence is the package-level write doorway, kept for the same one commit.
-func RunSequence(root string, cmds [][]string) (string, error) {
-	return Open(root).RunSequence(cmds)
-}

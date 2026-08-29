@@ -107,6 +107,9 @@ type diffLoadEvent struct {
 	title   string
 	tabPath string
 	patch   diff.Patch
+	// err is git's (or the parser's) reason when the load produced no
+	// usable patch — the difference between "clean" and "couldn't ask".
+	err error
 }
 
 // When satisfies the tcell.Event interface.
@@ -124,7 +127,7 @@ func (e *diffLoadEvent) When() time.Time { return e.when }
 // discrete, low-rate gesture bounded by git's own read deadline, so the
 // newest click winning matters more than capping concurrency; the
 // generation check in handleDiffLoaded is what makes that safe.
-func (a *App) requestDiff(kind diffLoadKind, title, tabPath string, load func(*git.Repo) diff.Patch) {
+func (a *App) requestDiff(kind diffLoadKind, title, tabPath string, load func(*git.Repo) (diff.Patch, error)) {
 	a.diffLoadGen++
 	gen := a.diffLoadGen
 	repo := a.readRepo()
@@ -133,7 +136,7 @@ func (a *App) requestDiff(kind diffLoadKind, title, tabPath string, load func(*g
 	// away, and a click that paints nothing reads as a dropped click.
 	a.flash("Loading diff…")
 	a.safeGo("diff-load", func() {
-		patch := load(repo)
+		patch, err := load(repo)
 		_ = scr.PostEvent(&diffLoadEvent{
 			when:    time.Now(),
 			gen:     gen,
@@ -141,6 +144,7 @@ func (a *App) requestDiff(kind diffLoadKind, title, tabPath string, load func(*g
 			title:   title,
 			tabPath: tabPath,
 			patch:   patch,
+			err:     err,
 		})
 	})
 }
@@ -151,7 +155,9 @@ func (a *App) requestDiff(kind diffLoadKind, title, tabPath string, load func(*g
 // this one (gen), an overlay went up (a diff yanking itself over a
 // prompt the user is typing into is worse than no diff at all), or the
 // active tab moved on, which would leave the diff describing a file
-// that is no longer in front of the user.
+// that is no longer in front of the user. An empty patch that came
+// with an error is not "clean" — git could not answer, and the reason
+// is what the user needs.
 func (a *App) handleDiffLoaded(e *diffLoadEvent) {
 	if e.gen != a.diffLoadGen || a.anyModalOpen() {
 		return
@@ -161,8 +167,10 @@ func (a *App) handleDiffLoaded(e *diffLoadEvent) {
 		return
 	}
 	if e.patch.Empty() {
-		switch e.kind {
-		case diffLoadHunk:
+		switch {
+		case e.err != nil:
+			a.openInfo(e.title, []string{"Couldn't load the diff:", "", e.err.Error()})
+		case e.kind == diffLoadHunk:
 			a.openInfo("Git change", []string{"No git diff found for this line."})
 		default:
 			a.flash("No uncommitted changes in this file")
@@ -195,7 +203,7 @@ func (a *App) menuDiffFile() {
 		}
 	}
 	base, path, untracked := a.diffBase, tab.Path, kind == filetree.GitChangeAdded
-	a.requestDiff(diffLoadFile, "Diff · "+title, tab.Path, func(repo *git.Repo) diff.Patch {
+	a.requestDiff(diffLoadFile, "Diff · "+title, tab.Path, func(repo *git.Repo) (diff.Patch, error) {
 		return repoFileDiff(repo, base, path, untracked)
 	})
 }

@@ -8,7 +8,7 @@
 // Tests for gitstatus.go. The byte-parsing helpers (parsePorcelain,
 // unquotePath, dirtyFolderSet, pathInside) are exercised in isolation
 // with synthetic input — no subprocess needed. The shell-out flow
-// (loadGitStatus end-to-end) is exercised against a real `git init`'d
+// (Repo.Status end-to-end) is exercised against a real `git init`'d
 // repo in a t.TempDir, and skipped when git isn't on PATH so the test
 // suite still runs in a stripped-down container.
 
@@ -28,6 +28,7 @@ import (
 	"github.com/johnlam90/skiff/internal/diff"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/git"
 )
 
 // TestLoadGitStatus_NotARepo verifies that pointing the loader at a
@@ -36,7 +37,7 @@ import (
 // erroring out when run inside a plain folder.
 func TestLoadGitStatus_NotARepo(t *testing.T) {
 	dir := t.TempDir()
-	st := loadGitStatus(dir, "")
+	st := git.Open(dir).Status("")
 	if st.IsRepo {
 		t.Fatalf("plain dir should not report as repo, got %+v", st)
 	}
@@ -48,7 +49,7 @@ func TestLoadGitStatus_NotARepo(t *testing.T) {
 // TestLoadGitStatus_EmptyRoot guards the "" early-return so a fresh App
 // (rootDir not yet set) can call refreshGitStatus without spawning git.
 func TestLoadGitStatus_EmptyRoot(t *testing.T) {
-	if st := loadGitStatus("", ""); st.IsRepo {
+	if st := git.Open("").Status(""); st.IsRepo {
 		t.Fatalf("empty rootDir should not report as repo, got %+v", st)
 	}
 }
@@ -65,7 +66,7 @@ func TestLoadGitStatus_CleanRepo(t *testing.T) {
 	gitRun(t, repo, "add", "a.txt")
 	gitRun(t, repo, "commit", "-m", "init")
 
-	st := loadGitStatus(repo, "")
+	st := git.Open(repo).Status("")
 	if !st.IsRepo {
 		t.Fatal("expected IsRepo=true on a real git repo")
 	}
@@ -89,7 +90,7 @@ func TestLoadGitLineChanges_IncludesStagedChanges(t *testing.T) {
 	writeFileT(t, path, "one\nchanged\nthree\nfour\n")
 	gitRun(t, repo, "add", "a.txt")
 
-	changes := loadGitLineChanges(repo, "", "a.txt")
+	changes := repoLineChanges(git.Open(repo), "", "a.txt")
 	if len(changes) == 0 {
 		t.Fatal("staged changes should produce gutter markers")
 	}
@@ -201,9 +202,9 @@ func TestLoadGitFileDiff_DeletedFile(t *testing.T) {
 		t.Fatalf("remove: %v", err)
 	}
 
-	patch := loadGitFileDiff(repo, "", path, false)
-	if patch.Empty() {
-		t.Fatal("deleted file should produce a diff")
+	patch, err := repoFileDiff(git.Open(repo), "", path, false)
+	if err != nil || patch.Empty() {
+		t.Fatalf("deleted file should produce a diff, got %+v %v", patch, err)
 	}
 	f := patch.Files[0]
 	if !f.IsDeleted || f.Path() != "gone.txt" {
@@ -224,38 +225,83 @@ func TestLoadGitFileDiff_UntrackedFallsBackToNoIndex(t *testing.T) {
 	fresh := filepath.Join(repo, "fresh.txt")
 	writeFileT(t, fresh, "hello\n")
 
-	patch := loadGitFileDiff(repo, "", fresh, true)
-	if patch.Empty() || !patch.Files[0].IsNew {
-		t.Fatalf("untracked file should read as brand new, got %+v", patch)
+	patch, err := repoFileDiff(git.Open(repo), "", fresh, true)
+	if err != nil || patch.Empty() || !patch.Files[0].IsNew {
+		t.Fatalf("untracked file should read as brand new, got %+v %v", patch, err)
 	}
 	if joined := strings.Join(diffBodyLines(patch), "\n"); !strings.Contains(joined, "+hello") {
 		t.Fatalf("untracked diff should show the file as added, got:\n%s", joined)
 	}
 }
 
-// TestLoadGitFileDiff_Degrades confirms the best-effort contract: a
-// non-repo, empty arguments, and a clean file all yield an empty patch
-// rather than an error the UI would have to route somewhere. The
-// clean-file case doubly matters now that untracked=true has a fallback
-// — a tracked, unchanged file must never be painted as brand new.
-func TestLoadGitFileDiff_Degrades(t *testing.T) {
-	if got := loadGitFileDiff(t.TempDir(), "", "x.txt", false); !got.Empty() {
-		t.Fatalf("non-repo diff = %v, want nothing", got)
+// TestRepoFileDiff_Degrades pins the loader's answers when there is no
+// diff to give: empty arguments yield an empty patch and no error
+// without asking git; a non-repo yields an empty patch WITH git's
+// reason, so the surface can tell "clean" from "couldn't ask"; and a
+// clean tracked file yields an empty patch and no error. The clean-file
+// case doubly matters because untracked=true has a fallback — a
+// tracked, unchanged file must never be painted as brand new.
+func TestRepoFileDiff_Degrades(t *testing.T) {
+	if got, err := repoFileDiff(git.Open(""), "", "x.txt", false); !got.Empty() || err != nil {
+		t.Fatalf("empty root diff = %v %v, want nothing", got, err)
 	}
-	if got := loadGitFileDiff("", "", "x.txt", false); !got.Empty() {
-		t.Fatalf("empty root diff = %v, want nothing", got)
-	}
-	if got := loadGitFileDiff(t.TempDir(), "", "", true); !got.Empty() {
-		t.Fatalf("empty path diff = %v, want nothing", got)
+	if got, err := repoFileDiff(git.Open(t.TempDir()), "", "", true); !got.Empty() || err != nil {
+		t.Fatalf("empty path diff = %v %v, want nothing", got, err)
 	}
 	requireGit(t)
+	if got, err := repoFileDiff(git.Open(t.TempDir()), "", "x.txt", false); !got.Empty() || err == nil {
+		t.Fatalf("non-repo diff = %v %v, want an empty patch and git's reason", got, err)
+	}
 	repo := initRepo(t)
 	clean := filepath.Join(repo, "clean.txt")
 	writeFileT(t, clean, "steady\n")
 	gitRun(t, repo, "add", "clean.txt")
 	gitRun(t, repo, "commit", "-m", "init")
-	if got := loadGitFileDiff(repo, "", clean, false); !got.Empty() {
-		t.Fatalf("clean file diff = %v, want nothing", got)
+	if got, err := repoFileDiff(git.Open(repo), "", clean, false); !got.Empty() || err != nil {
+		t.Fatalf("clean file diff = %v %v, want nothing", got, err)
+	}
+}
+
+// TestRefreshGitStatus_FromScriptedFake proves the status surface —
+// snapshot, tree tint, branch label, ahead/behind, and an open tab's
+// gutter — is driven entirely through readRepo: a git.Fake scripts all
+// of it against a plain temp directory with no repository behind it.
+func TestRefreshGitStatus_FromScriptedFake(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	writeFileT(t, target, "one\ntwo\n")
+	a := newTestApp(t, dir)
+	a.openFile(target)
+
+	fake := &git.Fake{}
+	fake.Script("rev-parse --show-toplevel", dir+"\n", nil)
+	fake.Script("rev-list --left-right --count @{upstream}...HEAD", "1\t2\n", nil)
+	fake.Script("status --porcelain -z", " M f.txt\x00", nil)
+	fake.Script("symbolic-ref --short HEAD", "scripted\n", nil)
+	fake.Script("diff --unified=0 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target, strings.Join([]string{
+		"diff --git a/f.txt b/f.txt",
+		"index 0000000..1111111 100644",
+		"--- a/f.txt",
+		"+++ b/f.txt",
+		"@@ -2 +2 @@",
+		"-old",
+		"+two",
+		"",
+	}, "\n"), nil)
+	a.gitRunner = fake
+
+	a.refreshGitStatus()
+	if !a.gitSnap.IsRepo || a.gitSnap.Branch != "scripted" {
+		t.Fatalf("snapshot should come from the script, got %+v", a.gitSnap)
+	}
+	if a.gitSnap.Ahead != 2 || a.gitSnap.Behind != 1 {
+		t.Fatalf("ahead/behind = %d/%d, want 2/1", a.gitSnap.Ahead, a.gitSnap.Behind)
+	}
+	if a.tree.DirtyFiles[target] != filetree.GitChangeModified {
+		t.Fatalf("tree tint should follow the scripted porcelain, got %v", a.tree.DirtyFiles)
+	}
+	if got := a.activeTabPtr().GitLines[1]; got != editor.GitLineModified {
+		t.Fatalf("gutter should follow the scripted diff, got %v", a.activeTabPtr().GitLines)
 	}
 }
 
@@ -279,7 +325,7 @@ func TestLoadGitStatus_FindsModifiedAndUntracked(t *testing.T) {
 	writeFileT(t, filepath.Join(repo, "staged.txt"), "added")
 	gitRun(t, repo, "add", "staged.txt")
 
-	st := loadGitStatus(repo, "")
+	st := git.Open(repo).Status("")
 	if !st.IsRepo {
 		t.Fatal("expected IsRepo=true")
 	}
@@ -312,7 +358,7 @@ func TestLoadGitStatus_FromSubdirectory(t *testing.T) {
 	writeFileT(t, filepath.Join(sub, "inside.txt"), "x2")
 	writeFileT(t, filepath.Join(repo, "outside.txt"), "y2")
 
-	st := loadGitStatus(sub, "")
+	st := git.Open(sub).Status("")
 	if !st.IsRepo {
 		t.Fatal("subdirectory of a repo should still register as a repo")
 	}
@@ -703,16 +749,16 @@ func TestGitPanelEmptyLabel_NamesMissingGit(t *testing.T) {
 	}
 }
 
-// TestLoadGitStatus_NoGitOnPath closes the loop between internal/git's
+// TestStatus_NoGitOnPath closes the loop between internal/git's
 // sentinel and the flash above it: with nothing executable on PATH the
 // real exec path has to come back GitMissing rather than as an ordinary
 // "not a repo", or noteGitMissing never fires on the machines it exists
 // for.
-func TestLoadGitStatus_NoGitOnPath(t *testing.T) {
+func TestStatus_NoGitOnPath(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PATH", filepath.Join(dir, "definitely-empty"))
 
-	st := loadGitStatus(dir, "")
+	st := git.Open(dir).Status("")
 	if !st.GitMissing {
 		t.Fatalf("no git on PATH must set GitMissing, got %+v", st)
 	}
@@ -721,15 +767,27 @@ func TestLoadGitStatus_NoGitOnPath(t *testing.T) {
 	}
 }
 
-// TestParseGitDiffBatch_AttributesHunksToPaths drives the batched
-// diff's splitter over one synthetic multi-file `--unified=0` stream
-// covering every attribution shape the single-file loader handled by
-// construction: a path with spaces (git prints those verbatim), a
-// rename (the tab holds the NEW name, which is what the +++ line
-// carries), a deletion (+++ is /dev/null, so the --- line must answer),
-// and a C-quoted path (git quotes control characters).
-func TestParseGitDiffBatch_AttributesHunksToPaths(t *testing.T) {
-	diff := strings.Join([]string{
+// mustParse turns diff text into the model, failing the test on a
+// header the parser could not read — a fixture typo must not pass as
+// "no hunks".
+func mustParse(t *testing.T, text string) diff.Patch {
+	t.Helper()
+	p, err := diff.Parse([]byte(text))
+	if err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+	return p
+}
+
+// TestGutterMarksByPath_AttributesHunksToPaths drives the batched
+// diff's attribution over one synthetic multi-file `--unified=0` stream
+// covering every shape the single-file loader handled by construction:
+// a path with spaces (git prints those verbatim), a rename (the tab
+// holds the NEW name, which is what the +++ line carries), a deletion
+// (+++ is /dev/null, so the --- line must answer), and a C-quoted path
+// (git quotes control characters).
+func TestGutterMarksByPath_AttributesHunksToPaths(t *testing.T) {
+	text := strings.Join([]string{
 		"diff --git a/a dir/spaced name.txt b/a dir/spaced name.txt",
 		"index 0000000..1111111 100644",
 		// Spaced names carry git's trailing TAB in the ---/+++ lines
@@ -767,7 +825,7 @@ func TestParseGitDiffBatch_AttributesHunksToPaths(t *testing.T) {
 		"",
 	}, "\n")
 
-	got := parseGitDiffBatch([]byte(diff))
+	got := gutterMarksByPath(mustParse(t, text))
 	if len(got) != 4 {
 		t.Fatalf("split found %d sections, want 4: %v", len(got), sortedKeys(got))
 	}
@@ -785,12 +843,12 @@ func TestParseGitDiffBatch_AttributesHunksToPaths(t *testing.T) {
 	}
 }
 
-// TestParseGitDiffBatch_BodyLinesNeverStartASection guards the split
+// TestGutterMarksByPath_BodyLinesNeverStartASection guards the split
 // against patch content that mimics headers: an added line whose text
 // begins "++ " renders as "+++ ", and only lines before the first hunk
 // may be read as headers.
-func TestParseGitDiffBatch_BodyLinesNeverStartASection(t *testing.T) {
-	diff := strings.Join([]string{
+func TestGutterMarksByPath_BodyLinesNeverStartASection(t *testing.T) {
+	text := strings.Join([]string{
 		"diff --git a/f.txt b/f.txt",
 		"index 0000000..1111111 100644",
 		"--- a/f.txt",
@@ -802,7 +860,7 @@ func TestParseGitDiffBatch_BodyLinesNeverStartASection(t *testing.T) {
 		"",
 	}, "\n")
 
-	got := parseGitDiffBatch([]byte(diff))
+	got := gutterMarksByPath(mustParse(t, text))
 	if len(got) != 1 {
 		t.Fatalf("split found %d sections, want 1: %v", len(got), sortedKeys(got))
 	}
@@ -816,7 +874,7 @@ func TestParseGitDiffBatch_BodyLinesNeverStartASection(t *testing.T) {
 // equivalence contract against a real repo: with several tabs open —
 // two modified (one with a space in its name), one clean — the single
 // collection must hand every tab exactly what a per-file
-// loadGitLineChanges would have, and the clean tab's key must still be
+// repoLineChanges would have, and the clean tab's key must still be
 // PRESENT (applyGitStatus clears stale gutters only for keys it finds).
 func TestCollectGitStatus_BatchMatchesSingleFileLoads(t *testing.T) {
 	requireGit(t)
@@ -835,14 +893,14 @@ func TestCollectGitStatus_BatchMatchesSingleFileLoads(t *testing.T) {
 		filepath.Join(repo, "spaced name.txt"),
 		filepath.Join(repo, "clean.txt"),
 	}
-	res := collectGitStatus(repo, "", paths, false)
+	res := collectGitStatus(git.Open(repo), "", paths, false)
 
 	for _, p := range paths {
 		got, ok := res.tabLines[p]
 		if !ok {
 			t.Fatalf("%s: key missing from the batch result", p)
 		}
-		want := loadGitLineChanges(repo, "", p)
+		want := repoLineChanges(git.Open(repo), "", p)
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("%s: batch %v != single %v", p, got, want)
 		}
@@ -914,7 +972,7 @@ func TestCollectGitStatus_OneDiffForkForManyTabs(t *testing.T) {
 	}
 
 	log := gitCallLog(t)
-	res := collectGitStatus(repo, "", paths, false)
+	res := collectGitStatus(git.Open(repo), "", paths, false)
 
 	if got := countLoggedDiffs(t, log); got != 1 {
 		t.Fatalf("collection forked %d gutter diffs for 3 tabs, want 1", got)
@@ -937,7 +995,7 @@ func TestCollectGitStatus_NoTabsSkipsDiffFork(t *testing.T) {
 	gitRun(t, repo, "commit", "-m", "init")
 
 	log := gitCallLog(t)
-	res := collectGitStatus(repo, "", nil, false)
+	res := collectGitStatus(git.Open(repo), "", nil, false)
 
 	if got := countLoggedDiffs(t, log); got != 0 {
 		t.Fatalf("collection with no tabs forked %d gutter diffs, want 0", got)
@@ -967,7 +1025,7 @@ func TestCollectGitStatus_CarriesIsDirForUntrackedDirs(t *testing.T) {
 		t.Fatalf("remove: %v", err)
 	}
 
-	res := collectGitStatus(repo, "", nil, false)
+	res := collectGitStatus(git.Open(repo), "", nil, false)
 	if !res.isDir[filepath.Join(repo, "newdir")] {
 		t.Fatalf("untracked dir should be flagged, got %v (dirty: %v)",
 			res.isDir, sortedKeys(res.st.Files))

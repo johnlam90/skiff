@@ -319,7 +319,7 @@ func TestOpenGitHunkAt_RequestsDiffOffThread(t *testing.T) {
 	tab.GitLines = map[int]editor.GitLineChange{0: editor.GitLineModified}
 
 	fake := &git.Fake{}
-	fake.Script("diff --unified=3 HEAD -- "+target,
+	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target,
 		"@@ -1 +1 @@\n-hell\n+hello\n", nil)
 	a.gitRunner = fake
 

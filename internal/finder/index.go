@@ -27,7 +27,6 @@ package finder
 // renderer can treat the strings uniformly.
 
 import (
-	"bytes"
 	"errors"
 	"io/fs"
 	"os"
@@ -100,24 +99,12 @@ func BuildIndex(rootDir string) ([]string, bool, error) {
 // the command fails for any other reason — the caller falls back
 // to the manual walk path.
 func buildIndexGit(rootDir string) ([]string, error) {
-	out, err := git.Output(rootDir,
-		"ls-files",
-		"--cached",
-		"--others",
-		"--exclude-standard",
-		"-z",
-	)
+	listed, err := git.Open(rootDir).LsFiles()
 	if err != nil {
 		return nil, err
 	}
-	// Split on \0; trim the trailing empty entry git always writes.
-	parts := bytes.Split(out, []byte{0})
-	paths := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if len(p) == 0 {
-			continue
-		}
-		s := string(p)
+	paths := make([]string, 0, len(listed))
+	for _, s := range listed {
 		// In-place session-trash entries are untracked-but-not-ignored,
 		// so git ls-files reports them; they are deleted content
 		// awaiting Undo and must not be findable.

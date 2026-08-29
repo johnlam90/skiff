@@ -12,7 +12,6 @@
 package app
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/johnlam90/skiff/internal/diff"
+	"github.com/johnlam90/skiff/internal/git"
 )
 
 // gitLogOv returns the open commit-history overlay, failing the test
@@ -59,109 +59,55 @@ func historyRepoApp(t *testing.T) (*App, string, string) {
 	return app, aFile, bFile
 }
 
-// TestLoadGitLog_BranchAndFileScopes pins the two loader modes: the
-// branch log sees every commit, a file path narrows it to commits that
-// touched that file, newest first.
-func TestLoadGitLog_BranchAndFileScopes(t *testing.T) {
-	a, aFile, bFile := historyRepoApp(t)
-	branch := loadGitLog(a.rootDir, "", gitLogLimit)
-	if len(branch) != 2 {
-		t.Fatalf("branch log: got %d entries, want 2", len(branch))
-	}
-	if !strings.Contains(branch[0].Subject, "c2") {
-		t.Fatalf("newest first: got %q", branch[0].Subject)
-	}
-	if branch[0].SHA == "" || branch[0].Age == "" {
-		t.Fatalf("entry should carry SHA and age: %+v", branch[0])
-	}
+// TestOpenGitLog_FromScriptedFake proves the history surface — the
+// overlay's rows and the commit diff a row opens — is driven entirely
+// through readRepo: a git.Fake scripts the log and the show against a
+// plain temp directory with no repository behind it.
+func TestOpenGitLog_FromScriptedFake(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	fake := &git.Fake{}
+	fake.Script("log --format=%h%x00%s%x00%cr -n 200 --",
+		"abc1234\x00scripted subject\x002 days ago\n"+
+			"def5678\x00older\x003 days ago\n", nil)
+	fake.Script("show --format= --src-prefix=a/ --dst-prefix=b/ abc1234 --", strings.Join([]string{
+		"diff --git a/f.txt b/f.txt",
+		"index 0000000..1111111 100644",
+		"--- a/f.txt",
+		"+++ b/f.txt",
+		"@@ -1 +1 @@",
+		"-old",
+		"+scripted line",
+		"",
+	}, "\n"), nil)
+	a.gitRunner = fake
 
-	onlyB := loadGitLog(a.rootDir, bFile, gitLogLimit)
-	if len(onlyB) != 1 || !strings.Contains(onlyB[0].Subject, "c1") {
-		t.Fatalf("file log for b.txt: got %+v, want just c1", onlyB)
+	a.openGitLog("History · main", "")
+	g := gitLogOv(t, a)
+	if len(g.entries) != 2 || g.entries[0].Hash != "abc1234" || g.entries[0].Subject != "scripted subject" {
+		t.Fatalf("overlay rows should be the scripted log, got %+v", g.entries)
 	}
-	if both := loadGitLog(a.rootDir, aFile, gitLogLimit); len(both) != 2 {
-		t.Fatalf("file log for a.txt: got %d entries, want 2", len(both))
+	g.activate()
+	if !diffIsOpen(a) {
+		t.Fatalf("activating a row should open the scripted commit diff; top = %T", a.overlays.Top())
+	}
+	if body := strings.Join(diffOv(t, a).unified, "\n"); !strings.Contains(body, "+scripted line") {
+		t.Fatalf("diff body should come from the scripted show, got:\n%s", body)
 	}
 }
 
-// TestLoadGitLog_Degrades confirms the best-effort contract: non-repos
-// and bad arguments yield nil, never an error surfaced to the UI.
-func TestLoadGitLog_Degrades(t *testing.T) {
-	if got := loadGitLog(t.TempDir(), "", 10); got != nil {
-		t.Fatalf("non-repo log = %v, want nil", got)
-	}
-	if got := loadGitLog("", "", 10); got != nil {
-		t.Fatalf("empty root log = %v, want nil", got)
-	}
-	if got := loadGitLog(t.TempDir(), "", 0); got != nil {
-		t.Fatalf("zero limit log = %v, want nil", got)
-	}
-}
-
-// TestLoadGitCommitDiff_WholeAndScoped pins the diff loader: a commit's
-// full diff includes every touched file, and the path-scoped variant
-// only that file's hunks. The loader hands back the parsed model now, so
-// "which files" is a list of paths rather than a substring search.
-func TestLoadGitCommitDiff_WholeAndScoped(t *testing.T) {
-	a, aFile, _ := historyRepoApp(t)
-	entries := loadGitLog(a.rootDir, "", gitLogLimit)
-	c1 := entries[1] // seeds both files
-
-	paths := func(p diff.Patch) []string {
-		var out []string
-		for _, f := range p.Files {
-			out = append(out, f.Path())
-		}
-		return out
-	}
-	whole := paths(loadGitCommitDiff(a.rootDir, c1.SHA, ""))
-	if len(whole) != 2 || whole[0] != "a.txt" || whole[1] != "b.txt" {
-		t.Fatalf("whole-commit diff should span both files, got %q", whole)
-	}
-	scoped := paths(loadGitCommitDiff(a.rootDir, c1.SHA, aFile))
-	if len(scoped) != 1 || scoped[0] != "a.txt" {
-		t.Fatalf("scoped diff should cover a.txt only, got %q", scoped)
-	}
-}
-
-// TestLoadGitCommitDiff_RefusesOptionLookalikeSHA pins the defense-in-depth
-// gate: loadGitCommitDiff routes sha through git.SafeRef before it ever
-// reaches argv. The test runs against a REAL repo (not a non-repo temp
-// dir) on purpose — git resolves "is this even a repository?" before it
-// parses `show`'s own options, so a non-repo root fails identically
-// whether or not the gate fires and can't prove the gate did anything.
-// Two of the three cases carry an observable side effect that only
-// happens if the raw string reaches argv: "--output=pwned" makes a real
-// `git show` write a file (proven manually: it does, in a real repo,
-// pre-gate), and "-p" makes `git show --format= -p` silently show
-// HEAD's diff instead of refusing — both would corrupt this test's repo
-// or return a wrong-but-non-nil diff if the gate didn't fire first.
-func TestLoadGitCommitDiff_RefusesOptionLookalikeSHA(t *testing.T) {
-	a, aFile, _ := historyRepoApp(t)
-
-	for _, sha := range []string{"--output=pwned", "", "-p"} {
-		if got := loadGitCommitDiff(a.rootDir, sha, ""); !got.Empty() {
-			t.Fatalf("sha %q: got %v, want nothing (refused before any subprocess)", sha, got)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(a.rootDir, "pwned")); err == nil {
-		t.Fatal("--output=pwned must not reach argv: file was written")
-	}
-
-	entries := loadGitLog(a.rootDir, "", gitLogLimit)
-	if len(entries) == 0 {
-		t.Fatal("need at least one real commit for the positive case")
-	}
-	// The trailing "--" always precedes the (possibly absent) path
-	// argument; both branches must still resolve correctly with it in
-	// place — an unscoped diff (no path after "--") and a path-scoped
-	// one (the path lands after it) exercise both shapes.
-	if whole := loadGitCommitDiff(a.rootDir, entries[0].SHA, ""); whole.Empty() {
-		t.Fatalf("valid sha, no path: got %v, want a diff", whole)
-	}
-	scoped := loadGitCommitDiff(a.rootDir, entries[0].SHA, aFile)
-	if scoped.Empty() {
-		t.Fatalf("valid sha, scoped path: got %v, want a diff", scoped)
+// TestGitLogActivate_ReportsGitFailure pins the difference between an
+// empty diff and a git that said no: the first flashes "no diff", the
+// second flashes git's reason, because a silent empty answer would send
+// the user looking for a problem in the commit rather than in git.
+func TestGitLogActivate_ReportsGitFailure(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	fake := &git.Fake{}
+	fake.Script("log --format=%h%x00%s%x00%cr -n 200 --", "abc1234\x00s\x00now\n", nil)
+	a.gitRunner = fake
+	a.openGitLog("History · main", "")
+	gitLogOv(t, a).activate()
+	if diffIsOpen(a) || !strings.Contains(a.statusMsg, "Couldn't load commit abc1234") {
+		t.Fatalf("an unscripted show is git saying no; flash = %q", a.statusMsg)
 	}
 }
 
@@ -319,7 +265,7 @@ func TestHandleGitLogMouse_HoverClickAndDismiss(t *testing.T) {
 // TestScrollGitLog_Clamps pins the wheel bounds on a long history.
 func TestScrollGitLog_Clamps(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	g := &gitLogOverlay{app: a, entries: make([]gitLogEntry, 40)}
+	g := &gitLogOverlay{app: a, entries: make([]git.Commit, 40)}
 	g.scrollBy(1000)
 	if want := 40 - gitLogVisible; g.scroll != want {
 		t.Fatalf("scroll past end: got %d, want %d", g.scroll, want)
@@ -343,7 +289,7 @@ func TestDrawGitLog_Smoke(t *testing.T) {
 		t.Fatalf("title row: %q", title)
 	}
 	row0 := screenLine(scr, my+3)
-	if !strings.Contains(row0, gitLogOv(t, a).entries[0].SHA) || !strings.Contains(row0, "c2") {
+	if !strings.Contains(row0, gitLogOv(t, a).entries[0].Hash) || !strings.Contains(row0, "c2") {
 		t.Fatalf("row 0 should show SHA and subject: %q", row0)
 	}
 	if !strings.Contains(row0, "ago") {

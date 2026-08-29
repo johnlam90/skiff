@@ -385,10 +385,12 @@ type App struct {
 	// Main-thread-only.
 	diffLoadGen int
 
-	// gitRunner overrides the git process boundary for the async read
-	// paths — nil in production (real git), a *git.Fake in tests that
-	// need to script a diff without a repo or a subprocess. See
-	// App.readRepo.
+	// gitRunner overrides the git process boundary — nil in production
+	// (real git), a *git.Fake in tests that script a surface without a
+	// repo or a subprocess. Every git-aware surface (status refresh,
+	// gutter, diff and log overlays, git panel rows, pickers, every
+	// write verb) opens its handle through App.readRepo, so this one
+	// field scripts all of them.
 	gitRunner git.Runner
 
 	// gitSnap is the last applied repo snapshot — branch, ahead/behind,
