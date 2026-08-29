@@ -51,7 +51,7 @@ The goals, in order:
 4. **One static binary.** No runtime, no plugin manager, no config
    directory full of YAML. Drop it on a server and run it.
 5. **Looks reasonable.** A hand-tuned Tokyo Night palette out of the
-   box, 25 more themes one menu away (`≡` → **Theme…** — Catppuccin,
+   box, a couple dozen more themes one menu away (`≡` → **Theme…** — Catppuccin,
    Dracula, Gruvbox, Nord, Rosé Pine, Solarized, and friends, ported
    from [druk](https://github.com/letstri/druk)), and syntax
    highlighting via [chroma](https://github.com/alecthomas/chroma)
@@ -159,7 +159,7 @@ The goals, in order:
   `~/.local/state/skiff/sessions/` (`$XDG_STATE_HOME` when set), so a
   corrupt or half-written file can only ever cost you that one
   project's tab list.
-- **26 themes with live preview** — `≡` → **Theme…** opens a picker
+- **Themes with live preview** — `≡` → **Theme…** opens a picker
   that restyles the whole editor as you arrow (or hover) through the
   list; type to filter ("cat" → the Catppuccins), `Enter` keeps,
   `Esc` puts your old theme back. The choice persists to
@@ -919,7 +919,7 @@ them while still making it one click to opt a project in.
 │   ├── format/               # Format-on-save config + trust store
 │   ├── userconfig/           # ~/.config/skiff/config.json (icons, theme, wrap, gitignore)
 │   ├── icons/                # Nerd Font detection + per-file glyphs
-│   ├── theme/                # 26 palettes + the low-color fallback
+│   ├── theme/                # the theme registry + the low-color fallback
 │   └── version/              # Single-line version constant
 ├── .github/workflows/        # Test pipeline + auto-release pipeline
 ├── .goreleaser.yml           # Cross-compile + brew formula config
