@@ -964,6 +964,14 @@ finding blocks the tag — and then:
 No PAT, no separate tap repo — the default workflow `GITHUB_TOKEN` is
 enough since the formula lives in the source repo.
 
+## Contributing
+
+Bug reports and feature requests go through the
+[issue templates](https://github.com/johnlam90/skiff/issues/new/choose) —
+they ask for the terminal/multiplexer details a TUI bug always needs. Code
+contributions: see [CONTRIBUTING.md](CONTRIBUTING.md); security reports: see
+[SECURITY.md](SECURITY.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
