@@ -23,6 +23,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/diff"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/git"
 )
@@ -483,7 +484,7 @@ func (a *App) openGitHunkAt(tab *editor.Tab, localX, localY int) bool {
 	}
 	path := tab.Path
 	a.requestDiff(diffLoadHunk, "Git change · "+filepath.Base(path), path,
-		func(repo *git.Repo) []string { return repoHunkPreview(repo, path, line) })
+		func(repo *git.Repo) diff.Patch { return repoHunkPreview(repo, path, line) })
 	return true
 }
 

@@ -729,16 +729,19 @@ func (a *App) activateGitChangeRow(row gitChangeRow) {
 		return
 	}
 
-	lines := loadGitFileDiff(a.rootDir, a.diffBase, row.Abs, row.Kind == filetree.GitChangeAdded)
-	if len(lines) == 0 {
-		lines = []string{"No git diff available for this file."}
+	patch := loadGitFileDiff(a.rootDir, a.diffBase, row.Abs, row.Kind == filetree.GitChangeAdded)
+	if patch.Empty() {
+		// Nothing to pair into rows — say so in the prefab meant for a
+		// sentence rather than opening a diff view over one line of text.
+		a.openInfo("Diff · "+row.Rel, []string{"No git diff available for this file."})
+		return
 	}
 	openPath := row.Abs
 	if row.Kind == filetree.GitChangeDeleted {
 		// Nothing left on disk to open — the diff is the whole story.
 		openPath = ""
 	}
-	a.openDiffView("Diff · "+row.Rel, lines, openPath, row.Abs)
+	a.openDiffView("Diff · "+row.Rel, patch, openPath, row.Abs)
 }
 
 // scrollGitPanel nudges the panel viewport by delta rows, clamped so the

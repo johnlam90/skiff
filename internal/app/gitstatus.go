@@ -16,17 +16,21 @@
 // loadGitStatus returns an empty result and the editor renders normally.
 // We never block the UI on git, never spam errors at the user, and never
 // retry on failure.
+//
+// The diff loaders here run git and hand back internal/diff's model.
+// Reading unified-diff text is that package's job now; what remains on
+// this side is the editor's own vocabulary — which line gets which
+// gutter marker, and which hunk a gutter click was asking about.
 
 package app
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/johnlam90/skiff/internal/diff"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/git"
@@ -151,150 +155,21 @@ func batchGitLineChanges(dst map[string]map[int]editor.GitLineChange, rootDir, b
 	}
 }
 
-// parseGitDiffBatch splits a multi-file unified diff into per-file
-// sections and runs the existing hunk parser over each, keyed by the
-// section's repo-relative path. Sections that name no usable path (a
-// binary file note, a mode-only change) are dropped — they carry no
-// hunks anyway.
+// parseGitDiffBatch attributes a multi-file unified diff's hunks to the
+// files they belong to, keyed by repo-relative path. The framing is
+// internal/diff's job now; what stays here is the mapping from hunk
+// ranges to gutter markers, which is the editor's vocabulary and not the
+// diff model's. Files that name no usable path (a mode-only change with
+// no ---/+++ block) are dropped — they carry no hunks anyway.
 func parseGitDiffBatch(out []byte) map[string]map[int]editor.GitLineChange {
 	res := map[string]map[int]editor.GitLineChange{}
-	for _, section := range splitGitDiffSections(out) {
-		if rel := sectionTargetRel(section); rel != "" {
-			res[rel] = parseGitDiffLines(section)
+	p, _ := diff.Parse(out)
+	for _, f := range p.Files {
+		if rel := f.Path(); rel != "" {
+			res[rel] = gutterMarks(f.Hunks)
 		}
 	}
 	return res
-}
-
-// splitGitDiffSections cuts a combined diff at each `diff --git ` file
-// header, returning subslices of out (no copying). Only a line START
-// can open a section: inside hunk bodies every line carries a +/-/space
-// prefix, so patch content can never fake the header.
-func splitGitDiffSections(out []byte) [][]byte {
-	header := []byte("diff --git ")
-	var starts []int
-	for i := 0; i >= 0 && i < len(out); {
-		if bytes.HasPrefix(out[i:], header) {
-			starts = append(starts, i)
-		}
-		j := bytes.IndexByte(out[i:], '\n')
-		if j < 0 {
-			break
-		}
-		i += j + 1
-	}
-	sections := make([][]byte, 0, len(starts))
-	for k, s := range starts {
-		end := len(out)
-		if k+1 < len(starts) {
-			end = starts[k+1]
-		}
-		sections = append(sections, out[s:end])
-	}
-	return sections
-}
-
-// sectionTargetRel extracts the repo-relative path a diff section
-// belongs to. The `+++ b/<new>` line answers for everything a tab can
-// hold — modifications, renames (the tab has the new name) — and the
-// `--- a/<old>` line covers deletions, where +++ is /dev/null. The
-// scan stops at the first hunk: body lines may legitimately start with
-// "+++ " or "--- " (an added line whose text begins "++ "), and only
-// the header block above the hunks may be trusted.
-func sectionTargetRel(section []byte) string {
-	oldRel := ""
-	for _, line := range bytes.Split(section, []byte{'\n'}) {
-		text := string(line)
-		switch {
-		case strings.HasPrefix(text, "@@ "):
-			return oldRel
-		case strings.HasPrefix(text, "+++ "):
-			if rel := headerPath(text[4:], "b/"); rel != "" {
-				return rel
-			}
-		case strings.HasPrefix(text, "--- "):
-			oldRel = headerPath(text[4:], "a/")
-		}
-	}
-	return oldRel
-}
-
-// headerPath turns one `---`/`+++` header operand into a repo-relative
-// path: unquote git's C-style form when present, reject /dev/null, and
-// strip the expected a// b/ prefix — anything else fails closed to ""
-// so a section is dropped rather than mis-attributed. An UNQUOTED name
-// containing blanks arrives with one trailing TAB (git's GNU-patch
-// compatibility marker for "the name ends here"); the quoted form
-// never carries it, and a real tab inside a name forces quoting, so
-// stripping one from the unquoted form is unambiguous.
-func headerPath(raw, prefix string) string {
-	if strings.HasPrefix(raw, `"`) {
-		raw = unquoteGitPath(raw)
-		if raw == "" {
-			return ""
-		}
-	} else {
-		raw = strings.TrimSuffix(raw, "\t")
-	}
-	if raw == os.DevNull || raw == "/dev/null" {
-		return ""
-	}
-	if !strings.HasPrefix(raw, prefix) {
-		return ""
-	}
-	return raw[len(prefix):]
-}
-
-// unquoteGitPath decodes the C-style quoting git applies to header
-// paths containing control or non-ASCII bytes (quote.c: \a \b \f \n
-// \r \t \v, \\, \", and three-digit octal). Returns "" for anything
-// malformed — failing closed beats guessing at a path. Content after
-// the closing quote is ignored; git writes none.
-func unquoteGitPath(q string) string {
-	if len(q) < 2 || q[0] != '"' {
-		return ""
-	}
-	var b strings.Builder
-	for i := 1; i < len(q); i++ {
-		c := q[i]
-		if c == '"' {
-			return b.String()
-		}
-		if c != '\\' {
-			b.WriteByte(c)
-			continue
-		}
-		i++
-		if i >= len(q) {
-			return ""
-		}
-		switch e := q[i]; e {
-		case 'a':
-			b.WriteByte('\a')
-		case 'b':
-			b.WriteByte('\b')
-		case 'f':
-			b.WriteByte('\f')
-		case 'n':
-			b.WriteByte('\n')
-		case 'r':
-			b.WriteByte('\r')
-		case 't':
-			b.WriteByte('\t')
-		case 'v':
-			b.WriteByte('\v')
-		case '\\', '"':
-			b.WriteByte(e)
-		default:
-			if e < '0' || e > '7' || i+2 >= len(q) ||
-				q[i+1] < '0' || q[i+1] > '7' || q[i+2] < '0' || q[i+2] > '7' {
-				return ""
-			}
-			b.WriteByte((e-'0')<<6 | (q[i+1]-'0')<<3 | (q[i+2] - '0'))
-			i += 2
-		}
-	}
-	return "" // unterminated quote
 }
 
 // gitStatus is the git package's Snapshot under its historical
@@ -473,20 +348,24 @@ func loadGitLineChanges(rootDir, base, path string) map[int]editor.GitLineChange
 	if err != nil || len(out) == 0 {
 		return nil
 	}
-	return parseGitDiffLines(out)
+	p, _ := diff.Parse(out)
+	var hunks []diff.Hunk
+	for _, f := range p.Files {
+		hunks = append(hunks, f.Hunks...)
+	}
+	return gutterMarks(hunks)
 }
 
-// loadGitFileDiff returns the full unified diff for path, one display
-// line per entry — the Git panel's per-file diff preview. Tracked files
-// diff against HEAD. untracked=true enables a fallback for files git
-// has never seen (they don't appear in `git diff HEAD` at all):
-// `git diff --no-index /dev/null <path>` renders the whole file as an
-// all-added diff. The flag comes from the caller's porcelain status —
-// gating on it keeps the fallback from painting a *clean* tracked file
-// as brand new just because its HEAD diff is empty. Same best-effort
-// contract as every other loader here: nil on any failure and the
-// caller shows a friendly placeholder instead.
-func loadGitFileDiff(rootDir, base, path string, untracked bool) []string {
+// loadGitFileDiff returns the full diff for path — the Git panel's
+// per-file preview. Tracked files diff against HEAD. untracked=true
+// enables a fallback for files git has never seen (they don't appear in
+// `git diff HEAD` at all): `git diff --no-index /dev/null <path>`
+// renders the whole file as an all-added diff. The flag comes from the
+// caller's porcelain status — gating on it keeps the fallback from
+// painting a *clean* tracked file as brand new just because its HEAD
+// diff is empty. Same best-effort contract as every other loader here:
+// an empty patch on any failure, and the caller explains itself instead.
+func loadGitFileDiff(rootDir, base, path string, untracked bool) diff.Patch {
 	return repoFileDiff(git.Open(rootDir), base, path, untracked)
 }
 
@@ -496,10 +375,10 @@ func loadGitFileDiff(rootDir, base, path string, untracked bool) []string {
 // a goroutine without sharing App state — and a test can hand over one
 // backed by git.Fake instead of paying for a subprocess and a repo in
 // exactly the right state.
-func repoFileDiff(repo *git.Repo, base, path string, untracked bool) []string {
+func repoFileDiff(repo *git.Repo, base, path string, untracked bool) diff.Patch {
 	rootDir := repo.Root()
 	if rootDir == "" || path == "" {
-		return nil
+		return diff.Patch{}
 	}
 	if base == "" {
 		base = "HEAD"
@@ -507,7 +386,7 @@ func repoFileDiff(repo *git.Repo, base, path string, untracked bool) []string {
 	out, err := repo.Output("diff", base, "--", path)
 	if err != nil || len(out) == 0 {
 		if !untracked {
-			return nil
+			return diff.Patch{}
 		}
 		// Hand --no-index a path relative to rootDir when we can — git
 		// echoes the argument verbatim into the +++ header, and a full
@@ -519,10 +398,11 @@ func repoFileDiff(repo *git.Repo, base, path string, untracked bool) []string {
 		// expected; the output being non-empty is the success signal.
 		out, _ = repo.Output("diff", "--no-index", "--", os.DevNull, path)
 		if len(out) == 0 {
-			return nil
+			return diff.Patch{}
 		}
 	}
-	return strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	p, _ := diff.Parse(out)
+	return p
 }
 
 // repoHunkPreview returns the unified diff hunk covering zero-based line.
@@ -533,45 +413,35 @@ func repoFileDiff(repo *git.Repo, base, path string, untracked bool) []string {
 // git.Fake instead of paying for a subprocess and a repo in exactly the
 // right state. See repoFileDiff, whose rootDir-taking wrapper survives
 // for the Git panel's synchronous callers.
-func repoHunkPreview(repo *git.Repo, path string, line int) []string {
+func repoHunkPreview(repo *git.Repo, path string, line int) diff.Patch {
 	if repo.Root() == "" || path == "" || line < 0 {
-		return nil
+		return diff.Patch{}
 	}
 	out, err := repo.Output("diff", "--unified=3", "HEAD", "--", path)
 	if err != nil || len(out) == 0 {
-		return nil
+		return diff.Patch{}
 	}
-	return parseGitHunkPreview(out, line)
+	p, _ := diff.Parse(out)
+	return hunkCovering(p, line)
 }
 
-// parseGitHunkPreview extracts the diff hunk covering zero-based line.
-func parseGitHunkPreview(out []byte, line int) []string {
+// hunkCovering narrows a patch to the single hunk containing zero-based
+// line, which is what a gutter click asks about: the marker names one
+// line, and showing the whole file's diff around it would bury the
+// answer. An empty patch comes back when no hunk claims the line.
+func hunkCovering(p diff.Patch, line int) diff.Patch {
 	target := line + 1
-	var current []string
-	match := false
-	flush := func() []string {
-		if match && len(current) > 0 {
-			return current
-		}
-		return nil
-	}
-	for _, raw := range bytes.Split(out, []byte{'\n'}) {
-		text := string(raw)
-		if strings.HasPrefix(text, "@@ ") {
-			if hunk := flush(); hunk != nil {
-				return hunk
+	for _, f := range p.Files {
+		for _, h := range f.Hunks {
+			if !lineInHunk(target, h.NewStart, h.NewLen) {
+				continue
 			}
-			_, _, newStart, newCount, ok := parseHunkHeader(text)
-			current = []string{text}
-			match = ok && lineInHunk(target, newStart, newCount)
-			continue
+			only := f
+			only.Hunks = []diff.Hunk{h}
+			return diff.Patch{Files: []diff.File{only}}
 		}
-		if len(current) == 0 {
-			continue
-		}
-		current = append(current, text)
 	}
-	return flush()
+	return diff.Patch{}
 }
 
 // lineInHunk reports whether target one-based line belongs to a new-file range.
@@ -582,74 +452,31 @@ func lineInHunk(target, start, count int) bool {
 	return target >= start && target < start+count
 }
 
-// parseGitDiffLines converts unified diff hunks into editor gutter markers.
-func parseGitDiffLines(out []byte) map[int]editor.GitLineChange {
+// gutterMarks turns hunk ranges into the editor's per-line change
+// markers. It is the one place the diff model meets the editor's
+// vocabulary: a hunk with no new lines marks the line the deletion
+// happened at, an all-new hunk marks additions, and a hunk with both
+// sides marks modifications.
+func gutterMarks(hunks []diff.Hunk) map[int]editor.GitLineChange {
 	changes := map[int]editor.GitLineChange{}
-	for _, raw := range bytes.Split(out, []byte{'\n'}) {
-		line := string(raw)
-		if !strings.HasPrefix(line, "@@ ") {
-			continue
-		}
-		oldStart, oldCount, newStart, newCount, ok := parseHunkHeader(line)
-		if !ok {
-			continue
-		}
-		if newCount == 0 {
-			mark := newStart
+	for _, h := range hunks {
+		if h.NewLen == 0 {
+			mark := h.NewStart
 			if mark < 0 {
 				mark = 0
 			}
 			changes[mark] = editor.GitLineDeleted
-			_ = oldStart
-			_ = oldCount
 			continue
 		}
 		kind := editor.GitLineAdded
-		if oldCount > 0 {
+		if h.OldLen > 0 {
 			kind = editor.GitLineModified
 		}
-		for lineNo := newStart; lineNo < newStart+newCount; lineNo++ {
+		for lineNo := h.NewStart; lineNo < h.NewStart+h.NewLen; lineNo++ {
 			changes[lineNo-1] = kind
 		}
 	}
 	return changes
-}
-
-// parseHunkHeader extracts old/new ranges from a unified diff header.
-func parseHunkHeader(line string) (int, int, int, int, bool) {
-	fields := strings.Fields(line)
-	if len(fields) < 3 {
-		return 0, 0, 0, 0, false
-	}
-	oldStart, oldCount, ok := parseDiffRange(fields[1])
-	if !ok {
-		return 0, 0, 0, 0, false
-	}
-	newStart, newCount, ok := parseDiffRange(fields[2])
-	if !ok {
-		return 0, 0, 0, 0, false
-	}
-	return oldStart, oldCount, newStart, newCount, true
-}
-
-// parseDiffRange parses a hunk range such as -1,2 or +7.
-func parseDiffRange(s string) (int, int, bool) {
-	if len(s) < 2 {
-		return 0, 0, false
-	}
-	parts := strings.SplitN(s[1:], ",", 2)
-	start, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, 0, false
-	}
-	count := 1
-	if len(parts) == 2 {
-		count, err = strconv.Atoi(parts[1])
-		if err != nil {
-			return 0, 0, false
-		}
-	}
-	return start, count, true
 }
 
 // pathInside reports whether candidate is root or a descendant of root.

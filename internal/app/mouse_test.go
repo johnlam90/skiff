@@ -333,7 +333,7 @@ func TestOpenGitHunkAt_RequestsDiffOffThread(t *testing.T) {
 	if !diffIsOpen(a) {
 		t.Fatal("the posted event should open the hunk diff")
 	}
-	if body := strings.Join(diffOv(t, a).raw, "\n"); !strings.Contains(body, "+hello") {
+	if body := strings.Join(diffOv(t, a).unified, "\n"); !strings.Contains(body, "+hello") {
 		t.Fatalf("scripted hunk missing, got:\n%s", body)
 	}
 }

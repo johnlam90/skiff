@@ -62,7 +62,8 @@ internal/app/menudef.go       Menu data model: rows, groups, drill-ins, filter m
 internal/app/menu.go          Menu behavior: filter field, nav, hit-test, drawing
 internal/app/actions.go       One handler per menu row + the custom-action runner
 internal/app/tabops.go        Tab lifecycle, save/close guards, clipboard, has* gates
-internal/app/conflict.go      Dirty-buffer-vs-changed-file prompt + buffer/disk diff
+internal/app/conflict.go      Dirty-buffer-vs-changed-file prompt (the diff
+                              itself comes from internal/diff)
 internal/app/gitchanges.go    Git panel: rows, buttons, keyboard mode, hint
                               strip, and the change list's own scrollbar
 internal/app/gitstatus.go     Best-effort `git status` read behind the tree tint
@@ -105,6 +106,12 @@ internal/filetree/render.go   Painting + row styling: git change
 internal/filetree/scrollbar.go The sidebar's own scrollbar column
 internal/filetree/nav.go      Hit-test, toggle, scroll, Reveal, and
                               expanded-dir session persistence
+internal/diff/                The one model of a unified diff: Parse (git
+                              text) and Lines (buffer vs disk) build it,
+                              Rows pairs it for the side-by-side view.
+                              No tcell, no theme, no git — the parse and
+                              the pairing live once so the gutter and the
+                              diff view cannot disagree
 internal/scrollbar/           The one definition of a scrollbar: thumb
                               geometry, its click inverse, and the Track/
                               Thumb glyphs. No tcell, no theme — both the

@@ -306,7 +306,7 @@ func TestGitPanelClick_ShowsDiffWithOpenButton(t *testing.T) {
 	if !strings.Contains(diffOv(t, a).title, "modified.txt") {
 		t.Fatalf("diff title should carry the file name, got %q", diffOv(t, a).title)
 	}
-	body := strings.Join(diffOv(t, a).raw, "\n")
+	body := strings.Join(diffOv(t, a).unified, "\n")
 	if !strings.Contains(body, "-two") || !strings.Contains(body, "+TWO") {
 		t.Fatalf("diff body should show the change, got:\n%s", body)
 	}
@@ -339,7 +339,7 @@ func TestGitPanelClick_UntrackedShowsAllAddedDiff(t *testing.T) {
 	if !diffIsOpen(a) {
 		t.Fatal("row click should open the diff view")
 	}
-	body := strings.Join(diffOv(t, a).raw, "\n")
+	body := strings.Join(diffOv(t, a).unified, "\n")
 	if !strings.Contains(body, "+new") {
 		t.Fatalf("untracked diff should show the file as added, got:\n%s", body)
 	}
@@ -373,9 +373,24 @@ func TestGitPanelClick_DeletedHasNoOpenButton(t *testing.T) {
 	if diffOv(t, a).openPath != "" {
 		t.Fatal("deleted files must not arm Open file")
 	}
-	body := strings.Join(diffOv(t, a).raw, "\n")
+	body := strings.Join(diffOv(t, a).unified, "\n")
 	if !strings.Contains(body, "-so long") {
 		t.Fatalf("diff body should show the removed line, got %q", body)
+	}
+}
+
+// TestActivateGitChangeRow_NoDiffExplainsItself pins the empty answer:
+// a row whose diff git cannot produce owes the user a sentence, and a
+// sentence belongs in the info prefab rather than in a diff view with
+// one line of prose where a diff should be.
+func TestActivateGitChangeRow_NoDiffExplainsItself(t *testing.T) {
+	a := newTestApp(t, t.TempDir()) // no repo: every diff comes back empty
+	a.activateGitChangeRow(gitChangeRow{Rel: "ghost.txt", Abs: filepath.Join(a.rootDir, "ghost.txt")})
+	if diffIsOpen(a) {
+		t.Fatal("there is no diff to show — the diff view must not open")
+	}
+	if !infoIsOpen(a) {
+		t.Fatalf("expected the info prefab to explain itself; top = %T", a.overlays.Top())
 	}
 }
 

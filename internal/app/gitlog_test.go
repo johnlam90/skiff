@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/johnlam90/skiff/internal/diff"
 )
 
 // gitLogOv returns the open commit-history overlay, failing the test
@@ -99,19 +100,27 @@ func TestLoadGitLog_Degrades(t *testing.T) {
 
 // TestLoadGitCommitDiff_WholeAndScoped pins the diff loader: a commit's
 // full diff includes every touched file, and the path-scoped variant
-// only that file's hunks.
+// only that file's hunks. The loader hands back the parsed model now, so
+// "which files" is a list of paths rather than a substring search.
 func TestLoadGitCommitDiff_WholeAndScoped(t *testing.T) {
 	a, aFile, _ := historyRepoApp(t)
 	entries := loadGitLog(a.rootDir, "", gitLogLimit)
 	c1 := entries[1] // seeds both files
 
-	whole := strings.Join(loadGitCommitDiff(a.rootDir, c1.SHA, ""), "\n")
-	if !strings.Contains(whole, "a.txt") || !strings.Contains(whole, "b.txt") {
-		t.Fatalf("whole-commit diff should span both files, got:\n%s", whole)
+	paths := func(p diff.Patch) []string {
+		var out []string
+		for _, f := range p.Files {
+			out = append(out, f.Path())
+		}
+		return out
 	}
-	scoped := strings.Join(loadGitCommitDiff(a.rootDir, c1.SHA, aFile), "\n")
-	if !strings.Contains(scoped, "a.txt") || strings.Contains(scoped, "b.txt") {
-		t.Fatalf("scoped diff should cover a.txt only, got:\n%s", scoped)
+	whole := paths(loadGitCommitDiff(a.rootDir, c1.SHA, ""))
+	if len(whole) != 2 || whole[0] != "a.txt" || whole[1] != "b.txt" {
+		t.Fatalf("whole-commit diff should span both files, got %q", whole)
+	}
+	scoped := paths(loadGitCommitDiff(a.rootDir, c1.SHA, aFile))
+	if len(scoped) != 1 || scoped[0] != "a.txt" {
+		t.Fatalf("scoped diff should cover a.txt only, got %q", scoped)
 	}
 }
 
@@ -131,8 +140,8 @@ func TestLoadGitCommitDiff_RefusesOptionLookalikeSHA(t *testing.T) {
 	a, aFile, _ := historyRepoApp(t)
 
 	for _, sha := range []string{"--output=pwned", "", "-p"} {
-		if got := loadGitCommitDiff(a.rootDir, sha, ""); got != nil {
-			t.Fatalf("sha %q: got %v, want nil (refused before any subprocess)", sha, got)
+		if got := loadGitCommitDiff(a.rootDir, sha, ""); !got.Empty() {
+			t.Fatalf("sha %q: got %v, want nothing (refused before any subprocess)", sha, got)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(a.rootDir, "pwned")); err == nil {
@@ -147,11 +156,11 @@ func TestLoadGitCommitDiff_RefusesOptionLookalikeSHA(t *testing.T) {
 	// argument; both branches must still resolve correctly with it in
 	// place — an unscoped diff (no path after "--") and a path-scoped
 	// one (the path lands after it) exercise both shapes.
-	if whole := loadGitCommitDiff(a.rootDir, entries[0].SHA, ""); len(whole) == 0 {
+	if whole := loadGitCommitDiff(a.rootDir, entries[0].SHA, ""); whole.Empty() {
 		t.Fatalf("valid sha, no path: got %v, want a diff", whole)
 	}
 	scoped := loadGitCommitDiff(a.rootDir, entries[0].SHA, aFile)
-	if len(scoped) == 0 {
+	if scoped.Empty() {
 		t.Fatalf("valid sha, scoped path: got %v, want a diff", scoped)
 	}
 }
@@ -196,7 +205,7 @@ func TestActivateGitLogRow_OpensCommitDiff(t *testing.T) {
 	}
 	files := 0
 	for _, r := range diffOv(t, a).rows {
-		if r.Kind == diffRowFile {
+		if r.Kind == diff.RowFile {
 			files++
 		}
 	}
