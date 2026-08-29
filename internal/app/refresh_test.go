@@ -224,6 +224,43 @@ func TestReconcileOpenTabsWithDisk_ReloadsCleanTab(t *testing.T) {
 	}
 }
 
+// TestReconcileTab_SilentReloadKeepsUndo pins the fix for the bug where
+// a background git checkout or `make` erased the undo history of a file
+// the user never touched: the clean-buffer silent reload branch of
+// reconcileTab was never something the user asked for, so — like
+// format-on-save — it must keep history instead of wiping it.
+func TestReconcileTab_SilentReloadKeepsUndo(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("one"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	tab.InsertString("edited-")
+	if err := tab.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	preReload := tab.Buffer.String()
+
+	writeNewer(t, target, "two", tab.Mtime)
+	a.reconcileOpenTabsWithDisk()
+
+	if got := tab.Buffer.String(); got != "two" {
+		t.Fatalf("buffer: got %q, want %q", got, "two")
+	}
+	if !tab.CanUndo() {
+		t.Fatal("expected undo history to survive the silent background reload")
+	}
+	if !tab.Undo() {
+		t.Fatal("Undo should succeed")
+	}
+	if got := tab.Buffer.String(); got != preReload {
+		t.Fatalf("after undo = %q, want %q", got, preReload)
+	}
+}
+
 // TestReconcileOpenTabsWithDisk_DirtyTabKeepsEdits is the branch that
 // protects unsaved work: a dirty buffer is never overwritten by the
 // disk. The one-line "will overwrite on save" flash this used to assert
