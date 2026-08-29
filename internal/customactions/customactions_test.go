@@ -21,6 +21,23 @@ import (
 	"time"
 )
 
+// TestMain redirects every XDG base directory to a throwaway root before
+// any test runs. Most tests here already redirect per-test, but TestMain
+// is the backstop that makes a forgotten redirect in a future test
+// harmless instead of a write into the developer's real
+// ~/.config/skiff/actions.json or ~/.local/state/skiff/actions.log.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "skiff-test-xdg-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+	os.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 // TestLoad_MissingFile confirms the "no config" case is silent — we
 // shouldn't fail editor startup just because the user hasn't created
 // the file.
