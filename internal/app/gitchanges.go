@@ -51,7 +51,6 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/scrollbar"
 	"github.com/johnlam90/skiff/internal/textdraw"
@@ -709,27 +708,6 @@ func (a *App) activateGitChangeRow(row gitChangeRow) {
 		openPath = ""
 	}
 	a.openDiffView("Diff · "+row.Rel, lines, openPath, row.Abs)
-}
-
-// openFileAtFirstChange opens path in a tab and parks the cursor on its
-// first changed line, so "take me to what I changed" is one gesture.
-func (a *App) openFileAtFirstChange(path string) {
-	a.openFile(path)
-	tab := a.activeTabPtr()
-	// openFile flashes and keeps the previous tab on failure — only jump
-	// the cursor when the file we asked for is actually the one in front.
-	if tab == nil || tab.Path != path || len(tab.GitLines) == 0 {
-		return
-	}
-	first := -1
-	for line := range tab.GitLines {
-		if first < 0 || line < first {
-			first = line
-		}
-	}
-	if first >= 0 {
-		tab.MoveCursorTo(editor.Position{Line: first}, false)
-	}
 }
 
 // scrollGitPanel nudges the panel viewport by delta rows, clamped so the

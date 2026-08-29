@@ -15,6 +15,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gdamore/tcell/v2"
+	"github.com/johnlam90/skiff/internal/editor"
 )
 
 // seedTwo writes two small files and returns their paths.
@@ -210,6 +214,111 @@ func TestPreviewCoachMark_FiresOnceThenStaysQuiet(t *testing.T) {
 	a.openFilePreview(p2)
 	if a.statusMsg != "" {
 		t.Errorf("second preview re-explained itself: %q", a.statusMsg)
+	}
+}
+
+// TestNewTab_DoesNotBlockOnGit pins the async-gutter contract (plan 009):
+// newTab must not shell out to `git diff` inline. Session restore calls
+// newTab in a loop, and a slow/huge/network-mounted repo would otherwise
+// serialize N subprocess waits before the first paint. GitLines arrives
+// later via the git-status pipeline (refreshGitStatusAsync), not
+// synchronously on construction.
+func TestNewTab_DoesNotBlockOnGit(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	target := filepath.Join(repo, "a.txt")
+	writeFileT(t, target, "one\ntwo\nthree\n")
+	gitRun(t, repo, "add", "a.txt")
+	gitRun(t, repo, "commit", "-m", "init")
+	writeFileT(t, target, "one\nchanged\nthree\n")
+
+	a := newTestApp(t, repo)
+	tab, err := a.newTab(target)
+	if err != nil {
+		t.Fatalf("newTab: %v", err)
+	}
+	if tab.GitLines != nil {
+		t.Fatalf("newTab must not load git lines inline, got %v", tab.GitLines)
+	}
+}
+
+// TestOpenFile_SwitchToOpenTabDoesNotBlockOnGit pins the second half of
+// plan 009: re-opening an already-open tab (a plain tab-strip click,
+// exercised here via openFile on a path that's already open) must not
+// shell out to `git diff` inline either — it kicks the existing async
+// git-status refresh instead of loading the gutter synchronously.
+func TestOpenFile_SwitchToOpenTabDoesNotBlockOnGit(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	target := filepath.Join(repo, "a.txt")
+	writeFileT(t, target, "one\ntwo\nthree\n")
+	gitRun(t, repo, "add", "a.txt")
+	gitRun(t, repo, "commit", "-m", "init")
+
+	a := newTestApp(t, repo)
+	a.openFile(target) // first open — tab created, GitLines nil
+	writeFileT(t, target, "one\nchanged\nthree\n")
+	a.tabs.ActivateAt(-1) // simulate switching away
+
+	a.openFile(target) // switch back — the path under test
+	tab := a.activeTabPtr()
+	if tab == nil || tab.GitLines != nil {
+		t.Fatalf("switching to an already-open tab must not load git lines inline, got %v", tab.GitLines)
+	}
+	if !a.gitRefreshInFlight {
+		t.Fatal("switching to an already-open tab should kick the async git-status refresh")
+	}
+}
+
+// TestOpenFile_GutterArrivesViaStatusEvent is the end-to-end convergence
+// proof for plan 009: a fresh, permanent open leaves GitLines nil — the
+// async git-status pipeline is the only thing that ever fills it in, not
+// the open path itself. openFileMode's new-tab branch already kicks
+// refreshGitStatusAsync (step 2), so this test drains that real posted
+// event — rather than fabricating a parallel synthetic one, which would
+// race the real in-flight collection's own subprocess against this
+// test's t.TempDir teardown — and asserts on its result, the same
+// pattern TestRefreshGitStatusAsync_PostsEventAndApplies uses.
+func TestOpenFile_GutterArrivesViaStatusEvent(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	target := filepath.Join(repo, "a.txt")
+	writeFileT(t, target, "one\ntwo\nthree\n")
+	gitRun(t, repo, "add", "a.txt")
+	gitRun(t, repo, "commit", "-m", "init")
+	writeFileT(t, target, "one\nchanged\nthree\n")
+
+	a := newTestApp(t, repo)
+	a.openFileMode(target, false)
+	tab := a.activeTabPtr()
+	if tab == nil || tab.Path != target {
+		t.Fatalf("expected %s open", target)
+	}
+	if tab.GitLines != nil {
+		t.Fatalf("a fresh open must not carry git lines yet, got %v", tab.GitLines)
+	}
+	if !a.gitRefreshInFlight {
+		t.Fatal("opening a new tab should kick the async git-status refresh")
+	}
+
+	evCh := make(chan tcell.Event, 1)
+	go func() { evCh <- a.screen.PollEvent() }()
+	select {
+	case ev := <-evCh:
+		gse, ok := ev.(*gitStatusEvent)
+		if !ok {
+			t.Fatalf("expected gitStatusEvent, got %T", ev)
+		}
+		a.handleEvent(gse)
+	case <-time.After(5 * time.Second):
+		t.Fatal("background collection never posted its event")
+	}
+
+	if a.gitRefreshInFlight {
+		t.Fatal("handling the event should clear the in-flight flag")
+	}
+	if got := tab.GitLines[1]; got != editor.GitLineModified {
+		t.Fatalf("gutter should arrive via the status event, got %v", tab.GitLines)
 	}
 }
 

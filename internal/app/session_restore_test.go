@@ -155,6 +155,32 @@ func TestRestoreNoSessionIsNoop(t *testing.T) {
 	}
 }
 
+// TestRestoreSession_KicksAsyncGitStatusRefresh pins step 3 of plan 009:
+// every restored tab comes through newTab with GitLines nil (the inline
+// `git diff` is gone from that path), so restoreSession must kick the
+// async git-status refresh itself — otherwise a restored session's
+// gutters would sit empty until the first 10s tick.
+func TestRestoreSession_KicksAsyncGitStatusRefresh(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	mkFile(t, root, "keep.go", "l1\nl2\n")
+	if err := session.Save(root, session.Project{
+		Tabs:       []session.TabState{{Path: "keep.go"}},
+		Active:     0,
+		ActivePath: "keep.go",
+		SavedAt:    time.Now(),
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	a := newTestApp(t, root)
+	a.gitRefreshInFlight = false
+	a.restoreSession()
+	if !a.gitRefreshInFlight {
+		t.Fatal("restoring a session with tabs should kick the async git-status refresh")
+	}
+}
+
 // TestSaveSessionRoundTrip drives saveSession → restoreSession end to
 // end through the real store.
 func TestSaveSessionRoundTrip(t *testing.T) {
