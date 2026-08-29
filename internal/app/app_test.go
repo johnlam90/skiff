@@ -41,14 +41,33 @@ func TestMain(m *testing.M) {
 	}
 	os.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 	os.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	// newTestApp constructs through the production newApp core, which
+	// loads the user config. Pin icons to "off" in the throwaway config:
+	// the default ("auto") shells out to Nerd Font detection for every
+	// constructed app, and would make glyph-level draw assertions depend
+	// on the fonts installed on whatever machine runs the suite. "off"
+	// is also exactly what the old hand-rolled test literal produced.
+	cfgDir := filepath.Join(dir, "config", "skiff")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		panic(err)
+	}
+	cfg := []byte("{\"icons\":\"off\"}\n")
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), cfg, 0o644); err != nil {
+		panic(err)
+	}
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
 }
 
-// newTestApp builds a fully-wired App against a tcell.SimulationScreen. It
-// mirrors what New() does, but skips the background tree-refresh goroutine
-// because we don't want a ticker firing while tests run.
+// newTestApp builds a fully-wired App against a tcell.SimulationScreen,
+// through the same newApp core production runs — so tests see the real
+// baseline mouseFlags, the user config, and custom actions (TestMain
+// points XDG at a throwaway dir, so both loaders read test-owned state,
+// never the developer's). It still skips New's tail on purpose: no
+// welcome flash, no startTreeRefresh ticker, no finder index build, and
+// no restoreSession — background goroutines and persisted sessions have
+// no place under `go test`.
 func newTestApp(t *testing.T, root string) *App {
 	t.Helper()
 	scr := tcell.NewSimulationScreen("UTF-8")
@@ -62,18 +81,7 @@ func newTestApp(t *testing.T, root string) *App {
 	if err != nil {
 		t.Fatalf("tree: %v", err)
 	}
-	a := &App{
-		screen:         scr,
-		theme:          theme.Default(),
-		rootDir:        tree.Root.Path,
-		tree:           tree,
-		hoveredMenuRow: -1,
-		diffPanelRow:   -1,
-		sidebarShown:   true,
-		sidebarWidth:   defaultSidebarWidth,
-		wrapOn:         true,
-	}
-	a.setActiveFolder(tree.Root.Path)
+	a := newApp(scr, tree.Root.Path, tree, true)
 	a.width, a.height = scr.Size()
 	// New() seeds git state synchronously before the loop starts; the
 	// cached branch is what gates the Git panel, so tests need the same
