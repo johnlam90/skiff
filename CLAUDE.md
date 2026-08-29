@@ -484,6 +484,11 @@ If you're touching the workflow or `.goreleaser.yml`, make sure both
 auto-commits keep their `[skip ci]` markers — without them the workflow
 loops forever.
 
+A failed GoReleaser run (API blip, upload timeout) is re-runnable: the tag
+step records that the tag already exists and the next step deletes the
+half-published release object (never the tag) before GoReleaser retries.
+"Re-run failed jobs" on the Actions run is the whole recovery.
+
 ## What NOT to add
 
 - `Ctrl+` editor shortcuts (they fight tmux/terminals — that's the

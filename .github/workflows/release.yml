@@ -131,13 +131,16 @@ jobs:
       # Always create + push the tag (even when version was hand-edited
       # — that's the whole point of accepting it as-is).
       - name: Tag release
+        id: tag
         run: |
           set -euo pipefail
           NEW="${{ steps.version.outputs.version }}"
           if git rev-parse -q --verify "refs/tags/v$NEW" >/dev/null; then
-            echo "Tag v$NEW already exists, skipping."
+            echo "Tag v$NEW already exists — release will retry against it."
+            echo "tag_existed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "tag_existed=false" >> "$GITHUB_OUTPUT"
           # Configure identity here too: the hand-edited-version path
           # skips the bump step above, and an annotated tag without an
           # ident fails the whole release.
@@ -145,6 +148,20 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "v$NEW" -m "Release v$NEW"
           git push origin "v$NEW"
+
+      # A previous run got as far as the tag but failed before (or
+      # during) publish — GoReleaser refuses to recreate a release that
+      # already exists. Clear the half-published release object (never
+      # the tag, which GoReleaser needs to still be there) so the retry
+      # below can recreate it cleanly.
+      - name: Clear half-published release on retry
+        if: steps.tag.outputs.tag_existed == 'true'
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.version.outputs.version }}"
+          gh release delete "v$NEW" --yes || echo "No release object for v$NEW — nothing to clear."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # Pinned exactly, like the staticcheck version test.yml pins: the
       # tool that builds every shipped binary must not float on "latest"
