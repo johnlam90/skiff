@@ -663,6 +663,12 @@ func (a *App) Close() {
 // Run is the editor's main event loop. It blocks on PollEvent, dispatches
 // each event, redraws, and exits when a.quit is set.
 func (a *App) Run() error {
+	// Route SIGTERM/SIGHUP/SIGINT through the loop as a clean quit so
+	// `tmux kill-pane` and friends restore the terminal instead of
+	// leaving raw mode and mouse tracking behind.
+	stopSignals := a.watchSignals()
+	defer stopSignals()
+
 	a.width, a.height = a.screen.Size()
 	// Apply the narrow-terminal rule against the size we booted at, not
 	// just against later resizes: starting inside a 55-column tmux pane
@@ -733,6 +739,11 @@ func (a *App) handleEvent(ev tcell.Event) {
 		a.lastEscape = time.Time{}
 	case *tcell.EventMouse:
 		a.handleMouse(e)
+	case *quitRequestEvent:
+		// A signal, not a person: skip the dirty-tab modal and quit.
+		// Close()'s session save preserves state, and dirty buffers
+		// come back dirty on the next open's session restore.
+		a.quit = true
 	case *autoScrollEvent:
 		a.handleAutoScroll()
 	case *treeRefreshEvent:
