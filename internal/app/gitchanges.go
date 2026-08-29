@@ -54,6 +54,7 @@ import (
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/scrollbar"
+	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -1073,21 +1074,11 @@ func (a *App) commitCheckOn(abs string) bool {
 }
 
 // drawClipped draws s at (x, y) using at most maxW cells and returns the
-// x position just past the last rune drawn. Shared by the git panel's
-// rows so clipping stays consistent in a sidebar the user can resize.
+// x position just past the last cell drawn. Shared by the git panel's
+// rows so clipping stays consistent in a sidebar the user can resize —
+// cluster-aware via textdraw, so a CJK path clips on cell boundaries.
 func drawClipped(scr tcell.Screen, x, y, maxW int, s string, st tcell.Style) int {
-	if maxW <= 0 {
-		return x
-	}
-	runes := []rune(s)
-	n := len(runes)
-	if n > maxW {
-		n = maxW
-	}
-	for i := 0; i < n; i++ {
-		scr.SetContent(x+i, y, runes[i], nil, st)
-	}
-	return x + n
+	return textdraw.DrawClipped(scr, x, y, maxW, s, st)
 }
 
 // gitKindLetter maps a change kind to its single-letter badge — the

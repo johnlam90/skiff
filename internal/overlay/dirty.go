@@ -197,7 +197,8 @@ func (d *Dirty) Draw(scr tcell.Screen) {
 	bg := th.LineHL
 	bodyStyle := tcell.StyleDefault.Background(bg).Foreground(th.Text)
 	msg := trimRunes(d.Message, r.W-4)
-	drawText(scr, r.X+(r.W-runeLen(msg))/2, r.Y+4, msg, bodyStyle)
+	msgX := r.X + (r.W-runeLen(msg))/2
+	drawText(scr, msgX, r.Y+4, r.X+r.W-1-msgX, msg, bodyStyle)
 
 	labels := d.labels()
 	xs, _ := d.columns()
