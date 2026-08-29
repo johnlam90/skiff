@@ -239,14 +239,14 @@ func (a *App) doProjReplaceAll(matches []search.Match, query, repl string, opts 
 	root := a.rootDir
 	scr := a.screen
 	a.fileOpBusy = true
-	go func() {
+	a.safeGo("project-replace", func() {
 		rep := search.ApplyReplace(root, diskMatches, query, repl, opts)
 		_ = scr.PostEvent(&projReplaceDoneEvent{
 			when: time.Now(), rep: rep,
 			bufOcc: bufOcc, bufFiles: bufFiles, bufSkip: bufSkip,
 			bufSaveFailed: saveFailed,
 		})
-	}()
+	})
 }
 
 // handleProjReplaceDone lands the combined report and refreshes

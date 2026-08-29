@@ -114,10 +114,10 @@ func (e *worktreeListEvent) When() time.Time { return e.when }
 func (a *App) requestWorktreeList(purpose string) {
 	root := a.rootDir
 	scr := a.screen
-	go func() {
+	a.safeGo("git-worktree-list", func() {
 		wts := gitWorktreeList(root)
 		_ = scr.PostEvent(&worktreeListEvent{when: time.Now(), purpose: purpose, wts: wts})
-	}()
+	})
 }
 
 // handleWorktreeList routes a collected list to the flow that asked for

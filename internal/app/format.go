@@ -608,7 +608,7 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 	// the event loop while the goroutine still reads it.
 	args := append([]string(nil), argv...)
 	a.flash(label + "…")
-	go func() {
+	a.safeGo("format", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), deadline)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
@@ -642,7 +642,7 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 			label:   label,
 			err:     err,
 		})
-	}()
+	})
 }
 
 // indexNewline returns the index of the first newline in s, or -1.
