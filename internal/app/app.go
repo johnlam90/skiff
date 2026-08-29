@@ -335,17 +335,15 @@ type App struct {
 	// it owns the keyboard. The active tab carries the query and match
 	// list (see editor.Tab.SetFindQuery), so each tab remembers its own
 	// search across closes / reopens.
-	findOpen   bool
-	findValue  []rune
-	findCursor int
-	findScroll int
-	// Replace field riding the find bar (Tab opens it) — see find.go.
-	// replaceScroll is the field's horizontal scroll window, kept
-	// caret-tracking by drawFindBar the same way findScroll is.
+	//
+	// findField and replaceField (Tab opens the second one) are the same
+	// overlay.Field the prompt, form and finder use: the strip owns
+	// which field has the keyboard, the field owns the text, the caret
+	// and its horizontal window. See find.go.
+	findOpen         bool
+	findField        overlay.Field
 	replaceOpen      bool
-	replaceValue     []rune
-	replaceCursor    int
-	replaceScroll    int
+	replaceField     overlay.Field
 	findFocusReplace bool
 
 	// The list picker is an overlay.Pick prefab — see listpick.go for

@@ -42,8 +42,8 @@ func TestOpenFind_OpensBarEmpty(t *testing.T) {
 	if !a.findOpen {
 		t.Fatal("openFind did not flip findOpen")
 	}
-	if len(a.findValue) != 0 {
-		t.Fatalf("input should be empty, got %q", string(a.findValue))
+	if len(a.findField.Value) != 0 {
+		t.Fatalf("input should be empty, got %q", a.findField.Text())
 	}
 }
 
@@ -234,8 +234,8 @@ func TestFindBarReplaceFlow(t *testing.T) {
 	for _, r := range "qux" {
 		a.handleFindKey(tcell.NewEventKey(tcell.KeyRune, r, 0))
 	}
-	if string(a.replaceValue) != "qux" || string(a.findValue) != "foo" {
-		t.Fatalf("typing went to the wrong field: %q / %q", a.replaceValue, a.findValue)
+	if a.replaceField.Text() != "qux" || a.findField.Text() != "foo" {
+		t.Fatalf("typing went to the wrong field: %q / %q", a.replaceField.Text(), a.findField.Text())
 	}
 
 	a.handleFindKey(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
@@ -260,20 +260,78 @@ func TestFindBarReplaceFlow(t *testing.T) {
 // with the caret and back left when the caret returns home.
 func TestDrawFindBar_ScrollsReplaceFieldToCaret(t *testing.T) {
 	a := seedFindApp(t, "hello world\n")
-	a.findOpen = true
-	a.replaceOpen = true
-	a.findFocusReplace = true
-	a.replaceValue = []rune(strings.Repeat("r", 80))
-	a.replaceCursor = len(a.replaceValue)
+	a.openFind()
+	a.handleFindKey(keyEv(tcell.KeyTab, 0)) // grow + focus the replace field
+	for _, r := range strings.Repeat("r", 80) {
+		a.handleFindKey(keyEv(tcell.KeyRune, r))
+	}
 
 	a.drawFindBar()
-	if a.replaceScroll == 0 {
+	if a.replaceField.Scroll() == 0 {
 		t.Fatal("replace field did not scroll; caret sits off-field")
 	}
 
-	a.replaceCursor = 0
+	a.handleFindKey(keyEv(tcell.KeyHome, 0))
 	a.drawFindBar()
-	if a.replaceScroll != 0 {
-		t.Fatalf("scroll should follow the caret home, got %d", a.replaceScroll)
+	if a.replaceField.Scroll() != 0 {
+		t.Fatalf("scroll should follow the caret home, got %d", a.replaceField.Scroll())
+	}
+}
+
+// TestDrawFindBar_ScrollsQueryFieldToCaret is the query field's twin: a
+// query wider than the bar has to slide its own window so the caret (and
+// the tail the user is typing) stay on screen. Both fields ride the same
+// overlay.Field, and this is the test that says so for the query.
+func TestDrawFindBar_ScrollsQueryFieldToCaret(t *testing.T) {
+	a := seedFindApp(t, "hello world\n")
+	a.openFind()
+	for _, r := range strings.Repeat("q", 200) {
+		a.handleFindKey(keyEv(tcell.KeyRune, r))
+	}
+
+	a.drawFindBar()
+	a.screen.Show()
+	if a.findField.Scroll() == 0 {
+		t.Fatal("query field did not scroll; the caret sits off-bar")
+	}
+	// The caret must land inside the bar, not past its right edge.
+	_, by, bw, _ := a.findBarRect()
+	bx := a.sidebarW()
+	cx, cy, visible := a.screen.(tcell.SimulationScreen).GetCursor()
+	if !visible || cy != by || cx < bx || cx >= bx+bw {
+		t.Fatalf("caret (%d,%d) visible=%v is outside the find bar row %d, x in [%d,%d)",
+			cx, cy, visible, by, bx, bx+bw)
+	}
+
+	a.handleFindKey(keyEv(tcell.KeyHome, 0))
+	a.drawFindBar()
+	if a.findField.Scroll() != 0 {
+		t.Fatalf("scroll should follow the caret home, got %d", a.findField.Scroll())
+	}
+}
+
+// TestHandleFindKey_CaretMoveDoesNotReSearch pins the "react to the edit,
+// not to the keystroke" rule the delegation to overlay.Field is built on:
+// Left/Right/Home/End change the caret, not the query, so they must not
+// re-run the search and yank the editor back onto the current match.
+func TestHandleFindKey_CaretMoveDoesNotReSearch(t *testing.T) {
+	a := seedFindApp(t, "foo\nfoo\nfoo")
+	a.openFind()
+	for _, r := range "foo" {
+		a.handleFindKey(keyEv(tcell.KeyRune, r))
+	}
+	tab := a.activeTabPtr()
+	a.handleFindKey(keyEv(tcell.KeyEnter, 0)) // advance to the second match
+	if tab.FindIndex != 1 {
+		t.Fatalf("setup: expected FindIndex=1, got %d", tab.FindIndex)
+	}
+
+	a.handleFindKey(keyEv(tcell.KeyHome, 0))
+	a.handleFindKey(keyEv(tcell.KeyRight, 0))
+	if tab.FindIndex != 1 {
+		t.Fatalf("a caret move re-ran the search: FindIndex=%d", tab.FindIndex)
+	}
+	if a.findField.Cursor != 1 {
+		t.Fatalf("caret should have moved inside the query, cursor=%d", a.findField.Cursor)
 	}
 }

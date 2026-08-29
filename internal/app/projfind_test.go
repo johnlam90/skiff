@@ -16,6 +16,7 @@ package app
 import (
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,11 +141,11 @@ func TestProjFindActivateHeaderFolds(t *testing.T) {
 // state so the next open starts fresh.
 func TestProjFindEscCloses(t *testing.T) {
 	a := projFindApp(t, t.TempDir())
-	a.projFind.findValue = []rune("abc")
+	a.projFind.query.SetText("abc")
 	a.projFind.findMatches = fakeMatches()
 
 	a.closeProjFind()
-	if a.projFind.findOpen || a.projFind.findValue != nil || a.projFind.findMatches != nil {
+	if a.projFind.findOpen || a.projFind.query.Text() != "" || a.projFind.findMatches != nil {
 		t.Fatal("close should clear the panel state")
 	}
 }
@@ -157,10 +158,10 @@ func TestProjFindDebounceAndStaleKick(t *testing.T) {
 	mkFile(t, root, "a.go", "xx alpha\n")
 	a := projFindApp(t, root)
 
-	a.projFind.findValue = []rune("al")
+	a.projFind.query.SetText("al")
 	a.projFindQueryChanged() // gen N
 	staleGen := a.projFind.findGen
-	a.projFind.findValue = []rune("alpha")
+	a.projFind.query.SetText("alpha")
 	a.projFindQueryChanged() // gen N+1 supersedes
 	a.handleProjFindKick(&projFindKickEvent{when: time.Now(), gen: staleGen})
 	// The stale kick must be inert: no done event for staleGen can win,
@@ -277,7 +278,7 @@ func TestProjFindMouseClickBelowLastRowIsNoop(t *testing.T) {
 func TestProjFindDraw_PaintsResultsAndBar(t *testing.T) {
 	root := t.TempDir()
 	a := projFindApp(t, root)
-	a.projFind.findValue = []rune("alpha")
+	a.projFind.query.SetText("alpha")
 	a.projFind.findMatches = fakeMatches()
 
 	a.draw()
@@ -319,6 +320,86 @@ func TestProjFindDraw_PaintsResultsAndBar(t *testing.T) {
 	// nonzero query and match count at this width, not just this
 	// test's data. Out of scope to fix in this test-only plan (plan
 	// 019) — reported for a follow-up bug fix in projfind.go.
+}
+
+// TestHandleProjFindKey_TypingEditsQueryAndCaretMovesDoNotResweep pins
+// the panel's half of the overlay.Field delegation: printable runes and
+// Backspace land in the query and each start a fresh sweep generation,
+// while Home/Right only move the caret. A caret move that spent a
+// generation would launch a redundant disk walk on every arrow press.
+func TestHandleProjFindKey_TypingEditsQueryAndCaretMovesDoNotResweep(t *testing.T) {
+	a := projFindApp(t, t.TempDir())
+	for _, r := range "alpha" {
+		a.handleProjFindKey(keyEv(tcell.KeyRune, r))
+	}
+	if a.projFind.query.Text() != "alpha" {
+		t.Fatalf("typing did not reach the query field: %q", a.projFind.query.Text())
+	}
+
+	gen := a.projFind.findGen
+	a.handleProjFindKey(keyEv(tcell.KeyHome, 0))
+	a.handleProjFindKey(keyEv(tcell.KeyRight, 0))
+	if a.projFind.findGen != gen {
+		t.Fatalf("a caret move started a new sweep generation: %d -> %d", gen, a.projFind.findGen)
+	}
+	if a.projFind.query.Cursor != 1 {
+		t.Fatalf("caret should have moved inside the query, cursor=%d", a.projFind.query.Cursor)
+	}
+
+	a.handleProjFindKey(keyEv(tcell.KeyBackspace2, 0))
+	if a.projFind.query.Text() != "lpha" {
+		t.Fatalf("backspace did not edit the query: %q", a.projFind.query.Text())
+	}
+	if a.projFind.findGen == gen {
+		t.Fatal("an edit must start a new sweep generation")
+	}
+}
+
+// TestProjFindDraw_ShowsCaretInsideALongReplaceField pins the replace
+// field's caret window. The field used to paint from rune 0 forever, so
+// a replacement longer than the field pushed the caret past the field's
+// right edge, where drawProjFindBar's guard dropped the ShowCursor call
+// entirely — the user kept typing into an input with no visible caret.
+// The in-file find bar had already fixed exactly this for its own
+// replace field; the panel's copy had drifted.
+func TestProjFindDraw_ShowsCaretInsideALongReplaceField(t *testing.T) {
+	a := projFindApp(t, t.TempDir())
+	a.handleProjFindKey(keyEv(tcell.KeyTab, 0)) // grow + focus the replace field
+	if !a.projFind.replaceOpen || !a.projFind.focusReplace {
+		t.Fatal("precondition: Tab should open and focus the replace field")
+	}
+	for _, r := range strings.Repeat("r", 80) {
+		a.handleProjFindKey(keyEv(tcell.KeyRune, r))
+	}
+
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+
+	x0, x1 := a.projFind.replaceFieldX0, a.projFind.replaceFieldX1
+	if x1 <= x0 {
+		t.Fatalf("precondition: replace field has no room, [%d,%d)", x0, x1)
+	}
+	cx, cy, visible := scr.GetCursor()
+	if !visible || cy != a.height-2 || cx < x0 || cx > x1 {
+		t.Fatalf("caret (%d,%d) visible=%v is outside the replace field [%d,%d] on bar row %d",
+			cx, cy, visible, x0, x1, a.height-2)
+	}
+}
+
+// TestMatchRuneSpans_NonASCIICapitalStaysCaseSensitive pins the
+// highlighter's smart-case trigger to the engine's. internal/search arms
+// case-sensitivity with unicode.IsUpper, so a query carrying a non-ASCII
+// capital searches case-sensitively there. The highlighter tested
+// r >= 'A' && r <= 'Z', read the same query as all-lowercase, folded
+// both sides, and tinted hits the engine never reported.
+func TestMatchRuneSpans_NonASCIICapitalStaysCaseSensitive(t *testing.T) {
+	if got := matchRuneSpans("été été", "Été"); got != nil {
+		t.Fatalf("capital É should make the query case-sensitive, got spans %v", got)
+	}
+	if got, want := matchRuneSpans("Été été", "Été"), [][2]int{{0, 3}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("case-sensitive hit: got %v, want %v", got, want)
+	}
 }
 
 // TestMatchRuneSpans pins matchRuneSpans' contract: spans are rune

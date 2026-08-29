@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/overlay"
 	"github.com/johnlam90/skiff/internal/search"
 )
 
@@ -48,8 +49,7 @@ func (e *projReplaceDoneEvent) When() time.Time { return e.when }
 // replace field armed underneath it.
 func (a *App) resetProjReplace() {
 	a.projFind.replaceOpen = false
-	a.projFind.replaceValue = nil
-	a.projFind.replaceCursor = 0
+	a.projFind.replace = overlay.Field{}
 	a.projFind.focusReplace = false
 }
 
@@ -173,7 +173,7 @@ func (a *App) projReplaceRowApply(row projFindRow) {
 		return
 	}
 	m := a.projFind.findMatches[row.MatchIdx]
-	query, repl := string(a.projFind.findValue), string(a.projFind.replaceValue)
+	query, repl := a.projFind.query.Text(), a.projFind.replace.Text()
 	opts := a.projReplaceOpts()
 	abs := filepath.Join(a.rootDir, filepath.FromSlash(m.Path))
 	if tab, wasClean := a.findOpenTab(abs); tab != nil {
@@ -219,7 +219,7 @@ func (a *App) projReplaceConfirmAll() {
 	// Snapshot everything the apply needs — the confirm modal closes
 	// the panel (closeAllModals), taking the live state with it.
 	matches := append([]search.Match(nil), a.projFind.findMatches...)
-	query, repl := string(a.projFind.findValue), string(a.projFind.replaceValue)
+	query, repl := a.projFind.query.Text(), a.projFind.replace.Text()
 	opts := a.projReplaceOpts()
 	a.openConfirm("Replace in project", msg, func(app *App) {
 		app.doProjReplaceAll(matches, query, repl, opts)
