@@ -28,6 +28,7 @@ import (
 
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/icons"
 	"github.com/johnlam90/skiff/internal/session"
 )
@@ -224,6 +225,43 @@ func TestReconcileOpenTabsWithDisk_ReloadsCleanTab(t *testing.T) {
 	}
 }
 
+// TestReconcileTab_SilentReloadKeepsUndo pins the fix for the bug where
+// a background git checkout or `make` erased the undo history of a file
+// the user never touched: the clean-buffer silent reload branch of
+// reconcileTab was never something the user asked for, so — like
+// format-on-save — it must keep history instead of wiping it.
+func TestReconcileTab_SilentReloadKeepsUndo(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("one"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	tab.InsertString("edited-")
+	if err := tab.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	preReload := tab.Buffer.String()
+
+	writeNewer(t, target, "two", tab.Mtime)
+	a.reconcileOpenTabsWithDisk()
+
+	if got := tab.Buffer.String(); got != "two" {
+		t.Fatalf("buffer: got %q, want %q", got, "two")
+	}
+	if !tab.CanUndo() {
+		t.Fatal("expected undo history to survive the silent background reload")
+	}
+	if !tab.Undo() {
+		t.Fatal("Undo should succeed")
+	}
+	if got := tab.Buffer.String(); got != preReload {
+		t.Fatalf("after undo = %q, want %q", got, preReload)
+	}
+}
+
 // TestReconcileOpenTabsWithDisk_DirtyTabKeepsEdits is the branch that
 // protects unsaved work: a dirty buffer is never overwritten by the
 // disk. The one-line "will overwrite on save" flash this used to assert
@@ -255,8 +293,14 @@ func TestReconcileOpenTabsWithDisk_DirtyTabKeepsEdits(t *testing.T) {
 }
 
 // TestReconcileOpenTabsWithDisk_DeletedFileMarksTab covers the missing
-// branch: the tab is marked gone and dirty so the buffer reads as the only
-// surviving copy, and the flash fires exactly once.
+// branch: the tab is marked DiskGone so the buffer reads as the only
+// surviving copy, and the flash fires exactly once. Dirty stays false —
+// the buffer has no user edits, and leaving it false is what lets a later
+// delete+recreate (see
+// TestReconcileTab_DeleteThenRecreateCleanTabReloadsSilently) fall through
+// to a silent reload instead of a false conflict prompt. Every consumer
+// that needs to treat this tab as "needs attention" anyway gates on
+// Dirty||DiskGone, not Dirty alone.
 func TestReconcileOpenTabsWithDisk_DeletedFileMarksTab(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "f.txt")
@@ -272,9 +316,11 @@ func TestReconcileOpenTabsWithDisk_DeletedFileMarksTab(t *testing.T) {
 	}
 	a.reconcileOpenTabsWithDisk()
 
-	if !tab.DiskGone || !tab.Dirty {
-		t.Fatalf("deleted file should mark the tab gone+dirty: gone=%v dirty=%v",
-			tab.DiskGone, tab.Dirty)
+	if !tab.DiskGone {
+		t.Fatalf("deleted file should mark the tab gone: gone=%v", tab.DiskGone)
+	}
+	if tab.Dirty {
+		t.Fatal("a deleted-but-unedited tab must not be marked Dirty")
 	}
 	if !strings.Contains(a.statusMsg, "deleted on disk") {
 		t.Fatalf("expected a deletion flash, got %q", a.statusMsg)
@@ -284,6 +330,123 @@ func TestReconcileOpenTabsWithDisk_DeletedFileMarksTab(t *testing.T) {
 	a.reconcileOpenTabsWithDisk()
 	if a.statusMsg != "" {
 		t.Fatalf("deletion flash repeated on a later tick: %q", a.statusMsg)
+	}
+}
+
+// TestReconcileTab_DeleteThenRecreateCleanTabReloadsSilently pins the fix
+// for the false disk-conflict prompt: a clean tab whose file is deleted
+// and then recreated (the shape of `git checkout`, `git stash pop`, or a
+// build tool rewriting its output — one unlink-then-recreate spanning two
+// reconcile ticks) must reload silently, exactly like any other external
+// edit. Before the fix, the delete branch overloaded Dirty to make the
+// deletion feel urgent, so the reappearance was indistinguishable from a
+// real unsaved-edits conflict and popped the Keep-mine/Reload/Diff modal
+// over a buffer that had nothing of the user's to lose.
+func TestReconcileTab_DeleteThenRecreateCleanTabReloadsSilently(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("one"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+
+	// Tick 1: the file vanishes.
+	a.reconcileTab(tab, tabProbe{path: target, err: os.ErrNotExist})
+	if !tab.DiskGone {
+		t.Fatal("expected DiskGone after the file disappeared")
+	}
+
+	// Tick 2: the file reappears with new content and a later mtime —
+	// the shape a `git checkout` or `make` leaves behind.
+	future := tab.Mtime.Add(2 * time.Second)
+	if err := os.WriteFile(target, []byte("two"), 0644); err != nil {
+		t.Fatalf("recreate: %v", err)
+	}
+	if err := os.Chtimes(target, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	a.reconcileTab(tab, tabProbe{path: target, mtime: future})
+
+	if a.anyModalOpen() {
+		t.Fatal("delete+recreate of a clean tab must not open the disk-conflict modal")
+	}
+	if got := tab.Buffer.String(); got != "two" {
+		t.Fatalf("buffer: got %q, want %q", got, "two")
+	}
+	if tab.Dirty {
+		t.Fatal("a silently reloaded tab must not read as dirty")
+	}
+}
+
+// TestReconcileTab_DeleteWhileDirtyStillConflicts guards against
+// overcorrecting the fix above: dropping the synthetic Dirty must not
+// weaken the real-conflict path. A tab with genuine unsaved edits whose
+// file is deleted and then recreated still has something of the user's
+// to lose, so the reappearance must still open the disk-conflict prompt.
+func TestReconcileTab_DeleteWhileDirtyStillConflicts(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("one"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	tab.Buffer.Lines = []string{"mine"}
+	tab.Dirty = true
+
+	// Tick 1: the file vanishes while the buffer has real edits.
+	a.reconcileTab(tab, tabProbe{path: target, err: os.ErrNotExist})
+	if !tab.DiskGone {
+		t.Fatal("expected DiskGone after the file disappeared")
+	}
+	if !tab.Dirty {
+		t.Fatal("genuine edits must survive the delete branch")
+	}
+
+	// Tick 2: the file reappears with different content.
+	future := tab.Mtime.Add(2 * time.Second)
+	if err := os.WriteFile(target, []byte("theirs"), 0644); err != nil {
+		t.Fatalf("recreate: %v", err)
+	}
+	if err := os.Chtimes(target, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	a.reconcileTab(tab, tabProbe{path: target, mtime: future})
+
+	d := dirtyOverlay(t, a)
+	if d.Labels[0] != "[ Keep mine ]" || d.Labels[1] != "[ Reload ]" || d.Labels[2] != "[ Diff ]" {
+		t.Fatalf("conflict prompt labels = %v", d.Labels)
+	}
+	if got := tab.Buffer.String(); got != "mine" {
+		t.Fatalf("opening the prompt must not touch the buffer: got %q", got)
+	}
+}
+
+// TestRequestCloseTab_DiskGoneOnlyWarns guards the close path: a clean
+// tab whose file is DiskGone still has the only surviving copy of that
+// content in its buffer, so closing it must warn exactly like a dirty
+// tab would rather than discarding it silently.
+func TestRequestCloseTab_DiskGoneOnlyWarns(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("one"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	tab.DiskGone = true
+
+	a.requestCloseTab(tab)
+
+	if !a.anyModalOpen() {
+		t.Fatal("a DiskGone-only tab should open the unsaved-changes modal, not close silently")
+	}
+	if a.tabs.IndexOf(tab) < 0 {
+		t.Fatal("requestCloseTab must not have closed the tab before the modal is answered")
 	}
 }
 
@@ -512,4 +675,115 @@ func findTreeChild(a *App, name string) *filetree.Node {
 		}
 	}
 	return nil
+}
+
+// installReadyFinder wires a Ready finder onto the app and returns a
+// counter of rebuild kicks. The PanicGuard seam intercepts the build
+// goroutine after the first (real) index lands, so a test can assert
+// "no rebuild started" without racing a goroutine that would flip the
+// state back to Ready before the assert runs.
+func installReadyFinder(t *testing.T, a *App) *int {
+	t.Helper()
+	f := finder.New(a.rootDir)
+	f.Rebuild(nil)
+	deadline := time.Now().Add(5 * time.Second)
+	for f.State() != finder.StateReady && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if f.State() != finder.StateReady {
+		t.Fatalf("finder never reached Ready: state=%v", f.State())
+	}
+	kicks := 0
+	f.PanicGuard = func(name string, fn func()) { kicks++ }
+	a.finder = f
+	return &kicks
+}
+
+// TestHandleTreeScan_QuietScanSkipsFinderRebuild pins the quiet tick:
+// a background sweep that reproduces the tree's current membership
+// must not invalidate the finder index. Before the gate, every tick
+// re-ran `git ls-files` (or a full walk) and left Esc-p showing
+// "Indexing…" for a slice of every ten-second window, forever, on a
+// project nobody was touching.
+func TestHandleTreeScan_QuietScanSkipsFinderRebuild(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	kicks := installReadyFinder(t, a)
+
+	a.handleTreeScan(&treeScanEvent{
+		when: time.Now(),
+		gen:  a.treeScanGen,
+		dirs: filetree.ScanDirs(a.tree.LoadedDirs()),
+	})
+
+	if *kicks != 0 {
+		t.Fatalf("an unchanged scan kicked %d finder rebuild(s), want 0", *kicks)
+	}
+	if a.finder.State() != finder.StateReady {
+		t.Fatalf("an unchanged scan moved the finder off Ready: %v", a.finder.State())
+	}
+}
+
+// TestHandleTreeScan_NewNameTriggersFinderRebuild is the other
+// direction of the gate: a sweep that lands an actual membership
+// change must reindex, or a file pulled in behind the editor would
+// stay invisible to Esc-p until some file op happened to invalidate.
+func TestHandleTreeScan_NewNameTriggersFinderRebuild(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	kicks := installReadyFinder(t, a)
+
+	if err := os.WriteFile(filepath.Join(dir, "appeared.txt"), []byte("hi"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a.handleTreeScan(&treeScanEvent{
+		when: time.Now(),
+		gen:  a.treeScanGen,
+		dirs: filetree.ScanDirs(a.tree.LoadedDirs()),
+	})
+
+	if *kicks != 1 {
+		t.Fatalf("a scan with a new name kicked %d finder rebuild(s), want 1", *kicks)
+	}
+	if findTreeChild(a, "appeared.txt") == nil {
+		t.Fatal("the scan should still land the new file in the tree")
+	}
+}
+
+// TestHandleGitOpDone_TreeTouchingOpStillReindexesFinder guards the
+// call refreshTreeNow used to make for everyone: a pull/checkout/stash
+// can create files in directories the tree never loaded, which the
+// scan-change gate cannot see, so the git-op landing must invalidate
+// the finder explicitly.
+func TestHandleGitOpDone_TreeTouchingOpStillReindexesFinder(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	kicks := installReadyFinder(t, a)
+
+	a.handleGitOpDone(&gitOpDoneEvent{
+		when: time.Now(), label: "Pull", okFlash: "Pulled", touchesTree: true,
+	})
+
+	if *kicks != 1 {
+		t.Fatalf("a tree-touching git op kicked %d finder rebuild(s), want 1", *kicks)
+	}
+	pumpTreeScan(t, a)
+}
+
+// TestHandleCustomActionDone_StillReindexesFinder: same reasoning as
+// the git-op case — a custom action (an scp, a generator) can drop
+// files anywhere, so its success path keeps an explicit invalidation
+// rather than riding the tick's now-conditional one.
+func TestHandleCustomActionDone_StillReindexesFinder(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	kicks := installReadyFinder(t, a)
+
+	a.handleCustomActionDone(&customActionDoneEvent{when: time.Now(), label: "Sync"})
+
+	if *kicks != 1 {
+		t.Fatalf("a finished custom action kicked %d finder rebuild(s), want 1", *kicks)
+	}
+	pumpTreeScan(t, a)
 }

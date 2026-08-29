@@ -79,20 +79,23 @@ func TestFinder_RebuildCoalescesConcurrent(t *testing.T) {
 		f.Rebuild(cb)
 	}
 
-	// Wait for state to settle. The first Rebuild fires; the rest
-	// are no-ops. We expect exactly one onDone call.
+	// f.running.Load() == 0 is the deterministic quiescence point, not a
+	// wall-clock guess: onDone() is called from inside the rebuild
+	// goroutine's body (see build() in Rebuild), and `defer
+	// f.running.Store(0)` is the only defer registered in that body, so
+	// it runs last — strictly after onDone returns. Once running reads
+	// 0, every callback from that rebuild has already landed, so a
+	// mismatched doneCount can't still be in flight.
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if f.State() == StateReady {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+	for time.Now().Before(deadline) && f.running.Load() != 0 {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if f.running.Load() != 0 {
+		t.Fatal("rebuild never quiesced (running stuck busy)")
 	}
 	if f.State() != StateReady {
-		t.Fatal("state never reached StateReady")
+		t.Fatalf("state: got %v, want StateReady", f.State())
 	}
-	// Give any spurious extra callbacks a moment to fire.
-	time.Sleep(50 * time.Millisecond)
 	mu.Lock()
 	got := doneCount
 	mu.Unlock()
@@ -305,5 +308,37 @@ func BenchmarkSearchTopN(b *testing.B) {
 		if got := len(f.Search("ab", 10)); got != 10 {
 			b.Fatalf("got %d results, want 10", got)
 		}
+	}
+}
+
+// TestFinder_RebuildUsesPanicGuard pins the injection seam the app
+// wires its crash guard through: when PanicGuard is set, Rebuild
+// launches the build via the guard — with a stable task name — instead
+// of a bare goroutine, so a panicking index build restores the terminal
+// like every other background task. A nil guard keeps the plain-go
+// semantics the other tests in this file rely on.
+func TestFinder_RebuildUsesPanicGuard(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, dir, "a.go", "package a")
+
+	f := New(dir)
+	var guardName string
+	f.PanicGuard = func(name string, fn func()) {
+		guardName = name
+		go fn()
+	}
+	done := make(chan struct{})
+	f.Rebuild(func() { close(done) })
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rebuild did not finish in 2s")
+	}
+	if guardName == "" {
+		t.Fatal("Rebuild should launch through PanicGuard when it is set")
+	}
+	if f.State() != StateReady {
+		t.Fatalf("state: got %v, want StateReady", f.State())
 	}
 }

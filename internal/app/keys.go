@@ -51,7 +51,7 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		a.handleFindKey(ev)
 		return
 	}
-	if a.projFindOpen {
+	if a.projFind.findOpen {
 		a.handleProjFindKey(ev)
 		return
 	}

@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+
+	"github.com/johnlam90/skiff/internal/textdraw"
 )
 
 // leaderStripVisible reports whether the cheat-strip should draw:
@@ -26,7 +28,7 @@ func (a *App) leaderStripVisible() bool {
 	if a.lastEscape.IsZero() || time.Since(a.lastEscape) >= doubleEscWindow {
 		return false
 	}
-	if a.overlays.IsOpen() || a.findOpen || a.projFindOpen {
+	if a.overlays.IsOpen() || a.findOpen || a.projFind.findOpen {
 		return false
 	}
 	return true
@@ -100,14 +102,9 @@ func (a *App) drawLeaderStrip() {
 }
 
 // drawStripSegment draws s at (x, y) clipped to maxW total columns and
-// returns the x just past what was drawn.
+// returns the x just past what was drawn. maxW is an absolute column, so
+// the cell budget handed to textdraw is the remaining maxW-x columns —
+// cluster-aware, an emoji in a description advances x by its two cells.
 func drawStripSegment(scr tcell.Screen, x, y, maxW int, s string, st tcell.Style) int {
-	for _, r := range s {
-		if x >= maxW {
-			return x
-		}
-		scr.SetContent(x, y, r, nil, st)
-		x++
-	}
-	return x
+	return textdraw.DrawClipped(scr, x, y, maxW-x, s, st)
 }

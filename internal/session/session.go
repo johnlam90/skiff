@@ -160,7 +160,9 @@ func readProjectFile(path string) (Project, bool) {
 // writeProjectFile serialises one project's session and swaps it into
 // place atomically, so a crash mid-write can never leave half-written
 // JSON — and, because the file belongs to this project alone, can never
-// damage another project's state.
+// damage another project's state. Owner-only (0600): the file records
+// every open file path and cursor position for the project, which a
+// shared multi-user box shouldn't hand to other local accounts.
 func writeProjectFile(path, rootAbs string, p Project) error {
 	data, err := json.MarshalIndent(projectFile{
 		Version: storeVersion,
@@ -170,7 +172,7 @@ func writeProjectFile(path, rootAbs string, p Project) error {
 	if err != nil {
 		return err
 	}
-	return atomicfile.Write(path, data, 0644)
+	return atomicfile.Write(path, data, 0600)
 }
 
 // Load returns the remembered session for the project rooted at

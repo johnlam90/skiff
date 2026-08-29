@@ -51,7 +51,7 @@ The goals, in order:
 4. **One static binary.** No runtime, no plugin manager, no config
    directory full of YAML. Drop it on a server and run it.
 5. **Looks reasonable.** A hand-tuned Tokyo Night palette out of the
-   box, 25 more themes one menu away (`≡` → **Theme…** — Catppuccin,
+   box, a couple dozen more themes one menu away (`≡` → **Theme…** — Catppuccin,
    Dracula, Gruvbox, Nord, Rosé Pine, Solarized, and friends, ported
    from [druk](https://github.com/letstri/druk)), and syntax
    highlighting via [chroma](https://github.com/alecthomas/chroma)
@@ -159,7 +159,7 @@ The goals, in order:
   `~/.local/state/skiff/sessions/` (`$XDG_STATE_HOME` when set), so a
   corrupt or half-written file can only ever cost you that one
   project's tab list.
-- **26 themes with live preview** — `≡` → **Theme…** opens a picker
+- **Themes with live preview** — `≡` → **Theme…** opens a picker
   that restyles the whole editor as you arrow (or hover) through the
   list; type to filter ("cat" → the Catppuccins), `Enter` keeps,
   `Esc` puts your old theme back. The choice persists to
@@ -201,8 +201,8 @@ The goals, in order:
 - **Format on save** — opt-in per-project via `.skiff/format.json`
   with a first-run trust prompt so cloning a repo never silently
   executes its commands. See [Format on save](#format-on-save).
-- **Single binary, no CGO** — cross-compiled for macOS, Linux, and
-  Windows on amd64 and arm64.
+- **Single binary, no CGO** — cross-compiled for macOS and Linux
+  (amd64 + arm64) and Windows (amd64).
 
 <img width="2504" height="1726" alt="CleanShot 2026-04-29 at 23 32 22@2x" src="https://github.com/user-attachments/assets/d0dca3da-5ba7-474d-852e-832acde90ca4" />
 
@@ -252,7 +252,11 @@ the `skiff` binary into `~/.local/bin` (or `/usr/local/bin` when
 upgrade** — it always fetches the latest tagged release. A missing
 checksum entry, a mismatch, or a host with no sha256 tool aborts the
 install; there is deliberately no way to skip verification, because
-this is remote code about to land on your `$PATH`.
+this is remote code about to land on your `$PATH`. The checksum proves
+the download matches what the release published — integrity, not
+authenticity. When `cosign` is installed, the script also verifies the
+release's keyless signature over `checksums.txt`, confirming it was
+published by this repo's own release workflow.
 
 Override behaviour with environment variables:
 
@@ -272,8 +276,9 @@ of `curl` or `wget`, and one of `sha256sum` or `shasum`.
 
 ### Other platforms (manual binary install)
 
-Pre-built binaries for Linux, macOS, and Windows (amd64 + arm64) are
-attached to every [GitHub Release](https://github.com/johnlam90/skiff/releases).
+Pre-built binaries for Linux and macOS (amd64 + arm64) and Windows
+(amd64) are attached to every
+[GitHub Release](https://github.com/johnlam90/skiff/releases).
 Download the archive for your OS/arch, extract it, and drop the
 `skiff` binary somewhere on your `$PATH`.
 
@@ -282,7 +287,7 @@ Download the archive for your OS/arch, extract it, and drop the
 ```sh
 git clone https://github.com/johnlam90/skiff.git
 cd skiff
-make install        # builds and installs to $GOPATH/bin
+make install        # builds and installs to /usr/local/bin (may need sudo)
 ```
 
 ## Usage
@@ -915,11 +920,12 @@ them while still making it one click to opt a project in.
 │   ├── format/               # Format-on-save config + trust store
 │   ├── userconfig/           # ~/.config/skiff/config.json (icons, theme, wrap, gitignore)
 │   ├── icons/                # Nerd Font detection + per-file glyphs
-│   ├── theme/                # 26 palettes + the low-color fallback
+│   ├── theme/                # the theme registry + the low-color fallback
 │   └── version/              # Single-line version constant
-├── .github/workflows/        # Test pipeline + auto-release pipeline
+├── .github/workflows/        # Test, auto-release, and Pages-deploy pipelines
 ├── .goreleaser.yml           # Cross-compile + brew formula config
 ├── Formula/                  # Homebrew formula (written by CI)
+├── website/                  # Hugo + Tailwind site (johnlam90.github.io/skiff)
 └── Makefile
 ```
 
@@ -957,12 +963,20 @@ finding blocks the tag — and then:
    back to `main` with `[skip ci]`.
 3. Tags `v<x.y.z>` and pushes the tag.
 4. [GoReleaser](https://goreleaser.com/) cross-compiles for
-   linux/darwin/windows × amd64/arm64, attaches archives to a GitHub
-   Release, and pushes an updated formula into `Formula/skiff.rb`
-   on this same repo.
+   linux/darwin (amd64 + arm64) and windows/amd64, attaches archives
+   to a GitHub Release, and pushes an updated formula into
+   `Formula/skiff.rb` on this same repo.
 
 No PAT, no separate tap repo — the default workflow `GITHUB_TOKEN` is
 enough since the formula lives in the source repo.
+
+## Contributing
+
+Bug reports and feature requests go through the
+[issue templates](https://github.com/johnlam90/skiff/issues/new/choose) —
+they ask for the terminal/multiplexer details a TUI bug always needs. Code
+contributions: see [CONTRIBUTING.md](CONTRIBUTING.md); security reports: see
+[SECURITY.md](SECURITY.md).
 
 ## License
 

@@ -139,6 +139,70 @@ func TestTab_SaveKeepsCRLFAfterEdit(t *testing.T) {
 	}
 }
 
+// TestSavePreservesExecBitAndSymlink fences the two properties a
+// rename-based atomic save is most likely to destroy: an executable
+// file must keep its mode after a save, and a tab opened on a symlink
+// must save through the link to its target instead of replacing the
+// link with a regular file. os.WriteFile happened to give both for
+// free; atomicfile.Replace has to provide them deliberately.
+func TestSavePreservesExecBitAndSymlink(t *testing.T) {
+	t.Run("exec bit", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "run.sh")
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0755); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		tab, err := NewTab(path)
+		if err != nil {
+			t.Fatalf("NewTab: %v", err)
+		}
+		tab.InsertString("# edited\n")
+		if err := tab.Save(); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0755 {
+			t.Fatalf("mode after save = %v, want 0755", got)
+		}
+	})
+
+	t.Run("symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		real := filepath.Join(dir, "real.txt")
+		link := filepath.Join(dir, "link.txt")
+		if err := os.WriteFile(real, []byte("old\n"), 0644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		tab, err := NewTab(link)
+		if err != nil {
+			t.Fatalf("NewTab: %v", err)
+		}
+		tab.InsertString("new ")
+		if err := tab.Save(); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		info, err := os.Lstat(link)
+		if err != nil {
+			t.Fatalf("lstat: %v", err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatal("save replaced the symlink with a regular file")
+		}
+		got, err := os.ReadFile(real)
+		if err != nil {
+			t.Fatalf("read target: %v", err)
+		}
+		if string(got) != "new old\n" {
+			t.Fatalf("target = %q, want %q", got, "new old\n")
+		}
+	})
+}
+
 // TestTab_ReloadRedetectsLineEnding covers a file whose convention
 // changed on disk under an open tab. Reload takes the disk version as
 // the new truth, so the recorded ending has to move with it or the next
@@ -389,6 +453,249 @@ func TestTab_Reload_VanishedFile(t *testing.T) {
 	}
 	if err := tab.Reload(); err == nil {
 		t.Fatal("expected error reloading vanished file")
+	}
+}
+
+// TestReloadKeepHistory_UndoRestoresPreReloadContent pins the whole point
+// of this method: a reload the user didn't ask for (format-on-save, the
+// background reconcile) must not destroy their prior edits. The pre-reload
+// buffer has to still be one Undo away, and Redo has to be able to move
+// forward again to the disk content.
+func TestReloadKeepHistory_UndoRestoresPreReloadContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.txt")
+	if err := os.WriteFile(path, []byte("original"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.InsertString("edited-")
+	if err := tab.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	preReload := tab.Buffer.String()
+
+	if err := os.WriteFile(path, []byte("formatted-on-disk"), 0644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if err := tab.ReloadKeepHistory(); err != nil {
+		t.Fatalf("ReloadKeepHistory: %v", err)
+	}
+	if got := tab.Buffer.String(); got != "formatted-on-disk" {
+		t.Fatalf("buffer after reload = %q, want formatted-on-disk", got)
+	}
+	if !tab.CanUndo() {
+		t.Fatal("expected undo history to survive ReloadKeepHistory")
+	}
+
+	if !tab.Undo() {
+		t.Fatal("Undo should succeed")
+	}
+	if got := tab.Buffer.String(); got != preReload {
+		t.Fatalf("after undo = %q, want %q", got, preReload)
+	}
+
+	if !tab.Redo() {
+		t.Fatal("Redo should succeed")
+	}
+	if got := tab.Buffer.String(); got != "formatted-on-disk" {
+		t.Fatalf("after redo = %q, want formatted-on-disk", got)
+	}
+}
+
+// TestReloadKeepHistory_ShorterFileClampsOnUndo reloads to a file much
+// shorter than the pre-reload buffer, then rounds trip Undo/Redo. The
+// cursor/anchor restored by applySnapshot must stay in range of whatever
+// buffer they're paired with rather than panicking.
+func TestReloadKeepHistory_ShorterFileClampsOnUndo(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.txt")
+	if err := os.WriteFile(path, []byte("line one\nline two\nline three\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.Cursor = Position{Line: 2, Col: 5}
+	tab.Anchor = tab.Cursor
+
+	if err := os.WriteFile(path, []byte("x"), 0644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if err := tab.ReloadKeepHistory(); err != nil {
+		t.Fatalf("ReloadKeepHistory: %v", err)
+	}
+
+	if !tab.Undo() {
+		t.Fatal("Undo should succeed")
+	}
+	if tab.Cursor.Line >= len(tab.Buffer.Lines) {
+		t.Fatalf("cursor line out of range after undo: %+v (lines=%d)", tab.Cursor, len(tab.Buffer.Lines))
+	}
+
+	if !tab.Redo() {
+		t.Fatal("Redo should succeed")
+	}
+	if tab.Cursor.Line >= len(tab.Buffer.Lines) {
+		t.Fatalf("cursor line out of range after redo: %+v (lines=%d)", tab.Cursor, len(tab.Buffer.Lines))
+	}
+}
+
+// TestReload_StillClearsHistory pins that the plain Reload() contract used
+// by the disk-conflict prompt's explicit "Reload" button is unchanged:
+// the user chose to take the disk version, so undo history is wiped.
+func TestReload_StillClearsHistory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.txt")
+	if err := os.WriteFile(path, []byte("original"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.InsertString("edited-")
+
+	if err := os.WriteFile(path, []byte("disk-version"), 0644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if err := tab.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if tab.CanUndo() {
+		t.Fatal("plain Reload should still clear undo history")
+	}
+}
+
+// TestReload_RefusesGrownFile pins the shared read gate: a file that grew
+// past maxOpenBytes since it was opened must be refused by both reload
+// variants, and — since a refusal must leave no partial state — the
+// buffer has to still hold exactly what was there before the reload was
+// attempted.
+func TestReload_RefusesGrownFile(t *testing.T) {
+	for _, variant := range []struct {
+		name   string
+		reload func(*Tab) error
+	}{
+		{"Reload", (*Tab).Reload},
+		{"ReloadKeepHistory", (*Tab).ReloadKeepHistory},
+	} {
+		t.Run(variant.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "x.txt")
+			if err := os.WriteFile(path, []byte("original"), 0644); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			tab, err := NewTab(path)
+			if err != nil {
+				t.Fatalf("NewTab: %v", err)
+			}
+
+			// Grow the file past the cap externally — sparse, so the test
+			// doesn't actually write 32 MiB to disk.
+			f, err := os.OpenFile(path, os.O_WRONLY, 0644)
+			if err != nil {
+				t.Fatalf("reopen: %v", err)
+			}
+			if err := f.Truncate(maxOpenBytes + 1); err != nil {
+				f.Close()
+				t.Fatalf("truncate: %v", err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+
+			if err := variant.reload(tab); !errors.Is(err, ErrFileTooLarge) {
+				t.Fatalf("want ErrFileTooLarge, got %v", err)
+			}
+			if got := tab.Buffer.String(); got != "original" {
+				t.Fatalf("buffer mutated by refused reload: %q", got)
+			}
+		})
+	}
+}
+
+// TestReload_RefusesNowBinaryFile pins that a file which turned binary
+// after it was opened — e.g. `git checkout` swapping in a build artifact
+// at the same path — is refused by both reload variants, and that the
+// refusal leaves the tab's existing buffer untouched rather than partly
+// applying the new (rejected) content.
+func TestReload_RefusesNowBinaryFile(t *testing.T) {
+	for _, variant := range []struct {
+		name   string
+		reload func(*Tab) error
+	}{
+		{"Reload", (*Tab).Reload},
+		{"ReloadKeepHistory", (*Tab).ReloadKeepHistory},
+	} {
+		t.Run(variant.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "x.txt")
+			if err := os.WriteFile(path, []byte("original"), 0644); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			tab, err := NewTab(path)
+			if err != nil {
+				t.Fatalf("NewTab: %v", err)
+			}
+
+			data := append([]byte("PK\x03\x04"), make([]byte, 64)...)
+			if err := os.WriteFile(path, data, 0644); err != nil {
+				t.Fatalf("rewrite: %v", err)
+			}
+
+			if err := variant.reload(tab); !errors.Is(err, ErrBinaryFile) {
+				t.Fatalf("want ErrBinaryFile, got %v", err)
+			}
+			if got := tab.Buffer.String(); got != "original" {
+				t.Fatalf("buffer mutated by refused reload: %q", got)
+			}
+		})
+	}
+}
+
+// TestReload_RefusesNowInvalidUTF8 pins that a file which turned invalid
+// UTF-8 after it was opened — e.g. someone re-saved it from an editor set
+// to Latin-1 — is refused by both reload variants, with the tab's existing
+// (valid) buffer left completely intact rather than partly applying the
+// rejected content. Same shape as TestReload_RefusesNowBinaryFile and
+// TestReload_RefusesGrownFile: the shared readTextFile gate must catch
+// this on reload exactly as it does on first open.
+func TestReload_RefusesNowInvalidUTF8(t *testing.T) {
+	for _, variant := range []struct {
+		name   string
+		reload func(*Tab) error
+	}{
+		{"Reload", (*Tab).Reload},
+		{"ReloadKeepHistory", (*Tab).ReloadKeepHistory},
+	} {
+		t.Run(variant.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "x.txt")
+			if err := os.WriteFile(path, []byte("original"), 0644); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			tab, err := NewTab(path)
+			if err != nil {
+				t.Fatalf("NewTab: %v", err)
+			}
+
+			// Raw 0xE9 is Latin-1 "é" — not valid UTF-8 on its own, and no
+			// NUL byte, so looksBinary must not be the thing that catches it.
+			if err := os.WriteFile(path, []byte("caf\xe9 au lait\n"), 0644); err != nil {
+				t.Fatalf("rewrite: %v", err)
+			}
+
+			if err := variant.reload(tab); !errors.Is(err, ErrNotUTF8) {
+				t.Fatalf("want ErrNotUTF8, got %v", err)
+			}
+			if got := tab.Buffer.String(); got != "original" {
+				t.Fatalf("buffer mutated by refused reload: %q", got)
+			}
+		})
 	}
 }
 
@@ -1736,6 +2043,45 @@ func TestNewTab_RefusesBinaryFiles(t *testing.T) {
 	}
 }
 
+// TestNewTab_RefusesInvalidUTF8 pins the UTF-8 validity gate: a file with
+// one raw non-UTF-8 byte (no NUL, so looksBinary must not be what catches
+// this) is refused rather than silently loaded — Buffer.LineRunes would
+// otherwise decode the invalid byte to U+FFFD, and editing that line would
+// permanently rewrite it on save.
+func TestNewTab_RefusesInvalidUTF8(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "latin1.txt")
+	// Raw 0xE9 is Latin-1 "é" and is not valid UTF-8 on its own.
+	data := []byte("caf\xe9 au lait\n")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := NewTab(path); !errors.Is(err, ErrNotUTF8) {
+		t.Fatalf("want ErrNotUTF8, got %v", err)
+	}
+}
+
+// TestNewTab_AcceptsMultibyteUTF8 guards the guard: valid multibyte UTF-8
+// — CJK, an emoji ZWJ sequence, and a combining mark — must still open
+// normally rather than being caught by the new validity check.
+func TestNewTab_AcceptsMultibyteUTF8(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "multibyte.txt")
+	// 高さ (CJK), a family emoji built from a ZWJ sequence, and "é" spelled
+	// as e + combining acute (U+0301).
+	data := []byte("高さ\n👨‍👩‍👧‍👦\ncafé\n")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("valid multibyte UTF-8 must open, got %v", err)
+	}
+	if len(tab.Buffer.Lines) < 3 {
+		t.Fatalf("buffer looks wrong: %d lines", len(tab.Buffer.Lines))
+	}
+}
+
 // TestNewTab_KeepsMultibyteTextOpenable guards the heuristic's other
 // side: UTF-8 text (no NUL bytes, whatever the language) must still
 // open normally.
@@ -1817,6 +2163,35 @@ func TestNewTab_OpensFileUnderCap(t *testing.T) {
 	}
 	if !tab.Mtime.Equal(info.ModTime()) {
 		t.Fatalf("mtime = %v, want %v", tab.Mtime, info.ModTime())
+	}
+}
+
+// TestNewTab_ImageOverSizeCapRefused pins that NewTab's image branch is
+// covered by the same size cap as the text path, even though the branch
+// still runs first — decodeImageFile carries its own Stat guard (see
+// image.go), so a sparse oversize file named like an image is refused
+// without ever attempting a decode. Naming it x.png rather than x.txt is
+// the point: the image extension routes into newImageTab before any of
+// NewTab's own text-path guards would see the file at all.
+func TestNewTab_ImageOverSizeCapRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.png")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := f.Truncate(maxOpenBytes + 1); err != nil {
+		f.Close()
+		t.Fatalf("truncate: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	tab, err := NewTab(path)
+	if !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("want ErrFileTooLarge, got %v", err)
+	}
+	if tab != nil {
+		t.Fatal("a refused open must not hand back a tab")
 	}
 }
 

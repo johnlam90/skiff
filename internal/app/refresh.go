@@ -148,7 +148,7 @@ func (a *App) startTreeRefresh() {
 	a.treeRefreshStop = make(chan struct{})
 	stop := a.treeRefreshStop
 	scr := a.screen
-	go func() {
+	a.safeGo("tree-refresh-tick", func() {
 		ticker := time.NewTicker(treeRefreshInterval)
 		defer ticker.Stop()
 		for {
@@ -159,7 +159,7 @@ func (a *App) startTreeRefresh() {
 				_ = scr.PostEvent(&treeRefreshEvent{when: t})
 			}
 		}
-	}()
+	})
 }
 
 // stopTreeRefresh signals the background tree-refresh goroutine to exit.
@@ -173,13 +173,20 @@ func (a *App) stopTreeRefresh() {
 
 // refreshTreeNow re-runs the same refresh pipeline the 10s timer
 // fires: rescan the file tree (preserving expansion state), reconcile
-// any open tabs with disk, refresh git status, and invalidate the
-// finder index so a freshly-pulled file shows up everywhere at once.
-// The session store piggybacks on the same tick, so a killed terminal
-// loses at most ten seconds of tab state instead of the whole session.
-// Called from the periodic event and from runCustomAction's success
-// path so a Copy-from-remote action's output is visible immediately
-// instead of after the next tick.
+// any open tabs with disk, and refresh git status. The session store
+// piggybacks on the same tick, so a killed terminal loses at most ten
+// seconds of tab state instead of the whole session. Called from the
+// periodic event and from the git-op / custom-action / project-replace
+// landing paths so their output is visible immediately instead of
+// after the next tick.
+//
+// The finder is deliberately NOT invalidated here any more: the sweep
+// itself reports whether any directory's membership changed, and
+// handleTreeScan reindexes only then — so a quiet tick stops re-running
+// `git ls-files` (or a full walk) on a project nobody touched. Callers
+// whose changes can land in directories the tree never loaded (git
+// ops, custom actions) invalidate explicitly at their own call sites,
+// because the scan gate cannot see those.
 //
 // Every stage is off-thread now. The tick used to run a recursive
 // ReadDir of the whole loaded tree, a Stat per open tab, and a session
@@ -188,7 +195,6 @@ func (a *App) stopTreeRefresh() {
 func (a *App) refreshTreeNow() {
 	a.refreshTreeAsync()
 	a.refreshGitStatusAsync()
-	a.invalidateFinder()
 }
 
 // refreshTreeAsync starts one background disk sweep: the session write,
@@ -237,7 +243,7 @@ func (a *App) refreshTreeAsync() {
 		snap = &p
 	}
 	root := a.rootDir
-	go func() {
+	a.safeGo("tree-scan", func() {
 		if snap != nil {
 			_ = session.Save(root, *snap)
 		}
@@ -247,7 +253,7 @@ func (a *App) refreshTreeAsync() {
 			dirs: filetree.ScanDirs(dirs),
 			tabs: probeOpenTabs(paths),
 		})
-	}()
+	})
 }
 
 // handleTreeScan applies a finished background sweep on the main thread
@@ -260,11 +266,17 @@ func (a *App) refreshTreeAsync() {
 // predates that change, so applying it would resurrect the file the user
 // just deleted until the next tick. Drop it; the mutation already
 // refreshed the tree correctly.
+//
+// The finder reindexes only when ApplyScan reports a membership change
+// — names actually came or went, or a .gitignore moved. Tab
+// reconciliation is deliberately outside the gate: it consumes the
+// per-tab Stat probes, never the directory listings, so external-edit
+// detection on open tabs cannot be starved by a quiet tree.
 func (a *App) handleTreeScan(e *treeScanEvent) {
 	a.treeScanInFlight = false
 	if e.gen == a.treeScanGen {
-		if a.tree != nil {
-			a.tree.ApplyScan(e.dirs)
+		if a.tree != nil && a.tree.ApplyScan(e.dirs) {
+			a.invalidateFinder()
 		}
 		a.applyTabProbes(e.tabs)
 	}
@@ -332,10 +344,19 @@ func (a *App) applyTabProbes(probes []tabProbe) {
 // reconcileTab decides what one open tab should do about what a Stat
 // found:
 //
-//   - File missing  → flash once, mark the tab dirty so the user knows.
+//   - File missing  → flash once, mark the tab DiskGone so the user
+//     knows. Dirty is untouched: the buffer has no edits of its own, so
+//     a later delete+recreate must still be able to reload silently
+//     instead of reading as a conflict with edits that don't exist.
 //   - Disk newer, tab clean → reload the buffer silently, flash success.
+//     This is also how a DiskGone tab resolves once the file reappears.
 //   - Disk newer, tab dirty → a real conflict: prompt (Keep mine /
 //     Reload / Diff) and leave a marker on the tab until it is resolved.
+//
+// The clean-tab reload uses ReloadKeepHistory, not plain Reload: the user
+// never asked for this reload (a background git checkout or `make` wrote
+// the file), so it must not erase the undo history of edits the user made
+// before those bytes were last saved.
 //
 // The reload's ReadFile stays synchronous on purpose: it only fires when
 // a file actually changed under a clean tab, which is an event rather
@@ -345,8 +366,15 @@ func (a *App) applyTabProbes(probes []tabProbe) {
 func (a *App) reconcileTab(tab *editor.Tab, p tabProbe) {
 	if os.IsNotExist(p.err) {
 		if !tab.DiskGone {
+			// Dirty is deliberately NOT set here: the buffer has no user
+			// edits, so marking it dirty would make a later delete+
+			// recreate (a `git checkout`, `git stash pop`, or a build
+			// tool spanning two ticks) look like a real unsaved-edits
+			// conflict when the file reappears. DiskGone alone carries
+			// "needs attention" for every consumer that means that
+			// rather than "has edits" — see the Dirty||DiskGone gates in
+			// tabops.go, actions.go and draw.go.
 			tab.DiskGone = true
-			tab.Dirty = true
 			a.flash(fmt.Sprintf("%s deleted on disk", filepath.Base(tab.Path)))
 		}
 		return
@@ -390,7 +418,7 @@ func (a *App) reconcileTab(tab *editor.Tab, p tabProbe) {
 		tab.Mtime = p.mtime
 		return
 	}
-	if err := tab.Reload(); err != nil {
+	if err := tab.ReloadKeepHistory(); err != nil {
 		a.flash(fmt.Sprintf("%s reload failed: %v", filepath.Base(tab.Path), err))
 		return
 	}

@@ -155,6 +155,32 @@ func TestRestoreNoSessionIsNoop(t *testing.T) {
 	}
 }
 
+// TestRestoreSession_KicksAsyncGitStatusRefresh pins step 3 of plan 009:
+// every restored tab comes through newTab with GitLines nil (the inline
+// `git diff` is gone from that path), so restoreSession must kick the
+// async git-status refresh itself — otherwise a restored session's
+// gutters would sit empty until the first 10s tick.
+func TestRestoreSession_KicksAsyncGitStatusRefresh(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	mkFile(t, root, "keep.go", "l1\nl2\n")
+	if err := session.Save(root, session.Project{
+		Tabs:       []session.TabState{{Path: "keep.go"}},
+		Active:     0,
+		ActivePath: "keep.go",
+		SavedAt:    time.Now(),
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	a := newTestApp(t, root)
+	a.gitRefreshInFlight = false
+	a.restoreSession()
+	if !a.gitRefreshInFlight {
+		t.Fatal("restoring a session with tabs should kick the async git-status refresh")
+	}
+}
+
 // TestSaveSessionRoundTrip drives saveSession → restoreSession end to
 // end through the real store.
 func TestSaveSessionRoundTrip(t *testing.T) {
@@ -187,6 +213,34 @@ func TestSessionPreservesPreviewFlag(t *testing.T) {
 	b.restoreSession()
 	if b.tabs.Len() != 1 || !b.tabs.At(0).IsPreview() {
 		t.Fatalf("preview flag lost: %d tabs", b.tabs.Len())
+	}
+}
+
+// TestRestoreSession_SkipsEscapingPaths pins the withinRoot containment
+// guard: a hand-edited or corrupted session entry naming a path that
+// climbs out of the project root via "../" must not open a tab outside
+// the tree, even though the file it names genuinely exists. The real
+// file sits one level above root specifically so the stat succeeds —
+// proving it's the containment guard skipping the entry, not the
+// existing "file missing" check right below it.
+func TestRestoreSession_SkipsEscapingPaths(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	outside := filepath.Join(filepath.Dir(root), "outside.txt")
+	writeFileT(t, outside, "should never open\n")
+	if err := session.Save(root, session.Project{
+		Tabs: []session.TabState{
+			{Path: filepath.Join("..", "outside.txt")},
+		},
+		SavedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	a := newTestApp(t, root)
+	a.restoreSession()
+	if a.tabs.Len() != 0 {
+		t.Fatalf("escaping path should not open a tab; got %d tabs", a.tabs.Len())
 	}
 }
 

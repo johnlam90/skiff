@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gdamore/tcell/v2"
+
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/format"
 	"github.com/johnlam90/skiff/internal/overlay"
@@ -202,7 +204,7 @@ func TestRunFormatOnSave_DeniedIsNoop(t *testing.T) {
 	// No hook assertion needed: the cancel hook lives on the confirm
 	// prefab itself, so with no confirm up there is structurally
 	// nothing to leak.
-	expectNoFormatEvent(t, a, 150*time.Millisecond)
+	expectNoFormatEvent(t, a)
 	onDisk, err := os.ReadFile(target)
 	if err != nil {
 		t.Fatalf("reread: %v", err)
@@ -311,6 +313,45 @@ func TestHandleFormatDone_ReloadsCleanBuffer(t *testing.T) {
 
 	if got := tab.Buffer.String(); got != "formatted\n" {
 		t.Fatalf("buffer after reload: got %q, want %q", got, "formatted\n")
+	}
+}
+
+// TestFormatOnSave_PreservesUndoHistory pins the fix for the bug where
+// every save with a formatter configured destroyed the user's undo
+// stack: handleFormatDone's reload was never something the user asked
+// for, so it must keep history instead of wiping it the way the
+// disk-conflict prompt's explicit Reload does.
+func TestFormatOnSave_PreservesUndoHistory(t *testing.T) {
+	useTestTrustFile(t)
+	root := t.TempDir()
+	a := newTestApp(t, root)
+	target := filepath.Join(root, "main.go")
+	if err := os.WriteFile(target, []byte("original\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab := openTabAtPath(t, a, target)
+	tab.InsertString("edited-")
+	if err := tab.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	preFormat := tab.Buffer.String()
+
+	if err := os.WriteFile(target, []byte("formatted\n"), 0644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	a.handleFormatDone(&formatDoneEvent{tabPath: target, label: "fmt"})
+
+	if got := tab.Buffer.String(); got != "formatted\n" {
+		t.Fatalf("buffer after format reload: got %q, want %q", got, "formatted\n")
+	}
+	if !tab.CanUndo() {
+		t.Fatal("expected undo history to survive a format-on-save reload")
+	}
+	if !tab.Undo() {
+		t.Fatal("Undo should succeed")
+	}
+	if got := tab.Buffer.String(); got != preFormat {
+		t.Fatalf("after undo = %q, want pre-format text %q", got, preFormat)
 	}
 }
 
@@ -553,6 +594,135 @@ func TestMaybeOfferInstall_ProjectHasEntryUsesTrustPath(t *testing.T) {
 	}
 }
 
+// TestMaybeOfferInstall_MergedConfigNotSilentlyTrusted is the
+// regression this plan exists for: a project with a pre-existing
+// format.json entry the user has never seen must not have that entry
+// silently trusted just because the user consented to installing an
+// unrelated extension. Accepting the install prompt should still
+// merge the new entry (InstallCommandIntoProject's job), but the
+// resulting file's hash must stay TrustUnknown — the standard trust
+// prompt, which actually shows every command, decides the merged
+// file's fate instead.
+func TestMaybeOfferInstall_MergedConfigNotSilentlyTrusted(t *testing.T) {
+	trustPath := useTestTrustFile(t)
+	useTestDefaultsFile(t, `{"commands":{"go":["gofmt","-w","$FILE"]}}`)
+	root := t.TempDir()
+	// A pre-existing project entry the user has never been shown.
+	writeFormatConfig(t, root, `{"commands":{"py":["evil-cmd","$FILE"]}}`)
+	a := newTestApp(t, root)
+	target := filepath.Join(root, "main.go")
+	if err := os.WriteFile(target, []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	openTabAtPath(t, a, target)
+
+	a.runFormatOnSave(a.tabs.At(0))
+	if !confirmIsOpen(a) {
+		t.Fatal("expected install prompt to open")
+	}
+	confirmYes(a)
+
+	mergedCfg, err := format.Load(root)
+	if err != nil {
+		t.Fatalf("load merged cfg: %v", err)
+	}
+	if mergedCfg == nil || len(mergedCfg.Commands["go"]) == 0 || len(mergedCfg.Commands["py"]) == 0 {
+		t.Fatalf("expected merge to preserve both entries, got %v", mergedCfg)
+	}
+
+	tf, err := format.LoadTrust(trustPath)
+	if err != nil {
+		t.Fatalf("load trust: %v", err)
+	}
+	if d := tf.CheckTrust(root, mergedCfg.Hash()); d != format.TrustUnknown {
+		t.Fatalf("merged config must not be silently trusted, got %v", d)
+	}
+
+	if !confirmIsOpen(a) {
+		t.Fatal("expected the merged file's trust prompt to open")
+	}
+	body := strings.Join(confirmPrefab(t, a).Body, "\n")
+	if !strings.Contains(body, "py") {
+		t.Fatalf("trust prompt for merged file must show the pre-existing py entry.\nbody:\n%s", body)
+	}
+}
+
+// TestOpenFormatInstallPrompt_BodyListsMergedCommands pins the other
+// half of the fix: even before the user answers, the install prompt's
+// Body must preview the whole file the merge will produce — the new
+// entry AND every extension the project already declared — not just
+// the one command this prompt is nominally about.
+func TestOpenFormatInstallPrompt_BodyListsMergedCommands(t *testing.T) {
+	useTestTrustFile(t)
+	useTestDefaultsFile(t, `{"commands":{"go":["gofmt","-w","$FILE"]}}`)
+	root := t.TempDir()
+	writeFormatConfig(t, root, `{"commands":{"py":["ruff","format","$FILE"]}}`)
+	a := newTestApp(t, root)
+	target := filepath.Join(root, "main.go")
+	if err := os.WriteFile(target, []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	openTabAtPath(t, a, target)
+
+	a.runFormatOnSave(a.tabs.At(0))
+	if !confirmIsOpen(a) {
+		t.Fatal("expected install prompt to open")
+	}
+
+	body := strings.Join(confirmPrefab(t, a).Body, "\n")
+	for _, want := range []string{".go", "gofmt -w", ".py", "ruff format"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("install prompt omits %q before any answer.\nbody:\n%s", want, body)
+		}
+	}
+}
+
+// TestMaybeOfferInstall_FreshProjectStillAutoTrusts pins the
+// preserved half of the Step 2 decision table: a project with no
+// pre-existing format.json has nothing to silently ride along in the
+// merge, so Yes may still auto-trust in one step with no second
+// prompt — the Body the user just read already was the whole merged
+// file.
+func TestMaybeOfferInstall_FreshProjectStillAutoTrusts(t *testing.T) {
+	trustPath := useTestTrustFile(t)
+	root := t.TempDir()
+	target := filepath.Join(root, "main.go")
+	if err := os.WriteFile(target, []byte("orig\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	useTestDefaultsFile(t, `{"commands":{"go":["sh","-c","echo formatted > $FILE"]}}`)
+
+	a := newTestApp(t, root)
+	openTabAtPath(t, a, target)
+
+	a.runFormatOnSave(a.tabs.At(0))
+	if !confirmIsOpen(a) {
+		t.Fatal("expected install prompt to open")
+	}
+	confirmYes(a)
+
+	if confirmIsOpen(a) {
+		t.Fatal("a fresh project's install should not chain into a second prompt")
+	}
+
+	cfg, err := format.Load(root)
+	if err != nil {
+		t.Fatalf("load cfg: %v", err)
+	}
+	tf, err := format.LoadTrust(trustPath)
+	if err != nil {
+		t.Fatalf("load trust: %v", err)
+	}
+	if d := tf.CheckTrust(root, cfg.Hash()); d != format.TrustAllowed {
+		t.Fatalf("expected TrustAllowed for a fresh project's install, got %v", d)
+	}
+
+	ev := waitForFormatEvent(t, a)
+	if ev.err != nil {
+		t.Fatalf("formatter failed: %v", ev.err)
+	}
+}
+
 // waitForFormatEvent drains the simulation screen's event queue
 // until a formatDoneEvent shows up. Cap the wait at 2s so a hung
 // goroutine fails the test instead of hanging CI forever.
@@ -687,21 +857,44 @@ func plantRepoBinary(t *testing.T, root, rel, marker string) {
 	}
 }
 
-// expectNoFormatEvent drains whatever is queued for a short window and
-// fails if a formatDoneEvent turns up — the assertion "the formatter
-// never ran" needs the absence checked, not assumed.
-func expectNoFormatEvent(t *testing.T, a *App, within time.Duration) {
+// formatSentinelEvent is a test-local marker, shaped like the real
+// events format.go declares (a time.Time plus a When() method), that
+// expectNoFormatEvent posts onto the queue itself right after the
+// refusal path under test has already returned.
+type formatSentinelEvent struct{ when time.Time }
+
+// When satisfies the tcell.Event interface.
+func (e *formatSentinelEvent) When() time.Time { return e.when }
+
+// expectNoFormatEvent asserts a formatter refusal never posts a
+// formatDoneEvent. format.go's execution goroutine (format.go:509's
+// `go func`) is only ever spawned past the refusal checks these tests
+// exercise, so a refused run returns synchronously with nothing in
+// flight — which makes a sentinel posted right here a strict
+// happens-after marker: any formatDoneEvent that attempt could still
+// produce is already queued (or never will be) by the time the
+// sentinel lands, so draining until the sentinel arrives is equivalent
+// to waiting out that attempt in full, without guessing how long that
+// takes. The 5s deadline only trips if the queue is genuinely stuck
+// (a caller whose refusal path turns out to be asynchronous would hang
+// here instead of racing silently).
+func expectNoFormatEvent(t *testing.T, a *App) {
 	t.Helper()
-	deadline := time.Now().Add(within)
+	_ = a.screen.PostEvent(&formatSentinelEvent{when: time.Now()})
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if !a.screen.HasPendingEvent() {
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(2 * time.Millisecond)
 			continue
 		}
-		if fe, ok := a.screen.PollEvent().(*formatDoneEvent); ok {
-			t.Fatalf("formatter ran when it should have been refused: %+v", fe)
+		switch ev := a.screen.PollEvent().(type) {
+		case *formatDoneEvent:
+			t.Fatalf("formatter ran when it should have been refused: %+v", ev)
+		case *formatSentinelEvent:
+			return
 		}
 	}
+	t.Fatal("timed out waiting for the sentinel event — event queue appears stuck")
 }
 
 // TestRunFormatOnSave_RepoShippedBinaryRefused is the second half of the
@@ -734,7 +927,7 @@ func TestRunFormatOnSave_RepoShippedBinaryRefused(t *testing.T) {
 		if !strings.Contains(a.statusMsg, "refused") {
 			t.Fatalf("trusted=%v: user needs a reason, got status %q", trusted, a.statusMsg)
 		}
-		expectNoFormatEvent(t, a, 150*time.Millisecond)
+		expectNoFormatEvent(t, a)
 		if _, err := os.Stat(marker); err == nil {
 			t.Fatalf("trusted=%v: the repo's binary executed", trusted)
 		}
@@ -756,7 +949,7 @@ func TestExecFormatter_RefusesPathRootedArgv(t *testing.T) {
 	if !strings.Contains(a.statusMsg, "refused") {
 		t.Fatalf("status should explain the refusal, got %q", a.statusMsg)
 	}
-	expectNoFormatEvent(t, a, 150*time.Millisecond)
+	expectNoFormatEvent(t, a)
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("execFormatter ran a path-rooted binary")
 	}
@@ -905,6 +1098,41 @@ func TestExecFormatter_TimeoutKillsAndReports(t *testing.T) {
 func TestFormatTimeoutDefault_IsGenerousButFinite(t *testing.T) {
 	if formatTimeoutDefault < 5*time.Second || formatTimeoutDefault > time.Minute {
 		t.Fatalf("formatter deadline out of sane range: %s", formatTimeoutDefault)
+	}
+}
+
+// TestFormatTrustPrompt_NarrowTerminalShowsFullCommands is the
+// truncation half of the fix: the body wraps its rows to a constant
+// width but used to be drawn clipped to the real terminal width, so a
+// narrow terminal silently dropped the tail of a long command behind
+// an ellipsis — precisely how a hostile format.json would smuggle a
+// payload past the prompt. No row painted on screen may end in '…'.
+func TestFormatTrustPrompt_NarrowTerminalShowsFullCommands(t *testing.T) {
+	useTestTrustFile(t)
+	root := t.TempDir()
+	longFlag := "--some-quite-long-flag=" + strings.Repeat("a", 35)
+	writeFormatConfig(t, root, `{"commands":{"go":["gofmt","-w","`+longFlag+`","$FILE"]}}`)
+	a := newTestApp(t, root)
+	resizeTestApp(t, a, 60, 40)
+	target := filepath.Join(root, "main.go")
+	if err := os.WriteFile(target, []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	openTabAtPath(t, a, target)
+
+	a.runFormatOnSave(a.tabs.At(0))
+	if !confirmIsOpen(a) {
+		t.Fatal("expected trust prompt to open")
+	}
+
+	a.draw()
+	a.screen.Show()
+
+	scr := a.screen.(tcell.SimulationScreen)
+	for y := 0; y < a.height; y++ {
+		if line := screenLine(scr, y); strings.ContainsRune(line, '…') {
+			t.Fatalf("row %d truncated with an ellipsis at 60 cols: %q", y, line)
+		}
 	}
 }
 

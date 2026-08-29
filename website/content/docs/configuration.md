@@ -137,7 +137,7 @@ All paths above respect the XDG environment variables when set:
 
 This is intentional. Don't ask for it.
 
-- **Themes beyond the registry.** 26 palettes ship in the binary and the `≡` → **Theme…** picker switches between them live; there's no way to define a 27th. One colorway per theme, no per-token overrides.
+- **Themes beyond the registry.** The palettes that ship in the binary are the whole menu — the `≡` → **Theme…** picker switches between them live, and there's no way to define your own. One colorway per theme, no per-token overrides.
 - **Keymap.** Esc-leader is the keymap. Adding a config file for it would defeat the entire point.
 - **Plugins.** None. Skiff is opinionated — that's the product.
 - **Tab width / line endings.** Detected from the file's own contents on open.

@@ -37,18 +37,19 @@ on:
   # Manual escape hatch. If a merge commit accidentally carries a
   # skip-CI marker (or anything else suppresses the auto-trigger),
   # we can rerun the release flow against the current main without
-  # needing an empty no-op commit. Bumps, tags, and dispatches Pages
-  # exactly the same as a normal push trigger.
+  # needing an empty no-op commit. Bumps and tags exactly the same as
+  # a normal push trigger.
   workflow_dispatch:
 
-# Pushes back to main need write access to the repo's contents. The
-# `actions: write` scope lets the final step kick off the Pages
-# workflow via workflow_dispatch — the version-bump commit carries
-# [skip ci] so the auto-deploy on internal/version/version.go won't
-# fire on its own.
+# Pushes back to main need write access to the repo's contents: the
+# version-bump commit and the GoReleaser-written Formula/skiff.rb commit
+# both push straight to main with the default token. id-token: write is
+# cosign's keyless-signing OIDC exchange and attestations: write is the
+# build-provenance attestation step — neither writes to the repo itself.
 permissions:
   contents: write
-  actions: write
+  id-token: write
+  attestations: write
 
 # Serialise releases — no two version-bumps racing each other.
 concurrency:
@@ -66,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Full history so the workflow can inspect HEAD~1 for the
           # "did this commit hand-edit version.go?" check, and so
@@ -78,7 +79,7 @@ jobs:
       # must be built with the Go version the module declares, not
       # whatever "stable" resolved to on release day.
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
 
@@ -131,13 +132,16 @@ jobs:
       # Always create + push the tag (even when version was hand-edited
       # — that's the whole point of accepting it as-is).
       - name: Tag release
+        id: tag
         run: |
           set -euo pipefail
           NEW="${{ steps.version.outputs.version }}"
           if git rev-parse -q --verify "refs/tags/v$NEW" >/dev/null; then
-            echo "Tag v$NEW already exists, skipping."
+            echo "Tag v$NEW already exists — release will retry against it."
+            echo "tag_existed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "tag_existed=false" >> "$GITHUB_OUTPUT"
           # Configure identity here too: the hand-edited-version path
           # skips the bump step above, and an annotated tag without an
           # ident fails the whole release.
@@ -146,13 +150,48 @@ jobs:
           git tag -a "v$NEW" -m "Release v$NEW"
           git push origin "v$NEW"
 
+      # A previous run got as far as the tag but failed before (or
+      # during) publish — GoReleaser refuses to recreate a release that
+      # already exists. Clear the half-published release object (never
+      # the tag, which GoReleaser needs to still be there) so the retry
+      # below can recreate it cleanly.
+      - name: Clear half-published release on retry
+        if: steps.tag.outputs.tag_existed == 'true'
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.version.outputs.version }}"
+          gh release delete "v$NEW" --yes || echo "No release object for v$NEW — nothing to clear."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Needed by .goreleaser.yml's signs: block, which shells out to
+      # `cosign sign-blob` on checksums.txt. Keyless signing exchanges the
+      # job's OIDC token for a short-lived cert — no key material to manage
+      # or leak.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Pinned exactly, like the staticcheck version test.yml pins: the
+      # tool that builds every shipped binary must not float on "latest"
+      # and silently change what we ship on release day.
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
-          version: latest
+          version: v2.18.0
           args: release --clean
         env:
           # Same-repo brew formula push uses the default workflow token —
           # no separate tap repo or PAT needed.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Separate from cosign's checksum signature: this is GitHub's own
+      # build-provenance attestation (SLSA-style), attached to the release
+      # via the repo's Attestations UI/API rather than shipped as a
+      # release asset.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
 

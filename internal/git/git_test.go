@@ -21,6 +21,9 @@ import (
 // thing, not to our assumptions about it.
 func initRepo(t *testing.T) string {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("forks a real git process per call — slow; run without -short")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available on PATH")
 	}
@@ -88,6 +91,9 @@ func TestRepo_OutputReadsRealGit(t *testing.T) {
 // command fails per call, same as the raw invocations did — Open never
 // pre-validates.
 func TestRepo_OutputFailsOutsideARepo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("forks a real git process — slow; run without -short")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available on PATH")
 	}

@@ -47,29 +47,29 @@ func (e *projReplaceDoneEvent) When() time.Time { return e.when }
 // closeAllModals, so an overlay opening over the panel can't leave the
 // replace field armed underneath it.
 func (a *App) resetProjReplace() {
-	a.projReplaceOpen = false
-	a.projReplaceValue = nil
-	a.projReplaceCursor = 0
-	a.projFocusReplace = false
+	a.projFind.replaceOpen = false
+	a.projFind.replaceValue = nil
+	a.projFind.replaceCursor = 0
+	a.projFind.focusReplace = false
 }
 
 // projReplaceToggleFocus is the Tab gesture: first press grows the
 // replace field and focuses it, later presses hop between the fields.
 func (a *App) projReplaceToggleFocus() {
-	if !a.projReplaceOpen {
-		a.projReplaceOpen = true
-		a.projFocusReplace = true
+	if !a.projFind.replaceOpen {
+		a.projFind.replaceOpen = true
+		a.projFind.focusReplace = true
 		return
 	}
-	a.projFocusReplace = !a.projFocusReplace
+	a.projFind.focusReplace = !a.projFind.focusReplace
 }
 
 // projReplaceOpts snapshots the panel's mode chips into engine options.
 func (a *App) projReplaceOpts() search.Options {
 	opts := search.DefaultOptions()
-	opts.MatchCase = a.projFindMatchCase
-	opts.WholeWord = a.projFindWholeWord
-	opts.Regex = a.projFindRegex
+	opts.MatchCase = a.projFind.findMatchCase
+	opts.WholeWord = a.projFind.findWholeWord
+	opts.Regex = a.projFind.findRegex
 	return opts
 }
 
@@ -82,10 +82,10 @@ func (a *App) projReplaceEnter(all bool) {
 		return
 	}
 	rows := a.projFindRows()
-	if a.projFindSelected < 0 || a.projFindSelected >= len(rows) {
+	if a.projFind.findSelected < 0 || a.projFind.findSelected >= len(rows) {
 		return
 	}
-	row := rows[a.projFindSelected]
+	row := rows[a.projFind.findSelected]
 	if row.IsHeader {
 		a.projFindToggleFold(row.Path)
 		return
@@ -105,18 +105,34 @@ func (a *App) findOpenTab(abs string) (*editor.Tab, bool) {
 }
 
 // applyMatchesToTab rewrites a tab's matched lines in one undo step,
-// verifying each line against what the sweep recorded first.
+// verifying each line against what the sweep recorded first. Matches are
+// per-occurrence, but staging never mutates tab.Buffer.Lines until the
+// end — so unlike the disk path, a naive per-match loop wouldn't even
+// see its own edits, it would DOUBLE-count: a second same-line match
+// would still verify clean against the untouched buffer and add its own
+// ReplaceLine pass on top of the first. Group by line and touch each one
+// once, exactly as ApplyReplace does on disk.
 func applyMatchesToTab(tab *editor.Tab, group []search.Match, query, repl string, opts search.Options) (occ, skipped int) {
-	newLines := map[int]string{}
+	byLine := map[int][]search.Match{}
+	var lineOrder []int
 	for _, m := range group {
-		i := m.Line - 1
-		if i < 0 || i >= tab.Buffer.LineCount() || !search.VerifyLine(tab.Buffer.Lines[i], m.Text) {
-			skipped++
+		if _, seen := byLine[m.Line]; !seen {
+			lineOrder = append(lineOrder, m.Line)
+		}
+		byLine[m.Line] = append(byLine[m.Line], m)
+	}
+
+	newLines := map[int]string{}
+	for _, ln := range lineOrder {
+		ms := byLine[ln]
+		i := ln - 1
+		if i < 0 || i >= tab.Buffer.LineCount() || !search.VerifyLine(tab.Buffer.Lines[i], ms[0].Text) {
+			skipped += len(ms)
 			continue
 		}
 		nl, n := search.ReplaceLine(tab.Buffer.Lines[i], query, repl, opts)
 		if n == 0 {
-			skipped++
+			skipped += len(ms)
 			continue
 		}
 		newLines[i] = nl
@@ -128,19 +144,40 @@ func applyMatchesToTab(tab *editor.Tab, group []search.Match, query, repl string
 	return occ, skipped
 }
 
+// applyMatchAtTab rewrites exactly the occurrence m names in tab's
+// buffer via ReplaceLineAt, verifying the recorded line first. Unlike
+// applyMatchesToTab (whole-line ReplaceLine, used for the group/confirm-
+// all path where "replace" means every occurrence on the line) this
+// targets one occurrence, so applying a single panel row can't consume
+// a sibling occurrence recorded on the same line.
+func applyMatchAtTab(tab *editor.Tab, m search.Match, query, repl string, opts search.Options) (occ, skipped int) {
+	i := m.Line - 1
+	if i < 0 || i >= tab.Buffer.LineCount() || !search.VerifyLine(tab.Buffer.Lines[i], m.Text) {
+		return 0, 1
+	}
+	nl, n := search.ReplaceLineAt(tab.Buffer.Lines[i], m.Col, query, repl, opts)
+	if n == 0 {
+		return 0, 1
+	}
+	tab.ReplaceLines(map[int]string{i: nl})
+	return n, 0
+}
+
 // projReplaceRowApply rewrites one match row: through the open buffer
 // when the file is up (clean tabs re-save, dirty tabs stay dirty with
-// the change applied), through the verified disk path otherwise.
+// the change applied), through the verified disk path otherwise. Both
+// paths target only the row's own occurrence — a sibling row recorded on
+// the same line is left untouched.
 func (a *App) projReplaceRowApply(row projFindRow) {
-	if row.MatchIdx < 0 || row.MatchIdx >= len(a.projFindMatches) {
+	if row.MatchIdx < 0 || row.MatchIdx >= len(a.projFind.findMatches) {
 		return
 	}
-	m := a.projFindMatches[row.MatchIdx]
-	query, repl := string(a.projFindValue), string(a.projReplaceValue)
+	m := a.projFind.findMatches[row.MatchIdx]
+	query, repl := string(a.projFind.findValue), string(a.projFind.replaceValue)
 	opts := a.projReplaceOpts()
 	abs := filepath.Join(a.rootDir, filepath.FromSlash(m.Path))
 	if tab, wasClean := a.findOpenTab(abs); tab != nil {
-		occ, skipped := applyMatchesToTab(tab, []search.Match{m}, query, repl, opts)
+		occ, skipped := applyMatchAtTab(tab, m, query, repl, opts)
 		if occ > 0 && wasClean {
 			if err := tab.Save(); err != nil {
 				a.flash(fmt.Sprintf("Replaced, but save failed: %v", err))
@@ -152,7 +189,7 @@ func (a *App) projReplaceRowApply(row projFindRow) {
 			a.flash(fmt.Sprintf("Replaced %d on %s:%d", occ, m.Path, m.Line))
 		}
 	} else {
-		rep := search.ApplyReplace(a.rootDir, []search.Match{m}, query, repl, opts)
+		rep := search.ApplyReplaceAt(a.rootDir, m, query, repl, opts)
 		if rep.Skipped > 0 {
 			a.flash("Skipped — the file changed since the search")
 		} else {
@@ -165,24 +202,24 @@ func (a *App) projReplaceRowApply(row projFindRow) {
 
 // projReplaceConfirmAll states the blast radius and arms the apply.
 func (a *App) projReplaceConfirmAll() {
-	if len(a.projFindMatches) == 0 {
+	if len(a.projFind.findMatches) == 0 {
 		a.flash("Nothing to replace")
 		return
 	}
 	files := map[string]bool{}
-	for _, m := range a.projFindMatches {
+	for _, m := range a.projFind.findMatches {
 		files[m.Path] = true
 	}
 	msg := fmt.Sprintf(
 		"Replace %d match(es) in %d file(s)? Files change on disk — commit or stash first if unsure.",
-		len(a.projFindMatches), len(files))
-	if a.projFindRegex {
+		len(a.projFind.findMatches), len(files))
+	if a.projFind.findRegex {
 		msg += " Regex replacements expand $1 / ${name} groups ($$ for a literal $)."
 	}
 	// Snapshot everything the apply needs — the confirm modal closes
 	// the panel (closeAllModals), taking the live state with it.
-	matches := append([]search.Match(nil), a.projFindMatches...)
-	query, repl := string(a.projFindValue), string(a.projReplaceValue)
+	matches := append([]search.Match(nil), a.projFind.findMatches...)
+	query, repl := string(a.projFind.findValue), string(a.projFind.replaceValue)
 	opts := a.projReplaceOpts()
 	a.openConfirm("Replace in project", msg, func(app *App) {
 		app.doProjReplaceAll(matches, query, repl, opts)
@@ -239,14 +276,14 @@ func (a *App) doProjReplaceAll(matches []search.Match, query, repl string, opts 
 	root := a.rootDir
 	scr := a.screen
 	a.fileOpBusy = true
-	go func() {
+	a.safeGo("project-replace", func() {
 		rep := search.ApplyReplace(root, diskMatches, query, repl, opts)
 		_ = scr.PostEvent(&projReplaceDoneEvent{
 			when: time.Now(), rep: rep,
 			bufOcc: bufOcc, bufFiles: bufFiles, bufSkip: bufSkip,
 			bufSaveFailed: saveFailed,
 		})
-	}()
+	})
 }
 
 // handleProjReplaceDone lands the combined report and refreshes
@@ -269,7 +306,7 @@ func (a *App) handleProjReplaceDone(e *projReplaceDoneEvent) {
 			strings.Join(e.bufSaveFailed, ", "))
 	}
 	a.refreshTreeNow()
-	if a.projFindOpen {
+	if a.projFind.findOpen {
 		a.projFindQueryChanged()
 	}
 	a.flash(msg)

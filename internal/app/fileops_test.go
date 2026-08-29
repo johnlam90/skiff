@@ -937,3 +937,49 @@ func TestMenuDelete_DirtyTabChainsToTheUnsavedPrompt(t *testing.T) {
 		t.Fatalf("the orphaned tab should be closed; got %d tabs", a.tabs.Len())
 	}
 }
+
+// TestWithinRoot pins the containment contract: a descendant path is
+// inside, the root itself counts as inside (Rel returns "." — the
+// session-restore call site treats a session entry naming the project
+// root as legitimate, not an escape), a "../" climb is refused, and an
+// unrelated absolute path elsewhere on the filesystem is refused too.
+func TestWithinRoot(t *testing.T) {
+	root := t.TempDir()
+	cases := []struct {
+		name      string
+		candidate string
+		want      bool
+	}{
+		{"descendant", filepath.Join(root, "sub", "leaf.go"), true},
+		{"root itself", root, true},
+		{"parent escape", filepath.Join(root, "..", "evil.txt"), false},
+		{"unrelated absolute path", t.TempDir(), false},
+	}
+	for _, c := range cases {
+		if got := withinRoot(root, c.candidate); got != c.want {
+			t.Errorf("%s: withinRoot(%q, %q) = %v, want %v", c.name, root, c.candidate, got, c.want)
+		}
+	}
+}
+
+// TestDoCreateFile_RefusesEscapingName drives the deliberate UX
+// narrowing recorded on doCreateFile's doc comment: a name that climbs
+// out of parent via "../" is refused with a flash instead of quietly
+// creating a file outside the tree the user is looking at.
+func TestDoCreateFile_RefusesEscapingName(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "sub")
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, root)
+
+	a.doCreateFile(parent, "../evil.txt")
+
+	if _, err := os.Stat(filepath.Join(root, "evil.txt")); !os.IsNotExist(err) {
+		t.Fatalf("escaping name must not create a file outside parent: err=%v", err)
+	}
+	if !strings.Contains(a.statusMsg, "escapes") {
+		t.Fatalf("expected a refusal flash mentioning the escape, got %q", a.statusMsg)
+	}
+}

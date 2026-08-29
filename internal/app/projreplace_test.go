@@ -20,6 +20,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/search"
 )
 
@@ -44,21 +45,48 @@ func TestProjReplaceTabGesture(t *testing.T) {
 	root := t.TempDir()
 	mkFile(t, root, "a.txt", "old\n")
 	a := projFindApp(t, root)
-	a.projFindValue = []rune("old")
+	a.projFind.findValue = []rune("old")
 
 	a.handleProjFindKey(tcell.NewEventKey(tcell.KeyTab, 0, 0))
-	if !a.projReplaceOpen || !a.projFocusReplace {
+	if !a.projFind.replaceOpen || !a.projFind.focusReplace {
 		t.Fatal("Tab should open and focus the replace field")
 	}
 	for _, r := range "new" {
 		a.handleProjFindKey(tcell.NewEventKey(tcell.KeyRune, r, 0))
 	}
-	if string(a.projReplaceValue) != "new" || string(a.projFindValue) != "old" {
-		t.Fatalf("typing routed wrong: %q / %q", a.projReplaceValue, a.projFindValue)
+	if string(a.projFind.replaceValue) != "new" || string(a.projFind.findValue) != "old" {
+		t.Fatalf("typing routed wrong: %q / %q", a.projFind.replaceValue, a.projFind.findValue)
 	}
 	a.handleProjFindKey(tcell.NewEventKey(tcell.KeyTab, 0, 0))
-	if a.projFocusReplace {
+	if a.projFind.focusReplace {
 		t.Fatal("second Tab should hop back to the query")
+	}
+}
+
+// TestApplyMatchesToTab_MultiOccurrenceLineCountsOnce is the buffer-side
+// counterpart of the disk-side idempotence fix: two per-occurrence
+// matches on one line ("foo(foo)") must rewrite that line exactly once
+// (one ReplaceLines staging) and report occ == 2, not 4 — the earlier
+// per-match loop staged newLines[i] without mutating the buffer, so the
+// second match on the line still verified against the ORIGINAL text and
+// got double-counted on top of the first.
+func TestApplyMatchesToTab_MultiOccurrenceLineCountsOnce(t *testing.T) {
+	root := t.TempDir()
+	p := mkFile(t, root, "dup.txt", "foo(foo)\n")
+	tab, err := editor.NewTab(p)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	group := []search.Match{
+		{Path: "dup.txt", Line: 1, Col: 0, Text: "foo(foo)"},
+		{Path: "dup.txt", Line: 1, Col: 4, Text: "foo(foo)"},
+	}
+	occ, skipped := applyMatchesToTab(tab, group, "foo", "bar", search.DefaultOptions())
+	if occ != 2 || skipped != 0 {
+		t.Fatalf("counts: occ=%d skipped=%d, want occ=2 skipped=0", occ, skipped)
+	}
+	if tab.Buffer.Lines[0] != "bar(bar)" {
+		t.Fatalf("buffer: %q, want %q", tab.Buffer.Lines[0], "bar(bar)")
 	}
 }
 
@@ -69,9 +97,9 @@ func TestProjReplaceRow_OpenCleanTabSaves(t *testing.T) {
 	p := mkFile(t, root, "a.txt", "keep\nold value\n")
 	a := projFindApp(t, root)
 	a.openFile(p)
-	a.projFindValue = []rune("old")
-	a.projReplaceValue = []rune("new")
-	a.projFindMatches = []search.Match{{Path: "a.txt", Line: 2, Col: 0, Text: "old value"}}
+	a.projFind.findValue = []rune("old")
+	a.projFind.replaceValue = []rune("new")
+	a.projFind.findMatches = []search.Match{{Path: "a.txt", Line: 2, Col: 0, Text: "old value"}}
 
 	a.projReplaceRowApply(projFindRow{Path: "a.txt", MatchIdx: 0})
 	tab := a.activeTabPtr()
@@ -99,9 +127,12 @@ func TestProjReplaceRow_DirtyTabStaysDirty(t *testing.T) {
 	tab := a.activeTabPtr()
 	tab.InsertRune('x') // dirty, unrelated edit on line 1 start
 	line0 := tab.Buffer.Lines[0]
-	a.projFindValue = []rune("old")
-	a.projReplaceValue = []rune("new")
-	a.projFindMatches = []search.Match{{Path: "a.txt", Line: 1, Col: 0, Text: line0}}
+	a.projFind.findValue = []rune("old")
+	a.projFind.replaceValue = []rune("new")
+	// Col must name "old"'s real position (1, after the inserted 'x') —
+	// row-apply is occurrence-targeted now, so an inaccurate column would
+	// miss the hit entirely instead of just being ignored.
+	a.projFind.findMatches = []search.Match{{Path: "a.txt", Line: 1, Col: 1, Text: line0}}
 
 	a.projReplaceRowApply(projFindRow{Path: "a.txt", MatchIdx: 0})
 	if !strings.Contains(tab.Buffer.Lines[0], "new") {
@@ -113,6 +144,59 @@ func TestProjReplaceRow_DirtyTabStaysDirty(t *testing.T) {
 	data, _ := os.ReadFile(p)
 	if strings.Contains(string(data), "new") {
 		t.Fatalf("disk must be untouched for dirty tabs: %q", data)
+	}
+}
+
+// TestProjReplaceRow_TargetsSingleOccurrence_OpenTab: two rows on the
+// same open-tab line ("foo(foo)", one at each occurrence) — applying the
+// first must rewrite only that occurrence, leave the second "foo" intact
+// in the buffer, and flash "Replaced 1", not 2.
+func TestProjReplaceRow_TargetsSingleOccurrence_OpenTab(t *testing.T) {
+	root := t.TempDir()
+	p := mkFile(t, root, "dup.txt", "foo(foo)\n")
+	a := projFindApp(t, root)
+	a.openFile(p)
+	a.projFind.findValue = []rune("foo")
+	a.projFind.replaceValue = []rune("bar")
+	a.projFind.findMatches = []search.Match{
+		{Path: "dup.txt", Line: 1, Col: 0, Text: "foo(foo)"},
+		{Path: "dup.txt", Line: 1, Col: 4, Text: "foo(foo)"},
+	}
+
+	a.projReplaceRowApply(projFindRow{Path: "dup.txt", MatchIdx: 0})
+	tab := a.activeTabPtr()
+	if tab.Buffer.Lines[0] != "bar(foo)" {
+		t.Fatalf("buffer: %q, want the second occurrence untouched", tab.Buffer.Lines[0])
+	}
+	if !strings.Contains(a.statusMsg, "Replaced 1 on dup.txt:1") {
+		t.Fatalf("flash: %q", a.statusMsg)
+	}
+}
+
+// TestProjReplaceRow_TargetsSingleOccurrence_ClosedFile is the disk-path
+// counterpart: applying the first of two same-line rows on a CLOSED file
+// leaves the second occurrence on disk and flashes "Replaced 1".
+func TestProjReplaceRow_TargetsSingleOccurrence_ClosedFile(t *testing.T) {
+	root := t.TempDir()
+	mkFile(t, root, "dup.txt", "foo(foo)\n")
+	a := projFindApp(t, root)
+	a.projFind.findValue = []rune("foo")
+	a.projFind.replaceValue = []rune("bar")
+	a.projFind.findMatches = []search.Match{
+		{Path: "dup.txt", Line: 1, Col: 0, Text: "foo(foo)"},
+		{Path: "dup.txt", Line: 1, Col: 4, Text: "foo(foo)"},
+	}
+
+	a.projReplaceRowApply(projFindRow{Path: "dup.txt", MatchIdx: 0})
+	data, err := os.ReadFile(filepath.Join(root, "dup.txt"))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(data) != "bar(foo)\n" {
+		t.Fatalf("file: %q, want the second occurrence untouched", data)
+	}
+	if !strings.Contains(a.statusMsg, "Replaced 1 on dup.txt:1") {
+		t.Fatalf("flash: %q", a.statusMsg)
 	}
 }
 
@@ -129,9 +213,9 @@ func TestProjReplaceAll_MixedRouting(t *testing.T) {
 	tab := a.activeTabPtr()
 	tab.Dirty = true // simulate unsaved state without changing line 1
 
-	a.projFindValue = []rune("old")
-	a.projReplaceValue = []rune("new")
-	a.projFindMatches = []search.Match{
+	a.projFind.findValue = []rune("old")
+	a.projFind.replaceValue = []rune("new")
+	a.projFind.findMatches = []search.Match{
 		{Path: "open.txt", Line: 1, Col: 0, Text: "old here"},
 		{Path: "closed.txt", Line: 1, Col: 0, Text: "old there"},
 		{Path: "drift.txt", Line: 1, Col: 0, Text: "old gone"},
@@ -192,9 +276,9 @@ func TestProjReplaceAll_ReportsBufferSaveFailure(t *testing.T) {
 		t.Fatalf("swap: %v", err)
 	}
 
-	a.projFindValue = []rune("old")
-	a.projReplaceValue = []rune("new")
-	a.projFindMatches = []search.Match{{Path: "a.txt", Line: 1, Col: 0, Text: "old value"}}
+	a.projFind.findValue = []rune("old")
+	a.projFind.replaceValue = []rune("new")
+	a.projFind.findMatches = []search.Match{{Path: "a.txt", Line: 1, Col: 0, Text: "old value"}}
 
 	a.projReplaceConfirmAll()
 	confirmYes(a)

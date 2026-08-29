@@ -72,7 +72,7 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		ov.HandleMouse(x, y, btn)
 		return
 	}
-	if a.projFindOpen {
+	if a.projFind.findOpen {
 		a.handleProjFindMouse(x, y, btn)
 		return
 	}
@@ -144,21 +144,21 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	// Drag continuation: while we're mid-drag in the editor, every event
 	// with the button held extends the selection — even if the cursor has
 	// wandered out of the editor pane.
-	if leftDown && a.dragMode == "editor" {
+	if leftDown && a.dragMode == dragEditor {
 		a.editorDrag(x, y)
 		return
 	}
 
 	// Sidebar resize drag: keep the splitter glued to the mouse x so the
 	// panel reshapes live as the user drags.
-	if leftDown && a.dragMode == "sidebar" {
+	if leftDown && a.dragMode == dragSidebar {
 		a.resizeSidebar(x + 1)
 		return
 	}
 
 	// Scrollbar thumb drag: the thumb stays glued to the mouse row even
 	// when the pointer wanders off the bar column.
-	if leftDown && a.dragMode == "scrollbar" {
+	if leftDown && a.dragMode == dragScrollbar {
 		_, ey, _, _ := a.editorRect()
 		a.scrollbarTo(y - ey)
 		return
@@ -167,7 +167,7 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	// File-tree thumb drag: same contract as the editor's — the tree
 	// keeps following the pointer's row once the grab has started, even
 	// when the pointer leaves the bar's column.
-	if leftDown && a.dragMode == "treescrollbar" {
+	if leftDown && a.dragMode == dragTreeScrollbar {
 		_, sy, _, _ := a.sidebarRect()
 		a.treeScrollbarTo(y - sy)
 		return
@@ -175,13 +175,13 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 
 	// Git-panel thumb drag: the change list is the sidebar's other
 	// mode, so its bar gets the same grab contract as the tree's.
-	if leftDown && a.dragMode == "gitpanelscrollbar" {
+	if leftDown && a.dragMode == dragGitPanelScrollbar {
 		a.gitPanelScrollbarTo(y)
 		return
 	}
 
 	// Initial press dispatch.
-	if leftDown && a.dragMode == "" {
+	if leftDown && a.dragMode == dragNone {
 		sw := a.sidebarW()
 		splitX := a.splitterX()
 		// A press anywhere but the sidebar means the user has moved on
@@ -192,7 +192,7 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		}
 		switch {
 		case splitX >= 0 && x == splitX:
-			a.dragMode = "sidebar"
+			a.dragMode = dragSidebar
 		case sw > 0 && x < splitX:
 			// The tree's bar and the Git panel's sit on the column
 			// just left of the splitter — whichever panel is up, that
@@ -201,12 +201,12 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 			// two can hit: each opts out when its panel is hidden.
 			if a.treeScrollbarHit(x, y) {
 				a.treeScrollbarTo(y)
-				a.dragMode = "treescrollbar"
+				a.dragMode = dragTreeScrollbar
 				return
 			}
 			if a.gitPanelScrollbarHit(x, y) {
 				a.gitPanelScrollbarTo(y)
-				a.dragMode = "gitpanelscrollbar"
+				a.dragMode = dragGitPanelScrollbar
 				return
 			}
 			a.sidebarClick(x, y)
@@ -217,7 +217,7 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		case y > 0 && y < a.height-1:
 			if localY, ok := a.scrollbarHit(x, y); ok {
 				a.scrollbarTo(localY)
-				a.dragMode = "scrollbar"
+				a.dragMode = dragScrollbar
 				return
 			}
 			// Only a press editorPress claims as its own arms the drag.
@@ -228,7 +228,7 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 			// a selection the user never started — and the release copy
 			// it to the clipboard.
 			if a.editorPress(x, y) {
-				a.dragMode = "editor"
+				a.dragMode = dragEditor
 			}
 		}
 		return
@@ -240,19 +240,19 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	// any multiplexer never see a selection of their own, so Cmd+C at
 	// the terminal level has nothing to grab. A plain click collapses
 	// the selection before release, so caret placement never copies.
-	if a.dragMode == "editor" {
+	if a.dragMode == dragEditor {
 		if t := a.activeTabPtr(); t != nil && t.HasSelection() {
 			a.copySelection()
 		}
 	}
-	a.dragMode = ""
+	a.dragMode = dragNone
 	a.stopAutoScroll()
 }
 
 // scrollAt scrolls whichever panel the (x, y) cursor is over.
 func (a *App) scrollAt(x, y, delta int) {
 	if sw := a.sidebarW(); sw > 0 && x < sw {
-		if a.gitPanelActive {
+		if a.gitPanel.active {
 			a.scrollGitPanel(delta)
 		} else {
 			a.tree.Scroll(delta)
@@ -294,7 +294,7 @@ func (a *App) tryTreeContextClick(x, y int) bool {
 	}
 	// The Git panel has no per-row context actions — the tree isn't
 	// what's on screen, so tree.HitTest would map to invisible rows.
-	if a.gitPanelActive {
+	if a.gitPanel.active {
 		return false
 	}
 	splitX := a.splitterX()
@@ -342,7 +342,7 @@ func (a *App) sidebarClick(x, y int) {
 		}
 		return
 	}
-	if a.gitPanelActive {
+	if a.gitPanel.active {
 		a.gitPanelClick(x-sx, y-sy)
 		return
 	}
@@ -552,7 +552,7 @@ func (a *App) startAutoScroll(dir int) {
 	a.autoScrollStop = make(chan struct{})
 	stop := a.autoScrollStop
 	scr := a.screen
-	go func() {
+	a.safeGo("auto-scroll", func() {
 		ticker := time.NewTicker(autoScrollTick)
 		defer ticker.Stop()
 		for {
@@ -563,7 +563,7 @@ func (a *App) startAutoScroll(dir int) {
 				_ = scr.PostEvent(&autoScrollEvent{when: t})
 			}
 		}
-	}()
+	})
 }
 
 // stopAutoScroll signals the auto-scroll goroutine to exit (idempotent).
@@ -581,7 +581,7 @@ func (a *App) stopAutoScroll() {
 // suggests the user is no longer drag-selecting (button released, menu
 // opened, no active tab).
 func (a *App) handleAutoScroll() {
-	if a.autoScrollDir == 0 || a.dragMode != "editor" || a.anyModalOpen() {
+	if a.autoScrollDir == 0 || a.dragMode != dragEditor || a.anyModalOpen() {
 		a.stopAutoScroll()
 		return
 	}
@@ -655,7 +655,7 @@ func (a *App) scrollbarTo(localY int) {
 // The Git panel draws its own list over the same rect and has no tree
 // bar, so it opts out entirely.
 func (a *App) treeScrollbarHit(x, y int) bool {
-	if a.tree == nil || a.gitPanelActive {
+	if a.tree == nil || a.gitPanel.active {
 		return false
 	}
 	sx, sy, sw, sh := a.sidebarRect()
@@ -686,7 +686,7 @@ func (a *App) treeScrollbarTo(y int) {
 // out when the panel is: the two share a column and only one of them
 // is ever painted on it.
 func (a *App) gitPanelScrollbarHit(x, y int) bool {
-	if !a.gitPanelActive {
+	if !a.gitPanel.active {
 		return false
 	}
 	sx, sy, _, _ := a.sidebarRect()
@@ -697,7 +697,7 @@ func (a *App) gitPanelScrollbarHit(x, y int) bool {
 // screen row y — shared by the initial press and the drag, so a grab
 // and a click can never disagree about where the thumb lands.
 func (a *App) gitPanelScrollbarTo(y int) {
-	if !a.gitPanelActive {
+	if !a.gitPanel.active {
 		return
 	}
 	_, sy, _, _ := a.sidebarRect()

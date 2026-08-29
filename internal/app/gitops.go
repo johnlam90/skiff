@@ -55,13 +55,13 @@ func (a *App) runGitOp(label, okFlash string, touchesTree bool, cmds ...[]string
 	a.gitOpBusy = true
 	root := a.rootDir
 	scr := a.screen
-	go func() {
+	a.safeGo("git-op", func() {
 		out, err := execGitSequence(root, cmds)
 		_ = scr.PostEvent(&gitOpDoneEvent{
 			when: time.Now(), label: label, okFlash: okFlash,
 			output: out, err: err, touchesTree: touchesTree,
 		})
-	}()
+	})
 	return true
 }
 
@@ -110,8 +110,12 @@ func (a *App) handleGitOpDone(e *gitOpDoneEvent) {
 	if e.touchesTree {
 		// Pull / stash / checkout rewrite files under open buffers —
 		// refreshTreeNow reloads clean tabs, warns on dirty ones, and
-		// re-tints everything in one pass.
+		// re-tints everything in one pass. The finder is invalidated
+		// here explicitly: these ops can create files in directories
+		// the tree never loaded, which the sweep's membership gate
+		// cannot see.
 		a.refreshTreeNow()
+		a.invalidateFinder()
 	}
 }
 
@@ -251,7 +255,7 @@ func (a *App) hasGitChanges() bool {
 // deliberate act.
 func (a *App) checkedChangePaths() []string {
 	var out []string
-	for _, row := range a.gitPanelRows {
+	for _, row := range a.gitPanel.rows {
 		if checked, explicit := a.gitCommitChecks[row.Abs]; explicit && !checked {
 			continue
 		}
@@ -358,10 +362,10 @@ func (e *branchListEvent) When() time.Time { return e.when }
 func (a *App) requestBranchList(purpose string) {
 	root, current := a.rootDir, a.gitSnap.Branch
 	scr := a.screen
-	go func() {
+	a.safeGo("git-branch-list", func() {
 		names := gitBranchNames(root, current)
 		_ = scr.PostEvent(&branchListEvent{when: time.Now(), purpose: purpose, names: names})
-	}()
+	})
 }
 
 // handleBranchList routes a collected branch list to the picker that

@@ -70,7 +70,11 @@ func (a *App) handleCustomActionDone(e *customActionDoneEvent) {
 		a.openInfo("Action failed: "+e.label, splitErrorOutput(e.err, e.output))
 		return
 	}
+	// Explicit finder invalidation, not the tick's conditional one: an
+	// action (an scp, a generator) can drop files in directories the
+	// tree never loaded, which the sweep's membership gate cannot see.
 	a.refreshTreeNow()
+	a.invalidateFinder()
 	body := splitActionOutput(e.output, e.duration)
 	if len(body) == 0 {
 		a.flash(e.label + " — done")
@@ -254,7 +258,7 @@ func (a *App) execCustomAction(act customactions.Action, promptValues map[string
 
 	a.flash(act.Label + "…")
 	scr := a.screen
-	go func() {
+	a.safeGo("custom-action", func() {
 		started := time.Now()
 		cmd := exec.Command("sh", "-c", act.Command)
 		cmd.Env = env
@@ -283,7 +287,7 @@ func (a *App) execCustomAction(act customactions.Action, promptValues map[string
 			output:   out,
 			duration: duration,
 		})
-	}()
+	})
 }
 
 // menuSave runs the Save action and dismisses the menu.
@@ -544,9 +548,12 @@ func (a *App) menuQuit() {
 	}
 	var message string
 	if dirty == 1 {
-		// Find the one dirty tab so we can name it in the modal.
+		// Find the one tab needing attention so we can name it in the
+		// modal — dirtyTabCount counts Dirty||DiskGone, so this loop
+		// must use the same gate or a DiskGone-only tab leaves message
+		// empty.
 		for _, tab := range a.tabs.Tabs() {
-			if tab.Dirty {
+			if tab.Dirty || tab.DiskGone {
 				name := filepath.Base(tab.Path)
 				if name == "" || name == "." {
 					name = "untitled"

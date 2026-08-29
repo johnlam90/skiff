@@ -57,6 +57,7 @@ func TestParseWorktreeList(t *testing.T) {
 // branch, existing local, and remote-tracking pick (tracking local
 // created on first use, reused after).
 func TestGitWorktreeAddCmds(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
@@ -128,6 +129,7 @@ func TestDefaultWorktreePath(t *testing.T) {
 // The current branch is excluded from the picker (it is already checked
 // out in the main worktree), so row 1 is the side branch.
 func TestMenuGitNewWorktree_EndToEnd(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
@@ -160,6 +162,7 @@ func TestMenuGitNewWorktree_EndToEnd(t *testing.T) {
 // TestMenuGitNewWorktree_NewBranch drives the three-prompt flow: branch
 // picker → path → branch name, ending in a fresh branch in a fresh tree.
 func TestMenuGitNewWorktree_NewBranch(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
@@ -194,6 +197,7 @@ func TestMenuGitNewWorktree_NewBranch(t *testing.T) {
 // TestMenuGitListWorktrees_EndToEnd creates a worktree, then opens the
 // list and checks both rows render — main starred, side with its branch.
 func TestMenuGitListWorktrees_EndToEnd(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
@@ -233,6 +237,7 @@ func waitInfo(t *testing.T, a *App) {
 // and checks the directory is gone. The main worktree must never appear
 // in the picker.
 func TestMenuGitRemoveWorktree_EndToEnd(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")
@@ -263,6 +268,7 @@ func TestMenuGitRemoveWorktree_EndToEnd(t *testing.T) {
 // plain remove on a dirty worktree fails, the handler offers force, and
 // accepting it removes the tree.
 func TestMenuGitRemoveWorktree_ForceOffer(t *testing.T) {
+	skipInShortMode(t)
 	requireGit(t)
 	dir := initRepo(t)
 	writeFileT(t, filepath.Join(dir, "a.txt"), "x\n")

@@ -10,12 +10,13 @@ Skiff ships as a single static Go binary. There is no runtime, no node, no langu
 
 ## macOS (Homebrew)
 
-The Homebrew formula lives in this repo's `Formula/` directory. Tap it by URL — there's no separate `homebrew-tap` repo to remember:
+One command — brew resolves the [johnlam90/homebrew-skiff](https://github.com/johnlam90/homebrew-skiff) tap automatically:
 
 ```sh
-brew tap johnlam90/skiff https://github.com/johnlam90/skiff
 brew install johnlam90/skiff/skiff
 ```
+
+If an older install command left a broken `johnlam90/skiff` tap behind, run `brew untap johnlam90/skiff` first.
 
 Both Apple Silicon (`arm64`) and Intel (`amd64`) builds are published on every release. Homebrew picks the right one.
 
@@ -84,10 +85,10 @@ For the masochists, the contributors, and anyone behind a corporate firewall:
 ```sh
 git clone https://github.com/johnlam90/skiff.git
 cd skiff
-make install   # builds and installs to $GOPATH/bin
+make install   # builds and installs to /usr/local/bin (may need sudo)
 ```
 
-Requires Go 1.22 or later. CGO is off by default — the build is fully static.
+Requires Go 1.24 or later (the `go` directive in `go.mod` is the source of truth). CGO is off by default — the build is fully static.
 
 ## Uninstall (manual)
 

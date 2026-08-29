@@ -1,0 +1,121 @@
+# =============================================================================
+# File: pages.yml
+# Author: Spicer Matthews <spicer@cloudmanic.com>
+# Created: 2026-08-29
+# Copyright: 2026 Cloudmanic, LLC. All rights reserved.
+# =============================================================================
+#
+# Website deploy for Skiff (johnlam90.github.io/skiff). Builds the Hugo +
+# Tailwind site in website/ and publishes it to GitHub Pages.
+#
+# Two truths this workflow maintains:
+#
+#   * The version badge. params.version in website/hugo.toml is rewritten
+#     from internal/version/version.go before every build, so the published
+#     site can never advertise a stale release. (The badge sat frozen at
+#     v0.0.25 while the product shipped 0.2.x — that class of bug is why
+#     the rewrite lives here, in the deploy, not in a human's memory.)
+#   * One definition of "the site". The build step runs the same
+#     `make site-install site-build` a contributor runs locally, the way
+#     test.yml keeps one definition of "green".
+#
+# Trigger note: the release workflow's auto version-bump commit carries
+# [skip ci], which suppresses this workflow like every other. After a
+# release, the badge catches up on the next website/ push — or run this
+# workflow manually from the Actions tab (workflow_dispatch below).
+
+name: Deploy website
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - "internal/version/version.go"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# Least privilege: read the repo to build, write the Pages deployment, and
+# mint the OIDC token deploy-pages uses to prove the artifact came from
+# this workflow. Nothing here writes to repo contents.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time, and never cancel an in-flight production deploy —
+# a half-cancelled Pages deployment can leave the environment stuck.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # hugo.toml sets enableGitInfo = true; full history keeps the
+          # per-page lastmod dates honest instead of pinning every page
+          # to the tip commit of a shallow clone.
+          fetch-depth: 0
+
+      # Hugo extended, pinned by version AND checksum — same philosophy as
+      # the pinned staticcheck and GoReleaser versions elsewhere: a tool
+      # that builds what we publish must not float on "latest".
+      - name: Install Hugo
+        env:
+          HUGO_VERSION: 0.165.0
+          HUGO_SHA256: f43494894cdf4a8630a201d5c828051c77f523cc66bb3938b30806835470ac20
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/hugo.tar.gz" \
+            "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
+          echo "${HUGO_SHA256}  ${RUNNER_TEMP}/hugo.tar.gz" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/hugo.tar.gz" -C "${RUNNER_TEMP}" hugo
+          sudo install -m 0755 "${RUNNER_TEMP}/hugo" /usr/local/bin/hugo
+          hugo version
+
+      # Keep the published version badge in lockstep with the released
+      # binary. The parse mirrors release.yml's; the trailing grep fails
+      # the build if the rewrite didn't land (e.g. the params line moved).
+      - name: Sync site version from version.go
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -nE 's/.*const Version = "([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' internal/version/version.go)"
+          if [ -z "$VERSION" ]; then
+            echo "Could not parse version from internal/version/version.go" >&2
+            exit 1
+          fi
+          sed -i -E "s|^([[:space:]]*version = )\"v[0-9]+\.[0-9]+\.[0-9]+\"|\1\"v${VERSION}\"|" website/hugo.toml
+          grep -F "version = \"v${VERSION}\"" website/hugo.toml
+
+      # npm install (Tailwind CLI) + Tailwind build + `hugo --minify` into
+      # website/public. Node comes preinstalled on ubuntu-latest and the
+      # site needs any Node >= 18 — no separate setup step required.
+      - name: Build site
+        run: make site-install site-build
+
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
+        with:
+          # Self-provision on first run so the workflow doesn't depend on
+          # someone having clicked "enable Pages" in the repo settings.
+          enablement: true
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: website/public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5

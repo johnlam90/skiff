@@ -110,6 +110,27 @@ func TestSearchCapsAndTruncatedFlag(t *testing.T) {
 	}
 }
 
+// TestSearchFile_MaxPerFileCapsOccurrences pins the caps' new meaning:
+// per-occurrence emission means MaxPerFile now bounds OCCURRENCES, not
+// lines — a single line with three hits and a cap of 2 yields exactly 2
+// matches and reports truncation, even though it never left that line.
+func TestSearchFile_MaxPerFileCapsOccurrences(t *testing.T) {
+	root := t.TempDir()
+	f := seed(t, root, "x.txt", "hit hit hit\n")
+
+	opts := Options{MaxTotal: 500, MaxPerFile: 2, MaxFileSize: 1 << 20}
+	got, trunc := Search(root, []string{f}, "hit", opts)
+	if !trunc {
+		t.Fatal("per-file cap was hit — truncated must be true")
+	}
+	if len(got) != 2 {
+		t.Fatalf("matches: got %d, want 2", len(got))
+	}
+	if got[0].Col != 0 || got[1].Col != 4 {
+		t.Fatalf("columns: got %d, %d, want 0, 4", got[0].Col, got[1].Col)
+	}
+}
+
 // TestSearchMissingFileSkipped: a stale index entry (file deleted since
 // the last build) is skipped without error.
 func TestSearchMissingFileSkipped(t *testing.T) {
@@ -155,19 +176,29 @@ func TestSearchToggles(t *testing.T) {
 	opts := DefaultOptions()
 	opts.MatchCase = true
 	got, _ := Search(root, []string{f}, "foo", opts)
-	if len(got) != 2 {
-		t.Fatalf("MatchCase: got %d lines, want 2", len(got))
+	// Per-occurrence emission: line 1 ("Foo food foo") has two
+	// case-sensitive hits ("food"'s "foo" and the trailing "foo"), line 2
+	// ("football") has one — 3 occurrences, not 2 lines.
+	if len(got) != 3 {
+		t.Fatalf("MatchCase: got %d occurrences, want 3", len(got))
 	}
 
 	opts = DefaultOptions()
 	opts.WholeWord = true
 	got, _ = Search(root, []string{f}, "foo", opts)
-	if len(got) != 1 || got[0].Line != 1 {
+	// Line 1 has two word-bounded hits ("Foo" at the start and the
+	// trailing "foo"); "food"'s "foo" and "football"'s are not
+	// word-bounded, so line 2 contributes nothing.
+	if len(got) != 2 || got[0].Line != 1 || got[1].Line != 1 {
 		t.Fatalf("WholeWord: got %+v", got)
 	}
 	if got[0].Col != 0 {
 		// "Foo" matches case-insensitively at col 0 and is word-bounded.
 		t.Fatalf("WholeWord col: got %d", got[0].Col)
+	}
+	if got[1].Col != 9 {
+		// The trailing "foo" starts at rune column 9.
+		t.Fatalf("WholeWord second hit col: got %d", got[1].Col)
 	}
 
 	opts = DefaultOptions()
@@ -279,6 +310,71 @@ func TestReplaceLineRegexGroups(t *testing.T) {
 	}
 }
 
+// TestSearchAndReplace_CountsAgreeOnMultiOccurrenceLine pins the
+// preview-parity guarantee: a line with the query twice must produce two
+// distinct Match rows (not one), and applying those two matches must
+// report Replaced == 2 with nothing skipped — the panel row count the
+// user reviewed must equal the number of occurrences actually rewritten.
+func TestSearchAndReplace_CountsAgreeOnMultiOccurrenceLine(t *testing.T) {
+	root := t.TempDir()
+	f := seed(t, root, "dup.txt", "foo(foo)\n")
+
+	got, trunc := Search(root, []string{f}, "foo", DefaultOptions())
+	if trunc {
+		t.Fatal("no caps should trip here")
+	}
+	if len(got) != 2 {
+		t.Fatalf("matches: got %d, want 2 (one per occurrence)", len(got))
+	}
+	if got[0].Col != 0 || got[1].Col != 4 {
+		t.Fatalf("columns: got %d, %d, want 0, 4", got[0].Col, got[1].Col)
+	}
+
+	rep := ApplyReplace(root, got, "foo", "bar", DefaultOptions())
+	if rep.Replaced != 2 || rep.Skipped != 0 {
+		t.Fatalf("report: %+v, want Replaced=2 Skipped=0", rep)
+	}
+	data, err := os.ReadFile(filepath.Join(root, f))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(data) != "bar(bar)\n" {
+		t.Fatalf("file: got %q, want %q", data, "bar(bar)\n")
+	}
+}
+
+// TestReplaceLineAt pins the occurrence-targeted rewrite the panel's
+// single-row apply relies on: only the occurrence starting at the given
+// rune column changes, a column with no qualifying hit is a no-op
+// reporting 0, and regex capture-group expansion works the same way
+// ReplaceLine's does.
+func TestReplaceLineAt(t *testing.T) {
+	got, n := ReplaceLineAt("foo(foo)", 0, "foo", "bar", DefaultOptions())
+	if got != "bar(foo)" || n != 1 {
+		t.Fatalf("first occurrence: %q (%d)", got, n)
+	}
+	got, n = ReplaceLineAt("foo(foo)", 4, "foo", "bar", DefaultOptions())
+	if got != "foo(bar)" || n != 1 {
+		t.Fatalf("second occurrence: %q (%d)", got, n)
+	}
+	// A column with no occurrence start is a no-op, not an error.
+	got, n = ReplaceLineAt("foo(foo)", 1, "foo", "bar", DefaultOptions())
+	if got != "foo(foo)" || n != 0 {
+		t.Fatalf("no hit at column: %q (%d)", got, n)
+	}
+	got, n = ReplaceLineAt("nothing here", 0, "foo", "bar", DefaultOptions())
+	if got != "nothing here" || n != 0 {
+		t.Fatalf("no match at all: %q (%d)", got, n)
+	}
+
+	opts := DefaultOptions()
+	opts.Regex = true
+	got, n = ReplaceLineAt("a=1 b=2", 4, `(\w+)=(\w+)`, "$2:$1", opts)
+	if got != "a=1 2:b" || n != 1 {
+		t.Fatalf("regex group expansion: %q (%d)", got, n)
+	}
+}
+
 // TestApplyReplaceRegexGroups: expansion flows through the disk path.
 func TestApplyReplaceRegexGroups(t *testing.T) {
 	root := t.TempDir()
@@ -293,6 +389,44 @@ func TestApplyReplaceRegexGroups(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(root, "kv.txt"))
 	if string(data) != "skiff is the name\n" {
 		t.Fatalf("expanded write: %q", data)
+	}
+}
+
+// TestApplyReplace_WriteFailureLeavesOriginal pins the atomic-write
+// contract ApplyReplace now gets from atomicfile.Replace: when the final
+// write can't land, the original file must be untouched and the matches
+// that were about to be rewritten must count as skipped, never guessed
+// at as replaced. Provoked by making the target's directory read-only —
+// same technique as atomicfile.TestReplaceFailureKeepsOriginal, and the
+// same root exemption, since root ignores directory permission bits.
+func TestApplyReplace_WriteFailureLeavesOriginal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions; the failure can't be provoked")
+	}
+	root := t.TempDir()
+	f := seed(t, root, "ro.txt", "old value\n")
+	dir := filepath.Dir(filepath.Join(root, f))
+
+	matches, _ := Search(root, []string{f}, "old", DefaultOptions())
+	if len(matches) != 1 {
+		t.Fatalf("seed matches: %d", len(matches))
+	}
+
+	if err := os.Chmod(dir, 0555); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+
+	rep := ApplyReplace(root, matches, "old", "new", DefaultOptions())
+	if rep.Replaced != 0 || rep.Skipped != 1 {
+		t.Fatalf("report: %+v, want Replaced=0 Skipped=1", rep)
+	}
+	data, err := os.ReadFile(filepath.Join(root, f))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(data) != "old value\n" {
+		t.Fatalf("original clobbered by a failed write: %q", data)
 	}
 }
 

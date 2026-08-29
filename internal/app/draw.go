@@ -47,7 +47,7 @@ func (a *App) draw() {
 
 	if a.sidebarShown {
 		sx, sy, sw, sh := a.sidebarRect()
-		if a.gitPanelActive {
+		if a.gitPanel.active {
 			a.drawGitPanel(sx, sy, sw, sh)
 		} else {
 			// Both scrollbar "I'm being dragged" flags are derived from
@@ -55,7 +55,7 @@ func (a *App) draw() {
 			// path, so a drag that ends through some other route (an
 			// overlay opening, closeAllModals) can't strand a thumb in
 			// its bright Accent state. Same rule drawSplitter follows.
-			a.tree.ScrollbarActive = a.dragMode == "treescrollbar"
+			a.tree.ScrollbarActive = a.dragMode == dragTreeScrollbar
 			a.tree.Render(a.screen, a.theme, sx, sy, sw, sh)
 			// Overdraw the tree's plain header with the EXPLORER / GIT
 			// tab row — the tree keeps rendering its own header so its
@@ -69,7 +69,7 @@ func (a *App) draw() {
 
 	if tab := a.activeTabPtr(); tab != nil {
 		ex, ey, ew, eh := a.editorRect()
-		tab.ScrollbarActive = a.dragMode == "scrollbar"
+		tab.ScrollbarActive = a.dragMode == dragScrollbar
 		tab.Render(a.screen, a.theme, ex, ey, ew, eh)
 	} else {
 		a.drawEmptyEditor()
@@ -80,7 +80,7 @@ func (a *App) draw() {
 	}
 	a.drawStatusBar()
 	a.drawFlashStrip()
-	if a.projFindOpen {
+	if a.projFind.findOpen {
 		a.drawProjFind()
 	}
 	a.drawLeaderStrip()
@@ -278,12 +278,14 @@ func (a *App) drawTabBar() {
 		}
 		tab := a.tabs.At(r.Index)
 		col := r.X + 1
-		if tab.Dirty && col >= stripX && col < tx+tw {
-			// Same story for the dirty dot: Modified is ColorDefault
-			// once the palette degrades, so the marker leans on
-			// Attrs.Modified to stay distinguishable from the name.
-			// Decompose keeps the row's own attributes (bold/italic)
-			// instead of clobbering them.
+		if (tab.Dirty || tab.DiskGone) && col >= stripX && col < tx+tw {
+			// The dot means "needs attention", not just "has edits" — a
+			// DiskGone tab (its file deleted, not yet recreated or
+			// re-saved) shows it too, same as Dirty. Modified is
+			// ColorDefault once the palette degrades, so the marker
+			// leans on Attrs.Modified to stay distinguishable from the
+			// name. Decompose keeps the row's own attributes
+			// (bold/italic) instead of clobbering them.
 			_, _, rowAttrs := st.Decompose()
 			dot := st.Foreground(a.theme.Modified).
 				Attributes(rowAttrs | a.theme.Attrs.Modified)
@@ -446,7 +448,7 @@ func (a *App) drawSplitter() {
 		return
 	}
 	fg := a.theme.Subtle
-	if a.dragMode == "sidebar" {
+	if a.dragMode == dragSidebar {
 		fg = a.theme.Accent
 	}
 	style := tcell.StyleDefault.Background(a.theme.SidebarBG).Foreground(fg)
@@ -644,8 +646,11 @@ func (a *App) statusLeftText() string {
 			return fmt.Sprintf(" %s · %d×%d · %s",
 				strings.ToUpper(tab.ImageFmt), b.Dx(), b.Dy(), filepath.Base(tab.Path))
 		}
+		// Same "needs attention" gate as the tab-strip dot: DiskGone
+		// alone (a deleted-but-not-yet-recreated file) shows the marker
+		// too, not just Dirty.
 		dirty := ""
-		if tab.Dirty {
+		if tab.Dirty || tab.DiskGone {
 			dirty = " · ●"
 		}
 		return fmt.Sprintf(" %s · Ln %d, Col %d · %d lines%s",
@@ -776,7 +781,7 @@ func (a *App) flashStripRect() (x, y, w, h int) {
 	sw := a.sidebarW()
 	h = a.flashStripRows()
 	y = a.height - 1 - h
-	if a.findOpen || a.projFindOpen {
+	if a.findOpen || a.projFind.findOpen {
 		y -= findBarHeight
 	}
 	return sw, y, a.width - sw, h

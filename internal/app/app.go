@@ -19,7 +19,6 @@ package app
 
 import (
 	"path/filepath"
-	"sync/atomic"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -30,7 +29,6 @@ import (
 	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/overlay"
-	"github.com/johnlam90/skiff/internal/search"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -147,6 +145,19 @@ const (
 	autoScrollTick = 60 * time.Millisecond
 )
 
+// dragKind names which surface owns the current mouse drag. Typed so a
+// misspelled mode is a compile error instead of a silently dead drag.
+type dragKind uint8
+
+const (
+	dragNone dragKind = iota
+	dragEditor
+	dragSidebar
+	dragScrollbar
+	dragTreeScrollbar
+	dragGitPanelScrollbar
+)
+
 // App is the editor's top-level state holder and event-loop owner.
 type App struct {
 	screen tcell.Screen
@@ -236,7 +247,7 @@ type App struct {
 	clipBuf      string
 	statusMsg    string
 	statusUntil  time.Time
-	dragMode     string // "editor" while a drag-select is active.
+	dragMode     dragKind // dragEditor while a drag-select is active, etc.
 	lastClick    clickRecord
 	lastTabRects []tabRect
 
@@ -340,31 +351,9 @@ type App struct {
 	// The list picker is an overlay.Pick prefab — see listpick.go for
 	// the opener; it carries all its own state.
 
-	// Project-wide content search (see projfind.go).
-	projFindOpen      bool
-	projFindValue     []rune
-	projFindCursor    int
-	projFindScroll    int
-	projFindGen       int // generation counter; stale sweeps are dropped
-	projFindBusy      bool
-	projFindMatches   []search.Match
-	projFindTruncated bool
-	projFindSelected  int
-	projFindScrollY   int
-	projFindFolded    map[string]bool
-	projFindLiveGen   atomic.Int64 // latest gen, readable from sweep goroutines
-	projFindMatchCase bool
-	projFindWholeWord bool
-	projFindRegex     bool
-
-	// Project-wide replace riding the panel (see projreplace.go). The
-	// X ranges are stamped by drawProjFindBar for the mouse handler.
-	projReplaceOpen                        bool
-	projReplaceValue                       []rune
-	projReplaceCursor                      int
-	projFocusReplace                       bool
-	projReplaceFieldX0, projReplaceFieldX1 int
-	projReplaceAllX0, projReplaceAllX1     int
+	// projFind is the project-wide content-search panel plus the
+	// replace state riding it — see projFindState in projfind.go.
+	projFind projFindState
 
 	// Auto-scroll while drag-selecting past the editor's top/bottom edge.
 	// lastDragX/Y is the most recent mouse position so the auto-scroll
@@ -435,32 +424,23 @@ type App struct {
 	// its transient state.
 	finder *finder.Finder
 
-	// Git panel state — the sidebar's second tab ("Esc g", ≡ → Git
-	// changes, the GIT header tab, or a click on the status bar's
-	// branch segment). When active the sidebar shows the uncommitted-
-	// changes list instead of the file tree. Rows are rebuilt from
-	// tree.DirtyFiles on activation and on every git-status refresh
-	// while the panel is up.
-	gitPanelActive bool
-	gitPanelRows   []gitChangeRow
-	gitPanelScroll int
+	// gitPanel is the sidebar's Git-changes panel state — see
+	// gitPanelState in gitchanges.go.
+	gitPanel gitPanelState
 
-	// Git panel keyboard mode (gitchanges.go). The panel is mouse-first,
-	// but Button3 and mouse reporting are exactly what macOS Terminal +
-	// tmux swallow, so Esc-g / ≡ → Git changes arm a keyboard focus that
-	// walks the rows and the action row. All three fields are zero-safe:
-	// off, focus on the list, first button.
-	gitPanelKeys   bool
-	gitPanelOnBtns bool
-	gitPanelBtn    int
+	// gitDirtyDirs flags which dirty paths are directories, keyed by
+	// tree-cased absolute path. Stat'd off-thread by collectGitStatus
+	// and rebased alongside DirtyFiles in applyGitStatus, so panel
+	// rebuilds between collections (activation, key nav) read the last
+	// collection's answer instead of stat'ing on the event loop.
+	gitDirtyDirs map[string]bool
 
 	// Write-side git state (see gitops.go / gitchanges.go): the
 	// one-at-a-time mutation gate, the commit checkbox set (absent =
-	// checked), the panel's keyboard/walk selection, and the panel row
-	// the open diff came from (-1 = diff not from the panel).
+	// checked), and the panel row the open diff came from (-1 = diff
+	// not from the panel).
 	gitOpBusy         bool
 	gitCommitChecks   map[string]bool
-	gitPanelSelected  int
 	diffPanelRow      int
 	gitDeleteTarget   string // branch mid-delete, for the force-delete offer
 	gitWorktreeTarget string // worktree mid-remove, for the force-remove offer
@@ -487,26 +467,10 @@ func New(rootDir string) (*App, error) {
 	if abs, err := filepath.Abs(rootDir); err == nil {
 		rootDir = abs
 	}
-	scr, err := tcell.NewScreen()
+	scr, err := newTerminalScreen()
 	if err != nil {
 		return nil, err
 	}
-	if err := scr.Init(); err != nil {
-		return nil, err
-	}
-	// Baseline mouse reporting only — clicks, drags and the wheel. The
-	// all-motion mode (`?1003h`) is switched on per-overlay by
-	// syncMouseMode; see mousemode.go for why it is not the default.
-	scr.EnableMouse(mouseBaseFlags)
-	// Bracketed paste: without it, pasted text arrives as raw
-	// keystrokes and any ESC byte inside the paste arms the leader —
-	// pasting "\x1bq" would quit the editor. See handleKey's pasting
-	// guard.
-	scr.EnablePaste()
-
-	th := theme.Default()
-	scr.SetStyle(tcell.StyleDefault.Background(th.BG).Foreground(th.Text))
-	scr.Clear()
 
 	tree, err := filetree.New(rootDir)
 	if err != nil {
@@ -514,26 +478,8 @@ func New(rootDir string) (*App, error) {
 		return nil, err
 	}
 
-	a := &App{
-		screen:         scr,
-		mouseFlags:     mouseBaseFlags,
-		theme:          th,
-		rootDir:        rootDir,
-		tree:           tree,
-		hoveredMenuRow: -1,
-		diffPanelRow:   -1,
-		sidebarShown:   true,
-		sidebarWidth:   defaultSidebarWidth,
-		wrapOn:         true,
-	}
-	a.setActiveFolder(tree.Root.Path)
-	a.loadUserConfig()
-	// The config may have swapped in a different palette, so the
-	// colour-depth fallback is resolved last — it must degrade the
-	// theme the user will actually see, not the default it replaced.
-	a.applyColorDepth()
+	a := newApp(scr, rootDir, tree, true)
 	a.refreshGitStatus()
-	a.loadCustomActions()
 	a.flash("Welcome — click a file to open · click  ≡  for the menu")
 	a.startTreeRefresh()
 	// Kick off the project file index in the background so that by
@@ -542,6 +488,9 @@ func New(rootDir string) (*App, error) {
 	// takes ~150ms; the user pays it once at startup instead of
 	// when they're trying to navigate.
 	a.finder = finder.New(rootDir)
+	// Route the index build through the crash guard: internal/finder
+	// can't import internal/app, so the guard rides in as a hook.
+	a.finder.PanicGuard = a.safeGo
 	scr2 := a.screen
 	a.finder.Rebuild(func() {
 		_ = scr2.PostEvent(&finderRebuiltEvent{when: time.Now()})
@@ -565,24 +514,19 @@ func New(rootDir string) (*App, error) {
 // actions that need a base directory — Save As, New File, the
 // relative/absolute path helpers — have somewhere to anchor.
 func NewSingleFile(filePath string) (*App, error) {
-	scr, err := tcell.NewScreen()
+	scr, err := newTerminalScreen()
 	if err != nil {
 		return nil, err
 	}
-	if err := scr.Init(); err != nil {
-		return nil, err
-	}
-	// Same baseline-mouse rationale as New: no all-motion tracking
-	// until an overlay that hovers is actually up.
-	scr.EnableMouse(mouseBaseFlags)
-	// Same bracketed-paste rationale as New: pasted ESC bytes must be
-	// content, not commands.
-	scr.EnablePaste()
+	return newSingleFileApp(scr, filePath), nil
+}
 
-	th := theme.Default()
-	scr.SetStyle(tcell.StyleDefault.Background(th.BG).Foreground(th.Text))
-	scr.Clear()
-
+// newSingleFileApp is NewSingleFile minus the terminal: everything after
+// the screen exists, over whichever screen the caller provides. The seam
+// lets tests construct the real single-file shape (tree nil, sidebar
+// hidden, no finder) on a SimulationScreen instead of hand-patching
+// tree=nil onto a tree-backed app.
+func newSingleFileApp(scr tcell.Screen, filePath string) *App {
 	rootDir := filepath.Dir(filePath)
 	if rootDir == "" {
 		rootDir = "."
@@ -592,29 +536,75 @@ func NewSingleFile(filePath string) (*App, error) {
 		rootDir = abs
 	}
 
-	a := &App{
-		screen:         scr,
-		mouseFlags:     mouseBaseFlags,
-		theme:          th,
-		rootDir:        rootDir,
-		tree:           nil,
-		hoveredMenuRow: -1,
-		diffPanelRow:   -1,
-		sidebarShown:   false,
-		sidebarWidth:   defaultSidebarWidth,
-		wrapOn:         true,
-	}
-	a.setActiveFolder(rootDir)
-	a.loadUserConfig()
-	// Same rationale as New: degrade the resolved palette, not the
-	// default one.
-	a.applyColorDepth()
-	a.loadCustomActions()
+	a := newApp(scr, rootDir, nil, false)
 	// openFile loads the file's git gutter markers itself (a file-scoped
 	// `git diff`), so single-file mode shows change bars on open without
 	// the whole-repo status or tree walk that New performs.
 	a.openFile(filePath)
-	return a, nil
+	return a
+}
+
+// newTerminalScreen builds and initialises the real tcell screen both
+// production constructors share: baseline mouse reporting, bracketed
+// paste, and the default-theme background painted before the first
+// event. Kept apart from newApp so tests can hand newApp a
+// SimulationScreen instead of a live terminal.
+func newTerminalScreen() (tcell.Screen, error) {
+	scr, err := tcell.NewScreen()
+	if err != nil {
+		return nil, err
+	}
+	if err := scr.Init(); err != nil {
+		return nil, err
+	}
+	// Baseline mouse reporting only — clicks, drags and the wheel. The
+	// all-motion mode (`?1003h`) is switched on per-overlay by
+	// syncMouseMode; see mousemode.go for why it is not the default.
+	scr.EnableMouse(mouseBaseFlags)
+	// Bracketed paste: without it, pasted text arrives as raw
+	// keystrokes and any ESC byte inside the paste arms the leader —
+	// pasting "\x1bq" would quit the editor. See handleKey's pasting
+	// guard.
+	scr.EnablePaste()
+
+	th := theme.Default()
+	scr.SetStyle(tcell.StyleDefault.Background(th.BG).Foreground(th.Text))
+	scr.Clear()
+	return scr, nil
+}
+
+// newApp builds the App core every construction path shares: the struct
+// literal with its sentinels, the active folder, user config, the
+// colour-depth degrade, and custom actions. Callers layer on what their
+// mode needs — New adds the git/finder/session machinery, NewSingleFile
+// opens the one file, tests inject a SimulationScreen. Any new
+// construction-time step belongs here unless it is genuinely
+// mode-specific, in which case its caller should say why in a comment.
+func newApp(scr tcell.Screen, rootDir string, tree *filetree.Tree, sidebarShown bool) *App {
+	a := &App{
+		screen:         scr,
+		mouseFlags:     mouseBaseFlags,
+		theme:          theme.Default(),
+		rootDir:        rootDir,
+		tree:           tree,
+		hoveredMenuRow: -1,
+		diffPanelRow:   -1,
+		sidebarShown:   sidebarShown,
+		sidebarWidth:   defaultSidebarWidth,
+		wrapOn:         true,
+	}
+	if tree != nil {
+		a.setActiveFolder(tree.Root.Path)
+	} else {
+		a.setActiveFolder(rootDir)
+	}
+	a.loadUserConfig()
+	// The config may have swapped in a different palette, so the
+	// colour-depth fallback is resolved last — it must degrade the
+	// theme the user will actually see, not the default it replaced.
+	a.applyColorDepth()
+	a.loadCustomActions()
+	return a
 }
 
 // applyColorDepth re-derives the live palette for whatever the terminal
@@ -653,6 +643,12 @@ func (a *App) applyColorDepth() {
 // at all. Nothing here needs to unwind the mode by hand.
 func (a *App) Close() {
 	a.saveSession()
+	// The undo window for deletes is the session: discard the trash on
+	// the way out so removed work doesn't pile up invisibly on disk.
+	// Living here rather than at the tail of Run means a signal quit or
+	// a recovered panic empties it too — every exit path funnels
+	// through Close.
+	a.emptyTrash()
 	a.stopTreeRefresh()
 	a.stopAutoScroll()
 	if a.screen != nil {
@@ -663,6 +659,27 @@ func (a *App) Close() {
 // Run is the editor's main event loop. It blocks on PollEvent, dispatches
 // each event, redraws, and exits when a.quit is set.
 func (a *App) Run() error {
+	// A panic on the event loop must not reach the runtime with the
+	// terminal still raw: restore it, leave a crash log the user can
+	// paste into a bug report, and re-panic so the exit code and trace
+	// still signal failure. Registered first so it also covers the
+	// other defers.
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		a.Close()
+		reportCrash("event-loop", handleGoroutinePanic("event-loop", r))
+		panic(r)
+	}()
+
+	// Route SIGTERM/SIGHUP/SIGINT through the loop as a clean quit so
+	// `tmux kill-pane` and friends restore the terminal instead of
+	// leaving raw mode and mouse tracking behind.
+	stopSignals := a.watchSignals()
+	defer stopSignals()
+
 	a.width, a.height = a.screen.Size()
 	// Apply the narrow-terminal rule against the size we booted at, not
 	// just against later resizes: starting inside a 55-column tmux pane
@@ -697,9 +714,6 @@ func (a *App) Run() error {
 		a.draw()
 		a.screen.Show()
 	}
-	// The undo window for deletes is the session: discard the trash on
-	// the way out so removed work doesn't pile up invisibly on disk.
-	a.emptyTrash()
 	return nil
 }
 
@@ -733,6 +747,11 @@ func (a *App) handleEvent(ev tcell.Event) {
 		a.lastEscape = time.Time{}
 	case *tcell.EventMouse:
 		a.handleMouse(e)
+	case *quitRequestEvent:
+		// A signal, not a person: skip the dirty-tab modal and quit.
+		// Close()'s session save preserves state, and dirty buffers
+		// come back dirty on the next open's session restore.
+		a.quit = true
 	case *autoScrollEvent:
 		a.handleAutoScroll()
 	case *treeRefreshEvent:

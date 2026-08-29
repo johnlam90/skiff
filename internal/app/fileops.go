@@ -201,18 +201,46 @@ func (a *App) emptyTrash() {
 // App glue: wrap the backend ops in tab/tree-aware helpers.
 // -----------------------------------------------------------------------------
 
+// withinRoot reports whether candidate, made absolute and cleaned, still
+// lives under root. Same escape rule relOrEmpty applies to shell
+// variables, expressed as the boolean the file-op guards need — with one
+// deliberate difference: root itself counts as within (filepath.Rel
+// returns "."), because session restore's call site needs a session
+// entry naming the project root to read as legitimate, not an escape.
+func withinRoot(root, candidate string) bool {
+	rel, err := filepath.Rel(root, candidate)
+	if err != nil {
+		return false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
+}
+
 // doCreateFile creates an empty file inside parent at the relative path
 // name, refreshes the tree, and opens the new file in a tab. Errors are
 // surfaced as a flash. name may contain path separators so the user can
 // drop a file into a subdirectory ("subdir/foo.go") — but the parent
 // directories must already exist; we don't silently mkdir to avoid
 // creating folders the user didn't realise they were making.
+//
+// A name that climbs out of parent via "../" is refused outright — a
+// deliberate UX narrowing, not an oversight: before this guard,
+// filepath.Join happily resolved such a name to a path outside the tree
+// the user is looking at, and the file would land somewhere the sidebar
+// never shows. Users who need to create a file elsewhere should navigate
+// the tree to that folder first.
 func (a *App) doCreateFile(parent, name string) {
 	name = trimSpace(name)
 	if name == "" {
 		return
 	}
 	target := filepath.Join(parent, name)
+	if !withinRoot(parent, target) {
+		a.flash("Create refused: name escapes " + filepath.Base(parent))
+		return
+	}
 	if err := createEmptyFile(target); err != nil {
 		// Translate the noisy "open <path>: no such file or directory"
 		// case into something the user can actually act on. ENOENT here

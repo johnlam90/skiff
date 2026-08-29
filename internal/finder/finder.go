@@ -53,6 +53,13 @@ const (
 type Finder struct {
 	rootDir string
 
+	// PanicGuard, when set, launches the build goroutine in place of a
+	// plain `go` statement — the app injects its crash guard here,
+	// because this package cannot import internal/app. nil keeps the
+	// zero value's plain-goroutine semantics. Set it once, right after
+	// New and before the first Rebuild; it is read without locking.
+	PanicGuard func(name string, fn func())
+
 	mu      sync.RWMutex
 	paths   []string
 	viaGit  bool
@@ -91,7 +98,7 @@ func (f *Finder) Rebuild(onDone func()) {
 	root := f.rootDir
 	f.mu.Unlock()
 
-	go func() {
+	build := func() {
 		defer f.running.Store(0)
 		paths, viaGit, err := BuildIndex(root)
 		f.mu.Lock()
@@ -107,7 +114,12 @@ func (f *Finder) Rebuild(onDone func()) {
 		if onDone != nil {
 			onDone()
 		}
-	}()
+	}
+	if f.PanicGuard != nil {
+		f.PanicGuard("finder-index", build)
+	} else {
+		go build()
+	}
 }
 
 // Invalidate marks the cached index stale. Caller must follow

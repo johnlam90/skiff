@@ -83,17 +83,28 @@ internal/editor/indent.go     Visual-column math, indent detection, Enter auto-i
 internal/editor/word.go       The single definition of "a word" + word-wise motion
 internal/editor/cluster.go    Grapheme clusters + terminal cell widths (uniseg)
 internal/editor/bracket.go    Bracket match under the caret (+ the render decision)
-internal/filetree/filetree.go Lazy tree, identity-preserving refresh, hit-test,
-                              render — plus the per-directory child cap
-                              (MaxDirChildren + "… N more" sentinel), the
-                              ReadErr "(unreadable)" mark, .gitignore-aware
-                              filtering (HideIgnored + the per-directory
-                              matcher cache), symlink resolution with
-                              ancestor-loop refusal, VS Code-style
-                              compact folder chains (single-child dir
-                              runs fold into one "a/b/c" row anchored on
-                              the deepest dir), and the sidebar's
-                              own scrollbar column
+internal/filetree/filetree.go Tree + Node model: lazy loading, the
+                              identity-preserving merge (+ its
+                              fingerprint fast-path), symlink resolution
+                              with ancestor-loop refusal, the
+                              per-directory child cap (MaxDirChildren +
+                              "… N more" sentinel), synchronous Refresh
+internal/filetree/scan.go     Off-thread disk sweep: readDir/ScanDirs on
+                              a goroutine, ApplyScan's on-loop merge,
+                              and the fixed shouldHide noise list
+internal/filetree/ignore.go   .gitignore-aware filtering: HideIgnored +
+                              the per-directory matcher cache, the
+                              nested-chain scoping, open-tab pins
+internal/filetree/flatten.go  Visible-row list + VS Code-style compact
+                              folder chains (single-child dir runs fold
+                              into one "a/b/c" row anchored on the
+                              deepest dir)
+internal/filetree/render.go   Painting + row styling: git change
+                              letters, the ReadErr "(unreadable)" mark
+                              and the other display labels
+internal/filetree/scrollbar.go The sidebar's own scrollbar column
+internal/filetree/nav.go      Hit-test, toggle, scroll, Reveal, and
+                              expanded-dir session persistence
 internal/scrollbar/           The one definition of a scrollbar: thumb
                               geometry, its click inverse, and the Track/
                               Thumb glyphs. No tcell, no theme — both the
@@ -132,7 +143,7 @@ internal/userconfig/userconfig.go ~/.config/skiff/config.json (icons, theme,
                               wrap, gitignore)
 internal/icons/icons.go       Nerd Font detection (deadline-bounded) + glyphs
 internal/theme/theme.go       Default Tokyo Night palette + contrast helpers
-internal/theme/palettes.go    Theme registry — 25 druk-ported palettes + ByID
+internal/theme/palettes.go    Theme registry — druk-ported palettes + Offshore + ByID
 internal/theme/degrade.go     Low-color fallback: hue → bold/underline/reverse
 internal/version/version.go   const Version = "x.y.z" — single line, CI bumps it
 ```
@@ -456,7 +467,7 @@ overlay follow.
 make run          # go run . in current dir
 make build        # build to ./bin/skiff
 make build-linux  # cross-compile linux/amd64
-make install      # go install to $GOPATH/bin
+make install      # install to /usr/local/bin (may need sudo)
 make tidy         # go mod tidy
 make clean        # rm -rf bin
 ```
@@ -483,6 +494,11 @@ it — a red suite can never publish:
 If you're touching the workflow or `.goreleaser.yml`, make sure both
 auto-commits keep their `[skip ci]` markers — without them the workflow
 loops forever.
+
+A failed GoReleaser run (API blip, upload timeout) is re-runnable: the tag
+step records that the tag already exists and the next step deletes the
+half-published release object (never the tag) before GoReleaser retries.
+"Re-run failed jobs" on the Actions run is the whole recovery.
 
 ## What NOT to add
 

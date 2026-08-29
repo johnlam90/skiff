@@ -190,7 +190,7 @@ func (a *App) requestDiff(kind diffLoadKind, title, tabPath string, load func(*g
 	// Acknowledge the click immediately: the diff is a git round trip
 	// away, and a click that paints nothing reads as a dropped click.
 	a.flash("Loading diff…")
-	go func() {
+	a.safeGo("diff-load", func() {
 		lines := load(repo)
 		_ = scr.PostEvent(&diffLoadEvent{
 			when:    time.Now(),
@@ -200,7 +200,7 @@ func (a *App) requestDiff(kind diffLoadKind, title, tabPath string, load func(*g
 			tabPath: tabPath,
 			lines:   lines,
 		})
-	}()
+	})
 }
 
 // handleDiffLoaded opens the diff a background load produced, or
@@ -469,15 +469,41 @@ func (d *diffOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
 }
 
 // runDiffOpenFile fires the Open file button: close the modal first
-// (capture-then-close, same as confirmYes) and jump to the first
-// changed line of the file the diff was showing.
+// (capture-then-close, same as confirmYes) and jump to the diff's own
+// first changed line. The target line comes from d.rows — the diff
+// overlay's already-parsed aligned rows — never from tab.GitLines: the
+// tab's async gutter markers may still be nil right after open (plan
+// 009 took the inline `git diff` off the tab-open path), and the diff
+// overlay already has everything it needs without another git call.
 func (d *diffOverlay) openFileButton() {
 	a := d.app
 	path := d.openPath
+	line := firstChangedLine(d.rows)
 	a.closeAllModals()
 	if path != "" {
-		a.openFileAtFirstChange(path)
+		a.OpenFileAtLine(path, line)
 	}
+}
+
+// firstChangedLine returns the aligned diff's own answer to "what's the
+// first thing that changed" — the file line the Open file button jumps
+// to. RightNo (the new-file line number) is preferred; a pure deletion
+// has no right side, so LeftNo is the fallback. Both are 1-based, the
+// same convention OpenFileAtLine expects. Returns 0 (no jump target)
+// when rows carries no change row at all.
+func firstChangedLine(rows []diffRow) int {
+	for _, r := range rows {
+		if r.Kind != diffRowChange {
+			continue
+		}
+		if r.RightNo > 0 {
+			return r.RightNo
+		}
+		if r.LeftNo > 0 {
+			return r.LeftNo
+		}
+	}
+	return 0
 }
 
 // scrollDiff nudges the body viewport by delta rows, clamped to the

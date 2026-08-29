@@ -90,6 +90,11 @@ type Confirm struct {
 	scroll int
 }
 
+// BodyTextWidth returns the usable text width for Body rows at the
+// confirm's current frame width — what callers should wrap consent
+// text to, so a narrow terminal wraps instead of truncating.
+func (c *Confirm) BodyTextWidth() int { return c.frameWidth() - 4 }
+
 // frameWidth returns the frame width: the wide form for a multi-line
 // Body, the classic 54-cell box otherwise — either way clamped to the
 // terminal, because a frame wider than the screen puts its right border
@@ -290,10 +295,11 @@ func (c *Confirm) Draw(scr tcell.Screen) {
 	bodyStyle := tcell.StyleDefault.Background(bg).Foreground(th.Text)
 	if len(c.Body) == 0 {
 		msg := trimRunes(c.Message, r.W-4)
-		drawText(scr, r.X+(r.W-runeLen(msg))/2, r.Y+4, msg, bodyStyle)
+		msgX := r.X + (r.W-runeLen(msg))/2
+		drawText(scr, msgX, r.Y+4, r.X+r.W-1-msgX, msg, bodyStyle)
 	} else {
 		for i, rows := 0, c.bodyRows(); i < rows && c.scroll+i < len(c.Body); i++ {
-			drawText(scr, r.X+2, r.Y+4+i, trimRunes(c.Body[c.scroll+i], r.W-4), bodyStyle)
+			drawText(scr, r.X+2, r.Y+4+i, r.W-4, trimRunes(c.Body[c.scroll+i], r.W-4), bodyStyle)
 		}
 		// Painted after the rows so the bar is never overwritten by a
 		// body line — the rows clip to r.W-4 and stop two cells short

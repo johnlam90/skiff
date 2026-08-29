@@ -90,7 +90,7 @@ const editorMinRows = 1
 // cap cannot quietly starve the editor, and a test can say so.
 func (a *App) stripRowBudget() int {
 	room := a.height - 2 - editorMinRows
-	if a.findOpen || a.projFindOpen {
+	if a.findOpen || a.projFind.findOpen {
 		room -= findBarHeight
 	}
 	if room < 0 {
@@ -113,7 +113,7 @@ func (a *App) stripRowBudget() int {
 func (a *App) editorRect() (x, y, w, h int) {
 	sw := a.sidebarW()
 	h = a.height - 2
-	if a.findOpen || a.projFindOpen {
+	if a.findOpen || a.projFind.findOpen {
 		h -= findBarHeight
 	}
 	h -= a.flashStripRows()

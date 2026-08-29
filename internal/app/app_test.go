@@ -28,9 +28,46 @@ import (
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
-// newTestApp builds a fully-wired App against a tcell.SimulationScreen. It
-// mirrors what New() does, but skips the background tree-refresh goroutine
-// because we don't want a ticker firing while tests run.
+// TestMain redirects every XDG base directory to a throwaway root before
+// any test runs. App tests exercise paths that persist sessions and config
+// (closeTab's deferred saveSession, quit flows); without this, each run
+// wrote temp-project sessions into the developer's real
+// ~/.local/state/skiff/sessions/ and the 50-file prune evicted their real
+// project sessions. Per-test t.Setenv overrides still compose on top.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "skiff-test-xdg-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+	os.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	// newTestApp constructs through the production newApp core, which
+	// loads the user config. Pin icons to "off" in the throwaway config:
+	// the default ("auto") shells out to Nerd Font detection for every
+	// constructed app, and would make glyph-level draw assertions depend
+	// on the fonts installed on whatever machine runs the suite. "off"
+	// is also exactly what the old hand-rolled test literal produced.
+	cfgDir := filepath.Join(dir, "config", "skiff")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		panic(err)
+	}
+	cfg := []byte("{\"icons\":\"off\"}\n")
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), cfg, 0o644); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+// newTestApp builds a fully-wired App against a tcell.SimulationScreen,
+// through the same newApp core production runs — so tests see the real
+// baseline mouseFlags, the user config, and custom actions (TestMain
+// points XDG at a throwaway dir, so both loaders read test-owned state,
+// never the developer's). It still skips New's tail on purpose: no
+// welcome flash, no startTreeRefresh ticker, no finder index build, and
+// no restoreSession — background goroutines and persisted sessions have
+// no place under `go test`.
 func newTestApp(t *testing.T, root string) *App {
 	t.Helper()
 	scr := tcell.NewSimulationScreen("UTF-8")
@@ -44,18 +81,7 @@ func newTestApp(t *testing.T, root string) *App {
 	if err != nil {
 		t.Fatalf("tree: %v", err)
 	}
-	a := &App{
-		screen:         scr,
-		theme:          theme.Default(),
-		rootDir:        tree.Root.Path,
-		tree:           tree,
-		hoveredMenuRow: -1,
-		diffPanelRow:   -1,
-		sidebarShown:   true,
-		sidebarWidth:   defaultSidebarWidth,
-		wrapOn:         true,
-	}
-	a.setActiveFolder(tree.Root.Path)
+	a := newApp(scr, tree.Root.Path, tree, true)
 	a.width, a.height = scr.Size()
 	// New() seeds git state synchronously before the loop starts; the
 	// cached branch is what gates the Git panel, so tests need the same
@@ -76,6 +102,200 @@ func newTestApp(t *testing.T, root string) *App {
 		}
 	})
 	return a
+}
+
+// TestNewApp_SharedShape pins the construction core every mode shares:
+// the sentinels, the baseline mouse flags, the wrap default, and the
+// active-folder anchor. These fields used to be hand-copied across three
+// constructors and drifted (the test constructor shipped without
+// mouseFlags, so 38 test files validated an App shape production never
+// has); newApp is now the single place they are set.
+func TestNewApp_SharedShape(t *testing.T) {
+	dir := t.TempDir()
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	t.Cleanup(func() { scr.Fini() })
+
+	tree, err := filetree.New(dir)
+	if err != nil {
+		t.Fatalf("tree: %v", err)
+	}
+	a := newApp(scr, tree.Root.Path, tree, true)
+	if a.mouseFlags != mouseBaseFlags {
+		t.Fatalf("mouseFlags = %v, want baseline %v", a.mouseFlags, mouseBaseFlags)
+	}
+	if a.hoveredMenuRow != -1 || a.diffPanelRow != -1 {
+		t.Fatalf("sentinels not seeded: hoveredMenuRow=%d diffPanelRow=%d",
+			a.hoveredMenuRow, a.diffPanelRow)
+	}
+	if !a.wrapOn {
+		t.Fatal("wrapOn should default to true")
+	}
+	if a.sidebarWidth != defaultSidebarWidth {
+		t.Fatalf("sidebarWidth = %d, want %d", a.sidebarWidth, defaultSidebarWidth)
+	}
+	if !a.sidebarShown {
+		t.Fatal("tree mode should show the sidebar when asked")
+	}
+	if a.activeFolder != tree.Root.Path {
+		t.Fatalf("activeFolder = %q, want tree root %q", a.activeFolder, tree.Root.Path)
+	}
+
+	// The tree-less path anchors the active folder on rootDir instead.
+	b := newApp(scr, dir, nil, false)
+	if b.tree != nil || b.sidebarShown {
+		t.Fatal("tree-less mode should have no tree and a hidden sidebar")
+	}
+	if b.activeFolder != dir {
+		t.Fatalf("activeFolder = %q, want rootDir %q", b.activeFolder, dir)
+	}
+}
+
+// TestNewSingleFileApp_ShapeInvariants pins the single-file mode
+// contract: no tree, no sidebar, no finder, and the file open in a tab —
+// the state the production tree==nil guard sites (openFinder,
+// menuToggleSidebar, the gitstatus tree tint, ...) exist to handle,
+// previously reachable in tests only by hand-patching tree=nil onto a
+// tree-backed app that still had a sidebar and a finder.
+func TestNewSingleFileApp_ShapeInvariants(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "solo.txt")
+	if err := os.WriteFile(target, []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	t.Cleanup(func() { scr.Fini() })
+	scr.SetSize(120, 40)
+
+	a := newSingleFileApp(scr, target)
+
+	if a.tree != nil {
+		t.Fatal("single-file mode must not build a tree")
+	}
+	if a.sidebarShown {
+		t.Fatal("single-file mode must hide the sidebar")
+	}
+	if a.finder != nil {
+		t.Fatal("single-file mode must not build a project index")
+	}
+	if a.hasTree() {
+		t.Fatal("hasTree must report false so tree-dependent menu rows hide")
+	}
+	if got := a.tabs.Len(); got != 1 {
+		t.Fatalf("tabs = %d, want exactly the one file", got)
+	}
+	if got := a.tabs.Tabs()[0].Path; got != target {
+		t.Fatalf("tab path = %q, want %q", got, target)
+	}
+	wantRoot, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	if a.rootDir != wantRoot {
+		t.Fatalf("rootDir = %q, want the file's parent %q", a.rootDir, wantRoot)
+	}
+
+	// One guarded behavior end to end: the finder opener must decline —
+	// flash, no modal — instead of popping an always-empty picker.
+	a.openFinder()
+	if a.anyModalOpen() {
+		t.Fatal("openFinder must not open a modal in single-file mode")
+	}
+	if !strings.Contains(a.statusMsg, "single-file") {
+		t.Fatalf("openFinder should explain itself, statusMsg = %q", a.statusMsg)
+	}
+}
+
+// TestRun_DrainsBurstAndExits drives the real event loop end to end: a
+// queued wheel burst must be fully applied (the drain loop's whole
+// reason to exist is one draw per burst, not one per event), and the
+// Esc-leader quit must terminate the loop through the same dispatch a
+// user's keystrokes take. The trash teardown is asserted through the
+// Run→Close composition main.go actually runs — emptyTrash moved from
+// Run's tail into Close so signal quits and recovered panics empty it
+// too, and TestClose_EmptiesTrash pins Close's half directly.
+func TestRun_DrainsBurstAndExits(t *testing.T) {
+	dir := t.TempDir()
+	big := filepath.Join(dir, "big.txt")
+	if err := os.WriteFile(big, []byte(strings.Repeat("line\n", 200)), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	doomed := filepath.Join(dir, "doomed.txt")
+	if err := os.WriteFile(doomed, []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	a := newTestApp(t, dir)
+	scr, ok := a.screen.(tcell.SimulationScreen)
+	if !ok {
+		t.Fatal("newTestApp must build on a SimulationScreen")
+	}
+	a.openFile(big)
+	if err := a.moveToTrash(doomed); err != nil {
+		t.Fatalf("moveToTrash: %v", err)
+	}
+	stored := a.trashed[len(a.trashed)-1].stored
+	if _, err := os.Stat(stored); err != nil {
+		t.Fatalf("trash copy should exist before Run: %v", err)
+	}
+
+	// Quiesce before injecting: openFile kicks an async git refresh
+	// whose completion event would otherwise share the simulation
+	// screen's 10-slot queue with the burst below (postEvent blocks
+	// when it is full).
+	deadline := time.Now().Add(3 * time.Second)
+	for (a.gitRefreshInFlight || scr.HasPendingEvent()) && time.Now().Before(deadline) {
+		if scr.HasPendingEvent() {
+			a.handleEvent(scr.PollEvent())
+		} else {
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+
+	// Queue the whole session up front: a wheel burst in the editor pane,
+	// then the two-keystroke Esc-leader quit. 7 events stay safely under
+	// the queue's 10-event capacity.
+	const burst = 5
+	x, y := a.sidebarW()+10, 5
+	for i := 0; i < burst; i++ {
+		scr.InjectMouse(x, y, tcell.WheelDown, tcell.ModNone)
+	}
+	scr.InjectKey(tcell.KeyEscape, 0, tcell.ModNone)
+	scr.InjectKey(tcell.KeyRune, 'q', tcell.ModNone)
+
+	done := make(chan error, 1)
+	go func() { done <- a.Run() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run hung: Esc q never terminated the loop (blocked in PollEvent?)")
+	}
+
+	if !a.quit {
+		t.Fatal("Run returned without quit set")
+	}
+	tab := a.activeTabPtr()
+	if tab == nil {
+		t.Fatal("no active tab after Run")
+	}
+	if want := burst * wheelLines; tab.ScrollY != want {
+		t.Fatalf("ScrollY = %d, want the full burst %d", tab.ScrollY, want)
+	}
+
+	// main.go defers Close around Run; the composed exit path is what
+	// discards the delete-undo window.
+	a.Close()
+	if _, err := os.Stat(stored); !os.IsNotExist(err) {
+		t.Fatal("Run+Close should have emptied the trash")
+	}
 }
 
 // TestNewFileLabel_Plain shows the bare label when the active folder is the

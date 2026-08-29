@@ -282,6 +282,13 @@ type RunRecord struct {
 // blocks on or aborts because of a log write — runCustomAction
 // ignores the return value on purpose.
 //
+// The log carries the full combined stdout+stderr of every custom
+// action the user runs — scp/ssh one-liners are the documented use
+// case, so hostnames and whatever a verbose tool prints land in it.
+// Both the log file and the directory it lives in are created
+// owner-only so a shared multi-user box can't let another local
+// account read it.
+//
 // Format is intentionally line-oriented and grep-friendly:
 //
 //	[2026-04-30T13:26:32-07:00] Open on Rager (1.234s) → ok
@@ -297,14 +304,17 @@ func AppendLog(logPath string, r RunRecord) error {
 	if logPath == "" {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
 		return fmt.Errorf("mkdir log dir: %w", err)
 	}
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open log: %w", err)
 	}
 	defer f.Close()
+	// Best-effort: logs created by older releases were 0644; tighten
+	// on the next append rather than leaving history world-readable.
+	_ = f.Chmod(0o600)
 
 	status := "ok"
 	if r.ExitErr != nil {

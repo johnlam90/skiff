@@ -88,7 +88,11 @@ func (a *App) saveTab(tab *editor.Tab) bool {
 // the first error before deciding what to do with the rest.
 func (a *App) saveAllDirty() bool {
 	for _, tab := range a.tabs.Tabs() {
-		if !tab.Dirty {
+		// A DiskGone tab is included even though it isn't Dirty: saving
+		// it writes the buffer back out via os.WriteFile, which creates
+		// the file again, resolving the "deleted on disk" state the
+		// same way Save always has for a clean write.
+		if !tab.Dirty && !tab.DiskGone {
 			continue
 		}
 		if !a.saveTab(tab) {
@@ -98,31 +102,37 @@ func (a *App) saveAllDirty() bool {
 	return true
 }
 
-// dirtyTabCount returns the number of tabs with unsaved changes.
-// Used by the quit flow to decide whether to skip the modal entirely.
+// dirtyTabCount returns the number of tabs needing attention before a
+// quit: tabs with unsaved edits (Dirty) and tabs whose backing file is
+// gone (DiskGone) — both would lose the buffer's only surviving copy if
+// the editor exited without asking. Used by the quit flow to decide
+// whether to skip the modal entirely.
 func (a *App) dirtyTabCount() int {
 	n := 0
 	for _, tab := range a.tabs.Tabs() {
-		if tab.Dirty {
+		if tab.Dirty || tab.DiskGone {
 			n++
 		}
 	}
 	return n
 }
 
-// requestCloseTab closes tab. A clean tab closes immediately; a dirty
-// tab opens the unsaved-changes modal so the user can pick Save /
-// Discard / Cancel. The Save path saves the buffer first and only
-// closes the tab on success — a save error would otherwise silently
-// lose the user's work. The callbacks capture the tab itself, so any
-// list mutation between the modal opening and the user's click (a
-// preview replacement, another close) can never redirect them onto the
-// wrong tab.
+// requestCloseTab closes tab. A clean tab with its file still on disk
+// closes immediately; a dirty tab, or a clean tab whose file is
+// DiskGone, opens the unsaved-changes modal so the user can pick Save /
+// Discard / Cancel — a DiskGone tab's buffer is the only surviving copy
+// of that content, so closing it silently would lose it exactly like a
+// dirty tab would. The Save path saves the buffer first and only closes
+// the tab on success — a save error would otherwise silently lose the
+// user's work. The callbacks capture the tab itself, so any list
+// mutation between the modal opening and the user's click (a preview
+// replacement, another close) can never redirect them onto the wrong
+// tab.
 func (a *App) requestCloseTab(tab *editor.Tab) {
 	if tab == nil || a.tabs.IndexOf(tab) < 0 {
 		return
 	}
-	if !tab.Dirty {
+	if !tab.Dirty && !tab.DiskGone {
 		a.closeTab(tab)
 		return
 	}
