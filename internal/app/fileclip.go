@@ -123,7 +123,7 @@ func (a *App) startFileOp(label, src, dest string, move bool) {
 	a.fileOpBusy = true
 	a.flash(gerundOf(label) + " " + filepath.Base(src) + "…")
 	scr := a.screen
-	go func() {
+	a.safeGo("file-op", func() {
 		var count int64
 		lastTick := time.Now()
 		progress := func() {
@@ -140,7 +140,7 @@ func (a *App) startFileOp(label, src, dest string, move bool) {
 			err = copyTree(src, dest, progress)
 		}
 		_ = scr.PostEvent(&fileOpDoneEvent{when: time.Now(), label: label, src: src, dest: dest, moved: move, err: err})
-	}()
+	})
 }
 
 // handleFileOpProgress keeps the user informed mid-copy.

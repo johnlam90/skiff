@@ -12,6 +12,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -353,7 +354,7 @@ func (p *Pick) Draw(scr tcell.Screen) {
 	fieldW := (r.X + r.W - 3) - fieldStart + 1
 	p.Filter.Draw(scr, fieldStart, r.Y+3, fieldW, inputStyle, true)
 	if len(p.Filter.Value) == 0 {
-		drawText(scr, fieldStart, r.Y+3, "type to filter…",
+		drawText(scr, fieldStart, r.Y+3, fieldW, "type to filter…",
 			tcell.StyleDefault.Background(th.BG).Foreground(th.Subtle))
 	}
 
@@ -368,7 +369,7 @@ func (p *Pick) Draw(scr tcell.Screen) {
 		p.drawRow(scr, r, rowsStart+i, p.Items[filtered[idx]], idx == p.Selected)
 	}
 	if len(filtered) == 0 {
-		drawText(scr, r.X+2, rowsStart, "no matches", mutedStyle)
+		drawText(scr, r.X+2, rowsStart, r.W-4, "no matches", mutedStyle)
 	}
 	// After the rows: drawRow fills the frame's inner width, padding
 	// column included, so the bar has to land on top of it.
@@ -396,21 +397,12 @@ func (p *Pick) drawRow(scr tcell.Screen, r Rect, ry int, it PickItem, selected b
 	}
 	drawClippedText(scr, r.X+4, ry, r.W-6-runeLen(it.Tag), it.Label, style)
 	if it.Tag != "" {
-		drawText(scr, r.X+r.W-2-runeLen(it.Tag), ry, it.Tag, rowStyle.Foreground(th.Muted))
+		drawText(scr, r.X+r.W-2-runeLen(it.Tag), ry, runeLen(it.Tag), it.Tag, rowStyle.Foreground(th.Muted))
 	}
 }
 
-// drawClippedText writes s at (x, y) truncated to maxW cells.
+// drawClippedText writes s at (x, y) truncated to maxW cells,
+// cluster-aware via textdraw so wide glyphs clip on cell boundaries.
 func drawClippedText(scr tcell.Screen, x, y, maxW int, s string, st tcell.Style) {
-	if maxW <= 0 {
-		return
-	}
-	col := 0
-	for _, ch := range s {
-		if col >= maxW {
-			break
-		}
-		scr.SetContent(x+col, y, ch, nil, st)
-		col++
-	}
+	textdraw.DrawClipped(scr, x, y, maxW, s, st)
 }

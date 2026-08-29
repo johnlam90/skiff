@@ -21,6 +21,23 @@ import (
 	"time"
 )
 
+// TestMain redirects every XDG base directory to a throwaway root before
+// any test runs. Most tests here already redirect per-test, but TestMain
+// is the backstop that makes a forgotten redirect in a future test
+// harmless instead of a write into the developer's real
+// ~/.config/skiff/actions.json or ~/.local/state/skiff/actions.log.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "skiff-test-xdg-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+	os.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 // TestLoad_MissingFile confirms the "no config" case is silent — we
 // shouldn't fail editor startup just because the user hasn't created
 // the file.
@@ -424,5 +441,34 @@ func TestAppendLog_CreatesParentDir(t *testing.T) {
 func TestAppendLog_EmptyPathIsNoOp(t *testing.T) {
 	if err := AppendLog("", RunRecord{Label: "x"}); err != nil {
 		t.Fatalf("empty path AppendLog: %v", err)
+	}
+}
+
+// TestAppendLog_OwnerOnlyPermissions pins the log's confidentiality: it
+// captures the full combined stdout+stderr of every custom action a user
+// runs (scp/ssh one-liners are the documented use case), so on a shared
+// box neither the log file nor its parent directory may be readable by
+// anyone but the owner. Asserted as "no group/other bits" rather than an
+// exact mode because OpenFile/MkdirAll perms are capped by the process
+// umask.
+func TestAppendLog_OwnerOnlyPermissions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state", "actions.log")
+	if err := AppendLog(path, RunRecord{Time: time.Now(), Label: "x"}); err != nil {
+		t.Fatalf("AppendLog: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat log: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Fatalf("log file mode = %v, want no group/other bits", perm)
+	}
+	dirInfo, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("stat log dir: %v", err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm&0o077 != 0 {
+		t.Fatalf("log dir mode = %v, want no group/other bits", perm)
 	}
 }

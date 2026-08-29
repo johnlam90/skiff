@@ -173,7 +173,7 @@ func (n *Info) Draw(scr tcell.Screen) {
 		// line: a diff marker lives in column 0 either way, and the
 		// ellipsis must not recolor the row.
 		st := DiffLineStyle(th, bg, line)
-		drawText(scr, r.X+2, r.Y+3+i, trimRunes(line, r.W-4), st)
+		drawText(scr, r.X+2, r.Y+3+i, r.W-4, trimRunes(line, r.W-4), st)
 	}
 	n.bar(r).draw(scr, th)
 	DrawButton(scr, r.X+(r.W-10)/2, r.Y+r.H-3, "[  OK  ]", bg, th.Accent, true)

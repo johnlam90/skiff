@@ -542,6 +542,9 @@ func New(rootDir string) (*App, error) {
 	// takes ~150ms; the user pays it once at startup instead of
 	// when they're trying to navigate.
 	a.finder = finder.New(rootDir)
+	// Route the index build through the crash guard: internal/finder
+	// can't import internal/app, so the guard rides in as a hook.
+	a.finder.PanicGuard = a.safeGo
 	scr2 := a.screen
 	a.finder.Rebuild(func() {
 		_ = scr2.PostEvent(&finderRebuiltEvent{when: time.Now()})
@@ -653,6 +656,12 @@ func (a *App) applyColorDepth() {
 // at all. Nothing here needs to unwind the mode by hand.
 func (a *App) Close() {
 	a.saveSession()
+	// The undo window for deletes is the session: discard the trash on
+	// the way out so removed work doesn't pile up invisibly on disk.
+	// Living here rather than at the tail of Run means a signal quit or
+	// a recovered panic empties it too — every exit path funnels
+	// through Close.
+	a.emptyTrash()
 	a.stopTreeRefresh()
 	a.stopAutoScroll()
 	if a.screen != nil {
@@ -663,6 +672,27 @@ func (a *App) Close() {
 // Run is the editor's main event loop. It blocks on PollEvent, dispatches
 // each event, redraws, and exits when a.quit is set.
 func (a *App) Run() error {
+	// A panic on the event loop must not reach the runtime with the
+	// terminal still raw: restore it, leave a crash log the user can
+	// paste into a bug report, and re-panic so the exit code and trace
+	// still signal failure. Registered first so it also covers the
+	// other defers.
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		a.Close()
+		reportCrash("event-loop", handleGoroutinePanic("event-loop", r))
+		panic(r)
+	}()
+
+	// Route SIGTERM/SIGHUP/SIGINT through the loop as a clean quit so
+	// `tmux kill-pane` and friends restore the terminal instead of
+	// leaving raw mode and mouse tracking behind.
+	stopSignals := a.watchSignals()
+	defer stopSignals()
+
 	a.width, a.height = a.screen.Size()
 	// Apply the narrow-terminal rule against the size we booted at, not
 	// just against later resizes: starting inside a 55-column tmux pane
@@ -697,9 +727,6 @@ func (a *App) Run() error {
 		a.draw()
 		a.screen.Show()
 	}
-	// The undo window for deletes is the session: discard the trash on
-	// the way out so removed work doesn't pile up invisibly on disk.
-	a.emptyTrash()
 	return nil
 }
 
@@ -733,6 +760,11 @@ func (a *App) handleEvent(ev tcell.Event) {
 		a.lastEscape = time.Time{}
 	case *tcell.EventMouse:
 		a.handleMouse(e)
+	case *quitRequestEvent:
+		// A signal, not a person: skip the dirty-tab modal and quit.
+		// Close()'s session save preserves state, and dirty buffers
+		// come back dirty on the next open's session restore.
+		a.quit = true
 	case *autoScrollEvent:
 		a.handleAutoScroll()
 	case *treeRefreshEvent:

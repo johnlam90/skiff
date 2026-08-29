@@ -42,6 +42,7 @@ import (
 
 	"github.com/johnlam90/skiff/internal/icons"
 	"github.com/johnlam90/skiff/internal/scrollbar"
+	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 
 	"github.com/johnlam90/skiff/internal/git"
@@ -1274,9 +1275,11 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 	}
 
 	drawString(scr, x, y, w, prefix, rowStyle)
-	px := len([]rune(prefix))
+	// Cell widths, not rune counts: a Nerd Font glyph or a CJK chain
+	// label advancing by its rune count would overdraw the name.
+	px := textdraw.Width(prefix)
 	drawString(scr, x+px, y, w-px, glyph, glyphStyle)
-	gx := len([]rune(glyph))
+	gx := textdraw.Width(glyph)
 	drawString(scr, x+px+gx, y, w-px-gx, "  "+suffix, rowStyle)
 	drawChangeLetter(scr, x, y, w, change, rowStyle)
 }
@@ -1331,16 +1334,11 @@ func gitChangeColor(th theme.Theme, change GitChangeKind) tcell.Color {
 }
 
 // drawString writes s left-aligned within [x, x+w). Excess content is
-// truncated; short content is implicitly padded by the row's pre-painted bg.
+// truncated; short content is implicitly padded by the row's pre-painted
+// bg. Cluster-aware via textdraw, so a CJK filename clips at the sidebar
+// edge instead of drifting past it.
 func drawString(scr tcell.Screen, x, y, w int, s string, st tcell.Style) {
-	col := 0
-	for _, r := range s {
-		if col >= w {
-			return
-		}
-		scr.SetContent(x+col, y, r, nil, st)
-		col++
-	}
+	textdraw.DrawClipped(scr, x, y, w, s, st)
 }
 
 // clampScroll keeps ScrollY within bounds for the current visible-row count.

@@ -40,13 +40,63 @@ import (
 //
 // perm applies to the final file; the temp file is created 0600 and
 // chmod'd before the rename so the bytes are never briefly world
-// readable.
+// readable. Any directory MkdirAll has to create along the way is
+// owner-only (0700) — Write is the path every per-user config/state
+// file (session, trust store) goes through, so a directory it creates
+// from scratch should default to private rather than group/other
+// readable. This only affects directories Write itself creates:
+// MkdirAll never chmods a directory that already exists, so a
+// pre-created project directory (e.g. a project's .skiff/, made
+// group/other readable by format.InstallCommandIntoProject) is left
+// untouched.
 func Write(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
+	return replaceFile(path, data, perm)
+}
 
+// Replace atomically replaces the file at path with data, following the
+// rules a *user's* file needs that Write's config-file contract doesn't:
+// the path is resolved through symlinks first (saving through a link must
+// update the target, not replace the link with a regular file), and the
+// existing file's permission bits are preserved (a 0755 script stays
+// executable). A file that doesn't exist yet is created 0644.
+//
+// Known, accepted limitations of rename-based replace: hard links to
+// the file are broken (the other names keep the old inode); xattrs,
+// ACLs and ownership are not copied (chown needs privileges). If those
+// matter, the alternative is write-in-place + fsync with a backup file
+// — a different design.
+func Replace(path string, data []byte) error {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		// A first save of a new file has nothing to resolve; resolve
+		// the parent directory instead (it may itself be a link) and
+		// rejoin the base name.
+		parent, perr := filepath.EvalSymlinks(filepath.Dir(path))
+		if perr != nil {
+			return perr
+		}
+		resolved = filepath.Join(parent, filepath.Base(path))
+	}
+	perm := os.FileMode(0644)
+	if info, err := os.Stat(resolved); err == nil {
+		perm = info.Mode().Perm()
+	}
+	return replaceFile(resolved, data, perm)
+}
+
+// replaceFile is the temp/rename/sync core Write and Replace share:
+// write the full bytes into a sibling temp file, fsync, rename over the
+// target, then sync the directory. The parent directory must already
+// exist — Write's MkdirAll and Replace's resolve step each guarantee
+// that in their own way.
+func replaceFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
@@ -67,6 +117,26 @@ func Write(path string, data []byte, perm os.FileMode) error {
 		_ = os.Remove(tmp)
 		return err
 	}
+	// The data rename already succeeded, so the caller's bytes are the
+	// file's bytes; a failed directory sync must not report the save as
+	// failed. It only narrows the crash window in which the rename
+	// itself could be lost.
+	_ = syncDir(dir)
+	return nil
+}
+
+// syncDir fsyncs a directory so a rename that just landed in it
+// survives a crash — rename(2) is atomic but not durable until the
+// directory entry itself reaches the disk. Best-effort by design: some
+// platforms and filesystems refuse to open or sync a directory, and
+// degrading quietly there is correct where refusing to save is not.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil
+	}
+	defer d.Close()
+	_ = d.Sync()
 	return nil
 }
 

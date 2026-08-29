@@ -17,9 +17,27 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+// TestMain redirects every XDG base directory to a throwaway root before
+// any test runs. Most tests here already call redirectStore per-test, but
+// TestMain is the backstop that makes a forgotten redirect in a future
+// test harmless instead of a write into the developer's real
+// ~/.local/state/skiff/sessions/.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "skiff-test-xdg-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+	os.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 // redirectStore points the store at a temp dir for the test.
 func redirectStore(t *testing.T) string {
@@ -306,5 +324,52 @@ func TestReadProjectFileRejectsFutureVersion(t *testing.T) {
 	}
 	if _, ok := Load("/proj"); ok {
 		t.Fatal("future version should not load")
+	}
+}
+
+// TestSave_OwnerOnlyPermissions pins the session store's
+// confidentiality: every project root and open file path a user has
+// touched lands here, so on a shared box neither the per-project file
+// nor the sessions directory may be readable by anyone but the owner.
+// Asserted as "no group/other bits" rather than an exact mode because
+// the process umask caps what OpenFile/MkdirAll actually produce.
+func TestSave_OwnerOnlyPermissions(t *testing.T) {
+	redirectStore(t)
+	if err := Save("/proj/perm", Project{SavedAt: time.Now()}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	path := pathFor(t, "/proj/perm")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat session file: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Fatalf("session file mode = %v, want no group/other bits", perm)
+	}
+	dirInfo, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("stat sessions dir: %v", err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm&0o077 != 0 {
+		t.Fatalf("sessions dir mode = %v, want no group/other bits", perm)
+	}
+}
+
+// TestStateDirIsRedirectedDuringTests pins the isolation contract this
+// suite relies on: with TestMain's XDG redirect in place, the session
+// store must never resolve under the developer's real home. If this
+// fails, some test cleared XDG_STATE_HOME or TestMain was removed —
+// either way the suite is about to write into ~/.local/state/skiff.
+func TestStateDirIsRedirectedDuringTests(t *testing.T) {
+	dir, err := stateDir()
+	if err != nil {
+		t.Fatalf("stateDir: %v", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	if strings.HasPrefix(dir, filepath.Join(home, ".local")) {
+		t.Fatalf("stateDir resolved under the real home during tests: %s", dir)
 	}
 }

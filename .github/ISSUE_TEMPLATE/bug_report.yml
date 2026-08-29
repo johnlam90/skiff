@@ -1,0 +1,71 @@
+name: Bug report
+description: Something in Skiff is broken or behaving unexpectedly.
+labels: ["needs-triage"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: skiff version
+      description: Paste the output of `skiff --version`.
+    validations:
+      required: true
+  - type: input
+    id: term
+    attributes:
+      label: $TERM
+      description: Paste the output of `echo $TERM`.
+    validations:
+      required: true
+  - type: input
+    id: emulator
+    attributes:
+      label: Terminal emulator
+      description: e.g. iTerm2, macOS Terminal, Ghostty, Windows Terminal, kitty
+    validations:
+      required: true
+  - type: dropdown
+    id: multiplexer
+    attributes:
+      label: Multiplexer
+      options:
+        - tmux
+        - zellij
+        - herdr
+        - none
+        - other
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection
+      options:
+        - local
+        - SSH
+    validations:
+      required: true
+  - type: input
+    id: os-arch
+    attributes:
+      label: OS / arch
+      description: e.g. macOS arm64, Ubuntu 24.04 amd64
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: false

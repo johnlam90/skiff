@@ -1437,6 +1437,71 @@ func TestRender_DirtyRowsShowStatusLetter(t *testing.T) {
 	}
 }
 
+// TestRender_CJKFilenameKeepsStatusLetterAligned pins the tree's
+// wide-glyph layout: each ideograph of a CJK filename occupies two cells
+// (base cell plus an untouched continuation cell), the dirty-status
+// letter still lands at the row's right edge, and nothing paints past
+// the sidebar width. Before textdraw, drawString painted one rune per
+// COLUMN, so consecutive ideographs landed in adjacent cells and
+// rendered as overlapping garbage.
+func TestRender_CJKFilenameKeepsStatusLetterAligned(t *testing.T) {
+	root := t.TempDir()
+	const name = "日本語ファイル.go"
+	mustWrite(t, filepath.Join(root, name), "package x\n")
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tr.DirtyFiles = map[string]GitChangeKind{filepath.Join(root, name): GitChangeModified}
+
+	// Narrow tree inside a wider screen, so painting past the sidebar
+	// edge would be visible — the same shape as the placeholder clip test.
+	const treeW = 30
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("scr.Init: %v", err)
+	}
+	t.Cleanup(scr.Fini)
+	scr.SetSize(40, 20)
+	tr.Render(scr, theme.Default(), 0, 0, treeW, 20)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+
+	fileY := findRowY(cells, w, 20, "日")
+	if fileY < 0 {
+		t.Fatal("could not find the CJK file row in render output")
+	}
+	// Locate the first ideograph, then check the cluster layout: base
+	// cell, untouched continuation cell (tcell paints the wide glyph
+	// through it), and the next ideograph exactly two cells later.
+	col := -1
+	for x := 0; x < treeW; x++ {
+		if c := cells[fileY*w+x]; len(c.Runes) > 0 && c.Runes[0] == '日' {
+			col = x
+			break
+		}
+	}
+	if col < 0 {
+		t.Fatal("日 not found on the CJK file row")
+	}
+	if c := cells[fileY*w+col+1]; len(c.Runes) > 0 && c.Runes[0] != ' ' {
+		t.Fatalf("continuation cell after 日 holds a glyph: %q", c.Runes)
+	}
+	if c := cells[fileY*w+col+2]; len(c.Runes) == 0 || c.Runes[0] != '本' {
+		t.Fatalf("cell two after 日 = %q, want 本", c.Runes)
+	}
+	// The status letter keeps its right-edge home.
+	if c := cells[fileY*w+(treeW-2)]; len(c.Runes) == 0 || c.Runes[0] != 'M' {
+		t.Fatalf("status letter cell = %q, want M at column %d", c.Runes, treeW-2)
+	}
+	// And no glyph escapes the sidebar.
+	for x := treeW; x < w; x++ {
+		if c := cells[fileY*w+x]; len(c.Runes) > 0 && c.Runes[0] != ' ' {
+			t.Fatalf("glyph painted past the sidebar at x=%d: %q", x, c.Runes[0])
+		}
+	}
+}
+
 // TestReload_HidesTrashEntries pins the session-trash filter: an
 // in-place trash entry (TrashPrefix rename fallback) is deleted
 // content awaiting Undo and must never appear as a tree row.
