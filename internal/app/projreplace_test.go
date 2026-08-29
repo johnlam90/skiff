@@ -20,6 +20,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/search"
 )
 
@@ -59,6 +60,33 @@ func TestProjReplaceTabGesture(t *testing.T) {
 	a.handleProjFindKey(tcell.NewEventKey(tcell.KeyTab, 0, 0))
 	if a.projFocusReplace {
 		t.Fatal("second Tab should hop back to the query")
+	}
+}
+
+// TestApplyMatchesToTab_MultiOccurrenceLineCountsOnce is the buffer-side
+// counterpart of the disk-side idempotence fix: two per-occurrence
+// matches on one line ("foo(foo)") must rewrite that line exactly once
+// (one ReplaceLines staging) and report occ == 2, not 4 — the earlier
+// per-match loop staged newLines[i] without mutating the buffer, so the
+// second match on the line still verified against the ORIGINAL text and
+// got double-counted on top of the first.
+func TestApplyMatchesToTab_MultiOccurrenceLineCountsOnce(t *testing.T) {
+	root := t.TempDir()
+	p := mkFile(t, root, "dup.txt", "foo(foo)\n")
+	tab, err := editor.NewTab(p)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	group := []search.Match{
+		{Path: "dup.txt", Line: 1, Col: 0, Text: "foo(foo)"},
+		{Path: "dup.txt", Line: 1, Col: 4, Text: "foo(foo)"},
+	}
+	occ, skipped := applyMatchesToTab(tab, group, "foo", "bar", search.DefaultOptions())
+	if occ != 2 || skipped != 0 {
+		t.Fatalf("counts: occ=%d skipped=%d, want occ=2 skipped=0", occ, skipped)
+	}
+	if tab.Buffer.Lines[0] != "bar(bar)" {
+		t.Fatalf("buffer: %q, want %q", tab.Buffer.Lines[0], "bar(bar)")
 	}
 }
 

@@ -105,18 +105,34 @@ func (a *App) findOpenTab(abs string) (*editor.Tab, bool) {
 }
 
 // applyMatchesToTab rewrites a tab's matched lines in one undo step,
-// verifying each line against what the sweep recorded first.
+// verifying each line against what the sweep recorded first. Matches are
+// per-occurrence, but staging never mutates tab.Buffer.Lines until the
+// end — so unlike the disk path, a naive per-match loop wouldn't even
+// see its own edits, it would DOUBLE-count: a second same-line match
+// would still verify clean against the untouched buffer and add its own
+// ReplaceLine pass on top of the first. Group by line and touch each one
+// once, exactly as ApplyReplace does on disk.
 func applyMatchesToTab(tab *editor.Tab, group []search.Match, query, repl string, opts search.Options) (occ, skipped int) {
-	newLines := map[int]string{}
+	byLine := map[int][]search.Match{}
+	var lineOrder []int
 	for _, m := range group {
-		i := m.Line - 1
-		if i < 0 || i >= tab.Buffer.LineCount() || !search.VerifyLine(tab.Buffer.Lines[i], m.Text) {
-			skipped++
+		if _, seen := byLine[m.Line]; !seen {
+			lineOrder = append(lineOrder, m.Line)
+		}
+		byLine[m.Line] = append(byLine[m.Line], m)
+	}
+
+	newLines := map[int]string{}
+	for _, ln := range lineOrder {
+		ms := byLine[ln]
+		i := ln - 1
+		if i < 0 || i >= tab.Buffer.LineCount() || !search.VerifyLine(tab.Buffer.Lines[i], ms[0].Text) {
+			skipped += len(ms)
 			continue
 		}
 		nl, n := search.ReplaceLine(tab.Buffer.Lines[i], query, repl, opts)
 		if n == 0 {
-			skipped++
+			skipped += len(ms)
 			continue
 		}
 		newLines[i] = nl
