@@ -153,6 +153,64 @@ func TestNewApp_SharedShape(t *testing.T) {
 	}
 }
 
+// TestNewSingleFileApp_ShapeInvariants pins the single-file mode
+// contract: no tree, no sidebar, no finder, and the file open in a tab —
+// the state the production tree==nil guard sites (openFinder,
+// menuToggleSidebar, the gitstatus tree tint, ...) exist to handle,
+// previously reachable in tests only by hand-patching tree=nil onto a
+// tree-backed app that still had a sidebar and a finder.
+func TestNewSingleFileApp_ShapeInvariants(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "solo.txt")
+	if err := os.WriteFile(target, []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	t.Cleanup(func() { scr.Fini() })
+	scr.SetSize(120, 40)
+
+	a := newSingleFileApp(scr, target)
+
+	if a.tree != nil {
+		t.Fatal("single-file mode must not build a tree")
+	}
+	if a.sidebarShown {
+		t.Fatal("single-file mode must hide the sidebar")
+	}
+	if a.finder != nil {
+		t.Fatal("single-file mode must not build a project index")
+	}
+	if a.hasTree() {
+		t.Fatal("hasTree must report false so tree-dependent menu rows hide")
+	}
+	if got := a.tabs.Len(); got != 1 {
+		t.Fatalf("tabs = %d, want exactly the one file", got)
+	}
+	if got := a.tabs.Tabs()[0].Path; got != target {
+		t.Fatalf("tab path = %q, want %q", got, target)
+	}
+	wantRoot, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	if a.rootDir != wantRoot {
+		t.Fatalf("rootDir = %q, want the file's parent %q", a.rootDir, wantRoot)
+	}
+
+	// One guarded behavior end to end: the finder opener must decline —
+	// flash, no modal — instead of popping an always-empty picker.
+	a.openFinder()
+	if a.anyModalOpen() {
+		t.Fatal("openFinder must not open a modal in single-file mode")
+	}
+	if !strings.Contains(a.statusMsg, "single-file") {
+		t.Fatalf("openFinder should explain itself, statusMsg = %q", a.statusMsg)
+	}
+}
+
 // TestNewFileLabel_Plain shows the bare label when the active folder is the
 // project root.
 func TestNewFileLabel_Plain(t *testing.T) {

@@ -558,7 +558,15 @@ func NewSingleFile(filePath string) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newSingleFileApp(scr, filePath), nil
+}
 
+// newSingleFileApp is NewSingleFile minus the terminal: everything after
+// the screen exists, over whichever screen the caller provides. The seam
+// lets tests construct the real single-file shape (tree nil, sidebar
+// hidden, no finder) on a SimulationScreen instead of hand-patching
+// tree=nil onto a tree-backed app.
+func newSingleFileApp(scr tcell.Screen, filePath string) *App {
 	rootDir := filepath.Dir(filePath)
 	if rootDir == "" {
 		rootDir = "."
@@ -573,7 +581,7 @@ func NewSingleFile(filePath string) (*App, error) {
 	// `git diff`), so single-file mode shows change bars on open without
 	// the whole-repo status or tree walk that New performs.
 	a.openFile(filePath)
-	return a, nil
+	return a
 }
 
 // newTerminalScreen builds and initialises the real tcell screen both
