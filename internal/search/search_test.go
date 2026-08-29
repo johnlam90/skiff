@@ -322,6 +322,38 @@ func TestSearchAndReplace_CountsAgreeOnMultiOccurrenceLine(t *testing.T) {
 	}
 }
 
+// TestReplaceLineAt pins the occurrence-targeted rewrite the panel's
+// single-row apply relies on: only the occurrence starting at the given
+// rune column changes, a column with no qualifying hit is a no-op
+// reporting 0, and regex capture-group expansion works the same way
+// ReplaceLine's does.
+func TestReplaceLineAt(t *testing.T) {
+	got, n := ReplaceLineAt("foo(foo)", 0, "foo", "bar", DefaultOptions())
+	if got != "bar(foo)" || n != 1 {
+		t.Fatalf("first occurrence: %q (%d)", got, n)
+	}
+	got, n = ReplaceLineAt("foo(foo)", 4, "foo", "bar", DefaultOptions())
+	if got != "foo(bar)" || n != 1 {
+		t.Fatalf("second occurrence: %q (%d)", got, n)
+	}
+	// A column with no occurrence start is a no-op, not an error.
+	got, n = ReplaceLineAt("foo(foo)", 1, "foo", "bar", DefaultOptions())
+	if got != "foo(foo)" || n != 0 {
+		t.Fatalf("no hit at column: %q (%d)", got, n)
+	}
+	got, n = ReplaceLineAt("nothing here", 0, "foo", "bar", DefaultOptions())
+	if got != "nothing here" || n != 0 {
+		t.Fatalf("no match at all: %q (%d)", got, n)
+	}
+
+	opts := DefaultOptions()
+	opts.Regex = true
+	got, n = ReplaceLineAt("a=1 b=2", 4, `(\w+)=(\w+)`, "$2:$1", opts)
+	if got != "a=1 2:b" || n != 1 {
+		t.Fatalf("regex group expansion: %q (%d)", got, n)
+	}
+}
+
 // TestApplyReplaceRegexGroups: expansion flows through the disk path.
 func TestApplyReplaceRegexGroups(t *testing.T) {
 	root := t.TempDir()

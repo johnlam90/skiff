@@ -144,9 +144,30 @@ func applyMatchesToTab(tab *editor.Tab, group []search.Match, query, repl string
 	return occ, skipped
 }
 
+// applyMatchAtTab rewrites exactly the occurrence m names in tab's
+// buffer via ReplaceLineAt, verifying the recorded line first. Unlike
+// applyMatchesToTab (whole-line ReplaceLine, used for the group/confirm-
+// all path where "replace" means every occurrence on the line) this
+// targets one occurrence, so applying a single panel row can't consume
+// a sibling occurrence recorded on the same line.
+func applyMatchAtTab(tab *editor.Tab, m search.Match, query, repl string, opts search.Options) (occ, skipped int) {
+	i := m.Line - 1
+	if i < 0 || i >= tab.Buffer.LineCount() || !search.VerifyLine(tab.Buffer.Lines[i], m.Text) {
+		return 0, 1
+	}
+	nl, n := search.ReplaceLineAt(tab.Buffer.Lines[i], m.Col, query, repl, opts)
+	if n == 0 {
+		return 0, 1
+	}
+	tab.ReplaceLines(map[int]string{i: nl})
+	return n, 0
+}
+
 // projReplaceRowApply rewrites one match row: through the open buffer
 // when the file is up (clean tabs re-save, dirty tabs stay dirty with
-// the change applied), through the verified disk path otherwise.
+// the change applied), through the verified disk path otherwise. Both
+// paths target only the row's own occurrence — a sibling row recorded on
+// the same line is left untouched.
 func (a *App) projReplaceRowApply(row projFindRow) {
 	if row.MatchIdx < 0 || row.MatchIdx >= len(a.projFindMatches) {
 		return
@@ -156,7 +177,7 @@ func (a *App) projReplaceRowApply(row projFindRow) {
 	opts := a.projReplaceOpts()
 	abs := filepath.Join(a.rootDir, filepath.FromSlash(m.Path))
 	if tab, wasClean := a.findOpenTab(abs); tab != nil {
-		occ, skipped := applyMatchesToTab(tab, []search.Match{m}, query, repl, opts)
+		occ, skipped := applyMatchAtTab(tab, m, query, repl, opts)
 		if occ > 0 && wasClean {
 			if err := tab.Save(); err != nil {
 				a.flash(fmt.Sprintf("Replaced, but save failed: %v", err))
@@ -168,7 +189,7 @@ func (a *App) projReplaceRowApply(row projFindRow) {
 			a.flash(fmt.Sprintf("Replaced %d on %s:%d", occ, m.Path, m.Line))
 		}
 	} else {
-		rep := search.ApplyReplace(a.rootDir, []search.Match{m}, query, repl, opts)
+		rep := search.ApplyReplaceAt(a.rootDir, m, query, repl, opts)
 		if rep.Skipped > 0 {
 			a.flash("Skipped — the file changed since the search")
 		} else {

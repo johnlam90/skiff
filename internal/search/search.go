@@ -21,6 +21,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/johnlam90/skiff/internal/atomicfile"
 )
 
 // Match is one hit: a project-relative path, a 1-based line number, the
@@ -392,6 +394,56 @@ func ReplaceLine(line, query, repl string, opts Options) (string, int) {
 	return b.String(), n
 }
 
+// ReplaceLineAt rewrites only the occurrence that starts at rune column
+// col on line, returning the new line and 1, or the line unchanged and 0
+// when no qualifying occurrence starts exactly there. The panel's
+// row-apply uses it so one row rewrites one occurrence — its sibling
+// rows on the same line stay valid.
+func ReplaceLineAt(line string, col int, query, repl string, opts Options) (string, int) {
+	needle, caseSensitive, re, ok := CompileQuery(query, opts)
+	if !ok || query == "" {
+		return line, 0
+	}
+	hay := matchHaystack(line, caseSensitive, re)
+	from := 0
+	for from <= len(line) {
+		idx, length := lineMatchFrom(line, hay, from, needle, re, opts.WholeWord)
+		if idx < 0 {
+			return line, 0
+		}
+		runeCol := len([]rune(line[:idx]))
+		if runeCol == col {
+			var b strings.Builder
+			b.WriteString(line[:idx])
+			if re != nil {
+				// Same capture-group expansion ReplaceLine uses: the
+				// submatch scan on the suffix re-finds the same leftmost
+				// match lineMatchFrom just located, so loc[0] is 0.
+				if loc := re.FindStringSubmatchIndex(line[idx:]); loc != nil && loc[0] == 0 {
+					b.Write(re.Expand(nil, []byte(repl), []byte(line[idx:]), loc))
+				} else {
+					b.WriteString(repl)
+				}
+			} else {
+				b.WriteString(repl)
+			}
+			b.WriteString(line[idx+length:])
+			return b.String(), 1
+		}
+		if runeCol > col {
+			// Occurrences are found in left-to-right order, so once we've
+			// passed the target column nothing further can match it.
+			return line, 0
+		}
+		next := idx + length
+		if length == 0 {
+			next = idx + 1 // zero-width regex hit — force progress
+		}
+		from = next
+	}
+	return line, 0
+}
+
 // VerifyLine reports whether a live line still matches what the sweep
 // recorded — the guard that keeps replace from rewriting a line the
 // user (or anything else) edited after the search. Compared through
@@ -480,5 +532,40 @@ func ApplyReplace(rootDir string, matches []Match, query, repl string, opts Opti
 		rep.Replaced += fileOcc
 		rep.Files++
 	}
+	return rep
+}
+
+// ApplyReplaceAt is ApplyReplace narrowed to exactly one occurrence: it
+// verifies the recorded line once, rewrites only the occurrence at
+// m.Col via ReplaceLineAt, and writes the file back atomically. The
+// panel's single-row apply on a closed file goes through this instead of
+// ApplyReplace, so applying one row can never sweep up a sibling
+// occurrence recorded on the same line.
+func ApplyReplaceAt(rootDir string, m Match, query, repl string, opts Options) ReplaceReport {
+	var rep ReplaceReport
+	abs := filepath.Join(rootDir, m.Path)
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		rep.Skipped++
+		return rep
+	}
+	lines := strings.Split(string(data), "\n")
+	i := m.Line - 1
+	if i < 0 || i >= len(lines) || !VerifyLine(lines[i], m.Text) {
+		rep.Skipped++
+		return rep
+	}
+	newLine, n := ReplaceLineAt(lines[i], m.Col, query, repl, opts)
+	if n == 0 {
+		rep.Skipped++
+		return rep
+	}
+	lines[i] = newLine
+	if err := atomicfile.Replace(abs, []byte(strings.Join(lines, "\n"))); err != nil {
+		rep.Skipped++
+		return rep
+	}
+	rep.Replaced = n
+	rep.Files = 1
 	return rep
 }

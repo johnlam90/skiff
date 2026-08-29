@@ -129,7 +129,10 @@ func TestProjReplaceRow_DirtyTabStaysDirty(t *testing.T) {
 	line0 := tab.Buffer.Lines[0]
 	a.projFindValue = []rune("old")
 	a.projReplaceValue = []rune("new")
-	a.projFindMatches = []search.Match{{Path: "a.txt", Line: 1, Col: 0, Text: line0}}
+	// Col must name "old"'s real position (1, after the inserted 'x') —
+	// row-apply is occurrence-targeted now, so an inaccurate column would
+	// miss the hit entirely instead of just being ignored.
+	a.projFindMatches = []search.Match{{Path: "a.txt", Line: 1, Col: 1, Text: line0}}
 
 	a.projReplaceRowApply(projFindRow{Path: "a.txt", MatchIdx: 0})
 	if !strings.Contains(tab.Buffer.Lines[0], "new") {
@@ -141,6 +144,59 @@ func TestProjReplaceRow_DirtyTabStaysDirty(t *testing.T) {
 	data, _ := os.ReadFile(p)
 	if strings.Contains(string(data), "new") {
 		t.Fatalf("disk must be untouched for dirty tabs: %q", data)
+	}
+}
+
+// TestProjReplaceRow_TargetsSingleOccurrence_OpenTab: two rows on the
+// same open-tab line ("foo(foo)", one at each occurrence) — applying the
+// first must rewrite only that occurrence, leave the second "foo" intact
+// in the buffer, and flash "Replaced 1", not 2.
+func TestProjReplaceRow_TargetsSingleOccurrence_OpenTab(t *testing.T) {
+	root := t.TempDir()
+	p := mkFile(t, root, "dup.txt", "foo(foo)\n")
+	a := projFindApp(t, root)
+	a.openFile(p)
+	a.projFindValue = []rune("foo")
+	a.projReplaceValue = []rune("bar")
+	a.projFindMatches = []search.Match{
+		{Path: "dup.txt", Line: 1, Col: 0, Text: "foo(foo)"},
+		{Path: "dup.txt", Line: 1, Col: 4, Text: "foo(foo)"},
+	}
+
+	a.projReplaceRowApply(projFindRow{Path: "dup.txt", MatchIdx: 0})
+	tab := a.activeTabPtr()
+	if tab.Buffer.Lines[0] != "bar(foo)" {
+		t.Fatalf("buffer: %q, want the second occurrence untouched", tab.Buffer.Lines[0])
+	}
+	if !strings.Contains(a.statusMsg, "Replaced 1 on dup.txt:1") {
+		t.Fatalf("flash: %q", a.statusMsg)
+	}
+}
+
+// TestProjReplaceRow_TargetsSingleOccurrence_ClosedFile is the disk-path
+// counterpart: applying the first of two same-line rows on a CLOSED file
+// leaves the second occurrence on disk and flashes "Replaced 1".
+func TestProjReplaceRow_TargetsSingleOccurrence_ClosedFile(t *testing.T) {
+	root := t.TempDir()
+	mkFile(t, root, "dup.txt", "foo(foo)\n")
+	a := projFindApp(t, root)
+	a.projFindValue = []rune("foo")
+	a.projReplaceValue = []rune("bar")
+	a.projFindMatches = []search.Match{
+		{Path: "dup.txt", Line: 1, Col: 0, Text: "foo(foo)"},
+		{Path: "dup.txt", Line: 1, Col: 4, Text: "foo(foo)"},
+	}
+
+	a.projReplaceRowApply(projFindRow{Path: "dup.txt", MatchIdx: 0})
+	data, err := os.ReadFile(filepath.Join(root, "dup.txt"))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(data) != "bar(foo)\n" {
+		t.Fatalf("file: %q, want the second occurrence untouched", data)
+	}
+	if !strings.Contains(a.statusMsg, "Replaced 1 on dup.txt:1") {
+		t.Fatalf("flash: %q", a.statusMsg)
 	}
 }
 
