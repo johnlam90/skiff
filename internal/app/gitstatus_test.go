@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -534,8 +535,9 @@ func writeFileT(t *testing.T, path, content string) {
 }
 
 // sortedKeys returns the keys of m in lexicographic order — handy when
-// printing diff context inside test failures.
-func sortedKeys[K comparable](m map[string]K) []string {
+// printing diff context inside test failures. The value type is
+// unconstrained because only the keys are read.
+func sortedKeys[K any](m map[string]K) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
@@ -696,5 +698,254 @@ func TestLoadGitStatus_NoGitOnPath(t *testing.T) {
 	}
 	if st.IsRepo {
 		t.Fatalf("no git on PATH cannot report a repo, got %+v", st)
+	}
+}
+
+// TestParseGitDiffBatch_AttributesHunksToPaths drives the batched
+// diff's splitter over one synthetic multi-file `--unified=0` stream
+// covering every attribution shape the single-file loader handled by
+// construction: a path with spaces (git prints those verbatim), a
+// rename (the tab holds the NEW name, which is what the +++ line
+// carries), a deletion (+++ is /dev/null, so the --- line must answer),
+// and a C-quoted path (git quotes control characters).
+func TestParseGitDiffBatch_AttributesHunksToPaths(t *testing.T) {
+	diff := strings.Join([]string{
+		"diff --git a/a dir/spaced name.txt b/a dir/spaced name.txt",
+		"index 0000000..1111111 100644",
+		// Spaced names carry git's trailing TAB in the ---/+++ lines
+		// (GNU-patch compatibility) — real output, not an artifact.
+		"--- a/a dir/spaced name.txt\t",
+		"+++ b/a dir/spaced name.txt\t",
+		"@@ -2,0 +3 @@ ctx",
+		"+added line",
+		"diff --git a/old.go b/renamed_new.go",
+		"similarity index 90%",
+		"rename from old.go",
+		"rename to renamed_new.go",
+		"index 2222222..3333333 100644",
+		"--- a/old.go",
+		"+++ b/renamed_new.go",
+		"@@ -5 +5 @@ ctx",
+		"-x",
+		"+y",
+		"diff --git a/gone.txt b/gone.txt",
+		"deleted file mode 100644",
+		"index 4444444..0000000",
+		"--- a/gone.txt",
+		"+++ /dev/null",
+		"@@ -1,3 +0,0 @@",
+		"-a",
+		"-b",
+		"-c",
+		`diff --git "a/qu\totes.txt" "b/qu\totes.txt"`,
+		"index 5555555..6666666 100644",
+		`--- "a/qu\totes.txt"`,
+		`+++ "b/qu\totes.txt"`,
+		"@@ -1 +1 @@",
+		"-old",
+		"+new",
+		"",
+	}, "\n")
+
+	got := parseGitDiffBatch([]byte(diff))
+	if len(got) != 4 {
+		t.Fatalf("split found %d sections, want 4: %v", len(got), sortedKeys(got))
+	}
+	if m := got["a dir/spaced name.txt"]; m[2] != editor.GitLineAdded {
+		t.Fatalf("spaced path: line 3 marker = %v, want added (%v)", m, editor.GitLineAdded)
+	}
+	if m := got["renamed_new.go"]; m[4] != editor.GitLineModified {
+		t.Fatalf("renamed path: line 5 marker = %v, want modified", m)
+	}
+	if m := got["gone.txt"]; m[0] != editor.GitLineDeleted {
+		t.Fatalf("deleted path: marker = %v, want deleted anchor at 0", m)
+	}
+	if m := got["qu\totes.txt"]; m[0] != editor.GitLineModified {
+		t.Fatalf("quoted path: line 1 marker = %v, want modified", m)
+	}
+}
+
+// TestParseGitDiffBatch_BodyLinesNeverStartASection guards the split
+// against patch content that mimics headers: an added line whose text
+// begins "++ " renders as "+++ ", and only lines before the first hunk
+// may be read as headers.
+func TestParseGitDiffBatch_BodyLinesNeverStartASection(t *testing.T) {
+	diff := strings.Join([]string{
+		"diff --git a/f.txt b/f.txt",
+		"index 0000000..1111111 100644",
+		"--- a/f.txt",
+		"+++ b/f.txt",
+		"@@ -1 +1,2 @@",
+		"-old",
+		"+++ b/decoy.txt",
+		"+--- a/decoy2.txt",
+		"",
+	}, "\n")
+
+	got := parseGitDiffBatch([]byte(diff))
+	if len(got) != 1 {
+		t.Fatalf("split found %d sections, want 1: %v", len(got), sortedKeys(got))
+	}
+	m := got["f.txt"]
+	if m == nil || m[0] != editor.GitLineModified || m[1] != editor.GitLineModified {
+		t.Fatalf("f.txt markers = %v, want lines 1-2 modified", m)
+	}
+}
+
+// TestCollectGitStatus_BatchMatchesSingleFileLoads is the batcher's
+// equivalence contract against a real repo: with several tabs open —
+// two modified (one with a space in its name), one clean — the single
+// collection must hand every tab exactly what a per-file
+// loadGitLineChanges would have, and the clean tab's key must still be
+// PRESENT (applyGitStatus clears stale gutters only for keys it finds).
+func TestCollectGitStatus_BatchMatchesSingleFileLoads(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	names := []string{"one.txt", "spaced name.txt", "clean.txt"}
+	for _, n := range names {
+		writeFileT(t, filepath.Join(repo, n), "l1\nl2\nl3\n")
+	}
+	gitRun(t, repo, "add", ".")
+	gitRun(t, repo, "commit", "-m", "init")
+	writeFileT(t, filepath.Join(repo, "one.txt"), "l1\nchanged\nl3\n")
+	writeFileT(t, filepath.Join(repo, "spaced name.txt"), "l1\nl2\nl3\nl4\n")
+
+	paths := []string{
+		filepath.Join(repo, "one.txt"),
+		filepath.Join(repo, "spaced name.txt"),
+		filepath.Join(repo, "clean.txt"),
+	}
+	res := collectGitStatus(repo, "", paths, false)
+
+	for _, p := range paths {
+		got, ok := res.tabLines[p]
+		if !ok {
+			t.Fatalf("%s: key missing from the batch result", p)
+		}
+		want := loadGitLineChanges(repo, "", p)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: batch %v != single %v", p, got, want)
+		}
+	}
+	if len(res.tabLines[paths[2]]) != 0 {
+		t.Fatalf("clean tab should carry no markers, got %v", res.tabLines[paths[2]])
+	}
+}
+
+// gitCallLog puts a logging shim ahead of the real git on PATH and
+// returns the log file its every invocation appends argv to. The
+// production runner resolves "git" through PATH with the inherited
+// environment, so this counts real forks without any seam in the code
+// under test. Call it after all fixture setup so the log holds only
+// the invocations the test means to count.
+func gitCallLog(t *testing.T) string {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not available on PATH")
+	}
+	shim := t.TempDir()
+	log := filepath.Join(shim, "calls.log")
+	script := "#!/bin/sh\necho \"$@\" >> " + log + "\nexec " + realGit + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(shim, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+	t.Setenv("PATH", shim+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
+}
+
+// countLoggedDiffs returns how many logged git invocations were gutter
+// diffs — the fork the batcher exists to collapse.
+func countLoggedDiffs(t *testing.T, log string) int {
+	t.Helper()
+	data, err := os.ReadFile(log)
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	n := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "diff --unified=0") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestCollectGitStatus_OneDiffForkForManyTabs pins the collapse itself:
+// three dirty tabs used to cost three `git diff` forks per collection
+// (every ten seconds, forever); now they cost one, and every tab still
+// gets its markers.
+func TestCollectGitStatus_OneDiffForkForManyTabs(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	names := []string{"a.txt", "b.txt", "c.txt"}
+	paths := make([]string, len(names))
+	for i, n := range names {
+		paths[i] = filepath.Join(repo, n)
+		writeFileT(t, paths[i], "l1\nl2\n")
+	}
+	gitRun(t, repo, "add", ".")
+	gitRun(t, repo, "commit", "-m", "init")
+	for _, p := range paths {
+		writeFileT(t, p, "l1\nedited\n")
+	}
+
+	log := gitCallLog(t)
+	res := collectGitStatus(repo, "", paths, false)
+
+	if got := countLoggedDiffs(t, log); got != 1 {
+		t.Fatalf("collection forked %d gutter diffs for 3 tabs, want 1", got)
+	}
+	for _, p := range paths {
+		if res.tabLines[p][1] != editor.GitLineModified {
+			t.Fatalf("%s: markers = %v, want line 2 modified", p, res.tabLines[p])
+		}
+	}
+}
+
+// TestCollectGitStatus_NoTabsSkipsDiffFork: the other end of the
+// collapse — a collection with nothing open must not fork a diff at
+// all.
+func TestCollectGitStatus_NoTabsSkipsDiffFork(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	writeFileT(t, filepath.Join(repo, "a.txt"), "x\n")
+	gitRun(t, repo, "add", ".")
+	gitRun(t, repo, "commit", "-m", "init")
+
+	log := gitCallLog(t)
+	res := collectGitStatus(repo, "", nil, false)
+
+	if got := countLoggedDiffs(t, log); got != 0 {
+		t.Fatalf("collection with no tabs forked %d gutter diffs, want 0", got)
+	}
+	if len(res.tabLines) != 0 {
+		t.Fatalf("no tabs should yield no gutter entries, got %v", res.tabLines)
+	}
+}
+
+// TestUnquoteGitPath covers the C-style quoting git applies to header
+// paths with control or non-ASCII bytes — the escapes quote.c emits,
+// octal included — plus the malformed shapes that must fail closed
+// (empty string) rather than mis-attribute a section.
+func TestUnquoteGitPath(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`"b/plain.txt"`, "b/plain.txt"},
+		{`"b/qu\totes.txt"`, "b/qu\totes.txt"},
+		{`"b/back\\slash"`, `b/back\slash`},
+		{`"b/dq\".txt"`, `b/dq".txt`},
+		{`"b/na\303\257ve.txt"`, "b/naïve.txt"},
+		{`b/notquoted`, ""},
+		{`"unterminated`, ""},
+		{`"bad\q"`, ""},
+		{`"bad\30"`, ""},
+	}
+	for _, c := range cases {
+		if got := unquoteGitPath(c.in); got != c.want {
+			t.Fatalf("unquoteGitPath(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
