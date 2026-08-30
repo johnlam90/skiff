@@ -487,6 +487,32 @@ func (a *App) wrapToggleLabel() string {
 	return "Wrap long lines"
 }
 
+// menuToggleScrollCaret flips whether a viewport-only scroll pulls the
+// caret along, and persists the preference — same apply-first,
+// persist-second contract as the wrap toggle.
+func (a *App) menuToggleScrollCaret() {
+	a.closeMenu()
+	a.scrollCaret = !a.scrollCaret
+	if err := userconfig.SetScrollCaret(userconfig.DefaultPath(), a.scrollCaret); err != nil {
+		a.flash("config: " + err.Error())
+		return
+	}
+	if a.scrollCaret {
+		a.flash("Caret now follows scrolling")
+	} else {
+		a.flash("Caret now stays put while scrolling")
+	}
+}
+
+// scrollCaretToggleLabel returns the follow-scroll row's label for the
+// current state, same dynamic pattern as the wrap row.
+func (a *App) scrollCaretToggleLabel() string {
+	if a.scrollCaret {
+		return "Stop caret following scroll"
+	}
+	return "Make caret follow scroll"
+}
+
 // menuToggleGitignore flips whether the file tree hides entries the
 // project's .gitignore files exclude, then persists the choice. The
 // refresh is what puts it on screen: the filter runs as each directory

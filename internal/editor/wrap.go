@@ -238,6 +238,40 @@ func (t *Tab) ensureVisibleWrapped(width, viewH int) {
 	t.ScrollY, t.ScrollSeg = t.retreatAnchor(cLine, cSeg, viewH-1, width)
 }
 
+// clampCursorWrapped is ClampCursorToView's wrap-mode half: visibility
+// is a (line, segment) question, so a caret above the viewport lands
+// inside the anchor row's own segment and one below lands inside the
+// last visible row's. The column is clamped into the target segment's
+// bounds rather than carried absolutely — an absolute column would
+// usually fall outside the row and re-trigger the very scroll this
+// exists to avoid. Segment boundaries are cluster boundaries by the
+// wrap design, so the clamp can never split a glyph.
+func (t *Tab) clampCursorWrapped(width, viewH int) {
+	t.normalizeAnchor(width)
+	cLine := t.Cursor.Line
+	cSeg := WrapRowOfCol(t.lineSegs(cLine, width), t.Cursor.Col)
+	above := cLine < t.ScrollY || (cLine == t.ScrollY && cSeg < t.ScrollSeg)
+	if !above && t.rowsBetween(t.ScrollY, t.ScrollSeg, cLine, cSeg, width, viewH) < viewH {
+		return // already visible
+	}
+	line, seg := t.ScrollY, t.ScrollSeg
+	if !above {
+		line, seg = t.advanceAnchor(t.ScrollY, t.ScrollSeg, viewH-1, width)
+	}
+	segs := t.lineSegs(line, width)
+	start, end := wrapSegBounds(segs, seg, len(t.Buffer.LineRunes(line)))
+	// A caret at a non-final segment's end renders on the NEXT row —
+	// WrapRowOfCol assigns the boundary column to the following segment
+	// — so the last in-row column there is end-1; only the final
+	// segment may hold the caret at end (the line's length).
+	limit := end
+	if seg < len(segs)-1 {
+		limit = end - 1
+	}
+	col := min(max(t.Cursor.Col, start), max(limit, start))
+	t.MoveCursorTo(Position{Line: line, Col: col}, false)
+}
+
 // clampScrollWrapped is clampScroll's wrap-mode twin: the anchor may not
 // scroll past the point where the file's last visual row sits roughly
 // mid-viewport — the same overscroll feel as line mode, computed by

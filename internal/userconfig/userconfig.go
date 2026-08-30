@@ -67,6 +67,12 @@ type Config struct {
 	// finder agree about what counts as project noise; the ≡ View row
 	// persists an "off" here for the times you need to see build output.
 	Gitignore bool
+	// ScrollCaret is whether a viewport-only scroll (wheel, scrollbar)
+	// pulls the caret along so it stays on a visible line. Defaults to
+	// off — scrolling has never moved the caret here (the VS Code
+	// behavior), so following it is an explicit opt-in via the ≡ View
+	// row.
+	ScrollCaret bool
 }
 
 // Defaults returns a Config populated with the values used when no
@@ -80,10 +86,11 @@ func Defaults() Config {
 // then promote into Config so the public type doesn't have to carry
 // JSON tags or pointer fields just for "field was absent" detection.
 type fileFormat struct {
-	Icons     string `json:"icons,omitempty"`
-	Theme     string `json:"theme,omitempty"`
-	Wrap      string `json:"wrap,omitempty"`
-	Gitignore string `json:"gitignore,omitempty"`
+	Icons       string `json:"icons,omitempty"`
+	Theme       string `json:"theme,omitempty"`
+	Wrap        string `json:"wrap,omitempty"`
+	Gitignore   string `json:"gitignore,omitempty"`
+	ScrollCaret string `json:"scrollcaret,omitempty"`
 }
 
 // DefaultPath returns the canonical config-file location:
@@ -163,6 +170,12 @@ func Load(path string) (Config, error) {
 		return Defaults(), err
 	}
 	cfg.Gitignore = gi
+
+	sc, err := parseOnOff(path, "scrollcaret", ff.ScrollCaret, cfg.ScrollCaret)
+	if err != nil {
+		return Defaults(), err
+	}
+	cfg.ScrollCaret = sc
 	return cfg, nil
 }
 
@@ -211,6 +224,12 @@ func SetWrap(path string, on bool) error {
 // preference, with the same contract as SetWrap.
 func SetGitignore(path string, on bool) error {
 	return setOnOff(path, "gitignore", on)
+}
+
+// SetScrollCaret persists the "caret follows scroll" preference, with
+// the same contract as SetWrap.
+func SetScrollCaret(path string, on bool) error {
+	return setOnOff(path, "scrollcaret", on)
 }
 
 // setOnOff writes one "on"/"off" key into the config file at path,

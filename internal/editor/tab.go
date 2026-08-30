@@ -1291,6 +1291,42 @@ func (t *Tab) Scroll(deltaLines int) {
 	}
 }
 
+// ClampCursorToView moves the caret to the nearest visible line when a
+// viewport-only scroll (wheel, scrollbar) has left it off screen — the
+// optional "caret follows scroll" behavior, called by the app only when
+// the user turned it on. Guards, in order: an active selection is never
+// clobbered (silently moving the selection head mid-scroll would
+// destroy what the user highlighted), and a caret already inside the
+// viewport is left untouched so the render pass sees no cursor motion
+// at all. The clamped position is inside the viewport by construction,
+// which keeps EnsureVisible a no-op afterwards — scroll → cursor never
+// feeds back into cursor → scroll, so the one-directional cursorMoved
+// contract survives with this feature enabled. Wrap width comes from
+// lastWrapW, the same source Scroll uses.
+func (t *Tab) ClampCursorToView(viewH int) {
+	if t.IsImage() || t.HasSelection() || viewH < 1 {
+		return
+	}
+	if t.Wrap && t.lastWrapW > 0 {
+		t.clampCursorWrapped(t.lastWrapW, viewH)
+		return
+	}
+	first := t.ScrollY
+	last := t.ScrollY + viewH - 1
+	if m := t.Buffer.LineCount() - 1; last > m {
+		last = m
+	}
+	if last < first {
+		return // overscrolled past EOF — no visible line to land on.
+	}
+	switch {
+	case t.Cursor.Line < first:
+		t.MoveCursorTo(Position{Line: first, Col: t.Cursor.Col}, false)
+	case t.Cursor.Line > last:
+		t.MoveCursorTo(Position{Line: last, Col: t.Cursor.Col}, false)
+	}
+}
+
 // ScrollH moves the viewport horizontally by delta rune-columns (negative
 // = left). Clamped at zero; the right side is naturally bounded by
 // Render's contentW window — scrolling past the longest visible line just

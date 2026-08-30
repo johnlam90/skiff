@@ -438,3 +438,55 @@ func TestSetGitignorePreservesOtherKeys(t *testing.T) {
 		t.Fatalf("fresh load: %+v %v", cfg, err)
 	}
 }
+
+// TestLoadScrollCaret covers the scrollcaret key's contract: absent
+// defaults to OFF (scrolling has never moved the caret, so opting in is
+// explicit), "on"/"off" parse case-insensitively, and a typo surfaces
+// as an error with the default — the same tell-the-user rule as wrap.
+func TestLoadScrollCaret(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name    string
+		json    string
+		want    bool
+		wantErr bool
+	}{
+		{"absent defaults off", `{"icons": "on"}`, false, false},
+		{"explicit on", `{"scrollcaret": "on"}`, true, false},
+		{"explicit off", `{"scrollcaret": "off"}`, false, false},
+		{"case insensitive", `{"scrollcaret": "ON"}`, true, false},
+		{"typo errors", `{"scrollcaret": "nope"}`, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "-")+".json")
+			if err := os.WriteFile(path, []byte(tc.json), 0644); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			cfg, err := Load(path)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if cfg.ScrollCaret != tc.want {
+				t.Fatalf("ScrollCaret = %v, want %v", cfg.ScrollCaret, tc.want)
+			}
+		})
+	}
+}
+
+// TestSetScrollCaretRoundTrip pins that SetScrollCaret writes through
+// the shared preserve-unknown-keys machinery and reads back via Load —
+// the same contract SetWrap/SetGitignore carry.
+func TestSetScrollCaretRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"theme": "nord"}`), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := SetScrollCaret(path, true); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil || !cfg.ScrollCaret || cfg.Theme != "nord" {
+		t.Fatalf("load after set: %+v %v", cfg, err)
+	}
+}

@@ -651,3 +651,41 @@ func FuzzWrapSegments(f *testing.F) {
 		}
 	})
 }
+
+// TestClampCursorWrapped pins the caret-follows-scroll clamp in wrap
+// mode, where "visible" is a (line, segment) question: a caret above
+// the anchor lands inside the anchor row's own segment, one below lands
+// inside the last visible row's segment, and the result is a position
+// ensureVisibleWrapped already considers visible — so the anchor does
+// not move afterwards (the yank-back fence, wrap edition).
+func TestClampCursorWrapped(t *testing.T) {
+	tab := wrapTestTab(t, "abcdefghijkl\nx\nyy")
+	tab.lastWrapW = 5 // line 0 wraps at cols [0,5,10]
+
+	// Anchor on line 0's third segment; caret in its first: above.
+	tab.MoveCursorTo(Position{Line: 0, Col: 1}, false)
+	tab.ScrollY, tab.ScrollSeg = 0, 2
+	tab.ClampCursorToView(2)
+	if tab.Cursor.Line != 0 || tab.Cursor.Col < 10 {
+		t.Fatalf("above-view clamp = %+v, want line 0 inside segment [10,12]", tab.Cursor)
+	}
+	y, s := tab.ScrollY, tab.ScrollSeg
+	tab.ensureVisibleWrapped(5, 2)
+	if tab.ScrollY != y || tab.ScrollSeg != s {
+		t.Fatalf("anchor moved to (%d,%d) — yank-back is back", tab.ScrollY, tab.ScrollSeg)
+	}
+
+	// Anchor at the top; caret on line 2: below a 2-row viewport whose
+	// last visible row is line 0's second segment [5,10).
+	tab.MoveCursorTo(Position{Line: 2, Col: 0}, false)
+	tab.ScrollY, tab.ScrollSeg = 0, 0
+	tab.ClampCursorToView(2)
+	if tab.Cursor.Line != 0 || tab.Cursor.Col < 5 || tab.Cursor.Col >= 10 {
+		t.Fatalf("below-view clamp = %+v, want line 0 inside segment [5,10)", tab.Cursor)
+	}
+	y, s = tab.ScrollY, tab.ScrollSeg
+	tab.ensureVisibleWrapped(5, 2)
+	if tab.ScrollY != y || tab.ScrollSeg != s {
+		t.Fatalf("anchor moved to (%d,%d) — yank-back is back", tab.ScrollY, tab.ScrollSeg)
+	}
+}
