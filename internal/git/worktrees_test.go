@@ -65,8 +65,12 @@ func TestWorktrees_AddListRemove(t *testing.T) {
 	if len(wts) != 2 || !wts[0].Main || wts[1].Main {
 		t.Fatalf("list = %+v, want main then side", wts)
 	}
-	if wts[1].Branch != "side" || wts[1].Path != wt {
-		t.Fatalf("side row = %+v", wts[1])
+	// git reports the worktree's resolved path; on macOS t.TempDir lives
+	// under /var, a symlink to /private/var, so the expectation has to
+	// be resolved the same way — as initRepo already does for the root.
+	wantWt, _ := filepath.EvalSymlinks(wt)
+	if wts[1].Branch != "side" || wts[1].Path != wantWt {
+		t.Fatalf("side row = %+v, want path %s", wts[1], wantWt)
 	}
 	if err := r.WorktreeRemove(wt, false); err != nil {
 		t.Fatalf("remove: %v", err)
