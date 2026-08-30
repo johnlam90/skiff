@@ -182,7 +182,7 @@ internal/git/ref.go           SafeRef / safePath: refuse names git would read as
 internal/clipboard/clipboard.go OSC 52 to /dev/tty with tmux passthrough wrap,
                               capped at MaxPayloadBytes (ErrTooLarge above it)
 internal/userconfig/userconfig.go ~/.config/skiff/config.json (icons, theme,
-                              wrap, gitignore)
+                              wrap, gitignore, scrollcaret)
 internal/icons/icons.go       Nerd Font detection (deadline-bounded) + glyphs
 internal/theme/theme.go       Default Tokyo Night palette + contrast helpers
 internal/theme/palettes.go    Theme registry — druk-ported palettes + Offshore + ByID
@@ -613,7 +613,7 @@ half-published release object (never the tag) before GoReleaser retries.
   whole reason the action menu exists).
 - A config *system*. Skiff is opinionated: `~/.config/skiff/config.json`
   exists but stays a flat file of tiny keys (`icons`, `theme`, `wrap`,
-  `gitignore`) — no plugin manifests, no per-key UI beyond a picker, no
+  `gitignore`, `scrollcaret`) — no plugin manifests, no per-key UI beyond a picker, no
   dotfile sprawl.
 - CGO dependencies. The whole point is one static binary.
 - Tree-sitter. We use Chroma intentionally — pure Go, no setup.

@@ -265,8 +265,22 @@ func (a *App) scrollAt(x, y, delta int) {
 	if y > 0 && y < a.height-1 {
 		if t := a.activeTabPtr(); t != nil {
 			t.Scroll(delta)
+			a.followCaret(t)
 		}
 	}
+}
+
+// followCaret applies the opt-in "caret follows scroll" clamp after a
+// viewport-only scroll gesture. A no-op unless the user turned the
+// preference on; the clamp itself refuses to touch an active selection
+// and lands the caret inside the viewport, so the render pass's
+// EnsureVisible cannot scroll back (see Tab.ClampCursorToView).
+func (a *App) followCaret(t *editor.Tab) {
+	if !a.scrollCaret {
+		return
+	}
+	_, _, _, eh := a.editorRect()
+	t.ClampCursorToView(eh)
 }
 
 // scrollAtH scrolls the panel under (x, y) horizontally by delta cells.
@@ -646,6 +660,7 @@ func (a *App) scrollbarTo(localY int) {
 	// The thumb maps to a buffer line; land at its first visual row so a
 	// stale wrap segment from the previous anchor can't offset the jump.
 	tab.ScrollSeg = 0
+	a.followCaret(tab)
 }
 
 // treeScrollbarHit reports whether (x, y) lands on the file tree's

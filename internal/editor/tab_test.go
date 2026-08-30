@@ -15,6 +15,7 @@ package editor
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -2594,5 +2595,94 @@ func TestTab_InsertNewline_UnderSoftWrap(t *testing.T) {
 	}
 	if _, _, vis := scr.GetCursor(); !vis {
 		t.Fatal("caret left the viewport after a wrapped-line split")
+	}
+}
+
+// TestClampCursorToView_LineMode pins the caret-follows-scroll clamp in
+// line mode: a caret stranded above the viewport by a viewport-only
+// scroll lands on the first visible line, one stranded below lands on
+// the last, the column carries over, and — the invariant that keeps the
+// old yank-back bug dead — the clamped position is already visible, so
+// EnsureVisible afterwards must not move the viewport.
+func TestClampCursorToView_LineMode(t *testing.T) {
+	var sb strings.Builder
+	for i := range 100 {
+		fmt.Fprintf(&sb, "line %d\n", i)
+	}
+	path := filepath.Join(t.TempDir(), "big.txt")
+	if err := os.WriteFile(path, []byte(sb.String()), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.SetWrap(false)
+	tab.MoveCursorTo(Position{Line: 50, Col: 3}, false)
+
+	// Scrolled below the caret: clamp to the first visible line.
+	tab.ScrollY = 60
+	tab.ClampCursorToView(10)
+	if tab.Cursor != (Position{Line: 60, Col: 3}) {
+		t.Fatalf("above-view clamp = %+v, want {60 3}", tab.Cursor)
+	}
+	tab.EnsureVisible(80, 10)
+	if tab.ScrollY != 60 {
+		t.Fatalf("EnsureVisible moved the viewport to %d — yank-back is back", tab.ScrollY)
+	}
+
+	// Scrolled above the caret: clamp to the last visible line.
+	tab.ScrollY = 10
+	tab.ClampCursorToView(10)
+	if tab.Cursor != (Position{Line: 19, Col: 3}) {
+		t.Fatalf("below-view clamp = %+v, want {19 3}", tab.Cursor)
+	}
+	tab.EnsureVisible(80, 10)
+	if tab.ScrollY != 10 {
+		t.Fatalf("EnsureVisible moved the viewport to %d — yank-back is back", tab.ScrollY)
+	}
+}
+
+// TestClampCursorToView_SelectionAndNoopGuards pins the two refusals: an
+// active selection is never clobbered by the follow-scroll clamp, and a
+// caret already inside the viewport is left byte-for-byte alone (no
+// cursorMoved, so the render pass runs no EnsureVisible either).
+func TestClampCursorToView_SelectionAndNoopGuards(t *testing.T) {
+	var sb strings.Builder
+	for i := range 50 {
+		fmt.Fprintf(&sb, "line %d\n", i)
+	}
+	path := filepath.Join(t.TempDir(), "sel.txt")
+	if err := os.WriteFile(path, []byte(sb.String()), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatalf("NewTab: %v", err)
+	}
+	tab.SetWrap(false)
+
+	// Selection guard.
+	tab.MoveCursorTo(Position{Line: 5, Col: 0}, false)
+	tab.MoveCursorTo(Position{Line: 6, Col: 2}, true) // extend
+	tab.cursorMoved = false
+	tab.ScrollY = 30
+	tab.ClampCursorToView(10)
+	if tab.Cursor != (Position{Line: 6, Col: 2}) || tab.Anchor != (Position{Line: 5, Col: 0}) {
+		t.Fatalf("clamp clobbered the selection: cursor=%+v anchor=%+v", tab.Cursor, tab.Anchor)
+	}
+	if tab.cursorMoved {
+		t.Fatal("selection guard must not mark the cursor moved")
+	}
+
+	// Noop guard.
+	tab.MoveCursorTo(Position{Line: 32, Col: 1}, false)
+	tab.cursorMoved = false
+	tab.ClampCursorToView(10) // visible range [30,39] contains the caret
+	if tab.Cursor != (Position{Line: 32, Col: 1}) {
+		t.Fatalf("visible caret moved to %+v", tab.Cursor)
+	}
+	if tab.cursorMoved {
+		t.Fatal("noop clamp must not mark the cursor moved")
 	}
 }

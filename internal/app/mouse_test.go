@@ -13,6 +13,7 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1190,5 +1191,102 @@ func TestScrollbarThumbBrightensOnDrag(t *testing.T) {
 	a.handleMouse(tcell.NewEventMouse(treeBarX, sy+2, tcell.ButtonNone, 0))
 	if r, fg := barCell(t, a, treeBarX, sy+2); fg != a.theme.Muted {
 		t.Fatalf("released tree thumb: rune %q fg %v, want Muted", r, fg)
+	}
+}
+
+// TestWheelScroll_CaretFollowsWhenEnabled pins the opt-in "caret
+// follows scroll" behavior end to end through the wheel path: with the
+// option on, scrolling the caret off the top of the viewport pulls it
+// down to the first visible line; with the option off (the default),
+// the caret stays exactly where it was — today's behavior, unchanged.
+func TestWheelScroll_CaretFollowsWhenEnabled(t *testing.T) {
+	dir := t.TempDir()
+	var sb strings.Builder
+	for i := range 200 {
+		fmt.Fprintf(&sb, "line %d\n", i)
+	}
+	path := filepath.Join(dir, "big.txt")
+	if err := os.WriteFile(path, []byte(sb.String()), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	for _, on := range []bool{true, false} {
+		a := newTestApp(t, dir)
+		a.scrollCaret = on
+		tab := openTabAtPath(t, a, path)
+		tab.SetWrap(false)
+		ex, _, _, _ := a.editorRect()
+
+		// Ten wheel ticks put the viewport well past the caret at line 0.
+		for range 10 {
+			a.handleMouse(tcell.NewEventMouse(ex+3, 5, tcell.WheelDown, tcell.ModNone))
+		}
+		if tab.ScrollY == 0 {
+			t.Fatal("fixture broken: wheel did not scroll the viewport")
+		}
+		if on {
+			if tab.Cursor.Line != tab.ScrollY {
+				t.Fatalf("option on: caret at line %d, want first visible line %d", tab.Cursor.Line, tab.ScrollY)
+			}
+		} else if tab.Cursor.Line != 0 {
+			t.Fatalf("option off: caret moved to line %d, must stay at 0", tab.Cursor.Line)
+		}
+	}
+}
+
+// TestWheelScroll_SelectionSurvivesFollow pins the selection guard: even
+// with caret-follows-scroll on, wheel-scrolling away from an active
+// selection must not move either end of it.
+func TestWheelScroll_SelectionSurvivesFollow(t *testing.T) {
+	dir := t.TempDir()
+	var sb strings.Builder
+	for i := range 200 {
+		fmt.Fprintf(&sb, "line %d\n", i)
+	}
+	path := filepath.Join(dir, "sel.txt")
+	if err := os.WriteFile(path, []byte(sb.String()), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.scrollCaret = true
+	tab := openTabAtPath(t, a, path)
+	tab.SetWrap(false)
+	tab.MoveCursorTo(editor.Position{Line: 2, Col: 0}, false)
+	tab.MoveCursorTo(editor.Position{Line: 3, Col: 4}, true)
+	ex, _, _, _ := a.editorRect()
+
+	for range 10 {
+		a.handleMouse(tcell.NewEventMouse(ex+3, 5, tcell.WheelDown, tcell.ModNone))
+	}
+	if tab.Cursor != (editor.Position{Line: 3, Col: 4}) || tab.Anchor != (editor.Position{Line: 2, Col: 0}) {
+		t.Fatalf("selection clobbered: cursor=%+v anchor=%+v", tab.Cursor, tab.Anchor)
+	}
+}
+
+// TestScrollbarTo_CaretFollowsWhenEnabled pins the same follow behavior
+// on the scrollbar click-to-jump path — the other viewport-only scroll
+// gesture the option covers.
+func TestScrollbarTo_CaretFollowsWhenEnabled(t *testing.T) {
+	dir := t.TempDir()
+	var sb strings.Builder
+	for i := range 200 {
+		fmt.Fprintf(&sb, "line %d\n", i)
+	}
+	path := filepath.Join(dir, "bar.txt")
+	if err := os.WriteFile(path, []byte(sb.String()), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.scrollCaret = true
+	tab := openTabAtPath(t, a, path)
+	tab.SetWrap(false)
+	_, _, _, eh := a.editorRect()
+
+	a.scrollbarTo(eh - 1) // jump to the bottom of the bar
+	if tab.ScrollY == 0 {
+		t.Fatal("fixture broken: scrollbar jump did not move the viewport")
+	}
+	if tab.Cursor.Line < tab.ScrollY || tab.Cursor.Line >= tab.ScrollY+eh {
+		t.Fatalf("caret at line %d not inside viewport [%d,%d)", tab.Cursor.Line, tab.ScrollY, tab.ScrollY+eh)
 	}
 }

@@ -59,6 +59,9 @@ var postRedesignMenuActions = []string{
 	// Both forms of the one toggle whose default the tree owns, so the
 	// pin doesn't quietly depend on which way that default points.
 	"Show ignored files", "Hide ignored files",
+	// The caret-follows-scroll preference (both label forms, same
+	// default-independence reasoning as the gitignore pair).
+	"Make caret follow scroll", "Stop caret following scroll",
 }
 
 // menuCatalog flattens every built-in row the ≡ menu can reach — the top
@@ -127,13 +130,13 @@ func TestMenuLayout_EmptySession(t *testing.T) {
 	a.customActions = nil
 	items, dividers, h := a.menuLayout()
 
-	if h != 18 {
-		t.Errorf("modalHeight = %d, want 18", h)
+	if h != 19 {
+		t.Errorf("modalHeight = %d, want 19", h)
 	}
-	if got := len(items); got != 10 {
-		t.Errorf("item count = %d, want 10; got %v", got, menuLabels(a, items))
+	if got := len(items); got != 11 {
+		t.Errorf("item count = %d, want 11; got %v", got, menuLabels(a, items))
 	}
-	wantDiv := []int{3, 5, 8, 15}
+	wantDiv := []int{3, 5, 8, 16}
 	if len(dividers) != len(wantDiv) {
 		t.Fatalf("dividers = %v, want %v", dividers, wantDiv)
 	}
@@ -389,8 +392,8 @@ func TestMenuLayout_WithCustomActions(t *testing.T) {
 	}
 	items, _, h := a.menuLayout()
 
-	if h != 21 { // 18 + 2 items + 1 divider
-		t.Errorf("modalHeight = %d, want 21", h)
+	if h != 22 { // 19 + 2 items + 1 divider
+		t.Errorf("modalHeight = %d, want 22", h)
 	}
 	// Custom actions should be the second-to-last and third-to-last
 	// rows, with Quit as the final row.

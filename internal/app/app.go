@@ -236,6 +236,12 @@ type App struct {
 	// rather than a fight.
 	sidebarNarrow bool
 
+	// scrollCaret is the "caret follows scroll" preference: when on, a
+	// viewport-only scroll (wheel, scrollbar) that leaves the caret off
+	// screen clamps it to the nearest visible line. Off by default —
+	// see userconfig.Config.ScrollCaret.
+	scrollCaret bool
+
 	// wrapOn is the soft-wrap preference stamped onto every tab at
 	// creation and flipped (for all open tabs at once) by the menu
 	// toggle. Loaded from config.json; defaults to on.

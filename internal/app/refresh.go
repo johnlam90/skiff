@@ -116,6 +116,7 @@ func (a *App) loadUserConfig() {
 	// Both constructors call this before any tab exists, so stamping
 	// the preference on the App is enough — tab-open paths copy it.
 	a.wrapOn = cfg.Wrap
+	a.scrollCaret = cfg.ScrollCaret
 }
 
 // refreshTree calls tree.Refresh when the file tree exists, and is a

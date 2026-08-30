@@ -186,6 +186,10 @@ func viewMenuGroup() []menuItemDef {
 	return []menuItemDef{
 		{shortcut: "Esc t", action: (*App).menuToggleSidebar, enabled: alwaysTrue, labelFor: (*App).sidebarToggleLabel, visible: (*App).hasTree},
 		{shortcut: "Esc z", action: (*App).menuToggleWrap, enabled: alwaysTrue, labelFor: (*App).wrapToggleLabel},
+		// No leader binding, same reasoning as the gitignore row: a
+		// set-and-forget preference, reachable from the menu per the
+		// CLAUDE.md rule.
+		{action: (*App).menuToggleScrollCaret, enabled: alwaysTrue, labelFor: (*App).scrollCaretToggleLabel},
 		// No leader binding: the tree's ignored-file filter is a
 		// once-in-a-while decision, not a gesture worth spending one of
 		// the 26 leader runes on. Reachability lives in the menu, which
