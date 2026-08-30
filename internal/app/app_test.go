@@ -87,13 +87,16 @@ func newTestApp(t *testing.T, root string) *App {
 	// cached branch is what gates the Git panel, so tests need the same
 	// seeding to see the app the way a real session does.
 	a.refreshGitStatus()
-	// Drain any in-flight background git-status refresh before teardown:
-	// a `git status` goroutine still writing .git lock files while
-	// t.TempDir removes the repo is the classic "directory not empty"
-	// flake. Registered after the Fini cleanup so it runs first (LIFO).
+	// Drain every in-flight background job before teardown: a `git
+	// status` goroutine still writing .git lock files, or a tree sweep
+	// still writing the session file under XDG_STATE_HOME, while
+	// t.TempDir removes the directory is the classic "directory not
+	// empty" flake. Registered after the Fini cleanup so it runs first
+	// (LIFO), and after the test's own t.TempDir calls so it runs
+	// before their RemoveAll.
 	t.Cleanup(func() {
 		deadline := time.Now().Add(3 * time.Second)
-		for a.gitStatus.Busy() && time.Now().Before(deadline) {
+		for a.jobsBusy() && time.Now().Before(deadline) {
 			if scr.HasPendingEvent() {
 				a.handleEvent(scr.PollEvent())
 			} else {
@@ -772,4 +775,23 @@ func TestApplyResponsiveSidebar_SingleFileModeIsInert(t *testing.T) {
 	if a.statusMsg != "" {
 		t.Errorf("flashed %q about a panel that does not exist", a.statusMsg)
 	}
+}
+
+// TestJobsBusy_SeesTheTreeSweep pins the teardown drain's eyes: a sweep
+// started by refreshTreeAsync — the job that writes the session file —
+// counts as busy until it lands, so newTestApp's cleanup can never let
+// it run into t.TempDir's RemoveAll. The custom-action test used to
+// leak exactly that worker, because the drain watched git status alone.
+func TestJobsBusy_SeesTheTreeSweep(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	a := newTestApp(t, t.TempDir())
+	pumpUntil(t, a, "git status", idle(&a.gitStatus))
+	if a.jobsBusy() {
+		t.Fatal("no job should be busy before the sweep starts")
+	}
+	a.refreshTreeAsync()
+	if !a.jobsBusy() {
+		t.Fatal("the tree sweep must count as busy while its worker runs")
+	}
+	pumpUntil(t, a, "tree sweep", func() bool { return !a.jobsBusy() })
 }

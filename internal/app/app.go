@@ -650,6 +650,20 @@ func (a *App) wireJobs() {
 	wireJob(a, &a.projFind.sweep, "project-find", asyncjob.Supersede, a.handleProjFindDone)
 }
 
+// jobsBusy reports whether any background job is in flight or queued.
+// It lives next to wireJobs so the two lists cannot drift: a job wired
+// here is a job the teardown drain waits for. Tests drain on it before
+// t.TempDir's RemoveAll, because a worker that writes to disk — the tree
+// sweep's session save, a file op, a formatter — must never outlive the
+// directory it writes into. Close does not wait on it: a quitting editor
+// has nothing left to land.
+func (a *App) jobsBusy() bool {
+	return a.treeScan.Busy() || a.gitStatus.Busy() || a.diffLoad.Busy() ||
+		a.fileOp.Busy() || a.projReplace.Busy() || a.gitOp.Busy() ||
+		a.branchList.Busy() || a.worktreeList.Busy() || a.formatter.Busy() ||
+		a.customAction.Busy() || a.projFind.sweep.Busy()
+}
+
 // wireJob is the one struct literal every job is built from. A generic
 // function rather than a method because Go methods cannot carry their
 // own type parameter.
