@@ -6,37 +6,23 @@
 // =============================================================================
 
 // Tests for the file clipboard: cut / copy / paste / duplicate of tree
-// entries, the never-overwrite naming rule, and open tabs following a
-// move.
+// entries through the background runner, the clipboard's own state
+// across those, and what the done event does on the main loop — tabs
+// following a move, the refreshes on success AND failure. The naming
+// ladder and the guards are the manager's (internal/filemanager); the
+// refusal tests here pin that their errors surface as flashes.
 
 package app
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
-)
 
-// waitFileOpIdle pumps the simulation screen's queue until the pending
-// background file op posts its done event, then applies it — tests run
-// without the real event loop.
-func waitFileOpIdle(t *testing.T, a *App) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for a.fileOpBusy {
-		if time.Now().After(deadline) {
-			t.Fatal("file op never finished")
-		}
-		switch e := a.screen.PollEvent().(type) {
-		case *fileOpDoneEvent:
-			a.handleFileOpDone(e)
-		case *fileOpProgressEvent:
-			a.handleFileOpProgress(e)
-		}
-	}
-}
+	"github.com/johnlam90/skiff/internal/finder"
+)
 
 // mkFile writes content to dir/name (creating parents) and returns the path.
 func mkFile(t *testing.T, dir, name, content string) string {
@@ -49,31 +35,6 @@ func mkFile(t *testing.T, dir, name, content string) string {
 		t.Fatalf("write: %v", err)
 	}
 	return path
-}
-
-// TestUniqueDestPathSuffixes pins the collision ladder: free name is
-// used as-is, then " copy", then " copy 2" — the suffix lands before
-// the extension for files and at the end for directories.
-func TestUniqueDestPathSuffixes(t *testing.T) {
-	dir := t.TempDir()
-	if got := uniqueDestPath(dir, "app.ts", false); got != filepath.Join(dir, "app.ts") {
-		t.Fatalf("free name: got %q", got)
-	}
-	mkFile(t, dir, "app.ts", "x")
-	if got := uniqueDestPath(dir, "app.ts", false); got != filepath.Join(dir, "app copy.ts") {
-		t.Fatalf("first collision: got %q", got)
-	}
-	mkFile(t, dir, "app copy.ts", "x")
-	if got := uniqueDestPath(dir, "app.ts", false); got != filepath.Join(dir, "app copy 2.ts") {
-		t.Fatalf("second collision: got %q", got)
-	}
-	// Directories: the whole name is the stem, dots included.
-	if err := os.MkdirAll(filepath.Join(dir, "v1.2"), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if got := uniqueDestPath(dir, "v1.2", true); got != filepath.Join(dir, "v1.2 copy") {
-		t.Fatalf("dir collision: got %q", got)
-	}
 }
 
 // TestPasteCopyKeepsClip: a copied file can be pasted into several
@@ -92,9 +53,9 @@ func TestPasteCopyKeepsClip(t *testing.T) {
 
 	a.clipCopyPath(src)
 	a.pasteInto(sub1)
-	waitFileOpIdle(t, a)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 	a.pasteInto(sub2)
-	waitFileOpIdle(t, a)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 	for _, want := range []string{filepath.Join(sub1, "a.txt"), filepath.Join(sub2, "a.txt")} {
 		if _, err := os.Stat(want); err != nil {
 			t.Fatalf("missing pasted copy %s: %v", want, err)
@@ -121,7 +82,7 @@ func TestPasteCutMovesAndClearsClip(t *testing.T) {
 
 	a.clipCutPath(src)
 	a.pasteInto(sub)
-	waitFileOpIdle(t, a)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 	if _, err := os.Stat(filepath.Join(sub, "a.txt")); err != nil {
 		t.Fatalf("moved file missing: %v", err)
 	}
@@ -134,8 +95,9 @@ func TestPasteCutMovesAndClearsClip(t *testing.T) {
 }
 
 // TestPasteDirIntoItselfRefused: pasting a cut folder into itself (or a
-// descendant) would eat the folder — it must refuse and leave the disk
-// untouched.
+// descendant) would eat the folder — the manager refuses inside the
+// background op, and the refusal has to come back as a flash with the
+// disk untouched and the clipboard kept.
 func TestPasteDirIntoItselfRefused(t *testing.T) {
 	root := t.TempDir()
 	inner := filepath.Join(root, "outer", "inner")
@@ -147,6 +109,10 @@ func TestPasteDirIntoItselfRefused(t *testing.T) {
 	outer := filepath.Join(root, "outer")
 	a.clipCutPath(outer)
 	a.pasteInto(inner)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
+	if !strings.Contains(a.statusMsg, "into itself") {
+		t.Fatalf("expected the into-itself flash, got %q", a.statusMsg)
+	}
 	if _, err := os.Stat(inner); err != nil {
 		t.Fatalf("refused paste must not disturb the tree: %v", err)
 	}
@@ -158,12 +124,14 @@ func TestPasteDirIntoItselfRefused(t *testing.T) {
 // TestPasteInto_SymlinkedDescendantRefused: the unresolved-path
 // comparison in the into-itself guard has a hole — a destination that
 // LOOKS unrelated to src by string prefix but RESOLVES (via a symlink)
-// to somewhere inside src must be refused too, or copyTree would walk
+// to somewhere inside src must be refused too, or the copy would walk
 // into its own growing output. The fixture: root/outer/inner is a real
 // directory; root/elsewhere/link is a symlink pointing at outer itself,
 // so pasting outer into elsewhere/link resolves to pasting outer into
 // outer — no different in effect from the plain into-itself case, just
-// reached through a symlink the unresolved-string check can't see.
+// reached through a symlink the unresolved-string check can't see. The
+// manager owns the resolution; this pins that its answer reaches the
+// user through the app's paste path.
 func TestPasteInto_SymlinkedDescendantRefused(t *testing.T) {
 	root := t.TempDir()
 	outer := filepath.Join(root, "outer")
@@ -182,6 +150,7 @@ func TestPasteInto_SymlinkedDescendantRefused(t *testing.T) {
 
 	a.clipCutPath(outer)
 	a.pasteInto(link)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 
 	if !strings.Contains(a.statusMsg, "into itself") {
 		t.Fatalf("expected the into-itself flash, got %q", a.statusMsg)
@@ -204,7 +173,7 @@ func TestPasteOntoFileLandsBeside(t *testing.T) {
 
 	a.clipCopyPath(src)
 	a.pasteInto(pasteDirForPath(target, false))
-	waitFileOpIdle(t, a)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 	if _, err := os.Stat(filepath.Join(root, "sub", "a.txt")); err != nil {
 		t.Fatalf("paste-onto-file should land beside it: %v", err)
 	}
@@ -225,7 +194,7 @@ func TestMoveUpdatesOpenTabs(t *testing.T) {
 
 	a.clipCutPath(filepath.Join(root, "pkg"))
 	a.pasteInto(dest)
-	waitFileOpIdle(t, a)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 	want := filepath.Join(dest, "pkg", "file.go")
 	if got := a.activeTabPtr().Path; got != want {
 		t.Fatalf("tab path: got %q, want %q", got, want)
@@ -240,8 +209,69 @@ func TestDuplicateInPlace(t *testing.T) {
 	a := newTestApp(t, root)
 
 	a.duplicatePath(src)
-	waitFileOpIdle(t, a)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
 	if _, err := os.Stat(filepath.Join(root, "a copy.txt")); err != nil {
 		t.Fatalf("duplicate missing: %v", err)
 	}
+}
+
+// TestHandleFileOpDone_FailureStillRefreshesFinderAndGit pins the error
+// tail of a background move. A move that dies part-way (here the
+// destination folder does not exist; a cross-device copy that runs out
+// of disk is the field case) may already have changed the disk, so the
+// finder index and the git tint have to be refreshed exactly as a
+// successful op refreshes them. The error path used to refresh only the
+// tree and left both stale.
+func TestHandleFileOpDone_FailureStillRefreshesFinderAndGit(t *testing.T) {
+	root := t.TempDir()
+	src := mkFile(t, root, "a.txt", "data")
+	a := newTestApp(t, root)
+	rebuilds := 0
+	a.finder = finder.New(root)
+	// Run the index build inline so the count is settled by the time
+	// the assertion reads it, with no goroutine to drain.
+	a.finder.PanicGuard = func(_ string, fn func()) { rebuilds++; fn() }
+	if a.gitStatus.Busy() {
+		t.Fatal("setup: no git refresh should be in flight before the op")
+	}
+
+	a.clipCutPath(src)
+	a.pasteInto(filepath.Join(root, "nope"))
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
+
+	if !strings.Contains(a.statusMsg, "failed") {
+		t.Fatalf("expected the failure flash, got %q", a.statusMsg)
+	}
+	if rebuilds == 0 {
+		t.Fatal("a failed move must invalidate and rebuild the finder index")
+	}
+	if !a.gitStatus.Busy() && !a.gitStatus.Queued() {
+		t.Fatal("a failed move must request a git status refresh")
+	}
+}
+
+// TestFileOpGate_IsSeparateFromProjectReplace pins the split of the two
+// gates: a project replace in flight is no reason to refuse a paste —
+// the features are unrelated and used to share one busy flag.
+func TestFileOpGate_IsSeparateFromProjectReplace(t *testing.T) {
+	root := t.TempDir()
+	src := mkFile(t, root, "a.txt", "data")
+	a := newTestApp(t, root)
+	release := make(chan struct{})
+	a.projReplace.Start(func(context.Context) (projReplaceResult, error) {
+		<-release
+		return projReplaceResult{}, nil
+	})
+
+	a.duplicatePath(src)
+	pumpUntil(t, a, "file op", idle(&a.fileOp))
+
+	if _, err := os.Stat(filepath.Join(root, "a copy.txt")); err != nil {
+		t.Fatalf("duplicate should run while a replace is busy: %v", err)
+	}
+	if !strings.Contains(a.statusMsg, "Duplicated") {
+		t.Fatalf("expected the done flash, got %q", a.statusMsg)
+	}
+	close(release)
+	pumpUntil(t, a, "replace", idle(&a.projReplace))
 }

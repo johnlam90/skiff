@@ -198,3 +198,11 @@ func (p *Prompt) submit() {
 func (p *Prompt) cancel() {
 	p.Close()
 }
+
+// WantsMotion is true: Prompt tracks a Hover button under the pointer,
+// so it needs button-less motion to keep the highlight honest.
+func (p *Prompt) WantsMotion() bool { return true }
+
+// Dismiss is a no-op — a prompt that is torn down simply never submits,
+// and it has no preview to revert.
+func (p *Prompt) Dismiss() {}

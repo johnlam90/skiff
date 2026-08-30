@@ -30,39 +30,44 @@ const contextMenuWidth = 19
 // closeAllModals dismisses every modal in one shot and parks any in-flight
 // drag / auto-scroll state. Every "open this modal" helper calls it first
 // so the modals stay mutually exclusive and a stale drag from before the
-// modal opened can't keep extending a selection underneath it. Both
-// strips are torn down through their own single teardown — closeFind and
-// closeProjFind — so the replace rows, the match highlights and the
-// in-flight sweep generation all go with them rather than staying armed
-// under the modal. Hand-clearing a subset here is how projFind.replaceOpen
-// once survived an overlay opening on top of the panel.
+// modal opened can't keep extending a selection underneath it. The strip
+// is torn down through the slot (dropStrip), which runs the occupant's
+// own close hook — so the replace rows, the match highlights and the
+// in-flight sweep generation go with it rather than staying armed under
+// the modal, and this file no longer has to name the strips to know what
+// to clear. Hand-clearing a subset here is how projFind.replaceOpen once
+// survived an overlay opening on top of the panel.
 func (a *App) closeAllModals() {
-	// A modal opening over a pick cancels it properly — popped first,
-	// hook after — so a preview hook (the theme picker's live preview)
-	// gets reverted rather than stranded. The pop happens before the
-	// hook so the hook can never re-enter this teardown.
-	if pick, ok := a.overlays.Top().(*overlay.Pick); ok {
+	// A modal opening over another tears it down properly — popped
+	// first, hook after — so a preview hook (the theme picker's live
+	// preview) gets reverted rather than stranded. The pop happens
+	// before the hook so the hook can never re-enter this teardown.
+	// Which overlays have a hook is the overlay's own business: this
+	// used to be a type switch naming *overlay.Pick, so the next
+	// surface with something to undo would have been torn down
+	// silently. Dismiss is a no-op on every overlay that has nothing.
+	// One Close is the whole teardown: the stack holds at most one
+	// overlay, so a second call here could only ever pop something a
+	// Dismiss hook had just pushed — which is exactly the re-entrant
+	// case the pop-before-hook order exists to make impossible.
+	if top := a.overlays.Top(); top != nil {
 		a.overlays.Close()
-		if pick.OnCancel != nil {
-			pick.OnCancel()
-		}
+		top.Dismiss()
 	}
-	a.overlays.Close()
 	a.menuOpen = false
-	a.closeFind()
+	a.dropStrip()
 	a.diffPanelRow = -1
-	a.closeProjFind()
 	a.hoveredMenuRow = -1
 	a.dragMode = dragNone
 	a.stopAutoScroll()
 }
 
 // anyModalOpen reports whether an overlay — a floating surface that
-// captures all input — is on screen. Strips (the find bar, the
-// project-find bar) are deliberately absent: they pass mouse through so
-// the editor stays interactive underneath them, and counting them here
+// captures all input — is on screen. The strip slot (App.strip) is
+// deliberately absent: the find bar passes the mouse through so the
+// editor stays interactive underneath it, and counting a strip here
 // would suppress editor behaviours (drag auto-scroll) that must keep
-// working while a strip is up. See docs/adr/0001-strips-are-not-overlays.md.
+// working while one is up. See docs/adr/0001-strips-are-not-overlays.md.
 func (a *App) anyModalOpen() bool {
 	return a.overlays.IsOpen()
 }

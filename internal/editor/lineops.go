@@ -25,14 +25,14 @@ func (t *Tab) MoveLinesUp() {
 	if first <= 0 {
 		return
 	}
-	t.pushUndo(undoGroupStructural)
-	lines := t.Buffer.Lines
-	moved := lines[first-1]
-	copy(lines[first-1:last], lines[first:last+1])
-	lines[last] = moved
-	t.Cursor.Line--
-	t.Anchor.Line--
-	t.markLineOpEdit()
+	t.edit(undoGroupStructural, func() {
+		lines := t.Buffer.Lines
+		moved := lines[first-1]
+		copy(lines[first-1:last], lines[first:last+1])
+		lines[last] = moved
+		t.Cursor.Line--
+		t.Anchor.Line--
+	})
 }
 
 // MoveLinesDown is the mirror gesture: the block swaps with the line
@@ -45,14 +45,14 @@ func (t *Tab) MoveLinesDown() {
 	if last >= t.Buffer.LineCount()-1 {
 		return
 	}
-	t.pushUndo(undoGroupStructural)
-	lines := t.Buffer.Lines
-	moved := lines[last+1]
-	copy(lines[first+1:last+2], lines[first:last+1])
-	lines[first] = moved
-	t.Cursor.Line++
-	t.Anchor.Line++
-	t.markLineOpEdit()
+	t.edit(undoGroupStructural, func() {
+		lines := t.Buffer.Lines
+		moved := lines[last+1]
+		copy(lines[first+1:last+2], lines[first:last+1])
+		lines[first] = moved
+		t.Cursor.Line++
+		t.Anchor.Line++
+	})
 }
 
 // DuplicateLines inserts a copy of the selected line block directly
@@ -63,28 +63,19 @@ func (t *Tab) DuplicateLines() {
 		return
 	}
 	first, last := t.commentLineRange()
-	t.pushUndo(undoGroupStructural)
-	lines := t.Buffer.Lines
-	span := make([]string, last-first+1)
-	copy(span, lines[first:last+1])
+	t.edit(undoGroupStructural, func() {
+		lines := t.Buffer.Lines
+		span := make([]string, last-first+1)
+		copy(span, lines[first:last+1])
 
-	out := make([]string, 0, len(lines)+len(span))
-	out = append(out, lines[:last+1]...)
-	out = append(out, span...)
-	out = append(out, lines[last+1:]...)
-	t.Buffer.Lines = out
+		out := make([]string, 0, len(lines)+len(span))
+		out = append(out, lines[:last+1]...)
+		out = append(out, span...)
+		out = append(out, lines[last+1:]...)
+		t.Buffer.Lines = out
 
-	delta := len(span)
-	t.Cursor.Line += delta
-	t.Anchor.Line += delta
-	t.markLineOpEdit()
-}
-
-// markLineOpEdit applies the bookkeeping every successful line op
-// shares: the buffer changed (dirty + re-highlight) and the cursor
-// moved (so Render keeps it visible).
-func (t *Tab) markLineOpEdit() {
-	t.Dirty = true
-	t.StyleStale = true
-	t.cursorMoved = true
+		delta := len(span)
+		t.Cursor.Line += delta
+		t.Anchor.Line += delta
+	})
 }

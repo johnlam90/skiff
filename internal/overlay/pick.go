@@ -34,13 +34,13 @@ type PickItem struct {
 // OnCancel; the branch pickers just take OnPick. It sits in the upper
 // third of the screen so the editor stays visible around it.
 type Pick struct {
+	// List owns the highlight and the scroll window over the FILTERED
+	// view — sync pushes the current match count and frame height in
+	// before anything reads it.
+	List
 	Title  string
 	Items  []PickItem
 	Filter Field
-	// Selected is the highlight index into the filtered view.
-	Selected int
-	// scroll is the first visible filtered row.
-	scroll int
 	Theme  theme.Theme
 
 	Size  func() (w, h int)
@@ -58,14 +58,31 @@ type Pick struct {
 // Init snaps the highlight onto the Current item and scrolls it into
 // view — called by the opener once Items are set.
 func (p *Pick) Init() {
-	p.Selected = 0
+	p.sync()
+	p.Select(0)
 	for i, it := range p.Items {
 		if it.Current {
-			p.Selected = i
+			p.Select(i)
 			break
 		}
 	}
-	p.ensureRowVisible()
+	p.EnsureVisible()
+}
+
+// sync pushes the live shape of the list — how many rows the filter
+// left and how many the frame can show — into the embedded List, and
+// hands back the frame it measured. Every entry point calls it first,
+// because both numbers move underneath the overlay: the match count on
+// every keystroke, the window on every terminal resize.
+func (p *Pick) sync() Rect {
+	r := p.rect()
+	rows := r.H - pickChromeRows
+	if rows < 1 {
+		rows = 1
+	}
+	p.SetLen(len(p.Filtered()))
+	p.SetVisible(rows)
+	return r
 }
 
 // Filtered returns the indexes of items matching the query —
@@ -86,11 +103,11 @@ func (p *Pick) Filtered() []int {
 func (p *Pick) Confirm() {
 	filtered := p.Filtered()
 	onPick := p.OnPick
-	if len(filtered) == 0 || p.Selected >= len(filtered) {
+	if len(filtered) == 0 || p.Sel() >= len(filtered) {
 		p.Cancel()
 		return
 	}
-	idx := filtered[p.Selected]
+	idx := filtered[p.Sel()]
 	p.Close()
 	if onPick != nil {
 		onPick(idx)
@@ -114,15 +131,11 @@ func (p *Pick) moved() {
 	if len(filtered) == 0 {
 		return
 	}
-	if p.Selected >= len(filtered) {
-		p.Selected = len(filtered) - 1
-	}
-	if p.Selected < 0 {
-		p.Selected = 0
-	}
-	p.ensureRowVisible()
+	p.sync()
+	p.Clamp()
+	p.EnsureVisible()
 	if p.OnMove != nil {
-		p.OnMove(filtered[p.Selected])
+		p.OnMove(filtered[p.Sel()])
 	}
 }
 
@@ -130,8 +143,12 @@ func (p *Pick) moved() {
 // preview hook — narrowing to one row should show its effect without
 // waiting for an arrow key.
 func (p *Pick) filterChanged() {
-	p.Selected = 0
-	p.scroll = 0
+	p.sync()
+	p.Select(0)
+	// Clamp carries the empty-match case: with no rows moved() bails
+	// before EnsureVisible could pull the window home, and a query that
+	// matches nothing must not leave the last window's offset behind.
+	p.Clamp()
 	p.moved()
 }
 
@@ -139,6 +156,7 @@ func (p *Pick) filterChanged() {
 // keys move the highlight, and everything else edits the filter field —
 // an edit that changes the query re-runs the filter.
 func (p *Pick) HandleKey(ev *tcell.EventKey) {
+	p.sync()
 	switch ev.Key() {
 	case tcell.KeyEsc:
 		p.Cancel()
@@ -147,19 +165,19 @@ func (p *Pick) HandleKey(ev *tcell.EventKey) {
 		p.Confirm()
 		return
 	case tcell.KeyUp:
-		p.Selected--
+		p.Move(-1)
 		p.moved()
 		return
 	case tcell.KeyDown:
-		p.Selected++
+		p.Move(1)
 		p.moved()
 		return
 	case tcell.KeyPgUp:
-		p.Selected -= pickMaxVisible
+		p.Move(-pickMaxVisible)
 		p.moved()
 		return
 	case tcell.KeyPgDn:
-		p.Selected += pickMaxVisible
+		p.Move(pickMaxVisible)
 		p.moved()
 		return
 	}
@@ -176,31 +194,36 @@ func (p *Pick) HandleKey(ev *tcell.EventKey) {
 // outside-click cancels, wheel scrolls — except on the scroll
 // indicator's column, which the bar claims for itself.
 func (p *Pick) HandleMouse(x, y int, btn tcell.ButtonMask) {
+	r := p.sync()
 	if btn&tcell.WheelUp != 0 {
-		p.scroll -= 3
-		p.clampScroll()
+		p.ScrollBy(-3)
 		return
 	}
 	if btn&tcell.WheelDown != 0 {
-		p.scroll += 3
-		p.clampScroll()
+		p.ScrollBy(3)
 		return
 	}
-	// Claimed before rowAt: without this a press on the bar would fall
-	// through and *pick* whichever row sits behind the thumb, which is
-	// the worst possible answer to "let me see further down the list".
-	// The hit is false whenever no bar is drawn, so a list that fits
-	// keeps the column as ordinary row surface.
-	if b := p.bar(p.rect()); b.hit(x, y) {
+	// Claimed before the row hit-test: without this a press on the bar
+	// would fall through and *pick* whichever row sits behind the thumb,
+	// which is the worst possible answer to "let me see further down the
+	// list". The hit is false whenever no bar is drawn, so a list that
+	// fits keeps the column as ordinary row surface.
+	if b := p.bar(r); b.Hit(x, y) {
 		if btn&tcell.Button1 != 0 {
-			p.scroll = b.target(y)
+			p.ScrollToBar(r.Y+4, y)
 		}
 		return
 	}
-	idx, inside := p.rowAt(x, y)
+	inside := r.Contains(x, y)
+	idx := -1
+	if inside {
+		if i, ok := p.RowAt(r.Y+4, y); ok {
+			idx = i
+		}
+	}
 	if btn&tcell.Button1 != 0 {
 		if idx >= 0 {
-			p.Selected = idx
+			p.Select(idx)
 			p.Confirm()
 			return
 		}
@@ -209,77 +232,18 @@ func (p *Pick) HandleMouse(x, y int, btn tcell.ButtonMask) {
 		}
 		return
 	}
-	if idx >= 0 && idx != p.Selected {
-		p.Selected = idx
+	if idx >= 0 && idx != p.Sel() {
+		p.Select(idx)
 		p.moved()
 	}
 }
 
-// rowAt maps screen coordinates to a filtered-row index (-1 when not on
-// a row); inside reports containment in the modal.
-func (p *Pick) rowAt(x, y int) (idx int, inside bool) {
-	r := p.rect()
-	inside = r.Contains(x, y)
-	if !inside {
-		return -1, false
-	}
-	rowsStart := r.Y + 4
-	i := p.scroll + (y - rowsStart)
-	if y < rowsStart || y >= r.Y+r.H-1 || i < 0 || i >= len(p.Filtered()) {
-		return -1, true
-	}
-	return i, true
-}
-
-// visibleRows returns how many list rows the modal shows.
-func (p *Pick) visibleRows() int {
-	r := p.rect()
-	rows := r.H - pickChromeRows
-	if rows < 1 {
-		rows = 1
-	}
-	return rows
-}
-
-// ensureRowVisible keeps the highlight inside the viewport.
-func (p *Pick) ensureRowVisible() {
-	rows := p.visibleRows()
-	if p.Selected < p.scroll {
-		p.scroll = p.Selected
-	}
-	if p.Selected >= p.scroll+rows {
-		p.scroll = p.Selected - rows + 1
-	}
-	p.clampScroll()
-}
-
-// clampScroll keeps the scroll offset inside the filtered list.
-func (p *Pick) clampScroll() {
-	max := len(p.Filtered()) - p.visibleRows()
-	if max < 0 {
-		max = 0
-	}
-	if p.scroll > max {
-		p.scroll = max
-	}
-	if p.scroll < 0 {
-		p.scroll = 0
-	}
-}
-
-// bar describes the list's scroll indicator inside frame r. total is
-// the FILTERED length, not len(Items): the filtered view is the list
-// the user is scrolling, so narrowing the query has to shrink the bar
-// with it — and retire it entirely once the matches fit.
-func (p *Pick) bar(r Rect) bodyBar {
-	return bodyBar{
-		x:      barColumn(r),
-		top:    r.Y + 4,
-		viewH:  p.visibleRows(),
-		total:  len(p.Filtered()),
-		scroll: p.scroll,
-	}
-}
+// bar describes the list's scroll indicator inside frame r. The List it
+// reads was synced against the FILTERED length, not len(Items): the
+// filtered view is the list the user is scrolling, so narrowing the
+// query shrinks the bar with it — and retires it entirely once the
+// matches fit.
+func (p *Pick) bar(r Rect) Bar { return p.List.Bar(BarColumn(r), r.Y+4) }
 
 // Rect exposes the live geometry for callers and tests that hit-test
 // against the pick from outside the package.
@@ -342,7 +306,7 @@ func (p *Pick) rect() Rect {
 // the windowed rows — ● on the current item, dimmed right-aligned tags,
 // the highlight on the selection color.
 func (p *Pick) Draw(scr tcell.Screen) {
-	r := p.rect()
+	r := p.sync()
 	th := p.Theme
 	DrawFrame(scr, r, p.Title, th)
 
@@ -359,21 +323,20 @@ func (p *Pick) Draw(scr tcell.Screen) {
 	}
 
 	filtered := p.Filtered()
-	rows := p.visibleRows()
 	rowsStart := r.Y + 4
-	for i := 0; i < rows; i++ {
-		idx := p.scroll + i
+	for i := range p.Visible() {
+		idx := p.Scroll() + i
 		if idx >= len(filtered) {
 			continue
 		}
-		p.drawRow(scr, r, rowsStart+i, p.Items[filtered[idx]], idx == p.Selected)
+		p.drawRow(scr, r, rowsStart+i, p.Items[filtered[idx]], idx == p.Sel())
 	}
 	if len(filtered) == 0 {
 		drawText(scr, r.X+2, rowsStart, r.W-4, "no matches", mutedStyle)
 	}
 	// After the rows: drawRow fills the frame's inner width, padding
 	// column included, so the bar has to land on top of it.
-	p.bar(r).draw(scr, th)
+	p.bar(r).Draw(scr, th)
 }
 
 // drawRow paints one row: ● on the current item, the label, and a
@@ -405,4 +368,19 @@ func (p *Pick) drawRow(scr tcell.Screen, r Rect, ry int, it PickItem, selected b
 // cluster-aware via textdraw so wide glyphs clip on cell boundaries.
 func drawClippedText(scr tcell.Screen, x, y, maxW int, s string, st tcell.Style) {
 	textdraw.DrawClipped(scr, x, y, maxW, s, st)
+}
+
+// WantsMotion is true: hovering a row moves the highlight and fires the
+// OnMove preview, which is how the theme picker previews a palette.
+func (p *Pick) WantsMotion() bool { return true }
+
+// Dismiss fires OnCancel without closing — the stack has already popped
+// this overlay. It is the one prefab with something to undo on a
+// teardown: OnMove may have previewed a theme, and OnCancel is the
+// revert. Close is deliberately not called, so a teardown can never
+// re-enter the stack it is already unwinding.
+func (p *Pick) Dismiss() {
+	if p.OnCancel != nil {
+		p.OnCancel()
+	}
 }

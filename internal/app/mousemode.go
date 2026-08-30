@@ -28,11 +28,7 @@
 
 package app
 
-import (
-	"github.com/gdamore/tcell/v2"
-
-	"github.com/johnlam90/skiff/internal/overlay"
-)
+import "github.com/gdamore/tcell/v2"
 
 const (
 	// mouseBaseFlags is what skiff asks for whenever nothing on screen
@@ -45,36 +41,26 @@ const (
 	mouseHoverFlags = mouseBaseFlags | tcell.MouseMotionEvents
 )
 
-// overlayWantsMotion reports whether the overlay on top gives hover
-// feedback and therefore needs button-less motion events.
-//
-// The default is YES, and the opt-out list is deliberately the short
-// side: a surface that hovers when it shouldn't costs a burst of
-// escape-sequence traffic for as long as one modal is up, while a
-// surface that does NOT hover when it should is a silently dead
-// highlight. Every other prefab (Prompt, Confirm, Dirty, Popup, Pick)
-// plus the bespoke finder, git-log and diff overlays and the action
-// menu track a Hover/selected row on motion. Info and Form do not —
-// Info ignores everything but the wheel and Button1, Form returns
-// early unless Button1 is down — and Info is the long-lived one (a
-// 300-line stderr dump or diff preview the user reads and scrolls),
-// so it is worth keeping quiet.
-func overlayWantsMotion(o overlay.Overlay) bool {
-	switch o.(type) {
-	case *overlay.Info, *overlay.Form:
-		return false
-	}
-	return true
-}
-
 // wantMouseFlags returns the mouse-reporting mode the current UI state
 // needs. The overlay stack is the single owner of what is floating, so
 // this reads it rather than trusting any individual opener or closer to
 // have paired its calls — closeAllModals, the activate-then-close
 // action paths and an overlay replacing another all fall out correctly
 // because the answer is recomputed from the stack, never accumulated.
+//
+// The surface answers for itself through Overlay.WantsMotion. This used
+// to be a type switch here with a two-entry opt-out list, which meant a
+// new overlay was classified by whichever branch it failed to match —
+// silently, and always as "hovers". Nearly every surface does hover
+// (Prompt, Confirm, Dirty, Popup, Pick, the action menu, the finder,
+// the git log and the diff view all track a row or a button under the
+// pointer), so the default was right far more often than not; but Info
+// and Form do not, and Info is the long-lived one — a 300-line stderr
+// dump or diff preview the user reads and scrolls — so getting it wrong
+// costs a continuous uplink flood for as long as it is up. Now the
+// classification lives on the type that knows.
 func (a *App) wantMouseFlags() tcell.MouseFlags {
-	if top := a.overlays.Top(); top != nil && overlayWantsMotion(top) {
+	if top := a.overlays.Top(); top != nil && top.WantsMotion() {
 		return mouseHoverFlags
 	}
 	return mouseBaseFlags

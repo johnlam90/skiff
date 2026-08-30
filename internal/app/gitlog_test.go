@@ -12,13 +12,17 @@
 package app
 
 import (
-	"os"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/johnlam90/skiff/internal/diff"
+	"github.com/johnlam90/skiff/internal/git"
+	"github.com/johnlam90/skiff/internal/overlay"
+	"github.com/johnlam90/skiff/internal/scrollbar"
 )
 
 // gitLogOv returns the open commit-history overlay, failing the test
@@ -58,101 +62,55 @@ func historyRepoApp(t *testing.T) (*App, string, string) {
 	return app, aFile, bFile
 }
 
-// TestLoadGitLog_BranchAndFileScopes pins the two loader modes: the
-// branch log sees every commit, a file path narrows it to commits that
-// touched that file, newest first.
-func TestLoadGitLog_BranchAndFileScopes(t *testing.T) {
-	a, aFile, bFile := historyRepoApp(t)
-	branch := loadGitLog(a.rootDir, "", gitLogLimit)
-	if len(branch) != 2 {
-		t.Fatalf("branch log: got %d entries, want 2", len(branch))
-	}
-	if !strings.Contains(branch[0].Subject, "c2") {
-		t.Fatalf("newest first: got %q", branch[0].Subject)
-	}
-	if branch[0].SHA == "" || branch[0].Age == "" {
-		t.Fatalf("entry should carry SHA and age: %+v", branch[0])
-	}
+// TestOpenGitLog_FromScriptedFake proves the history surface — the
+// overlay's rows and the commit diff a row opens — is driven entirely
+// through readRepo: a git.Fake scripts the log and the show against a
+// plain temp directory with no repository behind it.
+func TestOpenGitLog_FromScriptedFake(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	fake := &git.Fake{}
+	fake.Script("log --format=%h%x00%s%x00%cr -n 200 --",
+		"abc1234\x00scripted subject\x002 days ago\n"+
+			"def5678\x00older\x003 days ago\n", nil)
+	fake.Script("show --format= --src-prefix=a/ --dst-prefix=b/ abc1234 --", strings.Join([]string{
+		"diff --git a/f.txt b/f.txt",
+		"index 0000000..1111111 100644",
+		"--- a/f.txt",
+		"+++ b/f.txt",
+		"@@ -1 +1 @@",
+		"-old",
+		"+scripted line",
+		"",
+	}, "\n"), nil)
+	a.gitRunner = fake
 
-	onlyB := loadGitLog(a.rootDir, bFile, gitLogLimit)
-	if len(onlyB) != 1 || !strings.Contains(onlyB[0].Subject, "c1") {
-		t.Fatalf("file log for b.txt: got %+v, want just c1", onlyB)
+	a.openGitLog("History · main", "")
+	g := gitLogOv(t, a)
+	if len(g.entries) != 2 || g.entries[0].Hash != "abc1234" || g.entries[0].Subject != "scripted subject" {
+		t.Fatalf("overlay rows should be the scripted log, got %+v", g.entries)
 	}
-	if both := loadGitLog(a.rootDir, aFile, gitLogLimit); len(both) != 2 {
-		t.Fatalf("file log for a.txt: got %d entries, want 2", len(both))
+	g.activate()
+	if !diffIsOpen(a) {
+		t.Fatalf("activating a row should open the scripted commit diff; top = %T", a.overlays.Top())
+	}
+	if body := strings.Join(diffOv(t, a).unified, "\n"); !strings.Contains(body, "+scripted line") {
+		t.Fatalf("diff body should come from the scripted show, got:\n%s", body)
 	}
 }
 
-// TestLoadGitLog_Degrades confirms the best-effort contract: non-repos
-// and bad arguments yield nil, never an error surfaced to the UI.
-func TestLoadGitLog_Degrades(t *testing.T) {
-	if got := loadGitLog(t.TempDir(), "", 10); got != nil {
-		t.Fatalf("non-repo log = %v, want nil", got)
-	}
-	if got := loadGitLog("", "", 10); got != nil {
-		t.Fatalf("empty root log = %v, want nil", got)
-	}
-	if got := loadGitLog(t.TempDir(), "", 0); got != nil {
-		t.Fatalf("zero limit log = %v, want nil", got)
-	}
-}
-
-// TestLoadGitCommitDiff_WholeAndScoped pins the diff loader: a commit's
-// full diff includes every touched file, and the path-scoped variant
-// only that file's hunks.
-func TestLoadGitCommitDiff_WholeAndScoped(t *testing.T) {
-	a, aFile, _ := historyRepoApp(t)
-	entries := loadGitLog(a.rootDir, "", gitLogLimit)
-	c1 := entries[1] // seeds both files
-
-	whole := strings.Join(loadGitCommitDiff(a.rootDir, c1.SHA, ""), "\n")
-	if !strings.Contains(whole, "a.txt") || !strings.Contains(whole, "b.txt") {
-		t.Fatalf("whole-commit diff should span both files, got:\n%s", whole)
-	}
-	scoped := strings.Join(loadGitCommitDiff(a.rootDir, c1.SHA, aFile), "\n")
-	if !strings.Contains(scoped, "a.txt") || strings.Contains(scoped, "b.txt") {
-		t.Fatalf("scoped diff should cover a.txt only, got:\n%s", scoped)
-	}
-}
-
-// TestLoadGitCommitDiff_RefusesOptionLookalikeSHA pins the defense-in-depth
-// gate: loadGitCommitDiff routes sha through git.SafeRef before it ever
-// reaches argv. The test runs against a REAL repo (not a non-repo temp
-// dir) on purpose — git resolves "is this even a repository?" before it
-// parses `show`'s own options, so a non-repo root fails identically
-// whether or not the gate fires and can't prove the gate did anything.
-// Two of the three cases carry an observable side effect that only
-// happens if the raw string reaches argv: "--output=pwned" makes a real
-// `git show` write a file (proven manually: it does, in a real repo,
-// pre-gate), and "-p" makes `git show --format= -p` silently show
-// HEAD's diff instead of refusing — both would corrupt this test's repo
-// or return a wrong-but-non-nil diff if the gate didn't fire first.
-func TestLoadGitCommitDiff_RefusesOptionLookalikeSHA(t *testing.T) {
-	a, aFile, _ := historyRepoApp(t)
-
-	for _, sha := range []string{"--output=pwned", "", "-p"} {
-		if got := loadGitCommitDiff(a.rootDir, sha, ""); got != nil {
-			t.Fatalf("sha %q: got %v, want nil (refused before any subprocess)", sha, got)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(a.rootDir, "pwned")); err == nil {
-		t.Fatal("--output=pwned must not reach argv: file was written")
-	}
-
-	entries := loadGitLog(a.rootDir, "", gitLogLimit)
-	if len(entries) == 0 {
-		t.Fatal("need at least one real commit for the positive case")
-	}
-	// The trailing "--" always precedes the (possibly absent) path
-	// argument; both branches must still resolve correctly with it in
-	// place — an unscoped diff (no path after "--") and a path-scoped
-	// one (the path lands after it) exercise both shapes.
-	if whole := loadGitCommitDiff(a.rootDir, entries[0].SHA, ""); len(whole) == 0 {
-		t.Fatalf("valid sha, no path: got %v, want a diff", whole)
-	}
-	scoped := loadGitCommitDiff(a.rootDir, entries[0].SHA, aFile)
-	if len(scoped) == 0 {
-		t.Fatalf("valid sha, scoped path: got %v, want a diff", scoped)
+// TestGitLogActivate_ReportsGitFailure pins the difference between an
+// empty diff and a git that said no: the first flashes "no diff", the
+// second flashes git's reason, because a silent empty answer would send
+// the user looking for a problem in the commit rather than in git.
+func TestGitLogActivate_ReportsGitFailure(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	fake := &git.Fake{}
+	fake.Script("log --format=%h%x00%s%x00%cr -n 200 --", "abc1234\x00s\x00now\n", nil)
+	a.gitRunner = fake
+	a.openGitLog("History · main", "")
+	gitLogOv(t, a).activate()
+	if diffIsOpen(a) || !strings.Contains(a.statusMsg, "Couldn't load commit abc1234") {
+		t.Fatalf("an unscripted show is git saying no; flash = %q", a.statusMsg)
 	}
 }
 
@@ -183,7 +141,7 @@ func TestOpenGitLog_ListsCommitsAndEmptyFlashes(t *testing.T) {
 func TestActivateGitLogRow_OpensCommitDiff(t *testing.T) {
 	a, _, _ := historyRepoApp(t)
 	a.openGitLog("History · main", "")
-	gitLogOv(t, a).selected = 1 // c1 — the two-file commit
+	gitLogOv(t, a).Select(1) // c1 — the two-file commit
 	a.handleKey(keyEv(tcell.KeyEnter, 0))
 	if gitLogIsOpen(a) {
 		t.Fatal("activation should close the history modal")
@@ -196,7 +154,7 @@ func TestActivateGitLogRow_OpensCommitDiff(t *testing.T) {
 	}
 	files := 0
 	for _, r := range diffOv(t, a).rows {
-		if r.Kind == diffRowFile {
+		if r.Kind == diff.RowFile {
 			files++
 		}
 	}
@@ -291,8 +249,8 @@ func TestHandleGitLogMouse_HoverClickAndDismiss(t *testing.T) {
 	mx, my := gr.X, gr.Y
 
 	g.HandleMouse(mx+4, my+4, 0) // hover row 1
-	if g.selected != 1 {
-		t.Fatalf("hover should select row 1, got %d", g.selected)
+	if g.Sel() != 1 {
+		t.Fatalf("hover should select row 1, got %d", g.Sel())
 	}
 	g.HandleMouse(mx+4, my+4, tcell.Button1)
 	if gitLogIsOpen(a) || !diffIsOpen(a) {
@@ -310,14 +268,15 @@ func TestHandleGitLogMouse_HoverClickAndDismiss(t *testing.T) {
 // TestScrollGitLog_Clamps pins the wheel bounds on a long history.
 func TestScrollGitLog_Clamps(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	g := &gitLogOverlay{app: a, entries: make([]gitLogEntry, 40)}
-	g.scrollBy(1000)
-	if want := 40 - gitLogVisible; g.scroll != want {
-		t.Fatalf("scroll past end: got %d, want %d", g.scroll, want)
+	g := &gitLogOverlay{app: a, entries: make([]git.Commit, 40)}
+	g.sync()
+	g.ScrollBy(1000)
+	if want := 40 - gitLogVisible; g.Scroll() != want {
+		t.Fatalf("scroll past end: got %d, want %d", g.Scroll(), want)
 	}
-	g.scrollBy(-1000)
-	if g.scroll != 0 {
-		t.Fatalf("scroll past top: got %d, want 0", g.scroll)
+	g.ScrollBy(-1000)
+	if g.Scroll() != 0 {
+		t.Fatalf("scroll past top: got %d, want 0", g.Scroll())
 	}
 }
 
@@ -334,10 +293,155 @@ func TestDrawGitLog_Smoke(t *testing.T) {
 		t.Fatalf("title row: %q", title)
 	}
 	row0 := screenLine(scr, my+3)
-	if !strings.Contains(row0, gitLogOv(t, a).entries[0].SHA) || !strings.Contains(row0, "c2") {
+	if !strings.Contains(row0, gitLogOv(t, a).entries[0].Hash) || !strings.Contains(row0, "c2") {
 		t.Fatalf("row 0 should show SHA and subject: %q", row0)
 	}
 	if !strings.Contains(row0, "ago") {
 		t.Fatalf("row 0 should show a relative age: %q", row0)
+	}
+}
+
+// gitLogBarColumn draws g and reads its scroll-indicator column back
+// off the screen across the commit rows.
+func gitLogBarColumn(t *testing.T, a *App, g *gitLogOverlay) string {
+	t.Helper()
+	a.screen.Clear()
+	g.Draw(a.screen)
+	a.screen.Show()
+	cells, w, _ := a.screen.(tcell.SimulationScreen).GetContents()
+	r := g.rect()
+	barX := overlay.BarColumn(r)
+	var b strings.Builder
+	for row := range g.Visible() {
+		if rs := cells[(r.Y+3+row)*w+barX].Runes; len(rs) > 0 {
+			b.WriteRune(rs[0])
+		}
+	}
+	return b.String()
+}
+
+// TestDrawGitLog_ScrollbarShowsOnlyWhenHistoryOverflows pins the
+// history overlay's half of the shared indicator. A 200-commit log
+// scrolled to the middle of a 14-row window is the case where "there is
+// more below" is not obvious from anything else on screen; a history
+// short enough to fit must paint nothing, so the padding column stays
+// ordinary row surface.
+func TestDrawGitLog_ScrollbarShowsOnlyWhenHistoryOverflows(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+
+	long := &gitLogOverlay{app: a, title: "History", entries: make([]git.Commit, 60)}
+	long.sync()
+	// Scroll the way a user does — the wheel — and leave the highlight
+	// on row 0, which is the state a fresh open is in and the one that
+	// used to have the window snapped back on the next frame.
+	long.ScrollBy(20)
+	col := gitLogBarColumn(t, a, long)
+	if long.Scroll() != 20 {
+		t.Fatalf("the paint moved the window: scroll %d, want 20", long.Scroll())
+	}
+	if !strings.ContainsRune(col, scrollbar.Thumb) || !strings.ContainsRune(col, scrollbar.Track) {
+		t.Fatalf("60 commits in a %d-row window must paint a bar, got %q", long.Visible(), col)
+	}
+	wantStart, wantLen, ok := scrollbar.Geom(long.Len(), long.Visible(), long.Scroll())
+	if !ok {
+		t.Fatal("fixture should overflow")
+	}
+	for row, got := range []rune(col) {
+		want := scrollbar.Track
+		if row >= wantStart && row < wantStart+wantLen {
+			want = scrollbar.Thumb
+		}
+		if got != want {
+			t.Fatalf("bar row %d = %q, want %q (col %q)", row, got, want, col)
+		}
+	}
+
+	short := &gitLogOverlay{app: a, title: "History", entries: make([]git.Commit, 3)}
+	short.sync()
+	col = gitLogBarColumn(t, a, short)
+	if strings.ContainsAny(col, string([]rune{scrollbar.Track, scrollbar.Thumb})) {
+		t.Fatalf("a history that fits must paint no bar, got %q", col)
+	}
+}
+
+// TestGitLogBarPress_ScrollsInsteadOfOpeningTheCommitBehindIt is the
+// click-steal regression: the bar's column is inside the commit rows,
+// so without the hit-test claiming it first, reaching for the thumb
+// would open the diff of whichever commit sits behind it.
+func TestGitLogBarPress_ScrollsInsteadOfOpeningTheCommitBehindIt(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	g := &gitLogOverlay{app: a, title: "History", entries: make([]git.Commit, 60)}
+	g.sync()
+	a.overlays.Open(g)
+	r := g.rect()
+	barX := overlay.BarColumn(r)
+
+	g.HandleMouse(barX, r.Y+3+g.Visible()-1, tcell.Button1)
+	// Paint before asserting. A scroll that survives the press but not
+	// the next frame is a scrollbar the user cannot drag at all, and
+	// asserting straight off the press would never notice.
+	g.Draw(a.screen)
+	if want := g.MaxScroll(); g.Scroll() != want {
+		t.Fatalf("a press at the foot of the bar: scroll %d after a paint, want %d", g.Scroll(), want)
+	}
+	if !gitLogIsOpen(a) {
+		t.Fatal("a bar press must not activate a row or dismiss the overlay")
+	}
+	before := g.Sel()
+	g.HandleMouse(barX, r.Y+3, tcell.ButtonNone)
+	if g.Sel() != before {
+		t.Fatalf("hovering the bar moved the highlight: %d → %d", before, g.Sel())
+	}
+}
+
+// gitLogEntriesN builds n identifiable commit rows so a test can read
+// off the screen WHICH commit the window starts on, rather than only
+// trusting the offset the overlay reports about itself.
+func gitLogEntriesN(n int) []git.Commit {
+	out := make([]git.Commit, n)
+	for i := range out {
+		out[i] = git.Commit{
+			Hash:    fmt.Sprintf("sha%03d", i),
+			Subject: fmt.Sprintf("commit %d", i),
+			When:    "1 day ago",
+		}
+	}
+	return out
+}
+
+// TestGitLogWheel_SurvivesAPaint is the other half of the same defect
+// the bar press exposes. Draw used to call EnsureVisible on every
+// frame, so with the selection on row 0 — the state on every fresh
+// open — any offset the wheel set was pulled straight back to 0 by the
+// next paint: the history scrolled for zero frames and the user saw
+// nothing move. Scrolling is looking, not choosing (see overlay.List),
+// so a wheel tick has to outlive the frame that follows it, and the
+// commit it brings to the top of the window has to be the one painted
+// there.
+func TestGitLogWheel_SurvivesAPaint(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	g := &gitLogOverlay{app: a, title: "History", entries: gitLogEntriesN(60)}
+	g.sync()
+	a.overlays.Open(g)
+	r := g.rect()
+
+	g.HandleMouse(r.X+4, r.Y+4, tcell.WheelDown)
+	scrolled := g.Scroll()
+	if scrolled == 0 {
+		t.Fatal("the wheel should have scrolled the history")
+	}
+	if g.Sel() != 0 {
+		t.Fatalf("the wheel must not drag the highlight, got %d", g.Sel())
+	}
+
+	g.Draw(a.screen)
+	if g.Scroll() != scrolled {
+		t.Fatalf("a paint undid the wheel: scroll %d → %d", scrolled, g.Scroll())
+	}
+	a.screen.Show()
+	scr := a.screen.(tcell.SimulationScreen)
+	top := screenLine(scr, r.Y+3)
+	if want := g.entries[scrolled].Hash; !strings.Contains(top, want) {
+		t.Fatalf("the window's first row should paint %q, got %q", want, top)
 	}
 }

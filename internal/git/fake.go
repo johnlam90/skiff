@@ -24,8 +24,10 @@ type Fake struct {
 	mu sync.Mutex
 	// Responses maps strings.Join(args, " ") to a scripted result.
 	Responses map[string]FakeResponse
-	// Calls records every invocation's args in order.
-	Calls [][]string
+	// calls records every invocation's args in order. Read it through
+	// Calls: the verbs run on background goroutines, so a bare field
+	// read from a test would race the append.
+	calls [][]string
 }
 
 // FakeResponse scripts one command's result.
@@ -48,7 +50,7 @@ func (f *Fake) Script(args string, out string, err error) {
 func (f *Fake) lookup(args []string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.Calls = append(f.Calls, append([]string(nil), args...))
+	f.calls = append(f.calls, append([]string(nil), args...))
 	key := strings.Join(args, " ")
 	if resp, ok := f.Responses[key]; ok {
 		return resp.Out, resp.Err
@@ -73,5 +75,31 @@ func (f *Fake) Combined(root string, timeout time.Duration, args ...string) ([]b
 func (f *Fake) CallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.Calls)
+	return len(f.calls)
+}
+
+// Calls returns a copy of every recorded argv in call order — for
+// asserting that a verb chose the argv it should have, and in which
+// order its probes ran relative to the caller returning.
+func (f *Fake) Calls() [][]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([][]string, len(f.calls))
+	for i, c := range f.calls {
+		out[i] = append([]string(nil), c...)
+	}
+	return out
+}
+
+// Called reports whether a command with exactly this argv (joined by
+// single spaces, the same key Script uses) ran.
+func (f *Fake) Called(args string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.calls {
+		if strings.Join(c, " ") == args {
+			return true
+		}
+	}
+	return false
 }

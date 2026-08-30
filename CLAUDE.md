@@ -62,15 +62,24 @@ internal/app/menudef.go       Menu data model: rows, groups, drill-ins, filter m
 internal/app/menu.go          Menu behavior: filter field, nav, hit-test, drawing
 internal/app/actions.go       One handler per menu row + the custom-action runner
 internal/app/tabops.go        Tab lifecycle, save/close guards, clipboard, has* gates
-internal/app/conflict.go      Dirty-buffer-vs-changed-file prompt + buffer/disk diff
+internal/app/conflict.go      Dirty-buffer-vs-changed-file prompt (the diff
+                              itself comes from internal/diff)
 internal/app/gitchanges.go    Git panel: rows, buttons, keyboard mode, hint
                               strip, and the change list's own scrollbar
 internal/app/gitstatus.go     Best-effort `git status` read behind the tree tint
 internal/app/overlays.go      Overlay stack wiring: menu adapter + dropOverlay
 internal/app/modals.go        Openers for the prefab overlays + closeAllModals
+internal/app/strip.go         The strip interface + App's one strip slot: what a
+                              docked bar reserves, routes, paints and tears down
 internal/app/projfind.go      Project-wide content search panel (Esc-F)
 internal/app/preview.go       Shared file-open path + preview-tab rules
-internal/app/fileclip.go      File clipboard: cut/copy/paste/duplicate tree entries
+internal/app/fileops.go       App side of file ops: the prompts/confirms, the
+                              unsaved-changes gate, and applyChangeset — the ONE
+                              post-op tail (repoint/close/reopen tabs, tree,
+                              git, finder, session) every file op runs
+internal/app/fileclip.go      File clipboard: cut/copy/paste/duplicate tree
+                              entries on a background runner; the done event
+                              carries the manager's Changeset
 internal/app/session_restore.go App ↔ session store bridge (capture/restore)
 internal/app/gitops.go        Git write side: commit/push/pull/branch/stash runner
 internal/editor/buffer.go     Position + Buffer ([]string lines), edit primitives
@@ -105,6 +114,21 @@ internal/filetree/render.go   Painting + row styling: git change
 internal/filetree/scrollbar.go The sidebar's own scrollbar column
 internal/filetree/nav.go      Hit-test, toggle, scroll, Reveal, and
                               expanded-dir session persistence
+internal/filemanager/         The one owner of file operations: Create /
+                              Rename / Trash / Restore / Move / Copy /
+                              Duplicate over a project root, each returning
+                              a Changeset (Added/Removed/Moved). Owns the
+                              session trash, the " copy" ladder, the
+                              cross-device fallback and every guard (root,
+                              escape, into-itself, separator). No tcell,
+                              theme, app or filetree imports — testable
+                              against a t.TempDir() with no screen
+internal/diff/                The one model of a unified diff: Parse (git
+                              text) and Lines (buffer vs disk) build it,
+                              Rows pairs it for the side-by-side view.
+                              No tcell, no theme, no git — the parse and
+                              the pairing live once so the gutter and the
+                              diff view cannot disagree
 internal/scrollbar/           The one definition of a scrollbar: thumb
                               geometry, its click inverse, and the Track/
                               Thumb glyphs. No tcell, no theme — both the
@@ -120,23 +144,41 @@ internal/customactions/       Loader for ~/.config/skiff/actions.json, incl. the
 internal/session/session.go   Session store — one file per project under
                               ~/.local/state/skiff/sessions/ (legacy
                               sessions.json is migrated + renamed aside)
+internal/asyncjob/            The one shape of a background job: Job[T]
+                              with a Policy (Coalesce / Supersede / Refuse /
+                              Concurrent), injected Spawn + Post seams, and an OnDone
+                              that runs only when the loop lands the single
+                              *asyncjob.Event. Every goroutine-backed
+                              feature in app is one Job field; Notify is
+                              the no-result wake-up (progress ticks, the
+                              finder index's "rebuilt")
 internal/atomicfile/atomicfile.go Temp-file + fsync + rename write, shared by
                               every config/state file (session, trust,
                               config.json, .skiff/format.json)
 internal/overlay/             Floating surfaces: the Stack (routing truth),
                               Field/chrome primitives, and the prefab
                               overlays (Prompt/Confirm/Info/Dirty/Form/
-                              Popup/Pick). scrollbar.go is the shared
-                              scroll indicator every windowing prefab
-                              paints in its frame's right padding
+                              Popup/Pick). list.go is the one scrolled,
+                              selectable row window — Pick, the action
+                              menu, the finder, the git log and the git
+                              panel all embed it. scrollbar.go is the
+                              shared scroll indicator every windowing
+                              surface paints in its frame's right padding
                               column — Confirm's trust body, Info's
-                              stderr/diff, Pick's list
-internal/git/                 Git process boundary: Repo over a Runner
-                              seam (real exec + in-memory Fake), hardened
-                              env + read timeouts on every call, and the
-                              Snapshot model (IsRepo/Branch/Ahead/Behind/
-                              Files) every git-aware surface consumes
-internal/git/ref.go           SafeRef: refuses refs git would read as an option
+                              stderr/diff, every List's rows
+internal/git/                 Git process boundary AND vocabulary: Repo
+                              over a Runner seam (real exec + in-memory
+                              Fake), hardened env + timeouts, and typed
+                              verbs — Status/Diff/DiffUntracked/Log/Show/
+                              Branches/Worktrees/Toplevel/LsFiles reads,
+                              Commit/Push/Pull/Fetch/Switch/NewBranch/
+                              Merge/Stash*/Worktree* writes — each
+                              building its own argv and parsing its own
+                              output. snapshot.go is the Snapshot model;
+                              explain.go is *OpError (advice + the
+                              NonFastForward/NotMerged/WorktreeDirty
+                              flags the follow-up offers branch on)
+internal/git/ref.go           SafeRef / safePath: refuse names git would read as an option
 internal/clipboard/clipboard.go OSC 52 to /dev/tty with tmux passthrough wrap,
                               capped at MaxPayloadBytes (ErrTooLarge above it)
 internal/userconfig/userconfig.go ~/.config/skiff/config.json (icons, theme,
@@ -225,6 +267,27 @@ consumes the flag and clears it. **Do not** call `EnsureVisible`
 unconditionally — that re-introduces the "scroll yanks back to cursor
 on every tick" bug.
 
+### One seam for "an edit happened" (tab.go)
+Every text mutation goes through the unexported
+`(*Tab).edit(group, mutate)`: it pushes the undo snapshot under the
+caller's group, runs the mutation, then applies the trailer — `Dirty`,
+`StyleStale`, `cursorMoved`, and a re-run of the active find query. That
+trailer used to be hand-typed at ten sites and had already drifted (only
+the `Replace*` trio refreshed `FindMatches`, so typing with the find bar
+open painted the highlights one column off the text). **Don't write the
+trailer by hand again** — `grep -n 'Dirty = true' internal/editor/*.go`
+must stay at exactly one hit, inside `edit`.
+Two things stay with the mutator: its undo group (typing coalesces,
+structural edits don't) and every no-op guard, because reaching `edit`
+always records undo state — `pushUndo` either opens a new entry or, when
+the group coalesces, extends the one already open — so a call that
+mutates nothing still tells the history a change happened.
+`dropSelection` is the raw
+delete-the-selection half for the insert paths that replace a selection
+inside their own single step. `RestoreView` is the matching seam on the
+view side — the app never assigns `Cursor` / `Anchor` / `ScrollY`
+itself, so a restore can't forget `cursorMoved` or the undo-group break.
+
 ### Scroll clamping with overscroll
 `tab.clampScroll(viewH)` allows the last line to scroll roughly to the
 middle (`overscroll = max(viewH/2, 3)`). This is intentional — without
@@ -295,11 +358,50 @@ terminator. Any new buffer-to-disk write MUST use
 file. `Tab.Save` is the reference. Inserted newlines stay `"\n"` in the
 buffer on purpose; only the write joins with the file's own ending.
 
+### Git argv lives in `internal/git` only — app calls verbs (git.go)
+`git.Repo` has no `Output(args…)` door. Every git command the editor runs
+is a typed method (`Diff`, `Log`, `Push`, `Switch`, `WorktreeAdd`, …)
+that builds its own argv, applies `SafeRef` to any ref from outside the
+editor, puts `--` before paths, and parses its own output into a model.
+`grep -rn 'git\.Output\|RunSequence' internal/app` must stay empty. Two
+things follow. **A verb probes git for its own argv**: `Push` asks for
+an upstream and `Switch`/`WorktreeAdd` ask whether the tracking local
+exists *inside* the method, on `runGitOp`'s goroutine — never on the
+event loop, where the old builders froze the UI for up to the read
+timeout (`TestMenuGitPush_ReturnsBeforeUpstreamProbe` is the fence).
+**Failures are typed**: a write verb returns `*git.OpError` carrying
+`Advice` and the refusal flags; `handleGitOpDone` branches on the flags
+and renders the advice — it never reads stderr. And `a.readRepo()` is
+the single door app uses to obtain a handle, so `a.gitRunner =
+&git.Fake{}` scripts every surface: status, gutter, diff and log
+overlays, git panel rows, pickers, and every op.
+
 ### Custom tcell events for goroutine → main-loop messaging
-Background work (auto-scroll during drag, 10s tree refresh) posts custom
-events (`autoScrollEvent`, `treeRefreshEvent`) onto the tcell event queue
-and the main loop handles them. Don't mutate UI state from goroutines
-directly.
+Background work posts events onto the tcell event queue and the main
+loop handles them. Don't mutate UI state from goroutines directly.
+Two kinds exist. Long-lived tickers (auto-scroll during drag, the 10s
+tree-refresh tick, the signal forwarder) post their own tiny events
+(`autoScrollEvent`, `treeRefreshEvent`, `quitRequestEvent`). Everything
+that runs once and lands a result is an `asyncjob.Job[T]` field on
+`App` — tree sweep, git status, diff load, file op, project replace,
+git verb, branch/worktree list, formatter, custom action, the
+project-find sweep — wired in `wireJobs` with one of four policies:
+`Coalesce` (one in flight, one queued follow-up), `Supersede` (every
+start spawns; only the newest landing applies), `Refuse` (busy →
+`Start` returns false), `Concurrent` (every start spawns, every landing
+applies — the formatter and custom actions, which never had a gate). A
+landing the loop's queue refuses is retried from the worker and, if
+still lost, stops counting as in flight, so no gate can strand. The job
+owns the busy/queued/generation
+bookkeeping; `handleEvent` has ONE `*asyncjob.Event` case whose `Land`
+runs the stale check, the handler, and any follow-up. `Invalidate` is
+the "a main-thread mutation retired the in-flight run" verb (tree
+mutations, closing the project-find panel). Don't add a per-job event
+struct or a loose `xBusy` bool back — add a `Job` field and a line in
+`wireJobs`, and pick the policy in its field comment. `safeGo` stays
+the only goroutine spawner: the job's `Spawn` seam is `a.safeGo`, so a
+panic in a worker still reaches the crash guard. Tests drain with the
+one `pumpUntil(t, a, what, done)` and the `idle(&a.job)` adapter.
 
 ### Identity-preserving tree refresh (filetree.go)
 `merge` walks the existing children, matches survivors by name, and
@@ -314,10 +416,10 @@ walk) names the work, `filetree.ScanDirs` does the ReadDir sweep and
 along, and `handleTreeScan` merges the result via `Tree.ApplyScan` on the
 event loop — the node graph the renderer walks is only ever mutated
 there. `Tree.Refresh` stays synchronous for file operations, which need
-the tree correct before the next draw; its `treeScanGen` bump retires any
-in-flight sweep so a stale listing can't resurrect a just-deleted file.
-Overlapping ticks coalesce into one follow-up, as in
-`refreshGitStatusAsync`.
+the tree correct before the next draw; `refreshTree` calls
+`a.treeScan.Invalidate()` so an in-flight sweep's stale listing can't
+resurrect a just-deleted file. The sweep is a `Coalesce` job, so
+overlapping ticks fold into one follow-up, as does `gitStatus`.
 
 ### Three-way external-change reconciliation (refresh.go)
 On each tree-refresh tick, `reconcileTab` compares each open tab's mtime
@@ -333,8 +435,13 @@ booleans. Opening replaces (at most one overlay is ever up), openers run
 `closeAllModals()` first, and activate paths are capture-then-close so a
 callback that opens the next overlay is never popped by the previous
 one's teardown. Strips (find bar, project-find bar, leader strip) are
-NOT overlays — see `docs/adr/0001-strips-are-not-overlays.md` before
-"fixing" the find bar's mouse pass-through.
+NOT overlays — they implement `strip` and live in App's one strip slot
+(`a.strip`, strip.go), which is the same "one surface, one owner" rule
+applied to the docked bars: layout, keys, mouse and draw consult the
+slot and nothing else, and whether a click passes through to the editor
+is the strip's own answer. See
+`docs/adr/0001-strips-are-not-overlays.md` before "fixing" the find
+bar's mouse pass-through.
 
 ### Modal layout via `relY` and dynamic `labelFor`
 The action menu uses named struct literals with an optional `labelFor`

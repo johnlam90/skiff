@@ -85,55 +85,60 @@ func (a *App) menuModalRect() (x, y, w, h int) {
 	return
 }
 
+// syncMenuList pushes the menu's live shape into its scroll window and
+// hands the window back. Both numbers are in VIRTUAL ROWS: the content
+// region runs from menuContentY to the row above the bottom border, so
+// the layout's natural height and the clamped frame height each lose
+// the same fixed chrome, and their difference is exactly the old
+// menuMaxScroll. The layout moves on every filter keystroke and the
+// frame on every resize, so every reader syncs first.
+func (a *App) syncMenuList() *overlay.List {
+	_, _, natural := a.menuLayout()
+	_, _, _, h := a.menuModalRect()
+	a.menuList.SetLen(natural - 1 - menuContentY)
+	a.menuList.SetVisible(h - 1 - menuContentY)
+	return &a.menuList
+}
+
 // menuMaxScroll returns how many rows the menu content can scroll: the
 // overflow between the natural layout height and the clamped modal
 // height. Zero when the whole menu fits on screen.
-func (a *App) menuMaxScroll() int {
-	_, _, natural := a.menuLayout()
-	_, _, _, h := a.menuModalRect()
-	return natural - h
-}
+func (a *App) menuMaxScroll() int { return a.syncMenuList().MaxScroll() }
 
-// clampMenuScroll bounds menuScroll to [0, menuMaxScroll] so the content
-// region can never scroll past its first or last row.
-func (a *App) clampMenuScroll() {
-	if maxS := a.menuMaxScroll(); a.menuScroll > maxS {
-		a.menuScroll = maxS
-	}
-	if a.menuScroll < 0 {
-		a.menuScroll = 0
-	}
+// menuBar describes the menu's scroll indicator: the frame's right
+// padding column — the same cell every prefab spends on one — over the
+// content rows only, so the title, the filter and the borders stay
+// clear.
+func (a *App) menuBar() overlay.Bar {
+	mx, my, mw, mh := a.menuModalRect()
+	r := overlay.Rect{X: mx, Y: my, W: mw, H: mh}
+	return a.syncMenuList().Bar(overlay.BarColumn(r), my+menuContentY)
 }
 
 // ensureMenuRowVisible scrolls the menu so the item at idx sits inside
 // the visible content region — the keyboard analogue of the editor's
 // EnsureVisible, so arrow-key navigation can reach rows a short terminal
-// pushed out of the frame.
+// pushed out of the frame. The item's relY is a virtual row, which is
+// the unit the window counts in; hoveredMenuRow keeps the item index.
 func (a *App) ensureMenuRowVisible(idx int) {
 	items, _, _ := a.menuLayout()
 	if idx < 0 || idx >= len(items) {
 		return
 	}
-	_, _, _, h := a.menuModalRect()
-	relY := items[idx].relY
-	// Visible virtual rows span [menuContentY+menuScroll, h-2+menuScroll].
-	if relY < menuContentY+a.menuScroll {
-		a.menuScroll = relY - menuContentY
-	} else if relY > h-2+a.menuScroll {
-		a.menuScroll = relY - (h - 2)
-	}
-	a.clampMenuScroll()
+	l := a.syncMenuList()
+	l.Select(items[idx].relY - menuContentY)
+	l.EnsureVisible()
 }
 
 // handleMenuMouse processes mouse events while the action menu is open.
 // Left-click outside the modal closes it; left-click on a row runs that
-// row's action (if it is currently enabled). Wheel events scroll the
-// content when the layout is taller than the terminal. The filter never
-// changes what a click does — it only changes which rows are on screen.
+// row's action (if it is currently enabled). Wheel events — and the
+// scroll indicator's own column — scroll the content when the layout is
+// taller than the terminal. The filter never changes what a click does;
+// it only changes which rows are on screen.
 func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
 	if btn&tcell.WheelUp != 0 {
-		a.menuScroll--
-		a.clampMenuScroll()
+		a.syncMenuList().ScrollBy(-1)
 		// The rows just moved under the stationary pointer — recompute
 		// the hover so the highlight tracks what a click would now hit
 		// instead of going one row stale until the next mouse motion.
@@ -141,15 +146,24 @@ func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
 		return
 	}
 	if btn&tcell.WheelDown != 0 {
-		a.menuScroll++
-		a.clampMenuScroll()
+		a.syncMenuList().ScrollBy(1)
 		a.updateMenuHover(x, y)
+		return
+	}
+	mx, my, mw, mh := a.menuModalRect()
+	// The bar's column is claimed before anything else inside the frame,
+	// the same ordering Pick uses: reaching for the thumb must scroll,
+	// never run whichever action sits behind it. The hit is false
+	// whenever the menu fits, so the column stays row surface then.
+	if b := a.menuBar(); b.Hit(x, y) {
+		if btn&tcell.Button1 != 0 {
+			a.syncMenuList().ScrollToBar(my+menuContentY, y)
+		}
 		return
 	}
 	if btn&tcell.Button1 == 0 {
 		return
 	}
-	mx, my, mw, mh := a.menuModalRect()
 	if x < mx || x >= mx+mw || y < my || y >= my+mh {
 		a.closeMenu()
 		return
@@ -157,20 +171,11 @@ func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
 	// Only the scrollable content region (below the title, the filter
 	// field and their divider, above the bottom border) can hold items;
 	// clicks on the chrome rows stay inert even when scrolled rows share
-	// their virtual position.
-	if y < my+menuContentY || y > my+mh-2 {
-		return
-	}
-	relY := y - my + a.menuScroll
-	items, _, _ := a.menuLayout()
-	for _, item := range items {
-		if item.relY != relY {
-			continue
-		}
-		if item.enabled(a) {
-			item.action(a)
-		}
-		return
+	// their virtual position. menuRowAt already answers all of that, and
+	// it only ever names an ENABLED row.
+	if idx := a.menuRowAt(x, y); idx >= 0 {
+		items, _, _ := a.menuLayout()
+		items[idx].action(a)
 	}
 }
 
@@ -183,7 +188,7 @@ func (a *App) openMenu() {
 	a.closeAllModals()
 	a.menuOpen = true
 	a.overlays.Open(menuOverlay{a})
-	a.menuScroll = 0
+	a.menuList = overlay.List{}
 	a.menuFilter = overlay.Field{}
 	a.menuFilterChanged()
 }
@@ -233,7 +238,7 @@ func (a *App) menuMoveSelection(dir int) {
 // query every row ranks 0 and this degenerates to "select the first
 // enabled row" — the pre-filter open behaviour.
 func (a *App) menuFilterChanged() {
-	a.menuScroll = 0
+	a.menuList = overlay.List{}
 	items, _, _ := a.menuLayout()
 	q := a.menuQuery()
 	best, bestRank := -1, 0
@@ -256,7 +261,7 @@ func (a *App) menuFilterChanged() {
 	if best >= 0 {
 		a.ensureMenuRowVisible(best)
 	}
-	a.clampMenuScroll()
+	a.syncMenuList().Clamp()
 }
 
 // clearMenuFilter empties the query and re-selects against the restored
@@ -374,7 +379,7 @@ func (a *App) closeMenu() {
 	a.menuOpen = false
 	a.dropOverlay(menuOverlay{a})
 	a.hoveredMenuRow = -1
-	a.menuScroll = 0
+	a.menuList = overlay.List{}
 	a.menuFilter = overlay.Field{}
 }
 
@@ -423,6 +428,12 @@ func (a *App) menuFileClipboard() { a.openMenuDrillIn(fileClipDrillIn()) }
 // its label when the modal had to clip it — gated on the row actually
 // changing, because this runs on every motion event.
 func (a *App) updateMenuHover(x, y int) {
+	// The bar owns its column outright, and the menu's hover IS its
+	// keyboard selection — reaching for the thumb must not drop the row
+	// Enter would have run. Same rule Pick follows for its own bar.
+	if a.menuBar().Hit(x, y) {
+		return
+	}
 	prev := a.hoveredMenuRow
 	a.hoveredMenuRow = a.menuRowAt(x, y)
 	if a.hoveredMenuRow >= 0 && a.hoveredMenuRow != prev {
@@ -431,19 +442,26 @@ func (a *App) updateMenuHover(x, y int) {
 }
 
 // menuRowAt returns the index of the enabled menu row under (x, y), or -1
-// for a disabled row, a chrome row, or anywhere outside the modal.
+// for a disabled row, a chrome row, the scroll indicator's column, or
+// anywhere outside the modal.
 func (a *App) menuRowAt(x, y int) int {
 	mx, my, mw, mh := a.menuModalRect()
 	if x < mx || x >= mx+mw || y < my || y >= my+mh {
 		return -1
 	}
-	// Chrome rows (title, filter, divider, borders) never hover; the
-	// content region maps through the scroll offset like the click
-	// hit-test.
-	if y < my+menuContentY || y > my+mh-2 {
+	// The bar owns its column outright — hovering it must not drag the
+	// highlight around any more than pressing it should run a row.
+	if a.menuBar().Hit(x, y) {
 		return -1
 	}
-	relY := y - my + a.menuScroll
+	// Chrome rows (title, filter, divider, borders) never hover; the
+	// window maps the content region through the scroll offset, and
+	// answers false for both.
+	row, ok := a.syncMenuList().RowAt(my+menuContentY, y)
+	if !ok {
+		return -1
+	}
+	relY := row + menuContentY
 	items, _, _ := a.menuLayout()
 	for i, item := range items {
 		if item.relY == relY && item.enabled(a) {
@@ -504,6 +522,7 @@ func (a *App) drawMenuButton() {
 func (a *App) drawMenu() {
 	mx, my, mw, mh := a.menuModalRect()
 	items, dividers, _ := a.menuLayout()
+	scroll := a.syncMenuList().Scroll()
 
 	bg := a.theme.LineHL
 	bgStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
@@ -537,12 +556,12 @@ func (a *App) drawMenu() {
 	// menuLayout — including the always-on row under the filter — so it
 	// stays in sync with whatever rows are actually being drawn. The
 	// chrome divider (menuDividerY) is fixed; the rest live in the
-	// scrollable content region and map through menuScroll, dropping
-	// out when they leave the visible window.
+	// scrollable content region and map through the scroll offset,
+	// dropping out when they leave the visible window.
 	for _, dy := range dividers {
 		cy := my + dy
 		if dy > menuDividerY {
-			cy -= a.menuScroll
+			cy -= scroll
 			if cy < my+menuContentY || cy > my+mh-2 {
 				continue
 			}
@@ -589,7 +608,7 @@ func (a *App) drawMenu() {
 	hoverStyle := tcell.StyleDefault.Background(hoverBg).Foreground(a.theme.Text).Bold(true)
 	hoverChevStyle := tcell.StyleDefault.Background(hoverBg).Foreground(a.theme.AccentSoft).Bold(true)
 	for i, item := range items {
-		cy := my + item.relY - a.menuScroll
+		cy := my + item.relY - scroll
 		// Rows scrolled out of the content window aren't drawn; the
 		// ▲/▼ chrome markers below tell the user they exist.
 		if cy < my+menuContentY || cy > my+mh-2 {
@@ -643,12 +662,18 @@ func (a *App) drawMenu() {
 	// Accent-colored — they're the only hint that more actions exist
 	// off-frame.
 	moreStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent)
-	if a.menuScroll > 0 {
+	if scroll > 0 {
 		drawAt(a.screen, mx+2, my+menuDividerY, " ▲ ", moreStyle)
 	}
-	if a.menuScroll < a.menuMaxScroll() {
+	if scroll < a.menuMaxScroll() {
 		drawAt(a.screen, mx+2, my+mh-1, " ▼ ", moreStyle)
 	}
+	// The scroll indicator, painted last: a hovered row fills the frame's
+	// inner width, padding column included, so the bar has to land on top
+	// of it. The ▲/▼ chrome markers say that more rows exist; the bar says
+	// HOW MANY and where in them you are, and it is the only one of the
+	// three you can grab.
+	a.menuBar().Draw(a.screen, a.theme)
 	// No HideCursor here on purpose: the filter field is focused and
 	// Field.Draw parked the terminal caret in it, which is the whole
 	// affordance telling the user they can just type.

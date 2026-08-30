@@ -94,7 +94,7 @@ func TestThemePick_ArrowsPreviewLive(t *testing.T) {
 	}
 	entries := theme.List()
 	p := pickPrefab(t, a)
-	if a.themeID != entries[p.Filtered()[p.Selected]].ID {
+	if a.themeID != entries[p.Filtered()[p.Sel()]].ID {
 		t.Fatalf("preview out of sync: theme %q vs highlight", a.themeID)
 	}
 }
@@ -168,8 +168,8 @@ func TestThemePick_MouseHoverPreviewsClickConfirms(t *testing.T) {
 	rowY := r.Y + 4 + 2 // third visible row
 
 	p.HandleMouse(r.X+5, rowY, 0) // hover
-	if p.Selected != 2 || a.themeID != theme.List()[p.Filtered()[2]].ID {
-		t.Fatalf("hover should preview row 2: sel %d theme %q", p.Selected, a.themeID)
+	if p.Sel() != 2 || a.themeID != theme.List()[p.Filtered()[2]].ID {
+		t.Fatalf("hover should preview row 2: sel %d theme %q", p.Sel(), a.themeID)
 	}
 	p.HandleMouse(r.X+5, rowY, tcell.Button1) // click keeps
 	if pickIsOpen(a) {

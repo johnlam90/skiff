@@ -28,6 +28,21 @@ type Overlay interface {
 	HandleMouse(x, y int, btn tcell.ButtonMask)
 	// Draw paints the overlay above the base UI.
 	Draw(scr tcell.Screen)
+	// WantsMotion reports whether this surface gives hover feedback and
+	// therefore needs button-less pointer motion from the terminal
+	// (`\x1b[?1003h`). It is a capability of the overlay, not a fact
+	// about its type, which is why it lives here: the app used to
+	// type-switch to answer it, so a new overlay was silently classified
+	// by whichever branch it failed to match. See app/mousemode.go for
+	// what the answer costs on a slow link.
+	WantsMotion() bool
+	// Dismiss tells the overlay the stack is tearing it down without a
+	// user gesture — a teardown, not a cancel-by-Esc. Most overlays have
+	// nothing to undo and implement it as a no-op; Pick fires OnCancel,
+	// because a live-preview hook (the theme picker's) has to be
+	// reverted rather than stranded. Callers pop first and call this
+	// second, so a hook can never re-enter the teardown.
+	Dismiss()
 }
 
 // Stack owns which overlay is up. Opening replaces any current overlay,

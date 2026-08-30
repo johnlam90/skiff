@@ -13,20 +13,24 @@
 //
 // Everything in here is best-effort — if the project isn't a git
 // repo, or `git` isn't on PATH, or the command fails for any reason,
-// loadGitStatus returns an empty result and the editor renders normally.
+// the snapshot comes back empty and the editor renders normally.
 // We never block the UI on git, never spam errors at the user, and never
 // retry on failure.
+//
+// The diff loaders here run git and hand back internal/diff's model.
+// Reading unified-diff text is that package's job now; what remains on
+// this side is the editor's own vocabulary — which line gets which
+// gutter marker, and which hunk a gutter click was asking about.
 
 package app
 
 import (
-	"bytes"
+	"context"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"time"
 
+	"github.com/johnlam90/skiff/internal/diff"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/git"
@@ -51,264 +55,101 @@ type gitStatusResult struct {
 	isDir map[string]bool
 }
 
-// gitStatusEvent carries a finished background collection back to the
-// main event loop, following the same custom-event pattern as
-// treeRefreshEvent and finderRebuiltEvent.
-type gitStatusEvent struct {
-	when time.Time
-	res  gitStatusResult
-}
-
-// When satisfies the tcell.Event interface.
-func (e *gitStatusEvent) When() time.Time { return e.when }
-
 // collectGitStatus runs the git side of a status refresh: the repo
 // snapshot (skipped in single-file mode, which deliberately avoids the
-// whole-repo walk) plus ONE `git diff` of gutter lines covering every
-// open tab — ten tabs used to mean ten diff forks per collection,
-// every ten seconds, forever. It only shells out and builds data — no
-// App state — so it is safe to run off the main thread.
+// whole-repo walk) plus ONE diff of gutter lines covering every open
+// tab — ten tabs used to mean ten diff forks per collection, every ten
+// seconds, forever. It takes the repo handle rather than a root because
+// a *git.Repo is immutable once opened: the main loop captures one and
+// hands it to the goroutine, and a test hands over one backed by
+// git.Fake. It only shells out and builds data — no App state — so it
+// is safe to run off the main thread.
 //
 // A single tab keeps the single-path loader: one fork either way, and
 // the per-path form needs no header attribution at all. No tabs forks
 // nothing.
-func collectGitStatus(rootDir, base string, tabPaths []string, skipStatus bool) gitStatusResult {
+func collectGitStatus(repo *git.Repo, base string, tabPaths []string, skipStatus bool) gitStatusResult {
 	res := gitStatusResult{tabLines: map[string]map[int]editor.GitLineChange{}}
 	if !skipStatus {
-		res.st = loadGitStatus(rootDir, base)
+		res.st = repo.Status(base)
 		res.isDir = statDirtyDirs(res.st.Files)
 	}
 	switch len(tabPaths) {
 	case 0:
 	case 1:
-		res.tabLines[tabPaths[0]] = loadGitLineChanges(rootDir, base, tabPaths[0])
+		res.tabLines[tabPaths[0]] = repoLineChanges(repo, base, tabPaths[0])
 	default:
-		batchGitLineChanges(res.tabLines, rootDir, base, res.st.Root, tabPaths)
+		batchGitLineChanges(res.tabLines, repo, base, res.st.Root, tabPaths)
 	}
 	return res
 }
 
 // batchGitLineChanges fills dst with gutter line changes for every path
-// using one `git diff --unified=0 <ref> -- p1 … pN` invocation, split
-// on its per-file headers. Every requested path gets an entry — nil
-// for a clean (or unattributable) tab — because applyGitStatus clears
-// stale gutters only for keys it finds.
+// using one zero-context diff over p1 … pN, attributed by its per-file
+// headers. Every requested path gets an entry — nil for a clean (or
+// unattributable) tab — because applyGitStatus clears stale gutters
+// only for keys it finds.
 //
 // toplevel is the repo root the diff's header paths are relative to,
 // normally free from the snapshot the same collection just took; when
 // the caller has none (multi-tab single-file mode, a failed status) one
-// rev-parse resolves it — still a win over one diff per tab. base is
-// repo-controlled (a clone can ship a branch named anything), so it
-// goes through SafeRef and the paths sit behind `--`, same as
-// diffNameStatus. Any failure degrades to nil markers, the package's
-// standing best-effort contract.
-func batchGitLineChanges(dst map[string]map[int]editor.GitLineChange, rootDir, base, toplevel string, paths []string) {
+// Toplevel call resolves it — still a win over one diff per tab. Any
+// failure — a base SafeRef refuses, a git that says no — degrades to
+// nil markers, the package's standing best-effort contract.
+func batchGitLineChanges(dst map[string]map[int]editor.GitLineChange, repo *git.Repo, base, toplevel string, paths []string) {
 	for _, p := range paths {
 		dst[p] = nil
 	}
-	if rootDir == "" {
+	if repo.Root() == "" {
 		return
 	}
 	if toplevel == "" {
-		out, err := git.Output(rootDir, "rev-parse", "--show-toplevel")
+		top, err := repo.Toplevel()
 		if err != nil {
 			return
 		}
-		toplevel = strings.TrimRight(string(out), "\n\r")
-		if toplevel == "" {
-			return
-		}
+		toplevel = top
 	}
-	ref := "HEAD"
-	if base != "" {
-		safe, err := git.SafeRef(base)
-		if err != nil {
-			return
-		}
-		ref = safe
-	}
-	// The explicit prefixes pin the header shape the attribution parses
-	// against a user's diff.noprefix/diff.mnemonicPrefix config.
-	args := append([]string{"diff", "--unified=0", "--src-prefix=a/", "--dst-prefix=b/", ref, "--"}, paths...)
-	out, err := git.Output(rootDir, args...)
-	if err != nil || len(out) == 0 {
+	p, err := repo.Diff(base, 0, paths...)
+	if err != nil && p.Empty() {
 		return
 	}
 	byRel := make(map[string]string, len(paths))
-	for _, p := range paths {
+	for _, path := range paths {
 		// relFromRoot rather than a plain Rel: tab paths can disagree
 		// with the repo root on casing (macOS), and an unmatched tab
 		// must simply keep nil markers, exactly like a tab outside the
 		// repo.
-		if rel, ok := relFromRoot(p, toplevel); ok {
-			byRel[filepath.ToSlash(rel)] = p
+		if rel, ok := relFromRoot(path, toplevel); ok {
+			byRel[filepath.ToSlash(rel)] = path
 		}
 	}
-	for rel, lines := range parseGitDiffBatch(out) {
+	for rel, lines := range gutterMarksByPath(p) {
 		if abs, ok := byRel[rel]; ok {
 			dst[abs] = lines
 		}
 	}
 }
 
-// parseGitDiffBatch splits a multi-file unified diff into per-file
-// sections and runs the existing hunk parser over each, keyed by the
-// section's repo-relative path. Sections that name no usable path (a
-// binary file note, a mode-only change) are dropped — they carry no
-// hunks anyway.
-func parseGitDiffBatch(out []byte) map[string]map[int]editor.GitLineChange {
+// gutterMarksByPath attributes a multi-file patch's hunks to the files
+// they belong to, keyed by repo-relative path. The framing is
+// internal/diff's job; what stays here is the mapping from hunk ranges
+// to gutter markers, which is the editor's vocabulary and not the diff
+// model's. Files that name no usable path (a mode-only change with no
+// ---/+++ block) are dropped — they carry no hunks anyway.
+func gutterMarksByPath(p diff.Patch) map[string]map[int]editor.GitLineChange {
 	res := map[string]map[int]editor.GitLineChange{}
-	for _, section := range splitGitDiffSections(out) {
-		if rel := sectionTargetRel(section); rel != "" {
-			res[rel] = parseGitDiffLines(section)
+	for _, f := range p.Files {
+		if rel := f.Path(); rel != "" {
+			res[rel] = gutterMarks(f.Hunks)
 		}
 	}
 	return res
 }
 
-// splitGitDiffSections cuts a combined diff at each `diff --git ` file
-// header, returning subslices of out (no copying). Only a line START
-// can open a section: inside hunk bodies every line carries a +/-/space
-// prefix, so patch content can never fake the header.
-func splitGitDiffSections(out []byte) [][]byte {
-	header := []byte("diff --git ")
-	var starts []int
-	for i := 0; i >= 0 && i < len(out); {
-		if bytes.HasPrefix(out[i:], header) {
-			starts = append(starts, i)
-		}
-		j := bytes.IndexByte(out[i:], '\n')
-		if j < 0 {
-			break
-		}
-		i += j + 1
-	}
-	sections := make([][]byte, 0, len(starts))
-	for k, s := range starts {
-		end := len(out)
-		if k+1 < len(starts) {
-			end = starts[k+1]
-		}
-		sections = append(sections, out[s:end])
-	}
-	return sections
-}
-
-// sectionTargetRel extracts the repo-relative path a diff section
-// belongs to. The `+++ b/<new>` line answers for everything a tab can
-// hold — modifications, renames (the tab has the new name) — and the
-// `--- a/<old>` line covers deletions, where +++ is /dev/null. The
-// scan stops at the first hunk: body lines may legitimately start with
-// "+++ " or "--- " (an added line whose text begins "++ "), and only
-// the header block above the hunks may be trusted.
-func sectionTargetRel(section []byte) string {
-	oldRel := ""
-	for _, line := range bytes.Split(section, []byte{'\n'}) {
-		text := string(line)
-		switch {
-		case strings.HasPrefix(text, "@@ "):
-			return oldRel
-		case strings.HasPrefix(text, "+++ "):
-			if rel := headerPath(text[4:], "b/"); rel != "" {
-				return rel
-			}
-		case strings.HasPrefix(text, "--- "):
-			oldRel = headerPath(text[4:], "a/")
-		}
-	}
-	return oldRel
-}
-
-// headerPath turns one `---`/`+++` header operand into a repo-relative
-// path: unquote git's C-style form when present, reject /dev/null, and
-// strip the expected a// b/ prefix — anything else fails closed to ""
-// so a section is dropped rather than mis-attributed. An UNQUOTED name
-// containing blanks arrives with one trailing TAB (git's GNU-patch
-// compatibility marker for "the name ends here"); the quoted form
-// never carries it, and a real tab inside a name forces quoting, so
-// stripping one from the unquoted form is unambiguous.
-func headerPath(raw, prefix string) string {
-	if strings.HasPrefix(raw, `"`) {
-		raw = unquoteGitPath(raw)
-		if raw == "" {
-			return ""
-		}
-	} else {
-		raw = strings.TrimSuffix(raw, "\t")
-	}
-	if raw == os.DevNull || raw == "/dev/null" {
-		return ""
-	}
-	if !strings.HasPrefix(raw, prefix) {
-		return ""
-	}
-	return raw[len(prefix):]
-}
-
-// unquoteGitPath decodes the C-style quoting git applies to header
-// paths containing control or non-ASCII bytes (quote.c: \a \b \f \n
-// \r \t \v, \\, \", and three-digit octal). Returns "" for anything
-// malformed — failing closed beats guessing at a path. Content after
-// the closing quote is ignored; git writes none.
-func unquoteGitPath(q string) string {
-	if len(q) < 2 || q[0] != '"' {
-		return ""
-	}
-	var b strings.Builder
-	for i := 1; i < len(q); i++ {
-		c := q[i]
-		if c == '"' {
-			return b.String()
-		}
-		if c != '\\' {
-			b.WriteByte(c)
-			continue
-		}
-		i++
-		if i >= len(q) {
-			return ""
-		}
-		switch e := q[i]; e {
-		case 'a':
-			b.WriteByte('\a')
-		case 'b':
-			b.WriteByte('\b')
-		case 'f':
-			b.WriteByte('\f')
-		case 'n':
-			b.WriteByte('\n')
-		case 'r':
-			b.WriteByte('\r')
-		case 't':
-			b.WriteByte('\t')
-		case 'v':
-			b.WriteByte('\v')
-		case '\\', '"':
-			b.WriteByte(e)
-		default:
-			if e < '0' || e > '7' || i+2 >= len(q) ||
-				q[i+1] < '0' || q[i+1] > '7' || q[i+2] < '0' || q[i+2] > '7' {
-				return ""
-			}
-			b.WriteByte((e-'0')<<6 | (q[i+1]-'0')<<3 | (q[i+2] - '0'))
-			i += 2
-		}
-	}
-	return "" // unterminated quote
-}
-
 // gitStatus is the git package's Snapshot under its historical
 // app-side name.
 type gitStatus = git.Snapshot
-
-// loadGitStatus inspects rootDir and returns the set of dirty file paths
-// reported by `git status --porcelain`. A non-git directory yields the
-// zero value (IsRepo=false, no dirty paths). Any failure of the underlying
-// commands degrades the same way — we'd rather lose the dirty highlight
-// than crash the editor over a transient git issue.
-func loadGitStatus(rootDir, base string) gitStatus {
-	return git.Open(rootDir).Status(base)
-}
 
 // gitUnavailableMsg explains why there is nothing git-shaped to show.
 // "Not a git repository" is a lie on a machine with no git binary:
@@ -347,12 +188,15 @@ func (a *App) noteGitMissing(st gitStatus) {
 	a.flash("git was not found on PATH — branch and change badges are off")
 }
 
-// readRepo returns the handle the app's asynchronous git reads go
-// through: real git in production, or the injected Runner when a test
-// installed one. Call it on the main thread and hand the result to the
-// goroutine — a *git.Repo is immutable after construction, so passing
-// it across is the safe alternative to letting background work reach
-// back into App for a.rootDir.
+// readRepo is the one way app obtains a git handle: real git in
+// production, or the injected Runner when a test installed one. Every
+// git-aware surface — status refresh, gutter diff, the diff and log
+// overlays, git panel rows, the branch and worktree pickers, every
+// write verb through runGitOp — opens its handle here, so a.gitRunner
+// = &git.Fake{} scripts all of them. Call it on the main thread and
+// hand the result to the goroutine — a *git.Repo is immutable after
+// construction, so passing it across is the safe alternative to
+// letting background work reach back into App for a.rootDir.
 func (a *App) readRepo() *git.Repo {
 	if a.gitRunner != nil {
 		return git.OpenWith(a.rootDir, a.gitRunner)
@@ -460,118 +304,88 @@ func dirtyFolderSet(dirtyFiles map[string]filetree.GitChangeKind, root string) m
 	return folders
 }
 
-// loadGitLineChanges returns line-level changes for path versus base
-// ("" = HEAD, the everyday worktree gutter).
-func loadGitLineChanges(rootDir, base, path string) map[int]editor.GitLineChange {
-	if rootDir == "" || path == "" {
+// repoLineChanges returns line-level changes for path versus base
+// ("" = HEAD, the everyday worktree gutter). Best-effort: nil markers
+// on any failure, because a gutter that goes blank is the honest
+// degradation and a gutter that errors is noise every ten seconds.
+func repoLineChanges(repo *git.Repo, base, path string) map[int]editor.GitLineChange {
+	if repo.Root() == "" || path == "" {
 		return nil
 	}
-	if base == "" {
-		base = "HEAD"
-	}
-	out, err := git.Output(rootDir, "diff", "--unified=0", base, "--", path)
-	if err != nil || len(out) == 0 {
+	p, err := repo.Diff(base, 0, path)
+	if err != nil && p.Empty() {
 		return nil
 	}
-	return parseGitDiffLines(out)
+	var hunks []diff.Hunk
+	for _, f := range p.Files {
+		hunks = append(hunks, f.Hunks...)
+	}
+	if len(hunks) == 0 {
+		return nil
+	}
+	return gutterMarks(hunks)
 }
 
-// loadGitFileDiff returns the full unified diff for path, one display
-// line per entry — the Git panel's per-file diff preview. Tracked files
-// diff against HEAD. untracked=true enables a fallback for files git
-// has never seen (they don't appear in `git diff HEAD` at all):
-// `git diff --no-index /dev/null <path>` renders the whole file as an
-// all-added diff. The flag comes from the caller's porcelain status —
-// gating on it keeps the fallback from painting a *clean* tracked file
-// as brand new just because its HEAD diff is empty. Same best-effort
-// contract as every other loader here: nil on any failure and the
-// caller shows a friendly placeholder instead.
-func loadGitFileDiff(rootDir, base, path string, untracked bool) []string {
-	return repoFileDiff(git.Open(rootDir), base, path, untracked)
-}
-
-// repoFileDiff is loadGitFileDiff's body over an explicit Repo handle.
-// The handle is the seam the async diff path needs: a *git.Repo is
-// immutable once opened, so the main loop can capture one and hand it to
-// a goroutine without sharing App state — and a test can hand over one
-// backed by git.Fake instead of paying for a subprocess and a repo in
-// exactly the right state.
-func repoFileDiff(repo *git.Repo, base, path string, untracked bool) []string {
-	rootDir := repo.Root()
-	if rootDir == "" || path == "" {
-		return nil
+// repoFileDiff returns the full diff for path — the Git panel's
+// per-file preview and ≡ → Diff this file. Tracked files diff against
+// base ("" = HEAD). untracked=true enables a fallback for files git has
+// never seen (they don't appear in `diff HEAD` at all): DiffUntracked
+// renders the whole file as an all-added diff. The flag comes from the
+// caller's porcelain status — gating on it keeps the fallback from
+// painting a *clean* tracked file as brand new just because its HEAD
+// diff is empty. The handle is the seam the async diff path needs: a
+// *git.Repo is immutable once opened, so the main loop can capture one
+// and hand it to a goroutine without sharing App state — and a test can
+// hand over one backed by git.Fake. An empty patch with a nil error is
+// "clean"; with an error it is "git could not answer", and the caller
+// shows the reason.
+func repoFileDiff(repo *git.Repo, base, path string, untracked bool) (diff.Patch, error) {
+	if repo.Root() == "" || path == "" {
+		return diff.Patch{}, nil
 	}
-	if base == "" {
-		base = "HEAD"
+	p, err := repo.Diff(base, 3, path)
+	if !p.Empty() || !untracked {
+		return p, err
 	}
-	out, err := repo.Output("diff", base, "--", path)
-	if err != nil || len(out) == 0 {
-		if !untracked {
-			return nil
-		}
-		// Hand --no-index a path relative to rootDir when we can — git
-		// echoes the argument verbatim into the +++ header, and a full
-		// absolute path there is noise the user has to scan past.
-		if rel, relErr := filepath.Rel(rootDir, path); relErr == nil && !strings.HasPrefix(rel, "..") {
-			path = rel
-		}
-		// --no-index exits 1 whenever the files differ, so the error is
-		// expected; the output being non-empty is the success signal.
-		out, _ = repo.Output("diff", "--no-index", "--", os.DevNull, path)
-		if len(out) == 0 {
-			return nil
-		}
+	file, err := repo.DiffUntracked(path, 3)
+	if len(file.Hunks) == 0 && !file.Binary {
+		return diff.Patch{}, err
 	}
-	return strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	return diff.Patch{Files: []diff.File{file}}, err
 }
 
 // repoHunkPreview returns the unified diff hunk covering zero-based line.
-// It takes a Repo handle rather than a root path because its only caller
-// is the asynchronous gutter-click path: a *git.Repo is immutable once
-// opened, so the main loop can capture one and hand it to a goroutine
-// without sharing App state — and a test can hand over one backed by
-// git.Fake instead of paying for a subprocess and a repo in exactly the
-// right state. See repoFileDiff, whose rootDir-taking wrapper survives
-// for the Git panel's synchronous callers.
-func repoHunkPreview(repo *git.Repo, path string, line int) []string {
+// Its only caller is the asynchronous gutter-click path, which hands it
+// the handle the main loop captured. An empty patch with a nil error
+// means no hunk claims the line; with an error, git could not answer.
+func repoHunkPreview(repo *git.Repo, path string, line int) (diff.Patch, error) {
 	if repo.Root() == "" || path == "" || line < 0 {
-		return nil
+		return diff.Patch{}, nil
 	}
-	out, err := repo.Output("diff", "--unified=3", "HEAD", "--", path)
-	if err != nil || len(out) == 0 {
-		return nil
+	p, err := repo.Diff("HEAD", 3, path)
+	if err != nil && p.Empty() {
+		return diff.Patch{}, err
 	}
-	return parseGitHunkPreview(out, line)
+	return hunkCovering(p, line), nil
 }
 
-// parseGitHunkPreview extracts the diff hunk covering zero-based line.
-func parseGitHunkPreview(out []byte, line int) []string {
+// hunkCovering narrows a patch to the single hunk containing zero-based
+// line, which is what a gutter click asks about: the marker names one
+// line, and showing the whole file's diff around it would bury the
+// answer. An empty patch comes back when no hunk claims the line.
+func hunkCovering(p diff.Patch, line int) diff.Patch {
 	target := line + 1
-	var current []string
-	match := false
-	flush := func() []string {
-		if match && len(current) > 0 {
-			return current
-		}
-		return nil
-	}
-	for _, raw := range bytes.Split(out, []byte{'\n'}) {
-		text := string(raw)
-		if strings.HasPrefix(text, "@@ ") {
-			if hunk := flush(); hunk != nil {
-				return hunk
+	for _, f := range p.Files {
+		for _, h := range f.Hunks {
+			if !lineInHunk(target, h.NewStart, h.NewLen) {
+				continue
 			}
-			_, _, newStart, newCount, ok := parseHunkHeader(text)
-			current = []string{text}
-			match = ok && lineInHunk(target, newStart, newCount)
-			continue
+			only := f
+			only.Hunks = []diff.Hunk{h}
+			return diff.Patch{Files: []diff.File{only}}
 		}
-		if len(current) == 0 {
-			continue
-		}
-		current = append(current, text)
 	}
-	return flush()
+	return diff.Patch{}
 }
 
 // lineInHunk reports whether target one-based line belongs to a new-file range.
@@ -582,74 +396,31 @@ func lineInHunk(target, start, count int) bool {
 	return target >= start && target < start+count
 }
 
-// parseGitDiffLines converts unified diff hunks into editor gutter markers.
-func parseGitDiffLines(out []byte) map[int]editor.GitLineChange {
+// gutterMarks turns hunk ranges into the editor's per-line change
+// markers. It is the one place the diff model meets the editor's
+// vocabulary: a hunk with no new lines marks the line the deletion
+// happened at, an all-new hunk marks additions, and a hunk with both
+// sides marks modifications.
+func gutterMarks(hunks []diff.Hunk) map[int]editor.GitLineChange {
 	changes := map[int]editor.GitLineChange{}
-	for _, raw := range bytes.Split(out, []byte{'\n'}) {
-		line := string(raw)
-		if !strings.HasPrefix(line, "@@ ") {
-			continue
-		}
-		oldStart, oldCount, newStart, newCount, ok := parseHunkHeader(line)
-		if !ok {
-			continue
-		}
-		if newCount == 0 {
-			mark := newStart
+	for _, h := range hunks {
+		if h.NewLen == 0 {
+			mark := h.NewStart
 			if mark < 0 {
 				mark = 0
 			}
 			changes[mark] = editor.GitLineDeleted
-			_ = oldStart
-			_ = oldCount
 			continue
 		}
 		kind := editor.GitLineAdded
-		if oldCount > 0 {
+		if h.OldLen > 0 {
 			kind = editor.GitLineModified
 		}
-		for lineNo := newStart; lineNo < newStart+newCount; lineNo++ {
+		for lineNo := h.NewStart; lineNo < h.NewStart+h.NewLen; lineNo++ {
 			changes[lineNo-1] = kind
 		}
 	}
 	return changes
-}
-
-// parseHunkHeader extracts old/new ranges from a unified diff header.
-func parseHunkHeader(line string) (int, int, int, int, bool) {
-	fields := strings.Fields(line)
-	if len(fields) < 3 {
-		return 0, 0, 0, 0, false
-	}
-	oldStart, oldCount, ok := parseDiffRange(fields[1])
-	if !ok {
-		return 0, 0, 0, 0, false
-	}
-	newStart, newCount, ok := parseDiffRange(fields[2])
-	if !ok {
-		return 0, 0, 0, 0, false
-	}
-	return oldStart, oldCount, newStart, newCount, true
-}
-
-// parseDiffRange parses a hunk range such as -1,2 or +7.
-func parseDiffRange(s string) (int, int, bool) {
-	if len(s) < 2 {
-		return 0, 0, false
-	}
-	parts := strings.SplitN(s[1:], ",", 2)
-	start, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, 0, false
-	}
-	count := 1
-	if len(parts) == 2 {
-		count, err = strconv.Atoi(parts[1])
-		if err != nil {
-			return 0, 0, false
-		}
-	}
-	return start, count, true
 }
 
 // pathInside reports whether candidate is root or a descendant of root.
@@ -674,40 +445,28 @@ func pathInside(candidate, root string) bool {
 // paths use refreshGitStatusAsync so a slow `git status` on a huge or
 // network-mounted repo can never stall typing.
 func (a *App) refreshGitStatus() {
-	a.applyGitStatus(collectGitStatus(a.rootDir, a.diffBase, a.openTabPaths(), a.tree == nil))
+	a.applyGitStatus(collectGitStatus(a.readRepo(), a.diffBase, a.openTabPaths(), a.tree == nil))
 }
 
-// refreshGitStatusAsync collects git status on a background goroutine
-// and posts the result back to the main loop as a gitStatusEvent —
-// the same goroutine → custom event pattern the auto-scroller and the
-// finder indexer use, so no UI state is ever touched off-thread.
-// Kicks while a collection is already in flight coalesce into a single
-// follow-up run, so a burst of file operations costs at most two
-// status calls rather than one each.
+// refreshGitStatusAsync collects git status on the gitStatus job's
+// goroutine and lands the result on the main loop through
+// handleGitStatus, so no UI state is ever touched off-thread. The job
+// is Coalesce: kicks while a collection is already in flight fold into
+// a single follow-up run, so a burst of file operations costs at most
+// two status calls rather than one each. The follow-up runs with the
+// values captured by the latest kick — which is why the capture below
+// runs on every call rather than only when a run actually spawns.
 func (a *App) refreshGitStatusAsync() {
-	if a.gitRefreshInFlight {
-		a.gitRefreshQueued = true
-		return
-	}
-	a.gitRefreshInFlight = true
-	rootDir, base, paths, skipStatus := a.rootDir, a.diffBase, a.openTabPaths(), a.tree == nil
-	scr := a.screen
-	a.safeGo("git-status", func() {
-		res := collectGitStatus(rootDir, base, paths, skipStatus)
-		_ = scr.PostEvent(&gitStatusEvent{when: time.Now(), res: res})
+	repo, base, paths, skipStatus := a.readRepo(), a.diffBase, a.openTabPaths(), a.tree == nil
+	a.gitStatus.Start(func(context.Context) (gitStatusResult, error) {
+		return collectGitStatus(repo, base, paths, skipStatus), nil
 	})
 }
 
-// handleGitStatusEvent applies a finished background collection and
-// launches the follow-up run if more refresh requests arrived while
-// this one was in flight.
-func (a *App) handleGitStatusEvent(e *gitStatusEvent) {
-	a.gitRefreshInFlight = false
-	a.applyGitStatus(e.res)
-	if a.gitRefreshQueued {
-		a.gitRefreshQueued = false
-		a.refreshGitStatusAsync()
-	}
+// handleGitStatus applies a finished background collection. The job
+// starts the coalesced follow-up, if one was queued, once this returns.
+func (a *App) handleGitStatus(res gitStatusResult, _ error) {
+	a.applyGitStatus(res)
 }
 
 // openTabPaths returns the file paths of every open text tab — the set
@@ -727,7 +486,7 @@ func (a *App) openTabPaths() []string {
 // applyGitStatus stamps a collection result onto the UI: tree tint
 // maps, branch, per-tab gutter markers, and the Git panel rows when the
 // panel is up. Main-thread only — the async path hands results here
-// via gitStatusEvent.
+// via handleGitStatus.
 func (a *App) applyGitStatus(res gitStatusResult) {
 	a.noteGitMissing(res.st)
 	if a.tree != nil {
@@ -751,7 +510,7 @@ func (a *App) applyGitStatus(res gitStatusResult) {
 	}
 	// Tabs opened after the collection started aren't in the map — they
 	// render without gutter marks until the queued follow-up collection
-	// lands (the coalescer's gitRefreshQueued guarantees one; see
+	// lands (the gitStatus job's Coalesce policy guarantees one; see
 	// refreshGitStatusAsync and newTab). Tabs closed since are simply
 	// skipped by the path lookup.
 	for _, tab := range a.tabs.Tabs() {

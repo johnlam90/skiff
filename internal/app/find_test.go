@@ -32,6 +32,19 @@ func seedFindApp(t *testing.T, content string) *App {
 	return a
 }
 
+// findBarOf returns the find bar occupying App's strip slot, failing the
+// test when some other strip (or none) is up — the slot is the only
+// "is the bar open" answer there is, so a test that reaches past it
+// would be asserting against a bar the app is not routing to.
+func findBarOf(t *testing.T, a *App) *findStrip {
+	t.Helper()
+	s := a.findBar()
+	if s == nil {
+		t.Fatalf("the find bar should own the strip slot, got %T", a.strip)
+	}
+	return s
+}
+
 // TestOpenFind_OpensBarEmpty drops the user into a focused find bar
 // with an empty input. Pre-fill from a prior query is intentionally
 // not done — closing the bar already clears find state, so each Esc-f
@@ -39,11 +52,11 @@ func seedFindApp(t *testing.T, content string) *App {
 func TestOpenFind_OpensBarEmpty(t *testing.T) {
 	a := seedFindApp(t, "foo bar foo")
 	a.openFind()
-	if !a.findOpen {
-		t.Fatal("openFind did not flip findOpen")
+	if !a.findBarOpen() {
+		t.Fatalf("openFind did not put the bar in the strip slot, got %T", a.strip)
 	}
-	if len(a.findValue) != 0 {
-		t.Fatalf("input should be empty, got %q", string(a.findValue))
+	if len(findBarOf(t, a).query.Value) != 0 {
+		t.Fatalf("input should be empty, got %q", findBarOf(t, a).query.Text())
 	}
 }
 
@@ -53,7 +66,7 @@ func TestOpenFind_OpensBarEmpty(t *testing.T) {
 func TestOpenFind_NoTabIsNoOp(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.openFind()
-	if a.findOpen {
+	if a.findBarOpen() {
 		t.Fatal("openFind should be a no-op with no tab")
 	}
 }
@@ -65,7 +78,7 @@ func TestHandleFindKey_TypingLiveSearches(t *testing.T) {
 	a := seedFindApp(t, "foo bar foo")
 	a.openFind()
 	for _, r := range "foo" {
-		a.handleFindKey(keyEv(tcell.KeyRune, r))
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
 	}
 	tab := a.activeTabPtr()
 	if len(tab.FindMatches) != 2 {
@@ -82,10 +95,10 @@ func TestHandleFindKey_EnterAdvances(t *testing.T) {
 	a := seedFindApp(t, "foo\nfoo\nfoo")
 	a.openFind()
 	for _, r := range "foo" {
-		a.handleFindKey(keyEv(tcell.KeyRune, r))
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
 	}
 	tab := a.activeTabPtr()
-	a.handleFindKey(keyEv(tcell.KeyEnter, 0))
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyEnter, 0))
 	if tab.FindIndex != 1 {
 		t.Fatalf("expected FindIndex=1 after Enter, got %d", tab.FindIndex)
 	}
@@ -101,11 +114,11 @@ func TestHandleFindKey_ShiftEnterGoesBack(t *testing.T) {
 	a := seedFindApp(t, "foo\nfoo\nfoo")
 	a.openFind()
 	for _, r := range "foo" {
-		a.handleFindKey(keyEv(tcell.KeyRune, r))
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
 	}
-	a.handleFindKey(keyEv(tcell.KeyEnter, 0))
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyEnter, 0))
 	// Shift+Enter — keyEv default is ModNone, so build it directly.
-	a.handleFindKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModShift))
+	findBarOf(t, a).handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModShift))
 	if a.activeTabPtr().FindIndex != 0 {
 		t.Fatalf("Shift-Enter should walk back, got idx=%d", a.activeTabPtr().FindIndex)
 	}
@@ -119,10 +132,10 @@ func TestHandleFindKey_EscClearsHighlights(t *testing.T) {
 	a := seedFindApp(t, "foo bar foo")
 	a.openFind()
 	for _, r := range "foo" {
-		a.handleFindKey(keyEv(tcell.KeyRune, r))
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
 	}
-	a.handleFindKey(keyEv(tcell.KeyEsc, 0))
-	if a.findOpen {
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyEsc, 0))
+	if a.findBarOpen() {
 		t.Fatal("Esc should close the find bar")
 	}
 	tab := a.activeTabPtr()
@@ -138,13 +151,13 @@ func TestHandleFindKey_BackspaceLiveUpdates(t *testing.T) {
 	a := seedFindApp(t, "foo bar foox")
 	a.openFind()
 	for _, r := range "foox" {
-		a.handleFindKey(keyEv(tcell.KeyRune, r))
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
 	}
 	tab := a.activeTabPtr()
 	if len(tab.FindMatches) != 1 {
 		t.Fatalf("setup expected 1 match for 'foox', got %d", len(tab.FindMatches))
 	}
-	a.handleFindKey(keyEv(tcell.KeyBackspace, 0))
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyBackspace, 0))
 	if len(tab.FindMatches) != 2 {
 		t.Fatalf("after backspace should match 'foo' (2x), got %d", len(tab.FindMatches))
 	}
@@ -156,7 +169,7 @@ func TestHandleFindKey_BackspaceLiveUpdates(t *testing.T) {
 func TestEditorRect_ShrinksWhenFindOpen(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	_, _, _, hClosed := a.editorRect()
-	a.findOpen = true
+	a.strip = &findStrip{a: a}
 	_, _, _, hOpen := a.editorRect()
 	if hOpen != hClosed-findBarHeight {
 		t.Fatalf("editor height didn't shrink: closed=%d open=%d", hClosed, hOpen)
@@ -178,19 +191,19 @@ func TestHasFindable_ImageTabIsFalse(t *testing.T) {
 func TestCounterText_Variants(t *testing.T) {
 	a := seedFindApp(t, "foo bar foo")
 	a.openFind()
-	if got := a.findCounterText(); got != "" {
+	if got := findBarOf(t, a).counterText(); got != "" {
 		t.Fatalf("empty input should yield blank counter, got %q", got)
 	}
 	for _, r := range "foo" {
-		a.handleFindKey(keyEv(tcell.KeyRune, r))
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
 	}
-	if got := a.findCounterText(); got != "1 of 2" {
+	if got := findBarOf(t, a).counterText(); got != "1 of 2" {
 		t.Fatalf("counter for 2 matches should be '1 of 2', got %q", got)
 	}
 	for _, r := range "zzz" {
-		a.handleFindKey(keyEv(tcell.KeyRune, r))
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
 	}
-	if got := a.findCounterText(); got != "no results" {
+	if got := findBarOf(t, a).counterText(); got != "no results" {
 		t.Fatalf("zero hits should yield 'no results', got %q", got)
 	}
 }
@@ -201,7 +214,7 @@ func TestCloseAllModals_ClosesFindBar(t *testing.T) {
 	a := seedFindApp(t, "foo")
 	a.openFind()
 	a.closeAllModals()
-	if a.findOpen {
+	if a.findBarOpen() {
 		t.Fatal("closeAllModals should close the find bar")
 	}
 }
@@ -220,35 +233,38 @@ func TestFindBarReplaceFlow(t *testing.T) {
 	a.openFile(path)
 	a.openFind()
 	for _, r := range "foo" {
-		a.handleFindKey(tcell.NewEventKey(tcell.KeyRune, r, 0))
+		findBarOf(t, a).handleKey(tcell.NewEventKey(tcell.KeyRune, r, 0))
 	}
 	tab := a.activeTabPtr()
 	if len(tab.FindMatches) != 3 {
 		t.Fatalf("seed matches: %d", len(tab.FindMatches))
 	}
 
-	a.handleFindKey(tcell.NewEventKey(tcell.KeyTab, 0, 0))
-	if !a.replaceOpen || !a.findFocusReplace {
+	findBarOf(t, a).handleKey(tcell.NewEventKey(tcell.KeyTab, 0, 0))
+	if !findBarOf(t, a).replaceOpen || !findBarOf(t, a).focusReplace {
 		t.Fatal("Tab should open and focus the replace field")
 	}
 	for _, r := range "qux" {
-		a.handleFindKey(tcell.NewEventKey(tcell.KeyRune, r, 0))
+		findBarOf(t, a).handleKey(tcell.NewEventKey(tcell.KeyRune, r, 0))
 	}
-	if string(a.replaceValue) != "qux" || string(a.findValue) != "foo" {
-		t.Fatalf("typing went to the wrong field: %q / %q", a.replaceValue, a.findValue)
+	if findBarOf(t, a).replace.Text() != "qux" || findBarOf(t, a).query.Text() != "foo" {
+		t.Fatalf("typing went to the wrong field: %q / %q", findBarOf(t, a).replace.Text(), findBarOf(t, a).query.Text())
 	}
 
-	a.handleFindKey(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
+	findBarOf(t, a).handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
 	if tab.Buffer.Lines[0] != "qux bar foo" {
 		t.Fatalf("replace current: %q", tab.Buffer.Lines[0])
 	}
-	a.handleFindKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModShift))
+	findBarOf(t, a).handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModShift))
 	if tab.Buffer.String() != "qux bar qux\nqux\n" {
 		t.Fatalf("replace all: %q", tab.Buffer.String())
 	}
 
-	a.handleFindKey(tcell.NewEventKey(tcell.KeyEsc, 0, 0))
-	if a.findOpen || a.replaceOpen || a.findFocusReplace {
+	// Esc empties the slot, and the replace row's state goes with the
+	// strip that held it — there is nothing left to leak into the next
+	// Esc-f.
+	findBarOf(t, a).handleKey(tcell.NewEventKey(tcell.KeyEsc, 0, 0))
+	if a.findBarOpen() {
 		t.Fatal("Esc should tear down the whole bar")
 	}
 }
@@ -260,20 +276,302 @@ func TestFindBarReplaceFlow(t *testing.T) {
 // with the caret and back left when the caret returns home.
 func TestDrawFindBar_ScrollsReplaceFieldToCaret(t *testing.T) {
 	a := seedFindApp(t, "hello world\n")
-	a.findOpen = true
-	a.replaceOpen = true
-	a.findFocusReplace = true
-	a.replaceValue = []rune(strings.Repeat("r", 80))
-	a.replaceCursor = len(a.replaceValue)
+	a.openFind()
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyTab, 0)) // grow + focus the replace field
+	for _, r := range strings.Repeat("r", 80) {
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
+	}
 
-	a.drawFindBar()
-	if a.replaceScroll == 0 {
+	findBarOf(t, a).draw(a.stripRect())
+	if findBarOf(t, a).replace.Scroll() == 0 {
 		t.Fatal("replace field did not scroll; caret sits off-field")
 	}
 
-	a.replaceCursor = 0
-	a.drawFindBar()
-	if a.replaceScroll != 0 {
-		t.Fatalf("scroll should follow the caret home, got %d", a.replaceScroll)
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyHome, 0))
+	findBarOf(t, a).draw(a.stripRect())
+	if findBarOf(t, a).replace.Scroll() != 0 {
+		t.Fatalf("scroll should follow the caret home, got %d", findBarOf(t, a).replace.Scroll())
+	}
+}
+
+// TestDrawFindBar_ScrollsQueryFieldToCaret is the query field's twin: a
+// query wider than the bar has to slide its own window so the caret (and
+// the tail the user is typing) stay on screen. Both fields ride the same
+// overlay.Field, and this is the test that says so for the query.
+func TestDrawFindBar_ScrollsQueryFieldToCaret(t *testing.T) {
+	a := seedFindApp(t, "hello world\n")
+	a.openFind()
+	for _, r := range strings.Repeat("q", 200) {
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
+	}
+
+	findBarOf(t, a).draw(a.stripRect())
+	a.screen.Show()
+	if findBarOf(t, a).query.Scroll() == 0 {
+		t.Fatal("query field did not scroll; the caret sits off-bar")
+	}
+	// The caret must land inside the bar, not past its right edge.
+	bar := a.stripRect()
+	by, bw, bx := bar.y, bar.w, bar.x
+	cx, cy, visible := a.screen.(tcell.SimulationScreen).GetCursor()
+	if !visible || cy != by || cx < bx || cx >= bx+bw {
+		t.Fatalf("caret (%d,%d) visible=%v is outside the find bar row %d, x in [%d,%d)",
+			cx, cy, visible, by, bx, bx+bw)
+	}
+
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyHome, 0))
+	findBarOf(t, a).draw(a.stripRect())
+	if findBarOf(t, a).query.Scroll() != 0 {
+		t.Fatalf("scroll should follow the caret home, got %d", findBarOf(t, a).query.Scroll())
+	}
+}
+
+// runeIndexOf returns the screen column of s inside a rendered row, or
+// -1. Rows are indexed in runes, not bytes: the sidebar's box-drawing
+// glyphs sit ahead of the bar, so a byte index would land short.
+func runeIndexOf(row []rune, s string) int {
+	want := []rune(s)
+	for i := 0; i+len(want) <= len(row); i++ {
+		if string(row[i:i+len(want)]) == s {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestBarLabelsThatFit pins the find bars' right-hand priority order in
+// one place: the counter is offered the space before the hint, and
+// neither is offered any until the input has its minimum. The two bars
+// used to carry two copies of a check that measured each label against
+// the label on the left and never against the other one.
+func TestBarLabelsThatFit(t *testing.T) {
+	cases := []struct {
+		name                  string
+		spare, counter, hint  int
+		wantCounter, wantHint bool
+	}{
+		{"both fit", 40, 10, 20, true, true},
+		{"only the counter fits", 25, 10, 20, true, false},
+		{"counter wins the last cells", 10, 10, 20, true, false},
+		{"nothing fits", 5, 10, 20, false, false},
+		{"no counter to place leaves the hint the room", 20, 0, 20, false, true},
+		{"a negative spare places nothing", -3, 10, 20, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotCounter, gotHint := barLabelsThatFit(c.spare, c.counter, c.hint)
+			if gotCounter != c.wantCounter || gotHint != c.wantHint {
+				t.Fatalf("barLabelsThatFit(%d, %d, %d) = (%v, %v), want (%v, %v)",
+					c.spare, c.counter, c.hint, gotCounter, gotHint, c.wantCounter, c.wantHint)
+			}
+		})
+	}
+}
+
+// TestDrawFindBar_InputSurvivesAWidthThatFitsBothLabels pins the
+// priority the bar's doc comment promises, at the band of widths that
+// used to break it. The two fit checks each measured the label against
+// their own text and never against each other, so both the counter and
+// the hint were drawn on a bar with no room for them; the input was
+// handed the leftovers, which is to say the cells they were already
+// painted in. Now the labels yield: the input keeps minFieldWidth cells
+// and the caret stays inside them.
+func TestDrawFindBar_InputSurvivesAWidthThatFitsBothLabels(t *testing.T) {
+	a := seedFindApp(t, "hello\n")
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.SetSize(109, 24)
+	a.width, a.height = 109, 24
+	a.openFind()
+	query := strings.Repeat("z", minFieldWidth-1) // no matches: counter reads "no results"
+	for _, r := range query {
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
+	}
+
+	a.draw()
+	scr.Show()
+
+	by := a.stripRect().y
+	row := []rune(screenLine(scr, by))
+	at := runeIndexOf(row, query)
+	if at < 0 {
+		t.Fatalf("the input lost its cells: bar row = %q", string(row))
+	}
+	cx, cy, visible := scr.GetCursor()
+	if !visible || cy != by || cx != at+len(query) {
+		t.Fatalf("caret (%d,%d) visible=%v, want it at (%d,%d) just after the query",
+			cx, cy, visible, at+len(query), by)
+	}
+}
+
+// TestDrawFindBar_HidesTheCaretWhenTheBarHasNoRoomAtAll pins the last
+// resort. When even a minimum field will not fit, the bar paints no
+// field — and Field.Draw owns the frame's only ShowCursor call, so
+// returning without it would leave the hardware cursor wherever the
+// editor's own render parked it: a caret blinking over static text,
+// pointing at a buffer that does not have the keyboard.
+func TestDrawFindBar_HidesTheCaretWhenTheBarHasNoRoomAtAll(t *testing.T) {
+	a := seedFindApp(t, "hello\n")
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.SetSize(60, 24)
+	a.width, a.height = 60, 24
+	// A sidebar dragged this wide leaves the bar too narrow for even the
+	// "Find:" label plus one cell of input, while the editor beside it
+	// is still wide enough to render — and to park the hardware cursor
+	// on its own caret, which is the cursor that must not survive.
+	a.sidebarShown, a.sidebarWidth = true, 52
+	a.openFind()
+
+	a.draw()
+	scr.Show()
+
+	if cx, cy, visible := scr.GetCursor(); visible {
+		t.Fatalf("a bar with no field left a caret at (%d,%d); it must be hidden", cx, cy)
+	}
+}
+
+// TestHandleFindKey_CaretMoveDoesNotReSearch pins the "react to the edit,
+// not to the keystroke" rule the delegation to overlay.Field is built on:
+// Left/Right/Home/End change the caret, not the query, so they must not
+// re-run the search and yank the editor back onto the current match.
+func TestHandleFindKey_CaretMoveDoesNotReSearch(t *testing.T) {
+	a := seedFindApp(t, "foo\nfoo\nfoo")
+	a.openFind()
+	for _, r := range "foo" {
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
+	}
+	tab := a.activeTabPtr()
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyEnter, 0)) // advance to the second match
+	if tab.FindIndex != 1 {
+		t.Fatalf("setup: expected FindIndex=1, got %d", tab.FindIndex)
+	}
+
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyHome, 0))
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyRight, 0))
+	if tab.FindIndex != 1 {
+		t.Fatalf("a caret move re-ran the search: FindIndex=%d", tab.FindIndex)
+	}
+	if findBarOf(t, a).query.Cursor != 1 {
+		t.Fatalf("caret should have moved inside the query, cursor=%d", findBarOf(t, a).query.Cursor)
+	}
+}
+
+// seedTwoTabApp opens two files as permanent tabs and returns the app
+// plus both tabs, with the second one active. The find-bar-vs-tab-switch
+// tests all need the same two-tab shape, and building it by hand invites
+// the preview slot silently collapsing the pair back into one tab.
+func seedTwoTabApp(t *testing.T) (*App, *editor.Tab, *editor.Tab) {
+	t.Helper()
+	dir := t.TempDir()
+	first := filepath.Join(dir, "a.txt")
+	second := filepath.Join(dir, "b.txt")
+	if err := os.WriteFile(first, []byte("foo bar foo\n"), 0644); err != nil {
+		t.Fatalf("seed a.txt: %v", err)
+	}
+	if err := os.WriteFile(second, []byte("foo baz\n"), 0644); err != nil {
+		t.Fatalf("seed b.txt: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(first)
+	tabA := a.activeTabPtr()
+	a.openFile(second)
+	tabB := a.activeTabPtr()
+	if tabA == nil || tabB == nil || tabA == tabB {
+		t.Fatalf("setup wanted two distinct tabs, got %p and %p", tabA, tabB)
+	}
+	return a, tabA, tabB
+}
+
+// TestFindStrip_ClearsTheTabItOpenedOn pins the bar to the tab it was
+// opened against. The bar passes the mouse through (ADR-0001), so the
+// user can click another tab while it is up; before this, Esc ran
+// ClearFind on whatever tab happened to be active, leaving the original
+// tab's FindQuery live — and a live query re-runs FindAll through
+// Tab.edit on every subsequent edit to that orphaned buffer.
+func TestFindStrip_ClearsTheTabItOpenedOn(t *testing.T) {
+	a, tabA, tabB := seedTwoTabApp(t)
+	a.tabs.Activate(tabA)
+	a.openFind()
+	for _, r := range "foo" {
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
+	}
+	if tabA.FindQuery != "foo" {
+		t.Fatalf("setup: tab A should carry the query, got %q", tabA.FindQuery)
+	}
+
+	// The user clicks tab B's tab strip entry while the bar is still up.
+	a.tabs.Activate(tabB)
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyEsc, 0))
+
+	if a.findBarOpen() {
+		t.Fatal("Esc should close the find bar")
+	}
+	if tabA.FindQuery != "" || tabA.FindMatches != nil || tabA.FindIndex != -1 {
+		t.Fatalf("Esc must clear the tab the bar opened on, got query=%q matches=%d idx=%d",
+			tabA.FindQuery, len(tabA.FindMatches), tabA.FindIndex)
+	}
+	if tabB.FindQuery != "" || tabB.FindMatches != nil {
+		t.Fatalf("the tab the bar never searched must be untouched, got query=%q matches=%d",
+			tabB.FindQuery, len(tabB.FindMatches))
+	}
+}
+
+// TestFindStrip_SearchesTheTabItOpenedOn is the same pin on the other
+// half of the strip's surface: typing, Enter/Shift+Enter and the counter
+// all act on the bar's own tab, not on whichever tab the user clicked
+// to afterwards. A bar whose Esc clears tab A but whose Enter walks
+// tab B's matches would be worse than either bug alone.
+func TestFindStrip_SearchesTheTabItOpenedOn(t *testing.T) {
+	a, tabA, tabB := seedTwoTabApp(t)
+	a.tabs.Activate(tabA)
+	a.openFind()
+	a.tabs.Activate(tabB)
+	for _, r := range "foo" {
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
+	}
+	if len(tabA.FindMatches) != 2 {
+		t.Fatalf("typing should search tab A, got %d matches", len(tabA.FindMatches))
+	}
+	if tabB.FindQuery != "" {
+		t.Fatalf("tab B must stay unsearched, got query=%q", tabB.FindQuery)
+	}
+	if got := findBarOf(t, a).counterText(); got != "1 of 2" {
+		t.Fatalf("counter should report tab A's matches, got %q", got)
+	}
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyEnter, 0))
+	if tabA.FindIndex != 1 {
+		t.Fatalf("Enter should walk tab A's match list, got idx=%d", tabA.FindIndex)
+	}
+}
+
+// TestFindStrip_ToleratesItsTabBeingClosed guards the pinned pointer
+// against the one way it can go stale: closing a clean tab does not run
+// closeAllModals, so the bar outlives the tab it was opened on. Every
+// path that reads the pin — the counter, the paint, Enter, Esc — must
+// treat a removed tab as "no tab" rather than mutating a buffer that is
+// no longer on screen.
+func TestFindStrip_ToleratesItsTabBeingClosed(t *testing.T) {
+	a, tabA, tabB := seedTwoTabApp(t)
+	a.tabs.Activate(tabA)
+	a.openFind()
+	for _, r := range "foo" {
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
+	}
+	a.closeTab(tabA)
+	if a.tabs.Active() != tabB {
+		t.Fatalf("setup: closing A should leave B active, got %p", a.tabs.Active())
+	}
+
+	bar := findBarOf(t, a)
+	if got := bar.counterText(); got != "" {
+		t.Fatalf("a closed tab has no counter to report, got %q", got)
+	}
+	if bar.hasNoMatches() {
+		t.Fatal("a closed tab is not a query with zero hits")
+	}
+	bar.handleKey(keyEv(tcell.KeyEnter, 0))
+	bar.draw(rect{x: 0, y: 0, w: 80, h: 1})
+	bar.handleKey(keyEv(tcell.KeyEsc, 0))
+	if tabB.FindQuery != "" {
+		t.Fatalf("the surviving tab must not inherit the closed tab's query, got %q", tabB.FindQuery)
 	}
 }

@@ -5,21 +5,24 @@
 // Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 // =============================================================================
 
-// fileops.go implements the editor's three file-management actions:
-// create-empty-file, rename-file, and delete-file. Each one is exposed two
+// fileops.go is the app-side adapter for the file manager's create /
+// rename / delete / undo-delete operations. Each one is exposed two
 // ways:
 //
 //   • From the main ≡ action menu, targeting the currently active tab
-//     (Rename / Delete only — there's no obvious "where" for a new file
-//     in that context, so New File lives only on the tree right-click).
+//     or the active folder.
 //
-//   • From the right-click context menu over a file-tree row. For folders
-//     the menu offers New File (creates a child) plus Rename / Delete; for
-//     files it offers Rename / Delete on the file itself.
+//   • From the right-click context menu over a file-tree row. For
+//     folders the menu offers New File (creates a child) plus Rename /
+//     Delete; for files it offers Rename / Delete on the file itself.
 //
-// All three operations refresh the file tree afterwards so the sidebar
-// reflects the change immediately, without waiting for the 10-second
-// background poller.
+// The disk work and every guard live in internal/filemanager. What is
+// left here is the choreography around it: which tab or folder an
+// action targets, the prompts and confirms, and applyChangeset — the
+// ONE tail every file operation (this file's and fileclip.go's) runs
+// after the manager returns, so the tree, the git tint, the finder
+// index and the session can never be refreshed by one site and
+// forgotten by another.
 
 package app
 
@@ -32,35 +35,111 @@ import (
 
 	"github.com/johnlam90/skiff/internal/clipboard"
 	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/filemanager"
 	"github.com/johnlam90/skiff/internal/filetree"
 )
 
 // -----------------------------------------------------------------------------
-// Backend: the actual file-system operations.
+// The post-op tail: one owner.
 // -----------------------------------------------------------------------------
 
-// createEmptyFile creates an empty file at path. It uses O_EXCL so it
-// refuses to clobber an existing file. The caller is expected to have
-// resolved path against a known parent directory.
-func createEmptyFile(path string) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
+// applyChangeset is the single place the editor reacts to a file
+// operation, successful or not. In order: every open tab under a Moved
+// path is repointed (prefix-aware, so a folder move carries the tabs
+// beneath it); every tab under a Removed path is closed and remembered
+// against that path; the tree is refreshed so a restored path exists
+// for Reveal; the tabs remembered for an Added path are reopened where
+// the user left them (that is what makes Undo delete a full undo); then
+// the git tint, the finder index and the session are refreshed.
+//
+// Call it with an empty Changeset on the error path too: a
+// half-completed cross-device move has already changed the disk, and
+// the index and tint would otherwise stay stale until the 10s tick.
+func (a *App) applyChangeset(cs filemanager.Changeset) {
+	for _, mv := range cs.Moved {
+		a.repointPaths(mv.Old, mv.New)
 	}
-	return f.Close()
+	for _, gone := range cs.Removed {
+		a.closeRemovedTabs(gone)
+	}
+	a.refreshTree()
+	for _, added := range cs.Added {
+		a.reopenRemovedTabs(added)
+	}
+	a.refreshGitStatusAsync()
+	a.invalidateFinder()
+	a.saveSession()
 }
 
-// renameFile moves oldPath to newPath. It refuses to clobber an existing
-// destination so the user can't accidentally lose a file by typing a name
-// that collides.
-func renameFile(oldPath, newPath string) error {
-	if oldPath == newPath {
-		return nil
+// repointPaths rewrites every open tab (and the active folder) that
+// lives at or under oldPath so buffers stay attached to files that just
+// moved. tabPathRemoved-style prefix matching with the trailing
+// separator avoids the /proj/foo vs /proj/foobar collision a substring
+// match would hit. applyChangeset's implementation of a Move; nothing
+// else calls it.
+func (a *App) repointPaths(oldPath, newPath string) {
+	prefix := oldPath + string(filepath.Separator)
+	for _, t := range a.tabs.Tabs() {
+		switch {
+		case t.Path == oldPath:
+			t.Path = newPath
+		case strings.HasPrefix(t.Path, prefix):
+			t.Path = filepath.Join(newPath, t.Path[len(prefix):])
+		default:
+			continue
+		}
+		if info, err := os.Stat(t.Path); err == nil {
+			t.Mtime = info.ModTime()
+		} else {
+			t.Mtime = time.Time{}
+		}
+		t.DiskGone = false
 	}
-	if _, err := os.Stat(newPath); err == nil {
-		return fmt.Errorf("a file named %q already exists", filepath.Base(newPath))
+	if a.activeFolder == oldPath {
+		a.setActiveFolder(newPath)
+	} else if strings.HasPrefix(a.activeFolder, prefix) {
+		a.setActiveFolder(filepath.Join(newPath, a.activeFolder[len(prefix):]))
 	}
-	return os.Rename(oldPath, newPath)
+	a.syncActiveTreeFile()
+}
+
+// closeRemovedTabs closes every open tab whose file disappeared when
+// gone was trashed, remembering where each one was so reopenRemovedTabs
+// can put them back if the path is restored. The records are keyed by
+// the removed path, not by tab: a folder delete closes several tabs in
+// one gesture, and the restore that brings the folder back is one
+// Added for the folder.
+func (a *App) closeRemovedTabs(gone string) {
+	doomed := a.orphanedTabs(gone)
+	if len(doomed) == 0 {
+		return
+	}
+	recs := make([]closedTabRecord, 0, len(doomed))
+	for _, t := range doomed {
+		recs = append(recs, closedTabRecord{Path: t.Path, Cursor: t.Cursor, ScrollY: t.ScrollY})
+		a.closeTab(t)
+	}
+	if a.removedTabs == nil {
+		a.removedTabs = map[string][]closedTabRecord{}
+	}
+	a.removedTabs[gone] = recs
+}
+
+// reopenRemovedTabs reopens the tabs a delete of added closed, in the
+// order they were open, and forgets the record either way — once the
+// path is back on disk the memory has done its job. A record whose file
+// did not come back with the restore (deleted inside the folder before
+// the folder itself was) is skipped silently: the restore is what the
+// user asked for and it succeeded.
+func (a *App) reopenRemovedTabs(added string) {
+	recs, ok := a.removedTabs[added]
+	if !ok {
+		return
+	}
+	delete(a.removedTabs, added)
+	for _, rec := range recs {
+		a.reopenClosedTab(rec)
+	}
 }
 
 // tabPathRemoved reports whether a tab pointing at tabPath is now
@@ -79,227 +158,124 @@ func tabPathRemoved(tabPath, deletedPath string) bool {
 	return strings.HasPrefix(tabPath, prefix)
 }
 
-// samePath reports whether two paths refer to the same location once
-// both are made absolute. The project root can arrive in different
-// spellings ("." from the CLI, the absolute tree root internally), and
-// a verbatim string compare between those spellings is exactly the bug
-// that once let the root masquerade as a deletable subfolder.
-func samePath(a, b string) bool {
-	aa, err1 := filepath.Abs(a)
-	bb, err2 := filepath.Abs(b)
-	if err1 != nil || err2 != nil {
-		return a == b
-	}
-	return aa == bb
-}
-
 // isProjectRoot reports whether folder refers to the project root in
 // any spelling. Every root-destructive path (menu predicates, labels,
 // and doDeletePath itself) checks this instead of comparing raw
-// strings, so no launch form can make the root deletable.
+// strings, so no launch form can make the root deletable. The manager
+// resolved the root once at construction; this is its answer.
 func (a *App) isProjectRoot(folder string) bool {
-	if samePath(folder, a.rootDir) {
-		return true
-	}
-	return a.tree != nil && a.tree.Root != nil && samePath(folder, a.tree.Root.Path)
+	return a.files.IsRoot(folder)
 }
 
-// trashEntry records one deleted item so Undo delete can put it back:
-// where it lived, and where the session trash is keeping it.
-type trashEntry struct {
-	orig   string
-	stored string
-}
-
-// moveToTrash relocates path into the session trash instead of
-// destroying it, which is what makes Delete undoable for the life of
-// the session. The primary destination is a per-session temp dir; when
-// that rename crosses filesystems (os.Rename fails on tmpfs /tmp,
-// network mounts, …) the item is instead renamed in place to a hidden
-// filetree.TrashPrefix sibling, which is always same-device. The tree
-// and finder both filter that prefix so a fallback entry never
-// surfaces in the UI.
-func (a *App) moveToTrash(path string) error {
-	if a.trashDir == "" {
-		if dir, err := os.MkdirTemp("", "skiff-trash-"); err == nil {
-			a.trashDir = dir
-		}
-	}
-	base := filepath.Base(path)
-	if a.trashDir != "" {
-		stored := filepath.Join(a.trashDir, fmt.Sprintf("%d-%s", len(a.trashed), base))
-		if err := os.Rename(path, stored); err == nil {
-			a.trashed = append(a.trashed, trashEntry{orig: path, stored: stored})
-			return nil
-		}
-	}
-	stored := filepath.Join(filepath.Dir(path),
-		fmt.Sprintf("%s%d-%s", filetree.TrashPrefix, len(a.trashed), base))
-	if err := os.Rename(path, stored); err != nil {
-		return err
-	}
-	a.trashed = append(a.trashed, trashEntry{orig: path, stored: stored})
-	return nil
-}
+// -----------------------------------------------------------------------------
+// Undo delete: the session trash the manager keeps.
+// -----------------------------------------------------------------------------
 
 // hasTrashedEntry is the menu predicate for the Undo delete row: true
 // while the session trash holds at least one restorable item.
-func (a *App) hasTrashedEntry() bool { return len(a.trashed) > 0 }
+func (a *App) hasTrashedEntry() bool { return a.files.HasTrash() }
 
 // menuUndoDelete restores the most recently deleted item from the
-// session trash. It refuses to clobber: if something new occupies the
-// original path the entry stays in the trash and the flash says why,
-// so a failed restore never destroys newer work.
+// session trash and reopens the tabs the delete closed (through
+// applyChangeset). The manager refuses to clobber: if something new
+// occupies the original path the entry stays in the trash and the
+// flash says why, so a failed restore never destroys newer work.
 func (a *App) menuUndoDelete() {
 	a.closeMenu()
-	if len(a.trashed) == 0 {
+	if !a.files.HasTrash() {
 		return
 	}
-	e := a.trashed[len(a.trashed)-1]
-	if _, err := os.Lstat(e.orig); err == nil {
-		a.flash(fmt.Sprintf("Restore failed: %s already exists", filepath.Base(e.orig)))
-		return
-	}
-	if err := os.Rename(e.stored, e.orig); err != nil {
+	name := filepath.Base(a.files.LastTrashed())
+	cs, err := a.files.Restore()
+	if err != nil {
+		a.applyChangeset(filemanager.Changeset{})
 		a.flash(fmt.Sprintf("Restore failed: %v", err))
 		return
 	}
-	a.trashed = a.trashed[:len(a.trashed)-1]
-	a.refreshTree()
-	a.refreshGitStatusAsync()
-	a.invalidateFinder()
-	a.flash(fmt.Sprintf("Restored %s", filepath.Base(e.orig)))
+	a.applyChangeset(cs)
+	a.flash(fmt.Sprintf("Restored %s", name))
 }
 
 // undoDeleteLabel is the dynamic label hook for the Undo delete menu
 // row: it names what will come back, matching the "say the target
 // before the click" rule the other file rows follow.
 func (a *App) undoDeleteLabel() string {
-	if len(a.trashed) == 0 {
+	if !a.files.HasTrash() {
 		return "Undo delete"
 	}
-	name := filepath.Base(a.trashed[len(a.trashed)-1].orig)
+	name := filepath.Base(a.files.LastTrashed())
 	return trimRunes("Undo delete ("+name+")", maxLabelSuffix+len("Undo delete"))
 }
 
-// emptyTrash permanently discards everything the session trash holds.
-// Called when the editor exits — the undo window is deliberately the
-// session lifetime, not forever, so deleted work doesn't accumulate
-// invisibly on disk.
-func (a *App) emptyTrash() {
-	for _, e := range a.trashed {
-		_ = os.RemoveAll(e.stored)
-	}
-	if a.trashDir != "" {
-		_ = os.RemoveAll(a.trashDir)
-		a.trashDir = ""
-	}
-	a.trashed = nil
-}
-
 // -----------------------------------------------------------------------------
-// App glue: wrap the backend ops in tab/tree-aware helpers.
+// App glue: the op sites. Each one is manager → applyChangeset → flash.
 // -----------------------------------------------------------------------------
-
-// withinRoot reports whether candidate, made absolute and cleaned, still
-// lives under root. Same escape rule relOrEmpty applies to shell
-// variables, expressed as the boolean the file-op guards need — with one
-// deliberate difference: root itself counts as within (filepath.Rel
-// returns "."), because session restore's call site needs a session
-// entry naming the project root to read as legitimate, not an escape.
-func withinRoot(root, candidate string) bool {
-	rel, err := filepath.Rel(root, candidate)
-	if err != nil {
-		return false
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false
-	}
-	return true
-}
 
 // doCreateFile creates an empty file inside parent at the relative path
-// name, refreshes the tree, and opens the new file in a tab. Errors are
-// surfaced as a flash. name may contain path separators so the user can
-// drop a file into a subdirectory ("subdir/foo.go") — but the parent
-// directories must already exist; we don't silently mkdir to avoid
-// creating folders the user didn't realise they were making.
+// name, refreshes everything, and opens the new file in a tab. Errors
+// are surfaced as a flash. name may contain path separators so the user
+// can drop a file into a subdirectory ("subdir/foo.go") — but the
+// parent directories must already exist; the manager never silently
+// mkdirs, to avoid creating folders the user didn't realise they were
+// making.
 //
 // A name that climbs out of parent via "../" is refused outright — a
-// deliberate UX narrowing, not an oversight: before this guard,
-// filepath.Join happily resolved such a name to a path outside the tree
-// the user is looking at, and the file would land somewhere the sidebar
-// never shows. Users who need to create a file elsewhere should navigate
-// the tree to that folder first.
+// deliberate UX narrowing, not an oversight: the prompt promised "in
+// <parent>", and before this guard filepath.Join happily resolved such
+// a name to a path outside the folder the user was looking at. The
+// manager's own guard is the root; this one is the prompt's promise.
+// Users who need to create a file elsewhere should navigate the tree to
+// that folder first.
 func (a *App) doCreateFile(parent, name string) {
 	name = trimSpace(name)
 	if name == "" {
 		return
 	}
 	target := filepath.Join(parent, name)
-	if !withinRoot(parent, target) {
+	if !filemanager.Within(parent, target) {
 		a.flash("Create refused: name escapes " + filepath.Base(parent))
 		return
 	}
-	if err := createEmptyFile(target); err != nil {
-		// Translate the noisy "open <path>: no such file or directory"
-		// case into something the user can actually act on. ENOENT here
-		// means the parent directory doesn't exist.
-		if os.IsNotExist(err) {
-			a.flash(fmt.Sprintf("Create failed: %s doesn't exist — create it first",
-				filepath.Dir(target)))
-			return
-		}
+	cs, err := a.files.Create(target)
+	if err != nil {
+		a.applyChangeset(filemanager.Changeset{})
 		a.flash(fmt.Sprintf("Create failed: %v", err))
 		return
 	}
-	a.refreshTree()
-	a.refreshGitStatusAsync()
-	a.invalidateFinder()
+	a.applyChangeset(cs)
 	a.openFile(target)
 	a.flash(fmt.Sprintf("Created %s", name))
 }
 
-// doRenameFile renames oldPath to a sibling whose basename is newName,
-// refreshing the tree and updating any open tab that points at the file.
-func (a *App) doRenameFile(oldPath, newName string) {
+// doRename gives the file or folder at oldPath the sibling name newName
+// and carries every open tab under it to the new path. One site for
+// both kinds on purpose: the tree popup once routed folders through a
+// file-only rename that rewrote exact-path tabs and nothing beneath a
+// directory, stranding every open tab under the renamed folder on a
+// dead path. The manager handles directories the same as files, and
+// applyChangeset's prefix-aware repoint does the rest.
+func (a *App) doRename(oldPath, newName string) {
 	newName = trimSpace(newName)
 	if newName == "" {
 		return
 	}
-	if strings.ContainsAny(newName, string(os.PathSeparator)+"/\\") {
-		a.flash("File name can't contain a path separator")
-		return
-	}
-	newPath := filepath.Join(filepath.Dir(oldPath), newName)
-	if err := renameFile(oldPath, newPath); err != nil {
+	cs, err := a.files.Rename(oldPath, newName)
+	if err != nil {
+		a.applyChangeset(filemanager.Changeset{})
 		a.flash(fmt.Sprintf("Rename failed: %v", err))
 		return
 	}
-	// Update any open tab that pointed at oldPath so its title reflects the
-	// new name and its disk-reconciliation logic stays correct.
-	for _, t := range a.tabs.Tabs() {
-		if t.Path == oldPath {
-			t.Path = newPath
-			if info, err := os.Stat(newPath); err == nil {
-				t.Mtime = info.ModTime()
-			} else {
-				t.Mtime = time.Time{}
-			}
-			t.DiskGone = false
-		}
-	}
-	a.refreshTree()
-	a.refreshGitStatusAsync()
-	a.invalidateFinder()
+	a.applyChangeset(cs)
 	a.flash(fmt.Sprintf("Renamed to %s", newName))
 }
 
 // doDeletePath moves path (file or directory) into the session trash,
 // closes any open tab whose file is gone as a result, and refreshes
-// the tree. The refusal to touch the project root is defense-in-depth:
-// the menu predicates already gate root-targeting rows out, but this
-// is the last line before filesystem damage, so it re-checks.
+// everything. The refusal to touch the project root is defense-in-
+// depth: the menu predicates already gate root-targeting rows out, and
+// the manager refuses it again, but this is the last check before the
+// unsaved-changes prompt — which would otherwise list every open tab
+// as doomed before the manager said no.
 //
 // Unsaved buffers get their own gate before anything moves. The trash
 // only ever holds what was on disk, and the reopen stack remembers a
@@ -310,10 +286,6 @@ func (a *App) doRenameFile(oldPath, newName string) {
 func (a *App) doDeletePath(path string) {
 	if a.isProjectRoot(path) {
 		a.flash("Refusing to delete the project root")
-		return
-	}
-	if _, err := os.Lstat(path); err != nil {
-		a.flash(fmt.Sprintf("Delete failed: %v", err))
 		return
 	}
 	if dirty := a.dirtyOrphanedTabs(path); len(dirty) > 0 {
@@ -397,30 +369,19 @@ func (a *App) confirmDeleteWithUnsaved(path string, dirty []*editor.Tab) {
 	)
 }
 
-// deletePathNow is the delete itself, past every guard. It re-runs the
-// root and existence checks because the unsaved-changes prompt opens a
-// window in which the world can change — a save can replace the file, a
-// background refresh can remove it — and the checks are cheap next to
-// what they prevent.
+// deletePathNow is the delete itself, past every guard. The manager
+// re-runs the root and existence checks because the unsaved-changes
+// prompt opens a window in which the world can change — a save can
+// replace the file, a background refresh can remove it — and the
+// checks are cheap next to what they prevent.
 func (a *App) deletePathNow(path string) {
-	if a.isProjectRoot(path) {
-		a.flash("Refusing to delete the project root")
-		return
-	}
-	if _, err := os.Lstat(path); err != nil {
+	cs, err := a.files.Trash(path)
+	if err != nil {
+		a.applyChangeset(filemanager.Changeset{})
 		a.flash(fmt.Sprintf("Delete failed: %v", err))
 		return
 	}
-	if err := a.moveToTrash(path); err != nil {
-		a.flash(fmt.Sprintf("Delete failed: %v", err))
-		return
-	}
-	for _, t := range a.orphanedTabs(path) {
-		a.closeTab(t)
-	}
-	a.refreshTree()
-	a.refreshGitStatusAsync()
-	a.invalidateFinder()
+	a.applyChangeset(cs)
 	a.flash(fmt.Sprintf("Deleted %s — ≡ Undo delete", filepath.Base(path)))
 }
 
@@ -517,7 +478,7 @@ func (a *App) menuRename() {
 		"in "+filepath.Dir(old),
 		filepath.Base(old),
 		func(app *App, value string) {
-			app.doRenameFile(old, value)
+			app.doRename(old, value)
 		},
 	)
 }
@@ -540,40 +501,6 @@ func (a *App) menuDelete() {
 	)
 }
 
-// doRenameFolder renames oldPath to a sibling whose basename is
-// newName, refreshes the tree, and rewrites every open tab whose
-// file lives under the renamed directory so the buffers don't end
-// up backed by a stale path. Reuses renameFile under the hood since
-// os.Rename works on directories the same as files.
-//
-// The descendant-tab path-rewriting case is what doRenameFile lacks:
-// renaming /proj/foo to /proj/bar must also point a tab at
-// /proj/foo/main.go to /proj/bar/main.go. tabPathRemoved-style
-// prefix matching with the trailing separator avoids the
-// /proj/foo vs /proj/foobar collision a substring match would hit.
-func (a *App) doRenameFolder(oldPath, newName string) {
-	newName = trimSpace(newName)
-	if newName == "" {
-		return
-	}
-	if strings.ContainsAny(newName, string(os.PathSeparator)+"/\\") {
-		a.flash("Folder name can't contain a path separator")
-		return
-	}
-	newPath := filepath.Join(filepath.Dir(oldPath), newName)
-	if err := renameFile(oldPath, newPath); err != nil {
-		a.flash(fmt.Sprintf("Rename failed: %v", err))
-		return
-	}
-	// Re-attach open tabs and the active folder to the moved paths —
-	// shared with the file-clipboard's move (see fileclip.go).
-	a.repointPaths(oldPath, newPath)
-	a.refreshTree()
-	a.refreshGitStatusAsync()
-	a.invalidateFinder()
-	a.flash(fmt.Sprintf("Renamed to %s", newName))
-}
-
 // menuRenameFolder opens a prompt pre-filled with the active
 // folder's basename and renames the directory on submit. Mirrors
 // menuRename but targets a folder rather than a file. The project
@@ -594,7 +521,7 @@ func (a *App) menuRenameFolder() {
 		"in "+filepath.Dir(old),
 		filepath.Base(old),
 		func(app *App, value string) {
-			app.doRenameFolder(old, value)
+			app.doRename(old, value)
 		},
 	)
 }
@@ -724,7 +651,9 @@ func ctxNewFile(a *App, n *filetree.Node) {
 }
 
 // ctxRename opens a prompt pre-filled with n's basename and renames the
-// file or folder on submit.
+// file or folder on submit — the same doRename the ≡ rows use, so a
+// folder renamed from the popup carries its open tabs exactly as one
+// renamed from the menu does.
 func ctxRename(a *App, n *filetree.Node) {
 	if n == a.tree.Root {
 		return
@@ -735,7 +664,7 @@ func ctxRename(a *App, n *filetree.Node) {
 		"in "+filepath.Dir(old),
 		n.Name,
 		func(app *App, value string) {
-			app.doRenameFile(old, value)
+			app.doRename(old, value)
 		},
 	)
 }
@@ -827,10 +756,11 @@ func ctxCopyAbsolutePath(a *App, n *filetree.Node) {
 }
 
 // ctxDelete confirms and removes the file or folder the user clicked.
-// Folder deletion is recursive (os.RemoveAll under the hood) so the
-// confirm copy spells out "and everything inside" — the stakes are
-// much higher than a single-file delete and the user should see that
-// before clicking Yes. The project root itself is never deletable.
+// Folder deletion is recursive (the whole subtree goes to the trash as
+// a unit) so the confirm copy spells out "and everything inside" — the
+// stakes are much higher than a single-file delete and the user should
+// see that before clicking Yes. The project root itself is never
+// deletable.
 func ctxDelete(a *App, n *filetree.Node) {
 	if n == a.tree.Root {
 		return

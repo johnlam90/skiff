@@ -21,10 +21,19 @@ open one — at most one overlay is ever up.
 _Avoid_: modal cascade, routing lists
 
 **Strip**:
-A bottom bar that reflows the editor and captures keys while letting mouse
-actions pass through to the editor — the find bar, the project-find bar,
-the leader strip. A strip is not an overlay and never sits on the stack.
+A bottom bar that reflows the editor and owns the keyboard while it is up,
+answering for itself whether a mouse event is consumed or passed through to
+the editor — the find bar, the project-find bar, the leader strip. Every
+strip implements the `strip` interface (`internal/app/strip.go`): the rows
+it reserves, its key and mouse handlers, its draw, its teardown. A strip is
+not an overlay and never sits on the stack.
 _Avoid_: bar, bottom panel
+
+**Strip slot**:
+The single owner of which strip is docked (`App.strip`, nil = none). Every
+opener runs `closeAllModals` first, which empties it, so at most one strip
+is ever up — which is why layout can subtract one strip's rows.
+_Avoid_: per-bar open flags, findOpen
 
 **Shortcut reference**:
 The `Esc ?` overlay: the whole leader table under its group headings plus
@@ -36,6 +45,14 @@ _Avoid_: help screen, cheat sheet (that's the strip's job), keymap
 **Prefab**:
 A ready-made overlay kind (prompt, confirm, pick, form) that a feature
 fills with text and callbacks instead of drawing its own surface.
+
+**List**:
+The one scrolled, selectable window every row surface embeds — the
+list pick, the action menu, the finder, the git log and the git panel:
+the highlight, the scroll offset, the row hit-test and the scrollbar.
+The surface pushes its row count and window height in each frame
+(`sync()` first); the list never measures a frame itself.
+_Avoid_: viewport, menu model, cursor (that's the editor's)
 
 **Drill-in**:
 A single menu row that opens a pick of the rows it demoted — "Git…",
@@ -89,11 +106,23 @@ hold unterminated lines and every write restores the file's own ending,
 so editing one line of a CRLF file never rewrites the whole file.
 _Avoid_: newline mode, EOL setting (there is no setting — it is detected)
 
+**Changeset**:
+What a file operation reports back: the paths it added, removed and
+moved (old → new pairs; a folder move is one pair). `applyChangeset` is
+the one place the app reacts — repointing tabs, closing and reopening
+them, then refreshing the tree, the git tint, the finder index and the
+session. An empty changeset still runs that tail, which is how a failed
+op leaves nothing stale.
+_Avoid_: refresh list, diff (that's git's), result
+
 ### Git
 
 **Repo**:
 The project root's git repository as skiff sees it. "Not a repo" is an
-explicit state, not an empty branch name.
+explicit state, not an empty branch name. Its interface is a vocabulary
+of typed verbs (Diff, Log, Branches, Push, Switch, …), each owning its
+own argv and parse; a refusal on the write side is an OpError carrying
+advice. No surface assembles a git command line.
 
 **Snapshot**:
 One consistent read of repo state — branch, ahead/behind counts, and the
@@ -101,11 +130,30 @@ set of changed paths — feeding every git-aware surface (tree badges,
 gutter, status bar, git panel).
 _Avoid_: git status (that's the command, not the model)
 
+**Patch**:
+One parsed diff — files, each with hunks, each with lines that know
+their old and new line numbers. Both producers build the same shape:
+`git diff` output parsed, or a dirty buffer measured against what is on
+disk. Nothing renders a patch to text in order to read it back.
+_Avoid_: diff output, diff lines (that is the display form, not the
+model)
+
 **Git panel**:
 The sidebar's second mode: the list of changed files with their change
 kinds, replacing the explorer tree while active. Mouse-first, but it can
 take keyboard focus (`Esc g`) to walk rows, stage them, and reach the
 action buttons without a mouse.
+
+### Background work
+
+**Job**:
+One unit of background work with a policy — Coalesce (one in flight,
+at most one queued follow-up), Supersede (the newest start wins and a
+stale landing is dropped), Refuse (busy means refused, with a flash) or
+Concurrent (no gate) — that always lands on the event loop through one
+event type. Every goroutine → main-loop hand-off is a job or a Notify;
+nothing else posts custom events.
+_Avoid_: task, worker, async callback, in-flight flag
 
 ### Text
 
@@ -119,3 +167,11 @@ double-click selects whole. Widths come from `uniseg`, the same
 engine tcell measures a cell with.
 _Avoid_: character, glyph, rune (a rune is a different unit — name
 which one you mean)
+
+**Edit**:
+One text mutation of a tab, made through the `edit` seam: undo state is
+recorded under the caller's group, the mutation runs, then the trailer —
+dirty, styles stale, caret follow, find matches refreshed — is applied
+once. Nothing writes the trailer by hand; `RestoreView` is the matching
+seam for putting a tab back on a remembered place.
+_Avoid_: change, mutation (that's what happens *inside* an edit)

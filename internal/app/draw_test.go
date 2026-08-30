@@ -758,7 +758,7 @@ func TestFlashStrip_StacksAboveTheFindBar(t *testing.T) {
 	a.openFind()
 	a.flash(longFlash)
 
-	_, fy, _, _ := a.findBarRect()
+	fy := a.stripRect().y
 	_, sy, _, sh := a.flashStripRect()
 	if sy+sh != fy {
 		t.Fatalf("strip rows [%d,%d) should end exactly at the find bar row %d", sy, sy+sh, fy)
@@ -1088,7 +1088,7 @@ func TestDrawMenu_FiltersAndScrollsAtTheMinimumSize(t *testing.T) {
 	}
 	a.draw()
 	a.screen.Show()
-	if a.menuScroll == 0 {
+	if a.menuList.Scroll() == 0 {
 		t.Error("arrow keys never scrolled the content window")
 	}
 	if !screenHasText(t, a, "▲") || !screenHasText(t, a, "▼") {

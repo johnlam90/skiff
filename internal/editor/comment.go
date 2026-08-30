@@ -117,23 +117,21 @@ func (t *Tab) ToggleLineComment() (changed bool, ok bool) {
 		indent = blockIndent(t.Buffer.Lines, start, end)
 	}
 
-	t.pushUndo(undoGroupStructural)
-	for i := start; i <= end; i++ {
-		line := t.Buffer.Lines[i]
-		if strings.TrimSpace(line) == "" {
-			continue
+	t.edit(undoGroupStructural, func() {
+		for i := start; i <= end; i++ {
+			line := t.Buffer.Lines[i]
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			if uncomment {
+				t.Buffer.Lines[i] = uncommentLine(line, prefix)
+				continue
+			}
+			t.Buffer.Lines[i] = commentLine(line, prefix, indent)
 		}
-		if uncomment {
-			t.Buffer.Lines[i] = uncommentLine(line, prefix)
-			continue
-		}
-		t.Buffer.Lines[i] = commentLine(line, prefix, indent)
-	}
-	t.Cursor = t.Buffer.Clamp(t.Cursor)
-	t.Anchor = t.Buffer.Clamp(t.Anchor)
-	t.Dirty = true
-	t.StyleStale = true
-	t.cursorMoved = true
+		t.Cursor = t.Buffer.Clamp(t.Cursor)
+		t.Anchor = t.Buffer.Clamp(t.Anchor)
+	})
 	return true, true
 }
 

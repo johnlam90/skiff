@@ -55,7 +55,7 @@ func TestOpeners_PushOverlayStack(t *testing.T) {
 			a.openListPick("T", []listPickItem{{Label: "one"}}, nil, nil, nil)
 		}},
 		{"finder", nil, func(a *App) { a.openFinder() }},
-		{"diff", nil, func(a *App) { a.openDiffView("T", []string{"+x"}, "", "") }},
+		{"diff", nil, func(a *App) { a.openDiffView("T", patchOf("@@ -1,0 +1,1 @@", "+x"), "", "") }},
 		// openGitLog refuses to open with no commits, so it needs a real
 		// repo with history — initRepo skips when git isn't installed.
 		{"gitLog", initRepoWithCommit,
@@ -196,3 +196,14 @@ func containsRunes(cells []rune, s string) bool {
 	}
 	return false
 }
+
+// The app's own overlays satisfy the whole contract too — the bespoke
+// four alongside the package's prefabs. Listing them here is the fence
+// against a new App-side surface shipping without WantsMotion or
+// Dismiss, which is exactly the gap the two type switches used to hide.
+var (
+	_ overlay.Overlay = menuOverlay{}
+	_ overlay.Overlay = (*finderOverlay)(nil)
+	_ overlay.Overlay = (*gitLogOverlay)(nil)
+	_ overlay.Overlay = (*diffOverlay)(nil)
+)

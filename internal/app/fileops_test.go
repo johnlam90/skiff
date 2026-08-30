@@ -5,10 +5,13 @@
 // Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 // =============================================================================
 
-// Tests for the small file-system helpers in fileops.go. The App-level glue
-// (modals, menu wiring) is exercised manually via the TUI; here we just
-// pin down the behavior of the three primitives so future refactors don't
-// silently regress them.
+// Tests for the app side of file operations: the menu / popup wiring,
+// the unsaved-changes gate in front of a delete, and applyChangeset —
+// the one tail every operation runs. The disk primitives themselves
+// (create, rename, trash, the copy ladder) are pinned in
+// internal/filemanager; here the assertions are about what the editor
+// does with a Changeset: tab paths, closed and reopened tabs, the git
+// and finder refreshes, the flashes.
 
 package app
 
@@ -19,123 +22,12 @@ import (
 	"testing"
 
 	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/filemanager"
+	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/overlay"
+	"github.com/johnlam90/skiff/internal/session"
 )
-
-// TestCreateEmptyFile_New writes a brand-new empty file and verifies it
-// exists on disk and is zero bytes.
-func TestCreateEmptyFile_New(t *testing.T) {
-	dir := t.TempDir()
-	target := filepath.Join(dir, "hello.txt")
-
-	if err := createEmptyFile(target); err != nil {
-		t.Fatalf("createEmptyFile: %v", err)
-	}
-	info, err := os.Stat(target)
-	if err != nil {
-		t.Fatalf("stat after create: %v", err)
-	}
-	if info.Size() != 0 {
-		t.Fatalf("expected 0-byte file, got %d bytes", info.Size())
-	}
-}
-
-// TestCreateEmptyFile_RefusesExisting ensures we don't clobber an existing
-// file — the user's content should be safe even if they typo a name.
-func TestCreateEmptyFile_RefusesExisting(t *testing.T) {
-	dir := t.TempDir()
-	target := filepath.Join(dir, "existing.txt")
-	if err := os.WriteFile(target, []byte("keep me"), 0644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	if err := createEmptyFile(target); err == nil {
-		t.Fatal("expected error when creating an existing file, got nil")
-	}
-	got, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatalf("read after create attempt: %v", err)
-	}
-	if string(got) != "keep me" {
-		t.Fatalf("file contents were clobbered: %q", got)
-	}
-}
-
-// TestRenameFile_Basic renames a file and confirms the source is gone and
-// the destination has the original contents.
-func TestRenameFile_Basic(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "before.txt")
-	dst := filepath.Join(dir, "after.txt")
-	if err := os.WriteFile(src, []byte("payload"), 0644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	if err := renameFile(src, dst); err != nil {
-		t.Fatalf("renameFile: %v", err)
-	}
-	if _, err := os.Stat(src); !os.IsNotExist(err) {
-		t.Fatalf("source still exists after rename: err=%v", err)
-	}
-	got, err := os.ReadFile(dst)
-	if err != nil {
-		t.Fatalf("read dst: %v", err)
-	}
-	if string(got) != "payload" {
-		t.Fatalf("payload mismatch: %q", got)
-	}
-}
-
-// TestRenameFile_RefusesClobber proves we won't overwrite an existing
-// destination — important so the user can't accidentally erase a sibling
-// by typing its name into the rename prompt.
-func TestRenameFile_RefusesClobber(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "src.txt")
-	dst := filepath.Join(dir, "dst.txt")
-	if err := os.WriteFile(src, []byte("src"), 0644); err != nil {
-		t.Fatalf("seed src: %v", err)
-	}
-	if err := os.WriteFile(dst, []byte("dst"), 0644); err != nil {
-		t.Fatalf("seed dst: %v", err)
-	}
-
-	err := renameFile(src, dst)
-	if err == nil {
-		t.Fatal("expected rename to fail when destination exists")
-	}
-	if !strings.Contains(err.Error(), "already exists") {
-		t.Fatalf("error should mention conflict, got: %v", err)
-	}
-	// Both files should be untouched.
-	if got, _ := os.ReadFile(src); string(got) != "src" {
-		t.Fatalf("src corrupted: %q", got)
-	}
-	if got, _ := os.ReadFile(dst); string(got) != "dst" {
-		t.Fatalf("dst corrupted: %q", got)
-	}
-}
-
-// TestRenameFile_SamePathNoop allows rename(x, x) without erroring — the
-// UI path can hit this when the user opens the prompt and submits without
-// editing the pre-filled value.
-func TestRenameFile_SamePathNoop(t *testing.T) {
-	dir := t.TempDir()
-	target := filepath.Join(dir, "same.txt")
-	if err := os.WriteFile(target, []byte("same"), 0644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if err := renameFile(target, target); err != nil {
-		t.Fatalf("renameFile same-path: %v", err)
-	}
-	got, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if string(got) != "same" {
-		t.Fatalf("contents changed: %q", got)
-	}
-}
 
 // TestDoDeletePath_File removes an existing file from its original
 // location (the content lives on in the session trash — see the
@@ -238,7 +130,7 @@ func TestDoRenameFolder_RewritesDescendantTabPaths(t *testing.T) {
 	a.openFile(leaf)
 	a.setActiveFolder(oldDir)
 
-	a.doRenameFolder(oldDir, "renamed")
+	a.doRename(oldDir, "renamed")
 
 	newLeaf := filepath.Join(root, "renamed", "deep", "leaf.go")
 	if _, err := os.Stat(newLeaf); err != nil {
@@ -264,7 +156,7 @@ func TestDoRenameFolder_RefusesPathSeparator(t *testing.T) {
 	}
 	a := newTestApp(t, root)
 
-	a.doRenameFolder(sub, "nested/inside")
+	a.doRename(sub, "nested/inside")
 
 	if _, err := os.Stat(sub); err != nil {
 		t.Fatalf("source folder vanished despite refusal: %v", err)
@@ -276,7 +168,7 @@ func TestDoRenameFolder_RefusesPathSeparator(t *testing.T) {
 
 // TestDoRenameFolder_RefusesClobber confirms the rename helper
 // won't overwrite a sibling that already exists. Same safety rail
-// renameFile gives file rename, just exercised through the folder
+// the manager gives file rename, just exercised through the folder
 // path so we don't accidentally regress it for directories.
 func TestDoRenameFolder_RefusesClobber(t *testing.T) {
 	root := t.TempDir()
@@ -290,7 +182,7 @@ func TestDoRenameFolder_RefusesClobber(t *testing.T) {
 	}
 	a := newTestApp(t, root)
 
-	a.doRenameFolder(src, "lib")
+	a.doRename(src, "lib")
 
 	if _, err := os.Stat(src); err != nil {
 		t.Fatalf("src disappeared despite refusal: %v", err)
@@ -696,10 +588,12 @@ func TestMenuUndoDelete_RefusesClobber(t *testing.T) {
 	}
 }
 
-// TestEmptyTrash_DiscardsStored pins the "session trash" half of the
-// name: on exit the stored items are permanently discarded, so the
-// undo window is exactly the editor session.
-func TestEmptyTrash_DiscardsStored(t *testing.T) {
+// TestClose_DiscardsTrashAndUndoRow pins the "session trash" half of
+// the name from the app's side: Close empties the manager's trash, so
+// after it the Undo delete row has nothing to offer. The on-disk
+// discard itself is the manager's contract (internal/filemanager's
+// TestEmptyTrash_DiscardsStored); this is the wiring.
+func TestClose_DiscardsTrashAndUndoRow(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "f.txt")
 	writeFileT(t, target, "x")
@@ -709,15 +603,14 @@ func TestEmptyTrash_DiscardsStored(t *testing.T) {
 	if !a.hasTrashedEntry() {
 		t.Fatal("setup: expected a trash entry")
 	}
-	stored := a.trashed[len(a.trashed)-1].stored
 
-	a.emptyTrash()
+	a.Close()
 
-	if _, err := os.Stat(stored); !os.IsNotExist(err) {
-		t.Fatal("emptyTrash should remove the stored copy")
-	}
 	if a.hasTrashedEntry() {
-		t.Fatal("emptyTrash should clear the entries")
+		t.Fatal("Close should empty the session trash")
+	}
+	if a.undoDeleteLabel() != "Undo delete" {
+		t.Fatalf("label after Close = %q, want the bare label", a.undoDeleteLabel())
 	}
 }
 
@@ -762,8 +655,8 @@ func TestDoDeletePath_DirtyTabPromptsInsteadOfDiscarding(t *testing.T) {
 	if a.tabs.Len() != 1 {
 		t.Fatalf("the tab must stay open until the user answers; got %d tabs", a.tabs.Len())
 	}
-	if len(a.trashed) != 0 {
-		t.Fatalf("nothing should have entered the trash yet; got %d entries", len(a.trashed))
+	if a.hasTrashedEntry() {
+		t.Fatal("nothing should have entered the trash yet")
 	}
 }
 
@@ -938,30 +831,6 @@ func TestMenuDelete_DirtyTabChainsToTheUnsavedPrompt(t *testing.T) {
 	}
 }
 
-// TestWithinRoot pins the containment contract: a descendant path is
-// inside, the root itself counts as inside (Rel returns "." — the
-// session-restore call site treats a session entry naming the project
-// root as legitimate, not an escape), a "../" climb is refused, and an
-// unrelated absolute path elsewhere on the filesystem is refused too.
-func TestWithinRoot(t *testing.T) {
-	root := t.TempDir()
-	cases := []struct {
-		name      string
-		candidate string
-		want      bool
-	}{
-		{"descendant", filepath.Join(root, "sub", "leaf.go"), true},
-		{"root itself", root, true},
-		{"parent escape", filepath.Join(root, "..", "evil.txt"), false},
-		{"unrelated absolute path", t.TempDir(), false},
-	}
-	for _, c := range cases {
-		if got := withinRoot(root, c.candidate); got != c.want {
-			t.Errorf("%s: withinRoot(%q, %q) = %v, want %v", c.name, root, c.candidate, got, c.want)
-		}
-	}
-}
-
 // TestDoCreateFile_RefusesEscapingName drives the deliberate UX
 // narrowing recorded on doCreateFile's doc comment: a name that climbs
 // out of parent via "../" is refused with a flash instead of quietly
@@ -981,5 +850,225 @@ func TestDoCreateFile_RefusesEscapingName(t *testing.T) {
 	}
 	if !strings.Contains(a.statusMsg, "escapes") {
 		t.Fatalf("expected a refusal flash mentioning the escape, got %q", a.statusMsg)
+	}
+}
+
+// treeChild returns the root-level tree node called name, failing the
+// test when the tree does not show it — the popup rows take a node,
+// so a popup test has to start from one.
+func treeChild(t *testing.T, a *App, name string) *filetree.Node {
+	t.Helper()
+	for _, c := range a.tree.Root.Children {
+		if c.Name == name {
+			return c
+		}
+	}
+	t.Fatalf("%s not in tree", name)
+	return nil
+}
+
+// TestCtxRename_FolderRepointsDescendantTabs pins the tree popup's
+// Rename row to the same contract the ≡ Rename folder row already
+// keeps: renaming a folder carries every open tab under it to the new
+// path. The popup used to route folders through the file-only rename,
+// which rewrote exact-path tabs and nothing beneath a directory — so a
+// buffer stayed attached to a path that no longer existed and its next
+// save quietly re-created the old folder.
+func TestCtxRename_FolderRepointsDescendantTabs(t *testing.T) {
+	root := t.TempDir()
+	leaf := mkFile(t, root, "pkg/leaf.go", "package pkg\n")
+	a := newTestApp(t, root)
+	a.openFile(leaf)
+	node := treeChild(t, a, "pkg")
+
+	ctxRename(a, node)
+	promptPrefab(t, a).Field.SetText("renamed")
+	submitPrompt(a)
+
+	want := filepath.Join(root, "renamed", "leaf.go")
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("renamed leaf missing on disk: %v", err)
+	}
+	if got := a.tabs.At(0).Path; got != want {
+		t.Fatalf("tab path after popup rename: got %q, want %q", got, want)
+	}
+}
+
+// TestMenuUndoDelete_ReopensTheTabsTheDeleteClosed pins the half of
+// Undo delete that the file alone cannot give back: the delete closed
+// the tabs living under the folder, so the restore reopens them where
+// the user left them — same file, same caret, same scroll. Bringing
+// the bytes back and leaving the editor empty made "undo" a half-undo.
+func TestMenuUndoDelete_ReopensTheTabsTheDeleteClosed(t *testing.T) {
+	root := t.TempDir()
+	leaf := mkFile(t, root, "pkg/leaf.go", "one\ntwo\nthree\nfour\n")
+	a := newTestApp(t, root)
+	a.openFile(leaf)
+	a.activeTabPtr().MoveCursorTo(editor.Position{Line: 2, Col: 1}, false)
+	a.activeTabPtr().ScrollY = 1
+
+	a.doDeletePath(filepath.Join(root, "pkg"))
+	if a.tabs.Len() != 0 {
+		t.Fatalf("setup: the delete should have closed the tab; got %d tabs", a.tabs.Len())
+	}
+
+	a.menuUndoDelete()
+
+	if a.tabs.Len() != 1 {
+		t.Fatalf("undo delete should reopen the tab the delete closed; got %d tabs", a.tabs.Len())
+	}
+	tab := a.activeTabPtr()
+	if tab.Path != leaf {
+		t.Fatalf("reopened tab path: got %q, want %q", tab.Path, leaf)
+	}
+	if tab.Cursor != (editor.Position{Line: 2, Col: 1}) {
+		t.Fatalf("reopened tab cursor: got %+v, want line 2 col 1", tab.Cursor)
+	}
+	if tab.ScrollY != 1 {
+		t.Fatalf("reopened tab scroll: got %d, want 1", tab.ScrollY)
+	}
+}
+
+// countingFinder gives a test app a real finder whose index builds run
+// inline and are counted, so "the finder was invalidated" is an integer
+// the test can read rather than a goroutine it has to drain.
+func countingFinder(t *testing.T, a *App) *int {
+	t.Helper()
+	n := 0
+	a.finder = finder.New(a.rootDir)
+	a.finder.PanicGuard = func(_ string, fn func()) { n++; fn() }
+	return &n
+}
+
+// TestApplyChangeset_EmptyStillRefreshesEverything pins the rule every
+// error path relies on: an empty Changeset is not a no-op. The tree,
+// the git tint, the finder index and the session are refreshed
+// regardless, because the op that produced it may have changed the
+// disk before failing.
+func TestApplyChangeset_EmptyStillRefreshesEverything(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	a := newTestApp(t, root)
+	rebuilds := countingFinder(t, a)
+	if _, ok := session.Load(a.rootDir); ok {
+		t.Fatal("setup: no session should exist yet")
+	}
+
+	a.applyChangeset(filemanager.Changeset{})
+
+	if !a.gitStatus.Busy() && !a.gitStatus.Queued() {
+		t.Fatal("an empty changeset must still request a git refresh")
+	}
+	if *rebuilds != 1 {
+		t.Fatalf("finder rebuilds = %d, want 1", *rebuilds)
+	}
+	if _, ok := session.Load(a.rootDir); !ok {
+		t.Fatal("an empty changeset must still save the session")
+	}
+}
+
+// TestApplyChangeset_MovedFolderRepointsPrefixAware pins the Move half:
+// one Move of a folder pair carries the exact-path tab, every tab
+// beneath it, and the active folder — and leaves a sibling that merely
+// shares the prefix (foo vs foobar) alone.
+func TestApplyChangeset_MovedFolderRepointsPrefixAware(t *testing.T) {
+	root := t.TempDir()
+	inside := mkFile(t, root, "foo/deep/a.go", "a")
+	lookalike := mkFile(t, root, "foobar/b.go", "b")
+	a := newTestApp(t, root)
+	a.openFile(inside)
+	a.openFile(lookalike)
+	a.setActiveFolder(filepath.Join(root, "foo", "deep"))
+	// Move on disk first: applyChangeset reacts to what the manager did.
+	if err := os.Rename(filepath.Join(root, "foo"), filepath.Join(root, "bar")); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+
+	a.applyChangeset(filemanager.Changeset{Moved: []filemanager.Move{
+		{Old: filepath.Join(root, "foo"), New: filepath.Join(root, "bar")},
+	}})
+
+	if got, want := a.tabs.At(0).Path, filepath.Join(root, "bar", "deep", "a.go"); got != want {
+		t.Fatalf("descendant tab: got %q, want %q", got, want)
+	}
+	if got := a.tabs.At(1).Path; got != lookalike {
+		t.Fatalf("prefix lookalike must not move: got %q", got)
+	}
+	if want := filepath.Join(root, "bar", "deep"); a.activeFolder != want {
+		t.Fatalf("activeFolder: got %q, want %q", a.activeFolder, want)
+	}
+}
+
+// TestApplyChangeset_RemovedThenAddedRoundTripsTabs pins the memory
+// between the two halves of a delete/undo: Removed closes every tab
+// under the path and remembers them against it; the matching Added
+// reopens exactly those, with their view, and forgets the record so
+// a second Added of the same path opens nothing.
+func TestApplyChangeset_RemovedThenAddedRoundTripsTabs(t *testing.T) {
+	root := t.TempDir()
+	first := mkFile(t, root, "pkg/a.txt", "one\ntwo\nthree\n")
+	second := mkFile(t, root, "pkg/b.txt", "x\n")
+	other := mkFile(t, root, "other.txt", "o\n")
+	a := newTestApp(t, root)
+	a.openFile(first)
+	a.activeTabPtr().MoveCursorTo(editor.Position{Line: 2, Col: 0}, false)
+	a.openFile(second)
+	a.openFile(other)
+	pkg := filepath.Join(root, "pkg")
+
+	a.applyChangeset(filemanager.Changeset{Removed: []string{pkg}})
+
+	if a.tabs.Len() != 1 || a.tabs.At(0).Path != other {
+		t.Fatalf("only the unrelated tab should survive; tabs = %d", a.tabs.Len())
+	}
+	if len(a.removedTabs[pkg]) != 2 {
+		t.Fatalf("both closed tabs should be remembered under %s, got %v", pkg, a.removedTabs)
+	}
+
+	a.applyChangeset(filemanager.Changeset{Added: []string{pkg}})
+
+	if a.tabs.Len() != 3 {
+		t.Fatalf("both remembered tabs should reopen; tabs = %d", a.tabs.Len())
+	}
+	reopened := a.tabs.Lookup(first)
+	if reopened == nil || reopened.Cursor != (editor.Position{Line: 2, Col: 0}) {
+		t.Fatalf("reopened tab should land on its old caret; got %+v", reopened)
+	}
+	if a.tabs.Lookup(second) == nil {
+		t.Fatal("the second remembered tab should reopen too")
+	}
+	if _, still := a.removedTabs[pkg]; still {
+		t.Fatal("a consumed record must be forgotten")
+	}
+	a.applyChangeset(filemanager.Changeset{Added: []string{pkg}})
+	if a.tabs.Len() != 3 {
+		t.Fatalf("a second Added of the same path must open nothing; tabs = %d", a.tabs.Len())
+	}
+}
+
+// TestDoRename_FailureRunsTheTail pins the "on error too" rule on a
+// synchronous site: a rename the manager refuses still flashes AND runs
+// applyChangeset, so the tint and the index are refreshed exactly as
+// after a success.
+func TestDoRename_FailureRunsTheTail(t *testing.T) {
+	root := t.TempDir()
+	src := mkFile(t, root, "src.txt", "s")
+	mkFile(t, root, "taken.txt", "t")
+	a := newTestApp(t, root)
+	rebuilds := countingFinder(t, a)
+
+	a.doRename(src, "taken.txt")
+
+	if !strings.Contains(a.statusMsg, "Rename failed") || !strings.Contains(a.statusMsg, "already exists") {
+		t.Fatalf("expected the clobber refusal flash, got %q", a.statusMsg)
+	}
+	if *rebuilds != 1 {
+		t.Fatalf("a failed rename must still invalidate the finder; rebuilds = %d", *rebuilds)
+	}
+	if !a.gitStatus.Busy() && !a.gitStatus.Queued() {
+		t.Fatal("a failed rename must still request a git refresh")
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Fatalf("refused rename must leave the source: %v", err)
 	}
 }

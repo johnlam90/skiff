@@ -174,9 +174,9 @@ func TestRestoreSession_KicksAsyncGitStatusRefresh(t *testing.T) {
 	}
 
 	a := newTestApp(t, root)
-	a.gitRefreshInFlight = false
+	pumpUntil(t, a, "quiescent git status", idle(&a.gitStatus))
 	a.restoreSession()
-	if !a.gitRefreshInFlight {
+	if !a.gitStatus.Busy() {
 		t.Fatal("restoring a session with tabs should kick the async git-status refresh")
 	}
 }
@@ -216,8 +216,8 @@ func TestSessionPreservesPreviewFlag(t *testing.T) {
 	}
 }
 
-// TestRestoreSession_SkipsEscapingPaths pins the withinRoot containment
-// guard: a hand-edited or corrupted session entry naming a path that
+// TestRestoreSession_SkipsEscapingPaths pins the containment guard
+// (the file manager's Contains): a hand-edited or corrupted session entry naming a path that
 // climbs out of the project root via "../" must not open a tab outside
 // the tree, even though the file it names genuinely exists. The real
 // file sits one level above root specifically so the stat succeeds —

@@ -47,12 +47,8 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		ov.HandleKey(ev)
 		return
 	}
-	if a.findOpen {
-		a.handleFindKey(ev)
-		return
-	}
-	if a.projFind.findOpen {
-		a.handleProjFindKey(ev)
+	if a.strip != nil {
+		a.strip.handleKey(ev)
 		return
 	}
 

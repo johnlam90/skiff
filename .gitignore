@@ -15,3 +15,7 @@
 
 # Local design-critique scratch (never ship).
 .impeccable/
+
+# Per-task worktrees and SDD scratch (never ship).
+.worktrees/
+.superpowers/

@@ -8,7 +8,7 @@
 // Tests for actions.go — one exercise per action-menu handler, driven the
 // way a click would drive it (menu open, action runs, menu closes). The
 // custom-action cases cover the async shell-out end to end: env expansion
-// in, customActionDoneEvent out, info modal on failure.
+// in, a customActionResult landing out, info modal on failure.
 
 package app
 
@@ -261,16 +261,7 @@ func TestRunCustomAction_NoFileStillRuns(t *testing.T) {
 	}}
 	a.runCustomAction(0)
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		ev := a.screen.PollEvent()
-		if ev == nil {
-			break
-		}
-		if _, ok := ev.(*customActionDoneEvent); ok {
-			break
-		}
-	}
+	pumpUntil(t, a, "custom action", idle(&a.customAction))
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("command did not run: %v", err)
 	}
@@ -290,9 +281,9 @@ func TestRunCustomAction_OutOfRange(t *testing.T) {
 
 // TestRunCustomAction_ExecutesAndPostsEvent runs a real `sh -c`
 // command against a small file and confirms that (a) the command
-// observed FILE / FILENAME via env, and (b) a customActionDoneEvent
-// lands on the screen's event queue. The chosen command writes a
-// marker file that lets the test verify env reached the subprocess.
+// observed FILE / FILENAME via env, and (b) its landing reaches the
+// loop as a success report. The chosen command writes a marker file
+// that lets the test verify env reached the subprocess.
 func TestRunCustomAction_ExecutesAndPostsEvent(t *testing.T) {
 	// Redirect the action log into the test's temp dir so we don't
 	// scribble into the developer's real ~/.local/state/skiff/.
@@ -312,28 +303,14 @@ func TestRunCustomAction_ExecutesAndPostsEvent(t *testing.T) {
 
 	a.runCustomAction(0)
 
-	// The action runs in a goroutine and posts an event back. Pull
-	// events off the screen's queue until we see the done event, with
-	// a sanity timeout so a regression can't hang the suite forever.
-	deadline := time.Now().Add(2 * time.Second)
-	var done *customActionDoneEvent
-	for time.Now().Before(deadline) && done == nil {
-		ev := a.screen.PollEvent()
-		if ev == nil {
-			break
-		}
-		if d, ok := ev.(*customActionDoneEvent); ok {
-			done = d
-		}
+	// The action runs on the customAction job and lands through the
+	// real handler: a fast, silent success is exactly one flash.
+	pumpUntil(t, a, "custom action", idle(&a.customAction))
+	if infoIsOpen(a) {
+		t.Fatalf("action errored: %v", infoPrefab(t, a).Lines)
 	}
-	if done == nil {
-		t.Fatal("no customActionDoneEvent received within timeout")
-	}
-	if done.err != nil {
-		t.Fatalf("action errored: %v", done.err)
-	}
-	if done.label != "Mark" {
-		t.Errorf("event label = %q", done.label)
+	if a.statusMsg != "Mark — done" {
+		t.Errorf("landing flash = %q, want the labelled confirmation", a.statusMsg)
 	}
 
 	// Verify the subprocess saw the env variables we exported.
@@ -407,16 +384,7 @@ func TestRunCustomAction_PromptedExportsValuesAndExpands(t *testing.T) {
 		t.Fatal("Enter on last field should submit")
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		ev := a.screen.PollEvent()
-		if ev == nil {
-			break
-		}
-		if _, ok := ev.(*customActionDoneEvent); ok {
-			break
-		}
-	}
+	pumpUntil(t, a, "custom action", idle(&a.customAction))
 
 	got, err := os.ReadFile(marker)
 	if err != nil {
@@ -444,11 +412,10 @@ func TestRunCustomAction_PromptedExportsValuesAndExpands(t *testing.T) {
 // stderr lines stay visible until dismissed.
 func TestHandleCustomActionDone_FailureOpensInfoModal(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	a.handleCustomActionDone(&customActionDoneEvent{
+	a.handleCustomActionDone(customActionResult{
 		label:  "Copy from remote",
-		err:    fmt.Errorf("exit status 1"),
 		output: []byte("scp: /etc/missing: No such file or directory\n"),
-	})
+	}, fmt.Errorf("exit status 1"))
 	n := infoPrefab(t, a)
 	joined := strings.Join(n.Lines, "\n")
 	if !strings.Contains(joined, "scp:") || !strings.Contains(joined, "missing") {
@@ -466,7 +433,7 @@ func TestHandleCustomActionDone_FailureOpensInfoModal(t *testing.T) {
 // runs Copy-from-remote, sees "done", and then has to pause before
 // the new file becomes clickable in the sidebar. "Immediate" now means
 // "this tick, not the next one": the ReadDir walk happens on a
-// goroutine and lands on the posted treeScanEvent, so the test pumps
+// goroutine and lands through the treeScan job, so the test pumps
 // that event the way the real loop does.
 func TestHandleCustomActionDone_SuccessRefreshesTree(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -480,8 +447,8 @@ func TestHandleCustomActionDone_SuccessRefreshesTree(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	beforeChildren := len(a.tree.Root.Children)
-	a.handleCustomActionDone(&customActionDoneEvent{label: "X"})
-	pumpTreeScan(t, a)
+	a.handleCustomActionDone(customActionResult{label: "X"}, nil)
+	pumpUntil(t, a, "tree scan", idle(&a.treeScan))
 	if got := len(a.tree.Root.Children); got <= beforeChildren {
 		t.Errorf("tree was not refreshed: %d → %d children", beforeChildren, got)
 	}
@@ -494,10 +461,10 @@ func TestHandleCustomActionDone_SuccessRefreshesTree(t *testing.T) {
 // something now reports through the same surface as a failure.
 func TestHandleCustomActionDone_SuccessWithOutputOpensInfo(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	a.handleCustomActionDone(&customActionDoneEvent{
+	a.handleCustomActionDone(customActionResult{
 		label:  "Copy from remote",
 		output: []byte("sent 4 files, 1.2 MB\n"),
-	})
+	}, nil)
 	n := infoPrefab(t, a)
 	if !strings.Contains(strings.Join(n.Lines, "\n"), "sent 4 files") {
 		t.Errorf("info body missing stdout: %q", n.Lines)
@@ -513,10 +480,10 @@ func TestHandleCustomActionDone_SuccessWithOutputOpensInfo(t *testing.T) {
 // is the same as no confirmation at all.
 func TestHandleCustomActionDone_SlowSilentSuccessOpensInfo(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	a.handleCustomActionDone(&customActionDoneEvent{
+	a.handleCustomActionDone(customActionResult{
 		label:    "Deploy",
 		duration: 9 * time.Second,
-	})
+	}, nil)
 	n := infoPrefab(t, a)
 	if !strings.Contains(strings.Join(n.Lines, "\n"), "9s") {
 		t.Errorf("slow-run report should state the duration: %q", n.Lines)
@@ -528,10 +495,10 @@ func TestHandleCustomActionDone_SlowSilentSuccessOpensInfo(t *testing.T) {
 // a modal — the flash is proportionate and the overlay would be noise.
 func TestHandleCustomActionDone_FastSilentSuccessOnlyFlashes(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	a.handleCustomActionDone(&customActionDoneEvent{
+	a.handleCustomActionDone(customActionResult{
 		label:    "Format",
 		duration: 50 * time.Millisecond,
-	})
+	}, nil)
 	if a.overlays.IsOpen() {
 		t.Fatalf("fast silent action should not open an overlay; top = %T", a.overlays.Top())
 	}

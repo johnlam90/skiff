@@ -25,3 +25,12 @@ The find bar's absence from mouse routing is intentional pass-through,
 not a missing branch — an earlier architecture review misread it as a
 bug. Do not "fix" it by routing mouse events to the find bar, and do not
 re-propose putting strips on the stack.
+
+This decision now has a shape in code: the `strip` interface and App's
+one strip slot (`internal/app/strip.go`). What a strip is — the rows it
+reserves, that it owns the keyboard, whether it consumes the mouse or
+passes it through, how it is torn down — is that interface, and the
+pass-through is `findStrip.handleMouse` answering false rather than an
+absence anyone has to recognise. The interface is app-side on purpose:
+reflowing the editor is layout's job, which is exactly the concern this
+ADR refused to hand the overlay package.

@@ -18,10 +18,10 @@ package app
 
 import (
 	"path/filepath"
-	"time"
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/asyncjob"
 	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/overlay"
 )
@@ -38,28 +38,67 @@ const (
 	// finderSearchLimit is how deep we look — we ask for one full
 	// "page" extra so users can scroll past the initial chunk.
 	finderSearchLimit = 50
+	// finderChromeRows is the non-list height of the modal: the two
+	// borders, the title, the divider and the query input. Subtracting
+	// it from the frame is what turns a terminal height into a window
+	// height, and it lives next to finderResultsVisible so the cap and
+	// the derivation cannot drift.
+	finderChromeRows = 5
 )
 
-// finderRebuiltEvent is posted by the background indexer goroutine
-// when it finishes a rebuild. The main loop reacts by re-running
-// the current query so the visible results refresh — the user
-// gets to see "Indexing…" replaced with real matches without
-// having to type or wait for the next keystroke.
-type finderRebuiltEvent struct {
-	when time.Time
+// finderRebuiltNotice is what the background indexer runs when it
+// finishes a rebuild: it posts a Notify whose on-loop half is
+// onFinderRebuilt. The indexer is not an asyncjob.Job — internal/finder
+// owns its goroutine and its own coalescing (Rebuild during a build is
+// a no-op) and has no result to land — so the wake-up rides the same
+// event type as every job's landing, with no case of its own in
+// handleEvent. Built on the loop; the returned closure is all the
+// goroutine ever touches.
+func (a *App) finderRebuiltNotice() func() {
+	scr := a.screen
+	return func() { _ = scr.PostEvent(asyncjob.Notify(a.onFinderRebuilt)) }
 }
 
-// When satisfies the tcell.Event interface.
-func (e *finderRebuiltEvent) When() time.Time { return e.when }
+// onFinderRebuilt re-runs the open finder's query so a finished index
+// build replaces "Indexing…" with real matches without the user having
+// to type or wait for the next keystroke. Runs on the loop.
+func (a *App) onFinderRebuilt() {
+	if fo, ok := a.overlays.Top().(*finderOverlay); ok {
+		fo.refreshResults()
+	}
+}
 
 // finderOverlay is the file finder's overlay: the query field, the
-// current result window, and the highlight. It dies with the overlay —
+// current results, and the window over them. It dies with the overlay —
 // only the index cache (a.finder) outlives a session.
+//
+// The window is an overlay.List, which is what makes every one of the
+// finderSearchLimit matches reachable. It used to have no scroll state
+// at all: fifty results were fetched, ten were painted, and the other
+// forty could be selected with ↓ and never once appear on screen.
 type finderOverlay struct {
-	app      *App
-	query    overlay.Field
-	results  []finder.Result
-	selected int
+	overlay.List
+	app     *App
+	query   overlay.Field
+	results []finder.Result
+}
+
+// sync pushes the live result count and the window the frame can paint
+// into the embedded List. Both move underneath the overlay — the count
+// on every keystroke, the window on every resize — so every entry point
+// calls this before reading the List, and hands the frame on.
+func (fo *finderOverlay) sync() overlay.Rect {
+	r := fo.rect()
+	rows := r.H - finderChromeRows
+	if rows > finderResultsVisible {
+		rows = finderResultsVisible
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	fo.SetLen(len(fo.results))
+	fo.SetVisible(rows)
+	return r
 }
 
 // openFinder shows the project-wide file finder. Triggers a
@@ -79,14 +118,11 @@ func (a *App) openFinder() {
 	}
 	a.closeAllModals()
 	fo := &finderOverlay{app: a}
-	scr := a.screen
 	if a.finder != nil {
 		// Rebuild only when the cache is genuinely stale. A re-open
 		// during a still-warm session shouldn't pay for a refresh.
 		if a.finder.State() != finder.StateReady {
-			a.finder.Rebuild(func() {
-				_ = scr.PostEvent(&finderRebuiltEvent{when: time.Now()})
-			})
+			a.finder.Rebuild(a.finderRebuiltNotice())
 		}
 	}
 	fo.refreshResults()
@@ -115,15 +151,14 @@ func (a *App) hasFinder() bool {
 func (fo *finderOverlay) refreshResults() {
 	if fo.app.finder == nil {
 		fo.results = nil
+		fo.SetLen(0)
+		fo.Clamp()
 		return
 	}
 	fo.results = fo.app.finder.Search(fo.query.Text(), finderSearchLimit)
-	if fo.selected >= len(fo.results) {
-		fo.selected = len(fo.results) - 1
-	}
-	if fo.selected < 0 {
-		fo.selected = 0
-	}
+	fo.sync()
+	fo.Clamp()
+	fo.EnsureVisible()
 }
 
 // invalidateFinder marks the index stale and kicks off a rebuild.
@@ -139,18 +174,17 @@ func (a *App) invalidateFinder() {
 		return
 	}
 	a.finder.Invalidate()
-	scr := a.screen
-	a.finder.Rebuild(func() {
-		_ = scr.PostEvent(&finderRebuiltEvent{when: time.Now()})
-	})
+	a.finder.Rebuild(a.finderRebuiltNotice())
 }
 
 // HandleKey routes keyboard input while the finder is open: Esc
 // dismisses, Enter opens the highlighted result, ↑/↓ move the
-// highlight, and everything else edits the query field — an edit that
-// changes the query re-runs the search with the highlight reset.
+// highlight — dragging the window with them once they walk past its
+// edge — and everything else edits the query field, an edit that
+// re-runs the search with the highlight reset.
 func (fo *finderOverlay) HandleKey(ev *tcell.EventKey) {
 	a := fo.app
+	fo.sync()
 	switch ev.Key() {
 	case tcell.KeyEsc:
 		a.closeAllModals()
@@ -159,36 +193,46 @@ func (fo *finderOverlay) HandleKey(ev *tcell.EventKey) {
 		fo.openSelected()
 		return
 	case tcell.KeyUp:
-		if fo.selected > 0 {
-			fo.selected--
-		}
+		fo.Move(-1)
+		fo.EnsureVisible()
 		return
 	case tcell.KeyDown:
-		if fo.selected < len(fo.results)-1 {
-			fo.selected++
-		}
+		fo.Move(1)
+		fo.EnsureVisible()
 		return
 	}
 	before := len(fo.query.Value)
 	fo.query.HandleKey(ev)
 	if len(fo.query.Value) != before {
-		fo.selected = 0
+		fo.Select(0)
 		fo.refreshResults()
 	}
 }
 
-// HandleMouse handles mouse input while the overlay is open. Hover
-// highlights the row under the cursor; click opens it. Click outside
-// the modal dismisses.
+// HandleMouse handles mouse input while the overlay is open. The wheel
+// scrolls the result window, hover highlights the row under the cursor,
+// click opens it, and a click outside the modal dismisses.
 func (fo *finderOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
-	r := fo.rect()
-	rowsStart := r.Y + 4
-	row := y - rowsStart
-	if row >= 0 && row < len(fo.results) && x >= r.X && x < r.X+r.W {
+	r := fo.sync()
+	if btn&tcell.WheelUp != 0 {
+		fo.ScrollBy(-3)
+		return
+	}
+	if btn&tcell.WheelDown != 0 {
+		fo.ScrollBy(3)
+		return
+	}
+	idx := -1
+	if x >= r.X && x < r.X+r.W {
+		if i, ok := fo.RowAt(r.Y+4, y); ok {
+			idx = i
+		}
+	}
+	if idx >= 0 {
 		// Hover highlight always tracks the mouse — same behaviour
 		// the action menu uses, so users can scrub through results
 		// without clicking.
-		fo.selected = row
+		fo.Select(idx)
 	}
 	if btn&tcell.Button1 == 0 {
 		return
@@ -197,8 +241,7 @@ func (fo *finderOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
 		fo.app.closeAllModals()
 		return
 	}
-	if row >= 0 && row < len(fo.results) {
-		fo.selected = row
+	if idx >= 0 {
 		fo.openSelected()
 	}
 }
@@ -208,14 +251,22 @@ func (fo *finderOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
 // file. Silent no-op when the result list is empty (e.g. the user
 // mashed Enter on a no-match query).
 func (fo *finderOverlay) openSelected() {
-	if fo.selected < 0 || fo.selected >= len(fo.results) {
+	if fo.Sel() < 0 || fo.Sel() >= len(fo.results) {
 		return
 	}
 	a := fo.app
-	rel := fo.results[fo.selected].Path
+	rel := fo.results[fo.Sel()].Path
 	a.closeAllModals()
 	a.openFile(filepath.Join(a.rootDir, rel))
 }
+
+// WantsMotion is true: the finder highlights the result row under the
+// pointer so a mouse user can scrub the list without clicking.
+func (fo *finderOverlay) WantsMotion() bool { return true }
+
+// Dismiss is a no-op — a finder torn down by the stack opens nothing,
+// and it holds no state the rest of the app can see.
+func (fo *finderOverlay) Dismiss() {}
 
 // rect returns the finder's on-screen rectangle. Sized to fit a healthy
 // result list while leaving margins on small terminals; anchored in the
@@ -254,7 +305,7 @@ func (fo *finderOverlay) rect() overlay.Rect {
 // 4..N result rows · N+1 border.
 func (fo *finderOverlay) Draw(scr tcell.Screen) {
 	a := fo.app
-	r := fo.rect()
+	r := fo.sync()
 	th := a.theme
 	overlay.DrawFrame(scr, r, "Find file", th)
 
@@ -288,29 +339,20 @@ func (fo *finderOverlay) Draw(scr tcell.Screen) {
 	}
 	drawAt(scr, r.X+r.W-1-runeLen(tail), r.Y+3, tail, mutedStyle)
 
-	// Result rows. We paint the visible window (no scrolling support
-	// in v1 — we just cap at finderResultsVisible). When the query
-	// has more matches than fit, the user can refine.
+	// Result rows: the List's window, not the head of the list. Rows
+	// past the end are blanked so a previous query's tail doesn't
+	// linger when the results shrink.
 	rowsStart := r.Y + 4
-	rowsCap := r.H - 5 // borders + title + divider + input
-	if rowsCap > finderResultsVisible {
-		rowsCap = finderResultsVisible
-	}
-	visible := fo.results
-	if len(visible) > rowsCap {
-		visible = visible[:rowsCap]
-	}
-	for i := 0; i < rowsCap; i++ {
+	for i := range fo.Visible() {
 		ry := rowsStart + i
-		if i >= len(visible) {
-			// Clear unused rows so a previous query's tail doesn't
-			// linger when results shrink.
+		idx := fo.Scroll() + i
+		if idx >= len(fo.results) {
 			for cx := r.X + 1; cx < r.X+r.W-1; cx++ {
 				scr.SetContent(cx, ry, ' ', nil, bgStyle)
 			}
 			continue
 		}
-		fo.drawRow(scr, r, ry, visible[i], i == fo.selected, hitStyle, mutedStyle, bg)
+		fo.drawRow(scr, r, ry, fo.results[idx], idx == fo.Sel(), hitStyle, mutedStyle, bg)
 	}
 }
 

@@ -41,7 +41,7 @@ func pickIsOpen(a *App) bool {
 // Enter through real routing.
 func pickChoose(t *testing.T, a *App, idx int) {
 	t.Helper()
-	pickPrefab(t, a).Selected = idx
+	pickPrefab(t, a).Select(idx)
 	a.handleKey(keyEv(tcell.KeyEnter, 0))
 }
 
@@ -56,8 +56,8 @@ func TestOpenListPick_WiresHooksAndSnapsToCurrent(t *testing.T) {
 		{Label: "one"}, {Label: "two", Current: true},
 	}, func(_ *App, i int) { picked = i }, nil, nil)
 	p := pickPrefab(t, a)
-	if p.Selected != 1 {
-		t.Fatalf("highlight should snap to Current, got %d", p.Selected)
+	if p.Sel() != 1 {
+		t.Fatalf("highlight should snap to Current, got %d", p.Sel())
 	}
 	a.handleKey(keyEv(tcell.KeyEnter, 0))
 	if picked != 1 {

@@ -8,50 +8,39 @@
 // projfind.go owns the project-wide content search UI: a find-bar-style
 // input row above the status bar plus a results overlay in the editor
 // area, grouped by file with per-file folding (druk's search panel,
-// skiff-shaped). The sweep itself lives in internal/search and runs in
-// a goroutine; results come back through a projFindDoneEvent carrying a
-// generation number so stale sweeps are dropped, never rendered.
+// skiff-shaped). The sweep itself lives in internal/search and runs on
+// the panel's sweep job (internal/asyncjob, Supersede): every keystroke
+// starts a run that debounces, then searches; the newer keystroke
+// retires the older run, so stale sweeps are dropped, never rendered.
 
 package app
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/asyncjob"
+	"github.com/johnlam90/skiff/internal/overlay"
 	"github.com/johnlam90/skiff/internal/search"
 )
-
-// projFindKickEvent fires after the debounce interval: the sweep for
-// gen starts only if no newer keystroke has arrived meanwhile.
-type projFindKickEvent struct {
-	when time.Time
-	gen  int
-}
-
-// When implements tcell.Event.
-func (e *projFindKickEvent) When() time.Time { return e.when }
 
 // projFindDebounce is how long typing must pause before a sweep
 // starts. Long enough to coalesce a burst of keystrokes, short enough
 // to feel instant.
 const projFindDebounce = 120 * time.Millisecond
 
-// projFindDoneEvent carries a finished background sweep onto the main
-// event loop. gen pins it to the query generation that started it.
-type projFindDoneEvent struct {
-	when      time.Time
-	gen       int
+// projFindResult is what a finished sweep lands: the matches and
+// whether the engine's cap cut them short.
+type projFindResult struct {
 	matches   []search.Match
 	truncated bool
 }
-
-// When implements tcell.Event.
-func (e *projFindDoneEvent) When() time.Time { return e.when }
 
 // projFindRow is one rendered row of the results overlay: a file header
 // (fold toggle) or a single match line.
@@ -65,22 +54,20 @@ type projFindRow struct {
 // projFindState bundles the project-wide content-search panel and the
 // replace state riding it, moved out of App so the subsystem's fields
 // have a compiler-visible boundary. Held on App as the named field
-// projFind (named, not embedded: embedding would promote findOpen onto
-// App and collide with the in-file find bar's field of the same name).
+// projFind. Whether the panel is *open* is not in here: that is the
+// strip slot's answer (projFindOpen), so the panel and the find bar
+// cannot both believe they own the bottom row.
 type projFindState struct {
-	// Project-wide content search (see projfind.go).
-	findOpen      bool
-	findValue     []rune
-	findCursor    int
-	findScroll    int
-	findGen       int // generation counter; stale sweeps are dropped
-	findBusy      bool
+	// Project-wide content search (see projfind.go). query is the same
+	// overlay.Field the prompt, form and finder use — it owns the text,
+	// the caret and the field's horizontal window; the panel owns only
+	// which field has the keyboard.
+	query         overlay.Field
 	findMatches   []search.Match
 	findTruncated bool
 	findSelected  int
 	findScrollY   int
 	findFolded    map[string]bool
-	findLiveGen   atomic.Int64 // latest gen, readable from sweep goroutines
 	findMatchCase bool
 	findWholeWord bool
 	findRegex     bool
@@ -88,11 +75,61 @@ type projFindState struct {
 	// Project-wide replace riding the panel (see projreplace.go). The
 	// X ranges are stamped by drawProjFindBar for the mouse handler.
 	replaceOpen                    bool
-	replaceValue                   []rune
-	replaceCursor                  int
+	replace                        overlay.Field
 	focusReplace                   bool
 	replaceFieldX0, replaceFieldX1 int
 	replaceAllX0, replaceAllX1     int
+
+	// sweep is the background search: Supersede, so the newest
+	// keystroke's run is the only one that can land, and Busy is the
+	// bar's "searching…" state. Closing the panel invalidates it.
+	sweep asyncjob.Job[projFindResult]
+}
+
+// projFindStrip is the project-find panel's face on the strip slot
+// (strip.go). It is an adapter over App methods, not a state bundle:
+// unlike the find bar, whose whole state is the two fields it draws,
+// this panel's state is read from outside the strip — a background
+// sweep is started from the query and lands its results against the
+// generation counter — so it keeps the compiler-visible boundary it
+// already has in projFindState and the strip stays the routing face
+// over it. Same shape, and the same reason, as menuOverlay.
+type projFindStrip struct{ a *App }
+
+// rows is findBarHeight: only the query bar is docked. The results are
+// painted over the editor rect on purpose — a panel that reserved rows
+// for them would reflow the editor away to nothing on a long hit list.
+func (p projFindStrip) rows() int { return findBarHeight }
+
+// handleKey hands the keystroke to the panel, which owns the keyboard
+// while it is up.
+func (p projFindStrip) handleKey(ev *tcell.EventKey) { p.a.handleProjFindKey(ev) }
+
+// handleMouse consumes every event: unlike the find bar's deliberate
+// pass-through, this strip has real mouse targets — mode chips on the
+// bar, fold arrows and match rows in the results over the editor — and
+// a click anywhere else dismisses it. The editor underneath is covered
+// by the results, so there is nothing there to click through to.
+func (p projFindStrip) handleMouse(x, y int, btn tcell.ButtonMask) bool {
+	p.a.handleProjFindMouse(x, y, btn)
+	return true
+}
+
+// draw paints the results over the editor and the query bar into the
+// rect layout reserved for it.
+func (p projFindStrip) draw(r rect) { p.a.drawProjFind(r) }
+
+// close forgets the query and the results and retires any in-flight
+// sweep — the panel's teardown, run by dropStrip whichever route
+// emptied the slot.
+func (p projFindStrip) close() { p.a.projFindTeardown() }
+
+// projFindOpen reports whether the project-find panel owns the strip
+// slot. The slot is the open flag; there is no second boolean to drift
+// out of step with it.
+func (a *App) projFindOpen() bool {
+	_, ok := a.strip.(projFindStrip)
+	return ok
 }
 
 // menuFindInProject is the ≡ menu / Esc-F entry point.
@@ -109,93 +146,105 @@ func (a *App) openProjFind() {
 		return
 	}
 	a.closeAllModals()
-	a.projFind.findOpen = true
-	a.projFind.findValue = nil
-	a.projFind.findCursor = 0
-	a.projFind.findScroll = 0
+	a.strip = projFindStrip{a: a}
+	a.projFind.query = overlay.Field{}
 	a.projFind.findMatches = nil
 	a.projFind.findTruncated = false
-	a.projFind.findBusy = false
 	a.projFind.findSelected = 0
 	a.projFind.findScrollY = 0
 	a.projFind.findFolded = map[string]bool{}
 	a.resetProjReplace()
 }
 
-// closeProjFind dismisses the panel and forgets the query — same
-// "Esc means done" contract as the in-file find bar.
+// closeProjFind dismisses the panel — same "Esc means done" contract as
+// the in-file find bar. Dropping the slot is the whole gesture; the
+// state reset rides projFindTeardown, so every route out of the panel
+// (Esc, a click outside, an overlay opening over it) goes through one
+// teardown instead of a hand-picked subset. It drops the slot only when
+// the panel owns it, so a stray call can't dismiss the find bar.
 func (a *App) closeProjFind() {
-	a.projFind.findOpen = false
-	a.projFind.findValue = nil
-	a.projFind.findCursor = 0
-	a.projFind.findScroll = 0
-	a.projFind.findMatches = nil
-	a.projFind.findTruncated = false
-	a.projFind.findBusy = false
-	a.projFind.findFolded = nil
-	a.resetProjReplace()
-	// Invalidate any in-flight sweep.
-	a.projFind.findGen++
+	if a.projFindOpen() {
+		a.dropStrip()
+	}
 }
 
-// projFindQueryChanged kicks a background sweep for the current input.
-// Every call bumps the generation; the done-handler drops results from
-// older generations, so fast typing never renders stale hits.
+// projFindTeardown forgets the query and the results and invalidates
+// any in-flight sweep. Called by the strip's close hook, never
+// directly — the slot has to be empty first or a sweep landing during
+// the reset could paint into a panel that is on its way out.
+func (a *App) projFindTeardown() {
+	a.projFind.query = overlay.Field{}
+	a.projFind.findMatches = nil
+	a.projFind.findTruncated = false
+	a.projFind.findFolded = nil
+	a.resetProjReplace()
+	// Retire any in-flight sweep: its landing is dropped and its walk
+	// told to stop.
+	a.projFind.sweep.Invalidate()
+}
+
+// projFindQueryChanged starts a background sweep for the current input.
+// The sweep job is Supersede, so every keystroke retires the run before
+// it — the older run's walk stops at its next cancellation check and
+// its landing is dropped — and fast typing never renders stale hits.
+//
+// The run debounces before it reads anything: the sweep proper starts
+// only after the typing pauses, so a burst of keystrokes costs a burst
+// of goroutines that exit at the debounce, not a full disk walk each.
+// The file index is read after the debounce too, on the worker — the
+// finder is safe from any goroutine, and copying a 50k-entry list per
+// keystroke would be the wrong side of that trade.
 func (a *App) projFindQueryChanged() {
-	a.projFind.findGen++
-	gen := a.projFind.findGen
-	query := string(a.projFind.findValue)
+	query := a.projFind.query.Text()
 	if strings.TrimSpace(query) == "" {
+		a.projFind.sweep.Invalidate()
 		a.projFind.findMatches = nil
 		a.projFind.findTruncated = false
-		a.projFind.findBusy = false
 		a.projFind.findSelected = 0
 		a.projFind.findScrollY = 0
 		return
 	}
-	a.projFind.findBusy = true
-	a.projFind.findLiveGen.Store(int64(gen))
-	// Debounce: the sweep starts only after the typing pauses — every
-	// keystroke on a big repo used to launch (and then discard) a full
-	// disk walk.
-	scr := a.screen
-	time.AfterFunc(projFindDebounce, func() {
-		_ = scr.PostEvent(&projFindKickEvent{when: time.Now(), gen: gen})
-	})
-}
-
-// handleProjFindKick starts the debounced sweep, unless a newer
-// keystroke superseded it. The sweep itself also polls the live
-// generation so an in-flight walk abandons as soon as it is stale.
-func (a *App) handleProjFindKick(e *projFindKickEvent) {
-	if !a.projFind.findOpen || e.gen != a.projFind.findGen {
-		return
-	}
-	gen := e.gen
-	query := string(a.projFind.findValue)
-	files := a.finder.Files()
+	index := a.finder
 	root := a.rootDir
-	scr := a.screen
-	live := &a.projFind.findLiveGen
 	matchCase, wholeWord, regex := a.projFind.findMatchCase, a.projFind.findWholeWord, a.projFind.findRegex
-	a.safeGo("project-find", func() {
+	a.projFind.sweep.Start(func(ctx context.Context) (projFindResult, error) {
+		if !projFindDebounceWait(ctx) {
+			return projFindResult{}, ctx.Err()
+		}
 		opts := search.DefaultOptions()
-		opts.Cancelled = func() bool { return live.Load() != int64(gen) }
+		opts.Cancelled = func() bool { return ctx.Err() != nil }
 		opts.MatchCase, opts.WholeWord, opts.Regex = matchCase, wholeWord, regex
-		matches, truncated := search.Search(root, files, query, opts)
-		_ = scr.PostEvent(&projFindDoneEvent{when: time.Now(), gen: gen, matches: matches, truncated: truncated})
+		matches, truncated := search.Search(root, index.Files(), query, opts)
+		return projFindResult{matches: matches, truncated: truncated}, ctx.Err()
 	})
 }
 
-// handleProjFindDone lands a finished sweep: stale generations are
-// dropped, current ones replace the result set and reset the cursor.
-func (a *App) handleProjFindDone(e *projFindDoneEvent) {
-	if !a.projFind.findOpen || e.gen != a.projFind.findGen {
+// projFindDebounceWait holds the run for the debounce interval and
+// reports whether it survived it — false when a newer keystroke (or the
+// panel closing) retired the run first, which is the common case while
+// the user is still typing.
+func projFindDebounceWait(ctx context.Context) bool {
+	timer := time.NewTimer(projFindDebounce)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// handleProjFindDone lands a finished sweep: a run that was cancelled
+// mid-walk carries a partial answer and is dropped, as is one landing
+// after the panel closed; a current one replaces the result set and
+// resets the cursor. Superseded runs never reach here — the job drops
+// them.
+func (a *App) handleProjFindDone(r projFindResult, err error) {
+	if err != nil || !a.projFindOpen() {
 		return
 	}
-	a.projFind.findMatches = e.matches
-	a.projFind.findTruncated = e.truncated
-	a.projFind.findBusy = false
+	a.projFind.findMatches = r.matches
+	a.projFind.findTruncated = r.truncated
 	a.projFind.findSelected = 0
 	a.projFind.findScrollY = 0
 }
@@ -299,109 +348,57 @@ func (a *App) projFindClampView(rows []projFindRow) {
 	}
 }
 
-// handleProjFindKey owns the keyboard while the panel is open: Esc
-// closes, Enter activates, Tab folds the selected row's file, arrows
-// move the selection, everything text-ish edits the query.
+// handleProjFindKey owns the keyboard while the panel is open, but only
+// for the keys that route rather than type: Esc closes, Enter activates
+// (or replaces), Tab grows/hops the replace field, and the arrows walk
+// the result rows. Everything else is text editing and goes to the
+// focused overlay.Field — the same split prompt.go and form.go use.
 func (a *App) handleProjFindKey(ev *tcell.EventKey) {
 	switch ev.Key() {
 	case tcell.KeyEsc:
 		a.closeProjFind()
+		return
 	case tcell.KeyEnter:
 		if a.projFind.focusReplace {
 			a.projReplaceEnter(ev.Modifiers()&tcell.ModShift != 0)
 			return
 		}
 		a.projFindActivate()
+		return
 	case tcell.KeyTab:
 		// Tab grows/hops the replace field (folding lives on Enter-on-
 		// header and header clicks).
 		a.projReplaceToggleFocus()
+		return
 	case tcell.KeyUp:
 		a.projFindMove(-1)
+		return
 	case tcell.KeyDown:
 		a.projFindMove(1)
+		return
 	case tcell.KeyPgUp:
 		_, _, _, eh := a.editorRect()
 		a.projFindMove(-eh)
+		return
 	case tcell.KeyPgDn:
 		_, _, _, eh := a.editorRect()
 		a.projFindMove(eh)
-	case tcell.KeyLeft:
-		if a.projFind.focusReplace {
-			if a.projFind.replaceCursor > 0 {
-				a.projFind.replaceCursor--
-			}
-			return
-		}
-		if a.projFind.findCursor > 0 {
-			a.projFind.findCursor--
-		}
-	case tcell.KeyRight:
-		if a.projFind.focusReplace {
-			if a.projFind.replaceCursor < len(a.projFind.replaceValue) {
-				a.projFind.replaceCursor++
-			}
-			return
-		}
-		if a.projFind.findCursor < len(a.projFind.findValue) {
-			a.projFind.findCursor++
-		}
-	case tcell.KeyHome:
-		if a.projFind.focusReplace {
-			a.projFind.replaceCursor = 0
-			return
-		}
-		a.projFind.findCursor = 0
-	case tcell.KeyEnd:
-		if a.projFind.focusReplace {
-			a.projFind.replaceCursor = len(a.projFind.replaceValue)
-			return
-		}
-		a.projFind.findCursor = len(a.projFind.findValue)
-	case tcell.KeyBackspace, tcell.KeyBackspace2:
-		if a.projFind.focusReplace {
-			if a.projFind.replaceCursor > 0 {
-				a.projFind.replaceValue = append(a.projFind.replaceValue[:a.projFind.replaceCursor-1], a.projFind.replaceValue[a.projFind.replaceCursor:]...)
-				a.projFind.replaceCursor--
-			}
-			return
-		}
-		if a.projFind.findCursor > 0 {
-			a.projFind.findValue = append(a.projFind.findValue[:a.projFind.findCursor-1], a.projFind.findValue[a.projFind.findCursor:]...)
-			a.projFind.findCursor--
-			a.projFindQueryChanged()
-		}
-	case tcell.KeyDelete:
-		if a.projFind.focusReplace {
-			if a.projFind.replaceCursor < len(a.projFind.replaceValue) {
-				a.projFind.replaceValue = append(a.projFind.replaceValue[:a.projFind.replaceCursor], a.projFind.replaceValue[a.projFind.replaceCursor+1:]...)
-			}
-			return
-		}
-		if a.projFind.findCursor < len(a.projFind.findValue) {
-			a.projFind.findValue = append(a.projFind.findValue[:a.projFind.findCursor], a.projFind.findValue[a.projFind.findCursor+1:]...)
-			a.projFindQueryChanged()
-		}
-	case tcell.KeyRune:
-		r := ev.Rune()
-		if r < 0x20 {
-			return
-		}
-		if a.projFind.focusReplace {
-			next := make([]rune, 0, len(a.projFind.replaceValue)+1)
-			next = append(next, a.projFind.replaceValue[:a.projFind.replaceCursor]...)
-			next = append(next, r)
-			next = append(next, a.projFind.replaceValue[a.projFind.replaceCursor:]...)
-			a.projFind.replaceValue = next
-			a.projFind.replaceCursor++
-			return
-		}
-		next := make([]rune, 0, len(a.projFind.findValue)+1)
-		next = append(next, a.projFind.findValue[:a.projFind.findCursor]...)
-		next = append(next, r)
-		next = append(next, a.projFind.findValue[a.projFind.findCursor:]...)
-		a.projFind.findValue = next
-		a.projFind.findCursor++
+		return
+	}
+	a.projFindEditKey(ev)
+}
+
+// projFindEditKey hands a non-routing key to the focused field and
+// re-runs the sweep when the query's text actually changed — a caret
+// move must not spend a generation (and a disk walk) on the same query.
+func (a *App) projFindEditKey(ev *tcell.EventKey) {
+	if a.projFind.focusReplace {
+		a.projFind.replace.HandleKey(ev)
+		return
+	}
+	before := len(a.projFind.query.Value)
+	a.projFind.query.HandleKey(ev)
+	if len(a.projFind.query.Value) != before {
 		a.projFindQueryChanged()
 	}
 }
@@ -425,12 +422,14 @@ func (a *App) handleProjFindMouse(x, y int, btn tcell.ButtonMask) {
 		return
 	}
 	// Bar row: chip clicks toggle a mode and re-run the query; other
-	// spots keep focus and do nothing.
-	if y == a.height-2 && x >= ex {
+	// spots keep focus and do nothing. The row comes from stripRect —
+	// the same formula the bar was painted with — so the hit-test can
+	// never drift off the cells the user is looking at.
+	bar := a.stripRect()
+	if y == bar.y && x >= bar.x {
 		label := " Search project: "
 		for _, c := range a.projFindChips(runeLen(label)) {
-			sw := a.sidebarW()
-			if x >= sw+c.x0 && x < sw+c.x1 {
+			if x >= bar.x+c.x0 && x < bar.x+c.x1 {
 				*c.on = !*c.on
 				a.projFindQueryChanged()
 				return
@@ -468,12 +467,9 @@ func (a *App) handleProjFindMouse(x, y int, btn tcell.ButtonMask) {
 //	<editor area>   ▾ internal/app/app.go (12)
 //	                  123: the matched line text
 //	<bar row>        Search project: query     37 matches in 4 files
-func (a *App) drawProjFind() {
-	if !a.projFind.findOpen {
-		return
-	}
+func (a *App) drawProjFind(r rect) {
 	a.drawProjFindResults()
-	a.drawProjFindBar()
+	a.drawProjFindBar(r)
 }
 
 // drawProjFindResults paints the grouped match list over the editor area.
@@ -488,15 +484,15 @@ func (a *App) drawProjFindResults() {
 	rows := a.projFindRows()
 	if len(rows) == 0 {
 		msg := "Type to search the project"
-		if a.projFind.findBusy {
+		if a.projFind.sweep.Busy() {
 			msg = "Searching…"
-		} else if len(a.projFind.findValue) > 0 {
+		} else if len(a.projFind.query.Value) > 0 {
 			msg = "No matches"
 		}
 		drawAt(a.screen, ex+2, ey+1, msg, bgStyle.Foreground(a.theme.Muted))
 		return
 	}
-	query := string(a.projFind.findValue)
+	query := a.projFind.query.Text()
 	for i := 0; i < eh; i++ {
 		idx := a.projFind.findScrollY + i
 		if idx >= len(rows) {
@@ -586,10 +582,10 @@ func (a *App) projFindChips(labelEnd int) []projFindChip {
 	return out
 }
 
-// drawProjFindBar paints the query input row above the status bar.
-func (a *App) drawProjFindBar() {
-	sw := a.sidebarW()
-	bx, by, bw := sw, a.height-2, a.width-sw
+// drawProjFindBar paints the query input row into the rect layout
+// reserved for the strip.
+func (a *App) drawProjFindBar(r rect) {
+	bx, by, bw := r.x, r.y, r.w
 	bg := a.theme.LineHL
 	barStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
 	labelStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true)
@@ -611,6 +607,10 @@ func (a *App) drawProjFindBar() {
 	}
 	inputStart := bx + chips[len(chips)-1].x1 + 1
 
+	// Right side: counter + hint, placed before the input but only into
+	// the cells left over once the input has minFieldWidth. The chips
+	// never yield — they are controls, not labels, and a control the
+	// user cannot click is worse than a reminder they cannot read.
 	hint := " Enter: open · Tab: replace · Esc: close "
 	if a.projFind.replaceOpen && a.projFind.focusReplace {
 		hint = " Enter: replace line · Shift+Enter: all · Tab: query · Esc: close "
@@ -618,36 +618,57 @@ func (a *App) drawProjFindBar() {
 		hint = " Enter: open · Tab: replace field · Esc: close "
 	}
 	counter := a.projFindCounterText()
+	counterCost := 0
+	if counter != "" {
+		counterCost = runeLen(counter) + 2
+	}
+	hintCost := runeLen(hint) + 1
+	spare := (bx + bw) - (inputStart + minFieldWidth + 1)
+	showCounter, showHint := barLabelsThatFit(spare, counterCost, hintCost)
+
 	rightTextStart := bx + bw
-	if bw > runeLen(label)+runeLen(hint)+10 {
-		rightTextStart -= runeLen(hint) + 1
+	if showHint {
+		rightTextStart -= hintCost
 		drawAt(a.screen, rightTextStart, by, hint, mutedStyle)
 	}
-	if counter != "" && bw > runeLen(label)+runeLen(counter)+4 {
-		rightTextStart -= runeLen(counter) + 2
+	if showCounter {
+		rightTextStart -= counterCost
 		style := mutedStyle
-		if !a.projFind.findBusy && len(a.projFind.findValue) > 0 && len(a.projFind.findMatches) == 0 {
+		if !a.projFind.sweep.Busy() && len(a.projFind.query.Value) > 0 && len(a.projFind.findMatches) == 0 {
 			style = tcell.StyleDefault.Background(bg).Foreground(a.theme.Error).Bold(true)
 		}
 		drawAt(a.screen, rightTextStart, by, counter, style)
 	}
 
-	inputEnd := rightTextStart - 1
-	if inputEnd <= inputStart {
-		inputEnd = bx + bw - 1
-	}
-	// With the replace field open, the query keeps the left half; the
-	// right half carries " ⇒ <replacement> [ All ]". The x ranges are
-	// stamped for the mouse handler.
+	// The x ranges the mouse handler hit-tests are re-stamped on every
+	// draw, before the "no room" bail below, so a bar that paints no
+	// replace field can never leave last frame's rect taking clicks.
 	a.projFind.replaceFieldX0, a.projFind.replaceFieldX1 = 0, 0
 	a.projFind.replaceAllX0, a.projFind.replaceAllX1 = 0, 0
+
+	// The fields end one cell short of the right-hand text, because
+	// Field.Draw blanks its whole box plus a cell either side before
+	// painting and would otherwise erase a label rather than share its
+	// cells. The labels have already yielded everything they could by
+	// here, so reaching this bail means the label and chips alone fill
+	// the bar. HideCursor is not optional on that path: Field.Draw owns
+	// this frame's only ShowCursor call, so returning without it strands
+	// the hardware cursor wherever the editor's render parked it.
+	inputEnd := rightTextStart - 1
+	if inputEnd <= inputStart {
+		a.screen.HideCursor()
+		return
+	}
+	// With the replace field open, the query keeps the left half; the
+	// right half carries " ⇒ <replacement> [ All ]".
+	replaceFocused := a.projFind.replaceOpen && a.projFind.focusReplace
 	if a.projFind.replaceOpen {
 		half := inputStart + (inputEnd-inputStart)/2
 		rlabel := " ⇒ "
 		drawAt(a.screen, half, by, rlabel, labelStyle)
 		fieldX0 := half + runeLen(rlabel)
 		fieldX1 := inputEnd
-		if len(a.projFind.replaceValue) > 0 {
+		if len(a.projFind.replace.Value) > 0 {
 			allBtn := "[ All ]"
 			bx0 := inputEnd - runeLen(allBtn)
 			if bx0 > fieldX0+2 {
@@ -656,12 +677,11 @@ func (a *App) drawProjFindBar() {
 				fieldX1 = bx0 - 1
 			}
 		}
-		for i, r := range a.projFind.replaceValue {
-			if fieldX0+i >= fieldX1 {
-				break
-			}
-			a.screen.SetContent(fieldX0+i, by, r, nil, barStyle)
+		rw := fieldX1 - fieldX0
+		if rw < 1 {
+			rw = 1
 		}
+		a.projFind.replace.Draw(a.screen, fieldX0, by, rw, barStyle, replaceFocused)
 		a.projFind.replaceFieldX0, a.projFind.replaceFieldX1 = fieldX0, fieldX1
 		inputEnd = half - 1
 	}
@@ -669,38 +689,20 @@ func (a *App) drawProjFindBar() {
 	if inputWidth < 1 {
 		inputWidth = 1
 	}
-	if a.projFind.findCursor < a.projFind.findScroll {
-		a.projFind.findScroll = a.projFind.findCursor
-	}
-	if a.projFind.findCursor >= a.projFind.findScroll+inputWidth {
-		a.projFind.findScroll = a.projFind.findCursor - inputWidth + 1
-	}
-	for i := 0; i < inputWidth; i++ {
-		idx := a.projFind.findScroll + i
-		if idx >= len(a.projFind.findValue) {
-			break
-		}
-		a.screen.SetContent(inputStart+i, by, a.projFind.findValue[idx], nil, barStyle)
-	}
-	if a.projFind.replaceOpen && a.projFind.focusReplace {
-		caret := a.projFind.replaceFieldX0 + a.projFind.replaceCursor
-		if caret >= a.projFind.replaceFieldX0 && caret <= a.projFind.replaceFieldX1 {
-			a.screen.ShowCursor(caret, by)
-		}
-		return
-	}
-	caret := inputStart + (a.projFind.findCursor - a.projFind.findScroll)
-	if caret >= inputStart && caret <= inputEnd {
-		a.screen.ShowCursor(caret, by)
-	}
+	// Field.Draw carries the caret window and the ShowCursor call, so
+	// the focused flag is the whole "where does the caret blink"
+	// decision. It also clears one cell either side of the field, which
+	// the layout leaves blank on purpose: the gap after the chips, and
+	// the gaps around the " ⇒ " marker and the right-hand text.
+	a.projFind.query.Draw(a.screen, inputStart, by, inputWidth, barStyle, !replaceFocused)
 }
 
 // projFindCounterText summarises the sweep for the bar's right side.
 func (a *App) projFindCounterText() string {
-	if len(a.projFind.findValue) == 0 {
+	if len(a.projFind.query.Value) == 0 {
 		return ""
 	}
-	if a.projFind.findBusy {
+	if a.projFind.sweep.Busy() {
 		return "searching…"
 	}
 	if len(a.projFind.findMatches) == 0 {
@@ -722,13 +724,16 @@ func (a *App) projFindCounterText() string {
 }
 
 // matchRuneSpans returns the [start, end) rune ranges of every
-// smart-case occurrence of query inside text.
+// smart-case occurrence of query inside text. The smart-case trigger is
+// unicode.IsUpper, the same one internal/search arms the sweep with, so
+// a query carrying a non-ASCII capital tints exactly the hits the engine
+// reported instead of a wider, case-folded set.
 func matchRuneSpans(text, query string) [][2]int {
 	if query == "" {
 		return nil
 	}
 	hay, needle := text, query
-	if !strings.ContainsFunc(query, func(r rune) bool { return r >= 'A' && r <= 'Z' }) {
+	if !strings.ContainsFunc(query, unicode.IsUpper) {
 		hay = strings.ToLower(text)
 		needle = strings.ToLower(query)
 	}

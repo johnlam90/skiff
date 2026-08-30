@@ -259,3 +259,11 @@ func (d *Dirty) buttonAtRelX(rx int) int {
 func dirtyButtonAtRelX(rx int) int {
 	return (&Dirty{}).buttonAtRelX(rx)
 }
+
+// WantsMotion is true: Dirty highlights the Cancel / Discard / Save
+// button under the pointer.
+func (d *Dirty) WantsMotion() bool { return true }
+
+// Dismiss is a no-op — a torn-down dirty prompt neither saves nor
+// discards, which is the same as cancelling.
+func (d *Dirty) Dismiss() {}

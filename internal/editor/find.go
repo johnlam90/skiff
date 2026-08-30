@@ -162,6 +162,39 @@ func (t *Tab) SetFindQuery(query string) {
 	t.FindIndex = FirstMatchAtOrAfter(t.FindMatches, t.Cursor)
 }
 
+// refreshFindMatches re-runs the active query after the buffer changed,
+// so the highlights keep naming the text the user searched for instead
+// of the offsets it happened to sit at when the query was typed. Every
+// mutation reaches this through Tab.edit; matchAtRune's findRowsFor
+// guard cannot stand in for it, because an edit ahead of a hit moves
+// every span on the line without changing the match COUNT.
+//
+// The current-match index is preserved rather than re-derived from the
+// caret: "3 of 7" must not renumber itself under a cursor that is only
+// where it is because the user is typing. An edit that destroyed the
+// current match falls through to the hit nearest the caret — the answer
+// SetFindQuery already computed, which is -1 when nothing survived.
+//
+// An idle query costs nothing: closing the find bar calls ClearFind, so
+// a tab with no search running never re-scans on a keystroke. A live one
+// costs a full FindAll per edit, which is the same per-keystroke scan the
+// find bar's own input already pays (App.findApplyQuery re-queries on
+// every character typed into it) — a buffer keystroke is not the place to
+// start being cheaper than the query field.
+func (t *Tab) refreshFindMatches() {
+	if t.FindQuery == "" {
+		return
+	}
+	keep := t.FindIndex
+	t.SetFindQuery(t.FindQuery)
+	if keep >= len(t.FindMatches) {
+		keep = len(t.FindMatches) - 1
+	}
+	if keep >= 0 {
+		t.FindIndex = keep
+	}
+}
+
 // FocusCurrentMatch moves the cursor (and anchor — we don't want a
 // dangling selection from an earlier action) to the start of the
 // currently-pointed match. No-op when FindIndex is out of range, so
@@ -284,22 +317,14 @@ func (t *Tab) ReplaceCurrentMatch(repl string) bool {
 		return false
 	}
 	m := t.FindMatches[t.FindIndex]
-	t.pushUndo(undoGroupStructural)
-	start := Position{Line: m.Line, Col: m.Col}
-	end := Position{Line: m.Line, Col: m.Col + m.Width}
-	t.Buffer.DeleteRange(start, end)
-	after := t.Buffer.InsertString(start, repl)
-	t.Cursor = after
-	t.Anchor = after
-	t.Dirty = true
-	t.StyleStale = true
-	t.cursorMoved = true
-	keep := t.FindIndex
-	t.SetFindQuery(t.FindQuery)
-	if keep >= len(t.FindMatches) {
-		keep = len(t.FindMatches) - 1
-	}
-	t.FindIndex = keep
+	t.edit(undoGroupStructural, func() {
+		start := Position{Line: m.Line, Col: m.Col}
+		end := Position{Line: m.Line, Col: m.Col + m.Width}
+		t.Buffer.DeleteRange(start, end)
+		after := t.Buffer.InsertString(start, repl)
+		t.Cursor = after
+		t.Anchor = after
+	})
 	return true
 }
 
@@ -310,20 +335,19 @@ func (t *Tab) ReplaceAllMatches(repl string) int {
 	if t.IsImage() || len(t.FindMatches) == 0 {
 		return 0
 	}
-	t.pushUndo(undoGroupStructural)
-	n := len(t.FindMatches)
-	for i := n - 1; i >= 0; i-- {
-		m := t.FindMatches[i]
-		start := Position{Line: m.Line, Col: m.Col}
-		end := Position{Line: m.Line, Col: m.Col + m.Width}
-		t.Buffer.DeleteRange(start, end)
-		t.Buffer.InsertString(start, repl)
-	}
-	t.Dirty = true
-	t.StyleStale = true
-	t.cursorMoved = true
-	t.SetFindQuery(t.FindQuery)
-	return n
+	// Hold the list being replaced: the edit trailer re-runs the query,
+	// so t.FindMatches stops describing the spans this call swapped.
+	matches := t.FindMatches
+	t.edit(undoGroupStructural, func() {
+		for i := len(matches) - 1; i >= 0; i-- {
+			m := matches[i]
+			start := Position{Line: m.Line, Col: m.Col}
+			end := Position{Line: m.Line, Col: m.Col + m.Width}
+			t.Buffer.DeleteRange(start, end)
+			t.Buffer.InsertString(start, repl)
+		}
+	})
+	return len(matches)
 }
 
 // ReplaceLines swaps whole lines (0-based index → new content) as ONE
@@ -335,22 +359,28 @@ func (t *Tab) ReplaceLines(newLines map[int]string) int {
 	if t.IsImage() || len(newLines) == 0 {
 		return 0
 	}
-	t.pushUndo(undoGroupStructural)
+	// Count the in-range swaps first: an edit always records undo state
+	// (a new entry, or an extension of the open one when the group
+	// coalesces), so a map naming only vanished lines must not reach
+	// edit and leave the history claiming a change that never happened.
 	n := 0
-	for i, text := range newLines {
-		if i < 0 || i >= len(t.Buffer.Lines) {
-			continue
+	for i := range newLines {
+		if i >= 0 && i < len(t.Buffer.Lines) {
+			n++
 		}
-		t.Buffer.Lines[i] = text
-		n++
 	}
 	if n == 0 {
 		return 0
 	}
-	t.Cursor = t.Buffer.Clamp(t.Cursor)
-	t.Anchor = t.Cursor
-	t.Dirty = true
-	t.StyleStale = true
-	t.cursorMoved = true
+	t.edit(undoGroupStructural, func() {
+		for i, text := range newLines {
+			if i < 0 || i >= len(t.Buffer.Lines) {
+				continue
+			}
+			t.Buffer.Lines[i] = text
+		}
+		t.Cursor = t.Buffer.Clamp(t.Cursor)
+		t.Anchor = t.Cursor
+	})
 	return n
 }

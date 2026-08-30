@@ -63,16 +63,26 @@ func (a *App) menuReopenTab() {
 	for len(a.closedTabs) > 0 {
 		rec := a.closedTabs[len(a.closedTabs)-1]
 		a.closedTabs = a.closedTabs[:len(a.closedTabs)-1]
-		if _, err := os.Stat(rec.Path); err != nil {
-			a.flash(fmt.Sprintf("%s is gone — skipped", filepath.Base(rec.Path)))
-			continue
+		if a.reopenClosedTab(rec) {
+			return
 		}
-		a.openFile(rec.Path)
-		if tab := a.activeTabPtr(); tab != nil && tab.Path == rec.Path && !tab.IsImage() {
-			tab.Cursor = tab.Buffer.Clamp(rec.Cursor)
-			tab.Anchor = tab.Cursor
-			tab.ScrollY = rec.ScrollY
-		}
-		return
+		a.flash(fmt.Sprintf("%s is gone — skipped", filepath.Base(rec.Path)))
 	}
+}
+
+// reopenClosedTab puts one record back on screen: the file opens as a
+// pinned tab and the view lands where it was. Reports false when the
+// file no longer exists, so the caller decides what a dead record
+// means — Esc-o skips it with a flash, Undo delete has none (the
+// restore just put the file back). Shared by both so "reopen a
+// closed tab" has one definition, image tabs (no caret) included.
+func (a *App) reopenClosedTab(rec closedTabRecord) bool {
+	if _, err := os.Stat(rec.Path); err != nil {
+		return false
+	}
+	a.openFile(rec.Path)
+	if tab := a.activeTabPtr(); tab != nil && tab.Path == rec.Path && !tab.IsImage() {
+		tab.RestoreView(rec.Cursor, rec.ScrollY)
+	}
+	return true
 }

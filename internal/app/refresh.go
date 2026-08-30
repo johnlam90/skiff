@@ -11,12 +11,14 @@
 // what to do when a file changed on disk under an open tab.
 //
 // The tick runs on a goroutine but only ever posts a treeRefreshEvent —
-// the actual rescan happens on the main loop, because everything it
-// touches is UI state.
+// the rescan itself is the treeScan job (internal/asyncjob, Coalesce):
+// the sweep reads disk on a goroutine and handleTreeScan merges it on
+// the main loop, because everything it touches is UI state.
 
 package app
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,21 +53,16 @@ type treeRefreshEvent struct {
 // When satisfies the tcell.Event interface.
 func (e *treeRefreshEvent) When() time.Time { return e.when }
 
-// treeScanEvent carries a finished background disk sweep onto the main
-// event loop: the directory listings the file tree should adopt and the
-// Stat results the open tabs should be reconciled against. Same
-// goroutine → custom event pattern as gitStatusEvent — the sweep reads
-// disk, the main loop mutates the node graph and the tabs. gen pins the
-// sweep to the tree generation it started from; see handleTreeScan.
-type treeScanEvent struct {
-	when time.Time
-	gen  int
+// treeScanResult is what one background disk sweep lands: the directory
+// listings the file tree should adopt and the Stat results the open tabs
+// should be reconciled against. The sweep reads disk on the treeScan
+// job's goroutine; handleTreeScan mutates the node graph and the tabs on
+// the main loop. Which sweep is current is the job's business — a sweep
+// retired by a tree mutation never reaches the handler.
+type treeScanResult struct {
 	dirs []filetree.DirScan
 	tabs []tabProbe
 }
-
-// When satisfies the tcell.Event interface.
-func (e *treeScanEvent) When() time.Time { return e.when }
 
 // tabProbe is one open tab's on-disk state as observed by a background
 // sweep. err is carried verbatim rather than pre-interpreted so the main
@@ -127,12 +124,12 @@ func (a *App) loadUserConfig() {
 // every site. The git-status and finder refreshes that usually
 // accompany it already guard themselves internally.
 //
-// The generation bump retires any background sweep already in flight:
-// its listing was read before this mutation, so applying it afterwards
+// Invalidate retires any background sweep already in flight: its
+// listing was read before this mutation, so applying it afterwards
 // would put the file the user just deleted back on screen for a whole
 // tick. See handleTreeScan.
 func (a *App) refreshTree() {
-	a.treeScanGen++
+	a.treeScan.Invalidate()
 	if a.tree == nil {
 		return
 	}
@@ -207,18 +204,18 @@ func (a *App) refreshTreeNow() {
 // two sweeps rather than one each.
 //
 // The session write rides along rather than getting its own goroutine so
-// that treeScanInFlight covers the whole sweep: one flag, and a caller
-// that has seen the treeScanEvent knows nothing is still touching disk
-// on this tick's behalf. It goes first because it is small and bounded
+// that the job's Busy covers the whole sweep: one gate, and a caller
+// that has seen the sweep land knows nothing is still touching disk on
+// this tick's behalf. It goes first because it is small and bounded
 // while the walk is neither, and delaying a durability write behind a
 // slow NFS walk widens the window where a killed terminal loses tab
 // state.
+//
+// Under Coalesce a kick during a sweep is remembered with the values
+// captured here and spawns when the sweep lands, so the capture runs on
+// every kick — cheap, and it keeps the follow-up's work list as fresh
+// as the kick that asked for it.
 func (a *App) refreshTreeAsync() {
-	if a.treeScanInFlight {
-		a.treeScanQueued = true
-		return
-	}
-	a.treeScanInFlight = true
 	paths := a.openTabDiskPaths()
 	var dirs []string
 	if a.tree != nil {
@@ -229,8 +226,6 @@ func (a *App) refreshTreeAsync() {
 		a.tree.SetOpenFiles(paths)
 		dirs = a.tree.LoadedDirs()
 	}
-	gen := a.treeScanGen
-	scr := a.screen
 	// The session payload is captured here for the same reason the path
 	// lists are: it reads tabs, cursors, and the tree's expanded set.
 	// captureSession builds fresh slices nothing else aliases, so only
@@ -243,47 +238,34 @@ func (a *App) refreshTreeAsync() {
 		snap = &p
 	}
 	root := a.rootDir
-	a.safeGo("tree-scan", func() {
+	a.treeScan.Start(func(context.Context) (treeScanResult, error) {
 		if snap != nil {
 			_ = session.Save(root, *snap)
 		}
-		_ = scr.PostEvent(&treeScanEvent{
-			when: time.Now(),
-			gen:  gen,
+		return treeScanResult{
 			dirs: filetree.ScanDirs(dirs),
 			tabs: probeOpenTabs(paths),
-		})
+		}, nil
 	})
 }
 
-// handleTreeScan applies a finished background sweep on the main thread
-// and starts the follow-up sweep if more triggers arrived while this one
-// was in flight.
-//
-// A generation mismatch means a main-thread tree mutation — a create,
-// rename, delete, or paste, each of which refreshes the tree
-// synchronously — landed after the sweep read the disk. Its listing
-// predates that change, so applying it would resurrect the file the user
-// just deleted until the next tick. Drop it; the mutation already
-// refreshed the tree correctly.
+// handleTreeScan applies a finished background sweep on the main thread.
+// The job has already dropped any sweep a tree mutation retired: a
+// create, rename, delete, or paste refreshes the tree synchronously and
+// calls Invalidate, because a listing read before the change would
+// resurrect the file the user just deleted until the next tick. The
+// job also starts the coalesced follow-up once this returns.
 //
 // The finder reindexes only when ApplyScan reports a membership change
 // — names actually came or went, or a .gitignore moved. Tab
 // reconciliation is deliberately outside the gate: it consumes the
 // per-tab Stat probes, never the directory listings, so external-edit
 // detection on open tabs cannot be starved by a quiet tree.
-func (a *App) handleTreeScan(e *treeScanEvent) {
-	a.treeScanInFlight = false
-	if e.gen == a.treeScanGen {
-		if a.tree != nil && a.tree.ApplyScan(e.dirs) {
-			a.invalidateFinder()
-		}
-		a.applyTabProbes(e.tabs)
+func (a *App) handleTreeScan(r treeScanResult, _ error) {
+	if a.tree != nil && a.tree.ApplyScan(r.dirs) {
+		a.invalidateFinder()
 	}
-	if a.treeScanQueued {
-		a.treeScanQueued = false
-		a.refreshTreeAsync()
-	}
+	a.applyTabProbes(r.tabs)
 }
 
 // openTabDiskPaths returns the path of every open tab backed by a real

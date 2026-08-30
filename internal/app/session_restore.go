@@ -85,7 +85,7 @@ func (a *App) restoreSession() {
 		// that climbs out of the project root via "../" — skip it
 		// silently, the same shape as the stat/IsDir skip right below:
 		// a stale or malformed session entry isn't worth a flash per tab.
-		if !withinRoot(a.rootDir, abs) {
+		if !a.files.Contains(abs) {
 			continue
 		}
 		if info, err := os.Stat(abs); err != nil || info.IsDir() {
@@ -95,9 +95,7 @@ func (a *App) restoreSession() {
 		if err != nil {
 			continue
 		}
-		t.Cursor = t.Buffer.Clamp(editor.Position{Line: ts.Line, Col: ts.Col})
-		t.Anchor = t.Cursor
-		t.ScrollY = ts.ScrollY
+		t.RestoreView(editor.Position{Line: ts.Line, Col: ts.Col}, ts.ScrollY)
 		t.Preview = ts.Preview
 		a.tabs.Append(t)
 		if p.ActivePath != "" && ts.Path == p.ActivePath {

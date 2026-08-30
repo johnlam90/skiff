@@ -6,44 +6,54 @@
 // =============================================================================
 
 // fileclip.go implements the file clipboard: cut / copy a tree entry,
-// paste it into (or beside) another, and duplicate in place. Nothing is
-// ever overwritten — a taken name walks the " copy" / " copy 2" ladder,
-// which is also how duplication works. Cut keeps the entry on disk until
-// the paste lands; copy keeps the clipboard afterwards so one source can
-// be pasted into several folders. Reachable from the tree's right-click
-// menu and (per the project rule) from the main ≡ menu.
+// paste it into (or beside) another, and duplicate in place. The disk
+// work — the never-overwrite " copy" ladder, the into-itself guard,
+// the cross-device fallback — is the file manager's; this file owns
+// the clipboard state, the background job that keeps a
+// node_modules-sized paste from freezing the editor, and the landing
+// that hands the manager's Changeset to the main loop. Cut keeps
+// the entry on disk until the paste lands; copy keeps the clipboard
+// afterwards so one source can be pasted into several folders.
+// Reachable from the tree's right-click menu and (per the project
+// rule) from the main ≡ menu.
 
 package app
 
 import (
+	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/johnlam90/skiff/internal/asyncjob"
+	"github.com/johnlam90/skiff/internal/filemanager"
 	"github.com/johnlam90/skiff/internal/filetree"
 )
 
+// fileClip is the file clipboard: the one entry on it and whether the
+// next paste moves it (cut) or copies it. The zero value is empty.
+type fileClip struct {
+	path string // absolute path on the clipboard; "" = empty
+	cut  bool   // true = paste moves; false = paste copies
+}
+
 // clipCutPath records path for a move-on-paste.
 func (a *App) clipCutPath(path string) {
-	a.fileClipPath = path
-	a.fileClipCut = true
+	a.fileClip = fileClip{path: path, cut: true}
 	a.flash(fmt.Sprintf("Cut %s — paste to move it", filepath.Base(path)))
 }
 
 // clipCopyPath records path for a copy-on-paste.
 func (a *App) clipCopyPath(path string) {
-	a.fileClipPath = path
-	a.fileClipCut = false
+	a.fileClip = fileClip{path: path, cut: false}
 	a.flash(fmt.Sprintf("Copied %s — paste to drop a copy", filepath.Base(path)))
 }
 
 // hasFileClip gates the paste rows: true while something is on the
 // file clipboard.
-func (a *App) hasFileClip() bool { return a.fileClipPath != "" }
+func (a *App) hasFileClip() bool { return a.fileClip.path != "" }
 
 // pasteDirForPath resolves a paste target to a directory: a folder
 // takes the paste inside itself, a file takes it beside itself — so the
@@ -55,110 +65,108 @@ func pasteDirForPath(path string, isDir bool) string {
 	return filepath.Dir(path)
 }
 
-// pasteInto drops the clipboard entry into dir, moving (cut) or
-// copying (copy). Collisions walk the " copy" ladder; a folder can
-// never be pasted into itself or a descendant; a cut entry pasted back
-// into its own folder is a friendly no-op. Open tabs follow a move.
+// pasteInto drops the clipboard entry into dir, moving (cut) or copying
+// (copy), on the background runner. The manager's guards — a folder
+// never pasted into itself, a cut never "moved" back into its own
+// folder, nothing ever overwritten — run inside the op and come back
+// as its error. The one check kept here is the clipboard's own: an
+// entry that vanished from disk since it was cut is dropped with a
+// flash rather than sent off to fail.
 func (a *App) pasteInto(dir string) {
-	src := a.fileClipPath
+	src := a.fileClip.path
 	if src == "" {
 		return
 	}
-	info, err := os.Stat(src)
-	if err != nil {
+	if _, err := os.Stat(src); err != nil {
 		a.flash(fmt.Sprintf("%s is gone — clipboard cleared", filepath.Base(src)))
-		a.fileClipPath = ""
+		a.fileClip = fileClip{}
 		return
 	}
-	if info.IsDir() {
-		// Compare resolved paths, not the raw strings: a destination
-		// that looks unrelated to src by prefix can still symlink to
-		// somewhere inside it, and copyTree would then walk into its
-		// own growing output. EvalSymlinks falls back to the original
-		// on error (a dangling link, permission trouble) — best-effort,
-		// same as every other symlink resolution in this codebase.
-		rSrc, rDir := src, dir
-		if resolved, err := filepath.EvalSymlinks(src); err == nil {
-			rSrc = resolved
-		}
-		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-			rDir = resolved
-		}
-		sep := string(filepath.Separator)
-		if rDir == rSrc || strings.HasPrefix(rDir+sep, rSrc+sep) {
-			a.flash("Can't paste a folder into itself")
-			return
-		}
-	}
-	if a.fileClipCut && filepath.Dir(src) == dir {
-		a.flash(fmt.Sprintf("%s is already here", filepath.Base(src)))
-		return
-	}
-	dest := uniqueDestPath(dir, filepath.Base(src), info.IsDir())
-	if a.fileClipCut {
-		a.startFileOp("Move", src, dest, true)
+	if a.fileClip.cut {
+		a.startFileOp(fileOpMove, src, dir)
 	} else {
-		a.startFileOp("Paste", src, dest, false)
+		a.startFileOp(fileOpCopy, src, dir)
 	}
 }
 
-// fileOpDoneEvent reports a finished background file operation.
-type fileOpDoneEvent struct {
-	when  time.Time
+// fileOpKind names which manager verb a background file op runs.
+type fileOpKind uint8
+
+const (
+	fileOpMove fileOpKind = iota
+	fileOpCopy
+	fileOpDuplicate
+)
+
+// label is the verb the flashes are built from: "Move" / "Paste" /
+// "Duplicate" — the user's word for the gesture, not the manager's.
+func (k fileOpKind) label() string {
+	switch k {
+	case fileOpMove:
+		return "Move"
+	case fileOpCopy:
+		return "Paste"
+	default:
+		return "Duplicate"
+	}
+}
+
+// fileOpResult is what a finished background file operation lands: the
+// manager's Changeset (empty on failure — the error rides beside it as
+// the job's error) and what the flash needs to name it.
+type fileOpResult struct {
 	label string
 	src   string
-	dest  string
-	moved bool
-	err   error
+	cs    filemanager.Changeset
 }
 
-// When implements tcell.Event.
-func (e *fileOpDoneEvent) When() time.Time { return e.when }
-
-// fileOpProgressEvent ticks the status bar while a big copy runs.
-type fileOpProgressEvent struct {
-	when  time.Time
-	label string
-	count int64
-}
-
-// When implements tcell.Event.
-func (e *fileOpProgressEvent) When() time.Time { return e.when }
-
-// startFileOp runs a move or copy in the background so a
-// node_modules-sized tree never freezes the editor (druk's rule). One
-// at a time — racing two ops over the same paths helps nobody.
-func (a *App) startFileOp(label, src, dest string, move bool) {
-	if a.fileOpBusy {
-		a.flash("Another file operation is still running")
-		return
-	}
-	a.fileOpBusy = true
-	a.flash(gerundOf(label) + " " + filepath.Base(src) + "…")
+// startFileOp runs a move, copy or duplicate on the fileOp job so a
+// node_modules-sized tree never freezes the editor (druk's rule). The
+// job is Refuse — one at a time, because racing two ops over the same
+// paths helps nobody. The goroutine calls the manager (Move / Copy /
+// Duplicate read only its immutable fields, so this is safe beside the
+// main loop's trash reads) and lands the Changeset through
+// handleFileOpDone; nothing here touches UI state off the loop — the
+// progress tick is a Notify whose closure runs on the loop too.
+func (a *App) startFileOp(kind fileOpKind, src, dstDir string) {
+	label := kind.label()
 	scr := a.screen
-	a.safeGo("file-op", func() {
+	files := a.files
+	// tick is the on-loop half of a progress report, built here so the
+	// goroutine only ever posts it.
+	tick := func(n int64) { a.handleFileOpProgress(label, n) }
+	started := a.fileOp.Start(func(context.Context) (fileOpResult, error) {
 		var count int64
 		lastTick := time.Now()
 		progress := func() {
 			n := atomic.AddInt64(&count, 1)
 			if time.Since(lastTick) > 150*time.Millisecond {
 				lastTick = time.Now()
-				_ = scr.PostEvent(&fileOpProgressEvent{when: time.Now(), label: label, count: n})
+				_ = scr.PostEvent(asyncjob.Notify(func() { tick(n) }))
 			}
 		}
+		var cs filemanager.Changeset
 		var err error
-		if move {
-			err = moveEntry(src, dest, progress)
-		} else {
-			err = copyTree(src, dest, progress)
+		switch kind {
+		case fileOpMove:
+			cs, err = files.Move(src, dstDir, progress)
+		case fileOpCopy:
+			cs, err = files.Copy(src, dstDir, progress)
+		default:
+			cs, err = files.Duplicate(src, progress)
 		}
-		_ = scr.PostEvent(&fileOpDoneEvent{when: time.Now(), label: label, src: src, dest: dest, moved: move, err: err})
+		return fileOpResult{label: label, src: src, cs: cs}, err
 	})
+	if !started {
+		a.flash("Another file operation is still running")
+		return
+	}
+	a.flash(gerundOf(label) + " " + filepath.Base(src) + "…")
 }
 
 // handleFileOpProgress keeps the user informed mid-copy.
-func (a *App) handleFileOpProgress(e *fileOpProgressEvent) {
-	a.flash(fmt.Sprintf("%s… %d files", gerundOf(e.label), e.count))
+func (a *App) handleFileOpProgress(label string, count int64) {
+	a.flash(fmt.Sprintf("%s… %d files", gerundOf(label), count))
 }
 
 // gerundOf maps an op verb to its progress form.
@@ -175,158 +183,51 @@ func gerundOf(label string) string {
 	}
 }
 
-// handleFileOpDone lands a finished op on the main loop: repoint tabs
-// after a move, clear the cut clipboard, refresh everything.
-func (a *App) handleFileOpDone(e *fileOpDoneEvent) {
-	a.fileOpBusy = false
-	if e.err != nil {
-		a.flash(fmt.Sprintf("%s failed: %v", e.label, e.err))
-		a.refreshTree()
-		return
+// doneVerbOf maps an op verb to its past-tense flash.
+func doneVerbOf(label string) string {
+	switch label {
+	case "Move":
+		return "Moved"
+	case "Paste":
+		return "Pasted"
+	case "Duplicate":
+		return "Duplicated"
+	default:
+		return label
 	}
-	if e.moved {
-		a.repointPaths(e.src, e.dest)
-		if a.fileClipCut && a.fileClipPath == e.src {
-			a.fileClipPath = ""
-		}
-		a.flash(fmt.Sprintf("Moved %s", filepath.Base(e.dest)))
-	} else {
-		a.flash(fmt.Sprintf("Pasted %s", filepath.Base(e.dest)))
-	}
-	a.refreshTree()
-	a.refreshGitStatusAsync()
-	a.invalidateFinder()
 }
 
-// moveEntry relocates src to dest: rename when the filesystem allows,
-// copy-then-delete across devices (the one case os.Rename can't do).
-func moveEntry(src, dest string, progress func()) error {
-	if err := os.Rename(src, dest); err == nil {
-		return nil
+// handleFileOpDone lands a finished op on the main loop: clear a cut
+// clipboard once its entry has moved, hand the Changeset to
+// applyChangeset (tabs follow a move; tree, tint, index and session
+// refresh), then flash. The error path runs the same tail with an
+// empty Changeset — a cross-device move that died half-way has already
+// changed the disk, and refreshing only the tree left the finder and
+// the git tint stale.
+func (a *App) handleFileOpDone(r fileOpResult, err error) {
+	if err != nil {
+		a.applyChangeset(filemanager.Changeset{})
+		a.flash(fmt.Sprintf("%s failed: %v", r.label, err))
+		return
 	}
-	if err := copyTree(src, dest, progress); err != nil {
-		return err
+	if len(r.cs.Moved) > 0 && a.fileClip.cut && a.fileClip.path == r.src {
+		a.fileClip = fileClip{}
 	}
-	return os.RemoveAll(src)
+	a.applyChangeset(r.cs)
+	name := filepath.Base(r.src)
+	switch {
+	case len(r.cs.Moved) > 0:
+		name = filepath.Base(r.cs.Moved[0].New)
+	case len(r.cs.Added) > 0:
+		name = filepath.Base(r.cs.Added[0])
+	}
+	a.flash(fmt.Sprintf("%s %s", doneVerbOf(r.label), name))
 }
 
 // duplicatePath copies path beside itself under the next free " copy"
 // name — the one-gesture version of copy + paste-beside.
 func (a *App) duplicatePath(path string) {
-	info, err := os.Stat(path)
-	if err != nil {
-		a.flash(fmt.Sprintf("Duplicate failed: %v", err))
-		return
-	}
-	dest := uniqueDestPath(filepath.Dir(path), filepath.Base(path), info.IsDir())
-	a.startFileOp("Duplicate", path, dest, false)
-}
-
-// repointPaths rewrites every open tab (and the active folder) that
-// lives at or under oldPath so buffers stay attached to files that just
-// moved. Shared by the paste-move path and folder renames.
-func (a *App) repointPaths(oldPath, newPath string) {
-	prefix := oldPath + string(filepath.Separator)
-	for _, t := range a.tabs.Tabs() {
-		switch {
-		case t.Path == oldPath:
-			t.Path = newPath
-		case strings.HasPrefix(t.Path, prefix):
-			t.Path = filepath.Join(newPath, t.Path[len(prefix):])
-		default:
-			continue
-		}
-		if info, err := os.Stat(t.Path); err == nil {
-			t.Mtime = info.ModTime()
-		} else {
-			t.Mtime = time.Time{}
-		}
-		t.DiskGone = false
-	}
-	if a.activeFolder == oldPath {
-		a.setActiveFolder(newPath)
-	} else if strings.HasPrefix(a.activeFolder, prefix) {
-		a.setActiveFolder(filepath.Join(newPath, a.activeFolder[len(prefix):]))
-	}
-	a.syncActiveTreeFile()
-}
-
-// uniqueDestPath returns dir/base if free, else the first free name on
-// the " copy" / " copy 2" ladder. For files the suffix lands before the
-// extension ("app copy.ts"); a directory's whole name is the stem.
-func uniqueDestPath(dir, base string, isDir bool) string {
-	dest := filepath.Join(dir, base)
-	if _, err := os.Lstat(dest); err != nil {
-		return dest
-	}
-	ext := ""
-	stem := base
-	if !isDir {
-		ext = filepath.Ext(base)
-		stem = strings.TrimSuffix(base, ext)
-	}
-	for n := 1; ; n++ {
-		name := stem + " copy" + ext
-		if n > 1 {
-			name = fmt.Sprintf("%s copy %d%s", stem, n, ext)
-		}
-		dest = filepath.Join(dir, name)
-		if _, err := os.Lstat(dest); err != nil {
-			return dest
-		}
-	}
-}
-
-// copyTree copies src to dst recursively: directories re-create their
-// entries, symlinks re-link their targets, files copy bytes + mode.
-// dst must not exist yet (uniqueDestPath guarantees that). progress is
-// called once per copied entry so the background runner can narrate;
-// nil is allowed for callers that don't care.
-func copyTree(src, dst string, progress func()) error {
-	if progress != nil {
-		progress()
-	}
-	info, err := os.Lstat(src)
-	if err != nil {
-		return err
-	}
-	switch {
-	case info.IsDir():
-		if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
-			return err
-		}
-		entries, err := os.ReadDir(src)
-		if err != nil {
-			return err
-		}
-		for _, e := range entries {
-			if err := copyTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), progress); err != nil {
-				return err
-			}
-		}
-		return nil
-	case info.Mode()&os.ModeSymlink != 0:
-		target, err := os.Readlink(src)
-		if err != nil {
-			return err
-		}
-		return os.Symlink(target, dst)
-	default:
-		in, err := os.Open(src)
-		if err != nil {
-			return err
-		}
-		defer in.Close()
-		out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
-		if err != nil {
-			return err
-		}
-		if _, err := io.Copy(out, in); err != nil {
-			out.Close()
-			return err
-		}
-		return out.Close()
-	}
+	a.startFileOp(fileOpDuplicate, path, "")
 }
 
 // -----------------------------------------------------------------------------

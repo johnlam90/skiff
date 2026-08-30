@@ -23,6 +23,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/diff"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/git"
 )
@@ -65,15 +66,17 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	}
 
 	// The overlay on the stack absorbs all mouse input — same routing
-	// truth as the keyboard. The project-find strip comes next: it has
-	// real mouse targets (result rows, fold arrows) unlike the find bar,
-	// which deliberately passes mouse through to the editor (ADR-0001).
+	// truth as the keyboard. The docked strip comes next, and it is the
+	// strip that decides: the project-find panel consumes the event (it
+	// has real targets — result rows, fold arrows), while the find bar
+	// answers false and lets the press reach the editor underneath
+	// (ADR-0001's pass-through, now the adapter's answer rather than an
+	// absent branch here).
 	if ov := a.overlays.Top(); ov != nil {
 		ov.HandleMouse(x, y, btn)
 		return
 	}
-	if a.projFind.findOpen {
-		a.handleProjFindMouse(x, y, btn)
+	if a.strip != nil && a.strip.handleMouse(x, y, btn) {
 		return
 	}
 
@@ -483,7 +486,7 @@ func (a *App) openGitHunkAt(tab *editor.Tab, localX, localY int) bool {
 	}
 	path := tab.Path
 	a.requestDiff(diffLoadHunk, "Git change · "+filepath.Base(path), path,
-		func(repo *git.Repo) []string { return repoHunkPreview(repo, path, line) })
+		func(repo *git.Repo) (diff.Patch, error) { return repoHunkPreview(repo, path, line) })
 	return true
 }
 

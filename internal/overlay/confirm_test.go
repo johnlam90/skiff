@@ -490,7 +490,7 @@ func TestConfirm_ClassicFormDrawsNoIndicator(t *testing.T) {
 	// Below the title divider (which spans the full inner width by
 	// design) every content row's padding column stays blank.
 	for y := r.Y + 3; y < r.Y+r.H-1; y++ {
-		if got := cellAt(scr, barColumn(r), y); got != ' ' {
+		if got := cellAt(scr, BarColumn(r), y); got != ' ' {
 			t.Fatalf("padding column row %d = %q, want a blank cell", y, got)
 		}
 	}

@@ -61,19 +61,22 @@ func TestFake_UnscriptedCommandFailsLoudly(t *testing.T) {
 // TestFake_ScriptedErrorReachesTheCaller pins the reason the Fake
 // exists: failures real git can't be asked for on demand (a wedged
 // remote, a rejected push) are scripted, and both the output and the
-// error travel together — explainGit-style callers need git's words
-// alongside the non-zero exit.
+// error travel together — the OpError a verb returns needs git's words
+// alongside the non-zero exit. The upstream probe is left unscripted,
+// which is the Fake's way of saying "no upstream", and with no branch
+// scripted either the verb falls back to a plain push.
 func TestFake_ScriptedErrorReachesTheCaller(t *testing.T) {
 	boom := errors.New("exit status 1")
 	f := &Fake{}
 	f.Script("push", "! [rejected] main -> main\n", boom)
 
-	out, err := OpenWith("/repo", f).RunSequence([][]string{{"push"}})
+	err := OpenWith("/repo", f).Push()
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the scripted error", err)
 	}
-	if !strings.Contains(out, "rejected") {
-		t.Fatalf("scripted output must accompany the error, got %q", out)
+	var opErr *OpError
+	if !errors.As(err, &opErr) || !strings.Contains(opErr.Output, "rejected") {
+		t.Fatalf("scripted output must accompany the error, got %v", err)
 	}
 }
 
@@ -96,8 +99,8 @@ func TestFake_ScriptOverwritesAndRecordsEveryCall(t *testing.T) {
 	if got := f.CallCount(); got != 4 {
 		t.Fatalf("CallCount = %d, want 4 (failed lookups count too)", got)
 	}
-	if len(f.Calls) != 4 || f.Calls[3][0] != "unscripted" {
-		t.Fatalf("Calls must record every invocation in order, got %v", f.Calls)
+	if len(f.Calls()) != 4 || f.Calls()[3][0] != "unscripted" {
+		t.Fatalf("Calls must record every invocation in order, got %v", f.Calls())
 	}
 }
 
@@ -112,8 +115,8 @@ func TestFake_RecordedArgsAreCopied(t *testing.T) {
 	_, _ = f.Output("/repo", time.Second, args...)
 	args[1] = "--stat"
 
-	if f.Calls[0][1] != "--name-status" {
-		t.Fatalf("recorded args must be a copy, got %v", f.Calls[0])
+	if f.Calls()[0][1] != "--name-status" {
+		t.Fatalf("recorded args must be a copy, got %v", f.Calls()[0])
 	}
 }
 

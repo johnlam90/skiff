@@ -77,11 +77,28 @@ func (a *App) tabBarRect() (x, y, w, h int) {
 // it is arithmetic over cells that do not exist.
 const editorMinRows = 1
 
+// stripRect is the docked strip's screen rectangle: the rows directly
+// above the status bar, aligned with the editor the way every bottom
+// panel is. This is the ONE place a strip's row is computed — the find
+// bar, the project-find bar and the mouse hit-tests against them all
+// derive from it, where they used to carry three copies of the same
+// a.height-2 arithmetic that only agreed by luck. An empty slot yields
+// a zero-height rect on the status row, which is the floor the leader
+// strip stacks up from.
+func (a *App) stripRect() rect {
+	rows := 0
+	if a.strip != nil {
+		rows = a.strip.rows()
+	}
+	sw := a.sidebarW()
+	return rect{x: sw, y: a.height - 1 - rows, w: a.width - sw, h: rows}
+}
+
 // stripRowBudget is how many rows the transient strips docked under the
 // editor may take before the body would drop under editorMinRows. The
-// find bar is charged against the budget rather than being part of it:
-// it is a fixed, user-invoked row, so what comes back is what is left
-// for the flash strip to wrap onto.
+// docked strip is charged against the budget rather than being part of
+// it: it is a fixed, user-invoked row, so what comes back is what is
+// left for the flash strip to wrap onto.
 //
 // On the shortest terminal skiff runs in this never binds — minHeight is
 // 10, so even with the find bar up the budget is 6 against a
@@ -89,10 +106,7 @@ const editorMinRows = 1
 // rather than assumed, so lowering minHeight or raising the strip's row
 // cap cannot quietly starve the editor, and a test can say so.
 func (a *App) stripRowBudget() int {
-	room := a.height - 2 - editorMinRows
-	if a.findOpen || a.projFind.findOpen {
-		room -= findBarHeight
-	}
+	room := a.height - 2 - editorMinRows - a.stripRect().h
 	if room < 0 {
 		room = 0
 	}
@@ -102,9 +116,9 @@ func (a *App) stripRowBudget() int {
 // editorRect returns the editor body's screen rectangle (everything to the
 // right of the sidebar, between the tab bar and the status bar). Rows are
 // taken out of the bottom for every transient strip pinned there — the
-// find bar and the flash strip — because the editor's scrollbar, caret
-// and hit-testing all derive from this rect and have to describe the
-// region that is actually painted.
+// docked strip (stripRect) and the flash strip — because the editor's
+// scrollbar, caret and hit-testing all derive from this rect and have to
+// describe the region that is actually painted.
 //
 // The floor is not decoration. draw() refuses to paint below minHeight,
 // but the key handlers that ask for editorSize (page up/down, the wrap
@@ -112,10 +126,7 @@ func (a *App) stripRowBudget() int {
 // terminal is mid-resize and two rows tall.
 func (a *App) editorRect() (x, y, w, h int) {
 	sw := a.sidebarW()
-	h = a.height - 2
-	if a.findOpen || a.projFind.findOpen {
-		h -= findBarHeight
-	}
+	h = a.height - 2 - a.stripRect().h
 	h -= a.flashStripRows()
 	if h < editorMinRows {
 		h = editorMinRows

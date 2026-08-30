@@ -13,6 +13,7 @@
 package app
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/scrollbar"
 	"github.com/johnlam90/skiff/internal/theme"
 )
@@ -306,7 +308,7 @@ func TestGitPanelClick_ShowsDiffWithOpenButton(t *testing.T) {
 	if !strings.Contains(diffOv(t, a).title, "modified.txt") {
 		t.Fatalf("diff title should carry the file name, got %q", diffOv(t, a).title)
 	}
-	body := strings.Join(diffOv(t, a).raw, "\n")
+	body := strings.Join(diffOv(t, a).unified, "\n")
 	if !strings.Contains(body, "-two") || !strings.Contains(body, "+TWO") {
 		t.Fatalf("diff body should show the change, got:\n%s", body)
 	}
@@ -339,7 +341,7 @@ func TestGitPanelClick_UntrackedShowsAllAddedDiff(t *testing.T) {
 	if !diffIsOpen(a) {
 		t.Fatal("row click should open the diff view")
 	}
-	body := strings.Join(diffOv(t, a).raw, "\n")
+	body := strings.Join(diffOv(t, a).unified, "\n")
 	if !strings.Contains(body, "+new") {
 		t.Fatalf("untracked diff should show the file as added, got:\n%s", body)
 	}
@@ -373,9 +375,74 @@ func TestGitPanelClick_DeletedHasNoOpenButton(t *testing.T) {
 	if diffOv(t, a).openPath != "" {
 		t.Fatal("deleted files must not arm Open file")
 	}
-	body := strings.Join(diffOv(t, a).raw, "\n")
+	body := strings.Join(diffOv(t, a).unified, "\n")
 	if !strings.Contains(body, "-so long") {
 		t.Fatalf("diff body should show the removed line, got %q", body)
+	}
+}
+
+// TestActivateGitChangeRow_NoDiffExplainsItself pins the empty answer:
+// a row whose diff git cannot produce owes the user a sentence, and a
+// sentence belongs in the info prefab rather than in a diff view with
+// one line of prose where a diff should be.
+func TestActivateGitChangeRow_NoDiffExplainsItself(t *testing.T) {
+	a := newTestApp(t, t.TempDir()) // no repo: every diff comes back empty
+	a.activateGitChangeRow(gitChangeRow{Rel: "ghost.txt", Abs: filepath.Join(a.rootDir, "ghost.txt")})
+	if diffIsOpen(a) {
+		t.Fatal("there is no diff to show — the diff view must not open")
+	}
+	if !infoIsOpen(a) {
+		t.Fatalf("expected the info prefab to explain itself; top = %T", a.overlays.Top())
+	}
+}
+
+// TestActivateGitChangeRow_FromScriptedFake proves the git panel's row
+// surface goes through readRepo: the diff a row opens is the one a
+// git.Fake scripted, with no repository on disk. The untracked branch
+// is covered too — an empty tracked diff falls through to the scripted
+// --no-index rendering.
+func TestActivateGitChangeRow_FromScriptedFake(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	target := filepath.Join(a.rootDir, "f.txt")
+	fake := &git.Fake{}
+	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target, strings.Join([]string{
+		"diff --git a/f.txt b/f.txt",
+		"index 0000000..1111111 100644",
+		"--- a/f.txt",
+		"+++ b/f.txt",
+		"@@ -1 +1 @@",
+		"-old",
+		"+scripted",
+		"",
+	}, "\n"), nil)
+	a.gitRunner = fake
+
+	a.activateGitChangeRow(gitChangeRow{Rel: "f.txt", Abs: target, Kind: filetree.GitChangeModified})
+	if !diffIsOpen(a) {
+		t.Fatalf("a scripted diff should open the diff view; top = %T", a.overlays.Top())
+	}
+	if body := strings.Join(diffOv(t, a).unified, "\n"); !strings.Contains(body, "+scripted") {
+		t.Fatalf("diff body should come from the script, got:\n%s", body)
+	}
+	a.closeAllModals()
+
+	fresh := filepath.Join(a.rootDir, "new.txt")
+	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+fresh, "", nil)
+	fake.Script("diff --no-index --unified=3 --src-prefix=a/ --dst-prefix=b/ -- "+os.DevNull+" new.txt", strings.Join([]string{
+		"diff --git a/new.txt b/new.txt",
+		"new file mode 100644",
+		"--- /dev/null",
+		"+++ b/new.txt",
+		"@@ -0,0 +1 @@",
+		"+brand new",
+		"",
+	}, "\n"), errors.New("exit status 1"))
+	a.activateGitChangeRow(gitChangeRow{Rel: "new.txt", Abs: fresh, Kind: filetree.GitChangeAdded})
+	if !diffIsOpen(a) {
+		t.Fatalf("an untracked row should open the scripted --no-index diff; top = %T", a.overlays.Top())
+	}
+	if body := strings.Join(diffOv(t, a).unified, "\n"); !strings.Contains(body, "+brand new") {
+		t.Fatalf("untracked diff body should come from the script, got:\n%s", body)
 	}
 }
 
@@ -433,7 +500,7 @@ func TestGitPanelClick_IgnoresChrome(t *testing.T) {
 	if pastRows-gitPanelListTop >= listH {
 		t.Fatalf("fixture: list window (%d rows) too short to click past the rows inside it", listH)
 	}
-	a.gitPanel.selected = 1
+	a.gitPanel.Select(1)
 	checks, msg := len(a.gitCommitChecks), a.statusMsg
 	for _, tc := range []struct {
 		name string
@@ -449,9 +516,9 @@ func TestGitPanelClick_IgnoresChrome(t *testing.T) {
 		if a.overlays.IsOpen() {
 			t.Fatalf("%s: click opened %T", tc.name, a.overlays.Top())
 		}
-		if !a.gitPanel.active || a.gitPanel.selected != 1 || a.gitPanel.scroll != 0 {
+		if !a.gitPanel.active || a.gitPanel.Sel() != 1 || a.gitPanel.Scroll() != 0 {
 			t.Fatalf("%s: panel state moved — active %v, selected %d, scroll %d",
-				tc.name, a.gitPanel.active, a.gitPanel.selected, a.gitPanel.scroll)
+				tc.name, a.gitPanel.active, a.gitPanel.Sel(), a.gitPanel.Scroll())
 		}
 		if len(a.gitCommitChecks) != checks {
 			t.Fatalf("%s: click touched the commit checkboxes", tc.name)
@@ -470,17 +537,17 @@ func TestScrollGitPanel_Clamps(t *testing.T) {
 	a.gitPanel.rows = make([]gitChangeRow, 100)
 	_, _, _, sh := a.sidebarRect()
 	a.scrollGitPanel(1000)
-	if want := 100 - (sh - gitPanelListTop); a.gitPanel.scroll != want {
-		t.Fatalf("scroll past end: got %d, want %d", a.gitPanel.scroll, want)
+	if want := 100 - (sh - gitPanelListTop); a.gitPanel.Scroll() != want {
+		t.Fatalf("scroll past end: got %d, want %d", a.gitPanel.Scroll(), want)
 	}
 	a.scrollGitPanel(-1000)
-	if a.gitPanel.scroll != 0 {
-		t.Fatalf("scroll past top: got %d, want 0", a.gitPanel.scroll)
+	if a.gitPanel.Scroll() != 0 {
+		t.Fatalf("scroll past top: got %d, want 0", a.gitPanel.Scroll())
 	}
 	a.gitPanel.rows = a.gitPanel.rows[:3]
 	a.scrollGitPanel(5)
-	if a.gitPanel.scroll != 0 {
-		t.Fatalf("short list should never scroll, got %d", a.gitPanel.scroll)
+	if a.gitPanel.Scroll() != 0 {
+		t.Fatalf("short list should never scroll, got %d", a.gitPanel.Scroll())
 	}
 }
 
@@ -689,8 +756,8 @@ func TestDiffWalk_ArrowsMoveBetweenFiles(t *testing.T) {
 	if !strings.Contains(diffOv(t, a).title, "modified.txt") {
 		t.Fatalf("up should walk back, title %q", diffOv(t, a).title)
 	}
-	if a.gitPanel.selected != 0 {
-		t.Fatalf("panel selection should track the walk, got %d", a.gitPanel.selected)
+	if a.gitPanel.Sel() != 0 {
+		t.Fatalf("panel selection should track the walk, got %d", a.gitPanel.Sel())
 	}
 	a.closeAllModals()
 	if a.diffPanelRow != -1 {
@@ -871,8 +938,8 @@ func TestGitPanelKeys_DownMovesSelection(t *testing.T) {
 	}
 
 	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
-	if a.gitPanel.selected != 1 {
-		t.Fatalf("down should select row 1, got %d", a.gitPanel.selected)
+	if a.gitPanel.Sel() != 1 {
+		t.Fatalf("down should select row 1, got %d", a.gitPanel.Sel())
 	}
 	if got := gitScreenRow(t, a, gitPanelListTop+1); !strings.HasPrefix(got, "›") {
 		t.Fatalf("caret should have moved to row 1, got %q", got)
@@ -882,13 +949,13 @@ func TestGitPanelKeys_DownMovesSelection(t *testing.T) {
 	}
 
 	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
-	if a.gitPanel.selected != 1 {
-		t.Fatalf("selection must clamp at the last row, got %d", a.gitPanel.selected)
+	if a.gitPanel.Sel() != 1 {
+		t.Fatalf("selection must clamp at the last row, got %d", a.gitPanel.Sel())
 	}
 	a.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, 0))
 	a.handleKey(tcell.NewEventKey(tcell.KeyUp, 0, 0))
-	if a.gitPanel.selected != 0 {
-		t.Fatalf("selection must clamp at the first row, got %d", a.gitPanel.selected)
+	if a.gitPanel.Sel() != 0 {
+		t.Fatalf("selection must clamp at the first row, got %d", a.gitPanel.Sel())
 	}
 }
 
@@ -1021,8 +1088,8 @@ func TestGitPanelKeys_EscReturnsToEditor(t *testing.T) {
 	if tab.Cursor.Line != 1 {
 		t.Fatalf("arrows should move the caret again, cursor line %d", tab.Cursor.Line)
 	}
-	if a.gitPanel.selected != 0 {
-		t.Fatalf("the panel must not react after esc, selection %d", a.gitPanel.selected)
+	if a.gitPanel.Sel() != 0 {
+		t.Fatalf("the panel must not react after esc, selection %d", a.gitPanel.Sel())
 	}
 }
 
@@ -1035,8 +1102,8 @@ func TestGitPanelKeys_IgnoredWhileOverlayOpen(t *testing.T) {
 	a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
 	a.handleKey(tcell.NewEventKey(tcell.KeyRune, ' ', 0))
 	a.handleKey(tcell.NewEventKey(tcell.KeyTab, 0, 0))
-	if a.gitPanel.selected != 0 {
-		t.Fatalf("selection moved under an open overlay, got %d", a.gitPanel.selected)
+	if a.gitPanel.Sel() != 0 {
+		t.Fatalf("selection moved under an open overlay, got %d", a.gitPanel.Sel())
 	}
 	if a.gitPanel.onBtns {
 		t.Fatal("focus moved to the buttons under an open overlay")
@@ -1063,7 +1130,7 @@ func TestGitPanelKeys_NoCtrlBindings(t *testing.T) {
 			t.Fatalf("Ctrl key %v must not be bound in the Git panel", k)
 		}
 	}
-	if a.gitPanel.selected != 0 || a.gitPanel.onBtns || len(a.gitCommitChecks) != 0 {
+	if a.gitPanel.Sel() != 0 || a.gitPanel.onBtns || len(a.gitCommitChecks) != 0 {
 		t.Fatal("Ctrl keys must leave the panel completely untouched")
 	}
 }
@@ -1245,8 +1312,7 @@ func TestGitPanelScrollbar_HiddenWhenListFits(t *testing.T) {
 		t.Fatalf("a 4-row list must draw no bar, got %q", col)
 	}
 	_, _, sw, _ := a.sidebarRect()
-	listH, _ := a.gitPanelBody()
-	if _, ok := a.gitPanelBar(sw, listH); ok {
+	if _, ok := a.gitPanelBar(sw); ok {
 		t.Fatal("gitPanelBar should agree with what was painted")
 	}
 }
@@ -1281,7 +1347,7 @@ func TestGitPanelScrollbar_ThumbTracksScroll(t *testing.T) {
 	if !strings.HasSuffix(bottom, string(scrollbar.Thumb)) {
 		t.Fatalf("at the end the thumb must finish the track, got %q", bottom)
 	}
-	wantStart, wantLen, ok := scrollbar.Geom(len(a.gitPanel.rows), listH, a.gitPanel.scroll)
+	wantStart, wantLen, ok := scrollbar.Geom(len(a.gitPanel.rows), listH, a.gitPanel.Scroll())
 	if !ok {
 		t.Fatal("fixture should overflow")
 	}
@@ -1338,7 +1404,7 @@ func TestGitPanelScrollbar_ClickScrollsAndLeavesTheRestAlone(t *testing.T) {
 	a.draw()
 	_, _, sw, _ := a.sidebarRect()
 	listH, _ := a.gitPanelBody()
-	barX, ok := a.gitPanelBar(sw, listH)
+	barX, ok := a.gitPanelBar(sw)
 	if !ok {
 		t.Fatal("fixture should draw a bar")
 	}
@@ -1350,18 +1416,18 @@ func TestGitPanelScrollbar_ClickScrollsAndLeavesTheRestAlone(t *testing.T) {
 	// tree-bar check before sidebarClick ever sees it.
 	a.handleMouse(tcell.NewEventMouse(barX, y, tcell.Button1, 0))
 	a.handleMouse(tcell.NewEventMouse(barX, y, tcell.ButtonNone, 0))
-	if want := len(a.gitPanel.rows) - listH; a.gitPanel.scroll != want {
-		t.Fatalf("bar click: scroll %d, want %d", a.gitPanel.scroll, want)
+	if want := len(a.gitPanel.rows) - listH; a.gitPanel.Scroll() != want {
+		t.Fatalf("bar click: scroll %d, want %d", a.gitPanel.Scroll(), want)
 	}
 	if a.overlays.IsOpen() {
 		t.Fatal("a bar click must not open the diff")
 	}
-	if a.gitPanel.selected != 0 {
-		t.Fatalf("a bar click must not move the selection, got %d", a.gitPanel.selected)
+	if a.gitPanel.Sel() != 0 {
+		t.Fatalf("a bar click must not move the selection, got %d", a.gitPanel.Sel())
 	}
 
 	// The checkbox column at the same y: stages, opens nothing.
-	idx := a.gitPanel.scroll + y - gitPanelListTop
+	idx := a.gitPanel.Scroll() + y - gitPanelListTop
 	abs := a.gitPanel.rows[idx].Abs
 	a.gitPanelClick(1, y)
 	if a.commitCheckOn(abs) {
@@ -1373,8 +1439,8 @@ func TestGitPanelScrollbar_ClickScrollsAndLeavesTheRestAlone(t *testing.T) {
 
 	// The label between them: still activates the row.
 	a.gitPanelClick(6, y)
-	if a.gitPanel.selected != idx {
-		t.Fatalf("a row click should select row %d, got %d", idx, a.gitPanel.selected)
+	if a.gitPanel.Sel() != idx {
+		t.Fatalf("a row click should select row %d, got %d", idx, a.gitPanel.Sel())
 	}
 
 	// The button row and the branch line are above the bar's span.
@@ -1424,8 +1490,7 @@ func TestGitPanelScrollbar_ThumbBrightensWhileDragging(t *testing.T) {
 	a := gitPanelApp(t, 80)
 	a.draw()
 	_, sy, sw, _ := a.sidebarRect()
-	listH, _ := a.gitPanelBody()
-	barX, ok := a.gitPanelBar(sw, listH)
+	barX, ok := a.gitPanelBar(sw)
 	if !ok {
 		t.Fatal("fixture should draw a bar")
 	}
