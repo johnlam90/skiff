@@ -62,6 +62,9 @@ var postRedesignMenuActions = []string{
 	// The caret-follows-scroll preference (both label forms, same
 	// default-independence reasoning as the gitignore pair).
 	"Make caret follow scroll", "Stop caret following scroll",
+	// The markdown preview toggle (both label forms; the row itself is
+	// visibility-gated on a markdown tab being active).
+	"Preview Markdown", "Edit Markdown",
 }
 
 // menuCatalog flattens every built-in row the ≡ menu can reach — the top

@@ -401,7 +401,9 @@ func (a *App) reconcileTab(tab *editor.Tab, p tabProbe) {
 		tab.Mtime = p.mtime
 		return
 	}
-	if err := tab.ReloadKeepHistory(); err != nil {
+	if err := tab.ReloadKeepHistory(); err == nil {
+		a.invalidateMdPreview(tab)
+	} else {
 		a.flash(fmt.Sprintf("%s reload failed: %v", filepath.Base(tab.Path), err))
 		return
 	}

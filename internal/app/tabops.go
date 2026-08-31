@@ -158,6 +158,7 @@ func (a *App) requestCloseTab(tab *editor.Tab) {
 // the reopen stack first so Esc-o can bring it back; a tab that is no
 // longer in the list (already closed by another path) is a no-op.
 func (a *App) closeTab(tab *editor.Tab) {
+	delete(a.mdPreview, tab)
 	if tab == nil || a.tabs.IndexOf(tab) < 0 {
 		return
 	}

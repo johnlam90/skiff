@@ -236,6 +236,11 @@ type App struct {
 	// rather than a fight.
 	sidebarNarrow bool
 
+	// mdPreview holds each tab's active markdown preview (nil map
+	// until the first toggle). Ephemeral by design: never persisted,
+	// dropped on toggle-off and on tab close. See mdpreview.go.
+	mdPreview map[*editor.Tab]*mdPreviewState
+
 	// scrollCaret is the "caret follows scroll" preference: when on, a
 	// viewport-only scroll (wheel, scrollbar) that leaves the caret off
 	// screen clamps it to the nearest visible line. Off by default —

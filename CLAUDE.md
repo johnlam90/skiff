@@ -73,6 +73,9 @@ internal/app/strip.go         The strip interface + App's one strip slot: what a
                               docked bar reserves, routes, paints and tears down
 internal/app/projfind.go      Project-wide content search panel (Esc-F)
 internal/app/preview.go       Shared file-open path + preview-tab rules
+internal/app/mdpreview.go     Markdown preview mode: per-tab rendered
+                              read-only view, ≡ View toggle (visible
+                              only for .md tabs), own scroll state
 internal/app/fileops.go       App side of file ops: the prompts/confirms, the
                               unsaved-changes gate, and applyChangeset — the ONE
                               post-op tail (repoint/close/reopen tabs, tree,
@@ -129,6 +132,9 @@ internal/diff/                The one model of a unified diff: Parse (git
                               No tcell, no theme, no git — the parse and
                               the pairing live once so the gutter and the
                               diff view cannot disagree
+internal/mdrender/            Markdown → pre-wrapped theme-styled lines
+                              (goldmark AST walk; fenced code through
+                              editor.Highlight so Chroma colors match)
 internal/scrollbar/           The one definition of a scrollbar: thumb
                               geometry, its click inverse, and the Track/
                               Thumb glyphs. No tcell, no theme — both the

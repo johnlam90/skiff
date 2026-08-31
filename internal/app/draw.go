@@ -70,7 +70,11 @@ func (a *App) draw() {
 	if tab := a.activeTabPtr(); tab != nil {
 		ex, ey, ew, eh := a.editorRect()
 		tab.ScrollbarActive = a.dragMode == dragScrollbar
-		tab.Render(a.screen, a.theme, ex, ey, ew, eh)
+		if st := a.mdPreviewFor(tab); st != nil {
+			a.drawMdPreview(tab, st, ex, ey, ew, eh)
+		} else {
+			tab.Render(a.screen, a.theme, ex, ey, ew, eh)
+		}
 	} else {
 		a.drawEmptyEditor()
 	}

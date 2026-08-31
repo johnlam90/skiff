@@ -190,6 +190,10 @@ func viewMenuGroup() []menuItemDef {
 		// set-and-forget preference, reachable from the menu per the
 		// CLAUDE.md rule.
 		{action: (*App).menuToggleScrollCaret, enabled: alwaysTrue, labelFor: (*App).scrollCaretToggleLabel},
+		// Visible only while a markdown tab is active — the row IS the
+		// "this file can be previewed" affordance, per the menu's
+		// hide-don't-dim rule.
+		{action: (*App).menuTogglePreviewMarkdown, enabled: alwaysTrue, labelFor: (*App).previewMarkdownLabel, visible: (*App).hasMarkdownTab},
 		// No leader binding: the tree's ignored-file filter is a
 		// once-in-a-while decision, not a gesture worth spending one of
 		// the 26 leader runes on. Reachability lives in the menu, which
