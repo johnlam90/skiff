@@ -669,7 +669,9 @@ func (a *App) handleFormatDone(r formatResult, err error) {
 			a.flash(fmt.Sprintf("%s ran — kept your edits (file on disk was reformatted)", r.label))
 			return
 		}
-		if err := tab.ReloadKeepHistory(); err != nil {
+		if err := tab.ReloadKeepHistory(); err == nil {
+			a.invalidateMdPreview(tab)
+		} else {
 			a.flash(fmt.Sprintf("%s ran but reload failed: %v", r.label, err))
 			return
 		}

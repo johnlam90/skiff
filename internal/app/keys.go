@@ -135,6 +135,14 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 	if tab == nil {
 		return
 	}
+	// A markdown preview owns every key while it is up: arrows page
+	// the rendered view, everything else is read-only. Esc never gets
+	// here (the leader handling above claims it), so the menu — and the
+	// toggle back to editing — stays reachable.
+	if st := a.mdPreviewFor(tab); st != nil {
+		a.handleMdPreviewKey(st, ev)
+		return
+	}
 	// Image-preview tabs are read-only — no cursor, no editing, no
 	// caret movement. Drop every key here so the user can mash arrow
 	// keys without anything mysterious happening behind the splash.

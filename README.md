@@ -125,6 +125,14 @@ The goals, in order:
   preview of each session says so once — "Preview tab — edit it or
   click again to keep it open" — because a tab that replaces itself
   silently reads as tabs going missing.
+- **Markdown preview** — with a `.md` file in front, `≡` → **Preview
+  Markdown** swaps the editor for a rendered, read-only view: headings
+  in the theme's accent, real bullets and quote gutters, links with
+  their URLs, and fenced code blocks through the same syntax
+  highlighter the editor uses. Scroll it with the wheel or arrows;
+  `≡` → **Edit Markdown** puts your caret back exactly where it was.
+  The menu row only exists while a markdown tab is active — no mode to
+  remember, no configuration.
 - **Scrollbars you can actually see** — long files get a clickable,
   draggable scrollbar on the editor's right edge: a solid block thumb
   on a shaded track, brightening while you drag it, with the file's git

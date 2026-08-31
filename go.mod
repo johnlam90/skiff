@@ -7,6 +7,7 @@ require (
 	github.com/gdamore/tcell/v2 v2.13.9
 	github.com/rivo/uniseg v0.4.7
 	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
+	github.com/yuin/goldmark v1.8.5
 )
 
 require (

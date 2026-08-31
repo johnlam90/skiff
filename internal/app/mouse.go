@@ -230,6 +230,12 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 			// arming unconditionally let the next motion event drag out
 			// a selection the user never started — and the release copy
 			// it to the clipboard.
+			if t := a.activeTabPtr(); t != nil {
+				if st := a.mdPreviewFor(t); st != nil {
+					a.mdPreviewPress(st, x, y)
+					return
+				}
+			}
 			if a.editorPress(x, y) {
 				a.dragMode = dragEditor
 			}
@@ -264,6 +270,10 @@ func (a *App) scrollAt(x, y, delta int) {
 	}
 	if y > 0 && y < a.height-1 {
 		if t := a.activeTabPtr(); t != nil {
+			if st := a.mdPreviewFor(t); st != nil {
+				st.scrollBy(delta)
+				return
+			}
 			t.Scroll(delta)
 			a.followCaret(t)
 		}
