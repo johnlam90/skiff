@@ -1142,3 +1142,93 @@ func TestFlashStrip_AndFindBarShareTheFloorWithoutStarvingTheEditor(t *testing.T
 		t.Error("the flash strip is missing")
 	}
 }
+
+// TestStatusBar_BranchChipWithIcons pins the powerline-style branch
+// chip: with Nerd Font glyphs on, the git segment renders as a chip —
+// branch glyph plus name on the theme's Selection background, joined to
+// the bar by the  transition whose foreground IS the chip background.
+// The chip and its arrow both stay clickable git-panel targets.
+func TestStatusBar_BranchChipWithIcons(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.gitSnap.Branch = "main"
+	a.tree.IconsEnabled = true
+
+	_, _, sw, _ := a.statusRect()
+	segs := a.statusRightSegments(sw)
+	if len(segs) < 2 {
+		t.Fatalf("expected chip + arrow segments, got %d", len(segs))
+	}
+	chip, arrow := segs[0], segs[1]
+	if !strings.Contains(chip.text, "") || !strings.Contains(chip.text, "main") {
+		t.Fatalf("chip text = %q, want branch glyph + name", chip.text)
+	}
+	if chip.bg != a.theme.Selection {
+		t.Fatalf("chip bg = %v, want Selection", chip.bg)
+	}
+	if arrow.text != "" || arrow.fg != a.theme.Selection {
+		t.Fatalf("arrow = %+v, want \\ue0b2 with chip-colored fg", arrow)
+	}
+	if chip.click == nil || arrow.click == nil {
+		t.Fatal("chip and arrow must stay clickable")
+	}
+
+	// The draw pass paints the chip cells on the Selection background.
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+	bar := screenLine(scr, a.height-1)
+	x := strings.Index(bar, "main")
+	if x < 0 {
+		t.Fatalf("branch name not on the bar: %q", bar)
+	}
+	cells, w, _ := scr.GetContents()
+	if _, bg, _ := cells[(a.height-1)*w+x].Style.Decompose(); bg != a.theme.Selection {
+		t.Fatalf("branch cell bg = %v, want Selection", bg)
+	}
+}
+
+// TestStatusBar_BranchPlainWithoutIcons pins the fallback: icons off
+// keeps today's plain-text segment — no private-use glyphs that would
+// render as boxes on a non-Nerd-Font terminal.
+func TestStatusBar_BranchPlainWithoutIcons(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.gitSnap.Branch = "main"
+	a.tree.IconsEnabled = false
+
+	_, _, sw, _ := a.statusRect()
+	for _, seg := range a.statusRightSegments(sw) {
+		if strings.ContainsAny(seg.text, "") {
+			t.Fatalf("powerline glyphs leaked into icons-off mode: %q", seg.text)
+		}
+	}
+	segs := a.statusRightSegments(sw)
+	if len(segs) == 0 || !strings.Contains(segs[0].text, "main") {
+		t.Fatalf("plain branch segment missing: %+v", segs)
+	}
+}
+
+// TestStatusBarClick_BranchChipOpensGitPanel pins the chip's click:
+// same segment-derived geometry, same git-panel toggle as before the
+// restyle.
+func TestStatusBarClick_BranchChipOpensGitPanel(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.gitSnap.Branch = "main"
+	a.tree.IconsEnabled = true
+
+	sx, _, sw, _ := a.statusRect()
+	rightX := sx + sw
+	chipX := -1
+	for _, seg := range a.statusRightSegments(sw) {
+		rightX -= runeLen(seg.text)
+		if strings.Contains(seg.text, "main") {
+			chipX = rightX
+		}
+	}
+	if chipX < 0 {
+		t.Fatal("chip segment not found")
+	}
+	a.statusBarClick(chipX)
+	if !a.gitPanel.active {
+		t.Fatal("clicking the branch chip should open the git panel")
+	}
+}
