@@ -729,7 +729,15 @@ func TestDrawMenu_RightAlignsShortcuts(t *testing.T) {
 	if !ok {
 		t.Fatal("Save row missing with a file tab open")
 	}
-	shortcutX := mx + mw - 2 - runeLen(save.shortcut)
+	// The bar's reserve shifts every shortcut one cell left while the
+	// menu scrolls — alignment is still "right", just against the gap
+	// cell the bar demands. Compute the expectation the way the draw
+	// pass does so this pin survives both states.
+	reserve := 0
+	if a.menuBar().Drawn() {
+		reserve = 1
+	}
+	shortcutX := mx + mw - 2 - reserve - runeLen(save.shortcut)
 	line := screenLine(a.screen.(tcell.SimulationScreen), my+save.relY)
 	lineRunes := []rune(line)
 	if got := string(lineRunes[shortcutX : shortcutX+runeLen(save.shortcut)]); got != save.shortcut {
@@ -1338,5 +1346,67 @@ func TestMenuBarPress_ScrollsInsteadOfRunningTheRowBehindIt(t *testing.T) {
 	a.updateMenuHover(barX, rowY)
 	if a.hoveredMenuRow != before {
 		t.Fatalf("hovering the bar moved the highlight: %d → %d", before, a.hoveredMenuRow)
+	}
+}
+
+// TestDrawMenu_ScrollbarNeverTouchesShortcuts pins the reserve rule the
+// editor and tree already follow: when the menu scrolls and its bar
+// claims the frame's right padding column, every row's shortcut shifts
+// left so a blank gap cell always separates text from the bar — the
+// bar must never sit flush against (or over) a hint. When the menu
+// fits, no column is wasted: shortcuts keep their full-width position.
+func TestDrawMenu_ScrollbarNeverTouchesShortcuts(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.SetSize(72, 20) // short: the menu must scroll and draw its bar
+	a.width, a.height = scr.Size()
+	a.openMenu()
+	if !a.menuBar().Drawn() {
+		t.Fatal("fixture: menu should overflow a 20-row terminal")
+	}
+	a.draw()
+	a.screen.Show()
+
+	cells, w, h := scr.GetContents()
+	_ = h
+	bars := 0
+	for y := 0; y < a.height; y++ {
+		for x := 1; x < a.width; x++ {
+			r := cells[y*w+x].Runes
+			if len(r) == 0 || (r[0] != '█' && r[0] != '░') {
+				continue
+			}
+			bars++
+			left := cells[y*w+x-1].Runes
+			// Divider rules legitimately run under the bar column;
+			// only TEXT flush against the bar is the bug.
+			if len(left) > 0 && left[0] != ' ' && left[0] != '─' {
+				t.Fatalf("bar glyph at (%d,%d) flush against %q — no gap cell", x, y, string(left[0]))
+			}
+		}
+	}
+	if bars == 0 {
+		t.Fatal("fixture: no bar glyphs drawn")
+	}
+
+	// Tall terminal: menu fits, bar absent, shortcuts reclaim the column.
+	scr.SetSize(90, 45)
+	a.width, a.height = scr.Size()
+	if a.menuBar().Drawn() {
+		t.Fatal("fixture: menu should fit a 45-row terminal")
+	}
+	a.draw()
+	a.screen.Show()
+	cells, w, _ = scr.GetContents()
+	mx, my, mw, mh := a.menuModalRect()
+	foundEdge := false
+	for y := my; y < my+mh; y++ {
+		r := cells[y*w+mx+mw-3].Runes
+		if len(r) > 0 && r[0] != ' ' && r[0] != '─' {
+			foundEdge = true
+		}
+	}
+	if !foundEdge {
+		t.Fatal("with no bar, shortcuts should extend to the full-width column")
 	}
 }

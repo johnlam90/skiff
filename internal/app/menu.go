@@ -490,7 +490,11 @@ func (a *App) revealMenuRowLabel(idx int) {
 	it := items[idx]
 	label := a.menuLabel(it)
 	_, _, mw, _ := a.menuModalRect()
-	if runeLen(label) <= menuLabelBudget(mw, it) {
+	reserve := 0
+	if a.menuBar().Drawn() {
+		reserve = 1
+	}
+	if runeLen(label) <= menuLabelBudget(mw-reserve, it) {
 		return
 	}
 	a.flash(label)
@@ -602,6 +606,16 @@ func (a *App) drawMenu() {
 		drawAt(a.screen, verX, my+mh-1, verLabel, mutedStyle)
 	}
 
+	// barReserve is one extra cell every row surrenders while the
+	// scrollbar owns the frame's right padding column, so a blank gap
+	// always separates text from the bar — the reserve-before-drawing
+	// rule the editor and tree already follow. Zero when the menu fits:
+	// no bar, no wasted column.
+	barReserve := 0
+	if a.menuBar().Drawn() {
+		barReserve = 1
+	}
+
 	// Action rows. Hovered (enabled) rows get a tinted full-width
 	// background so they read like a hovered button in a GUI menu.
 	hoverBg := a.theme.Selection
@@ -639,17 +653,23 @@ func (a *App) drawMenu() {
 			chevStyle = mutedStyle
 			shortcutStyle = mutedStyle
 		}
+		// When the bar owns the right padding column, every row gives
+		// up one more cell so a blank gap always separates text from
+		// the bar — the same reserve-before-drawing rule the editor
+		// and tree scrollbars follow. Rows and the bar agreeing on the
+		// reserve is what keeps a shortcut's last glyph from sitting
+		// flush under the thumb.
 		// Every row is clipped to menuLabelBudget, shortcut or not.
 		// Without a shortcut there used to be no budget at all and
 		// drawAt does no bounds checking, so a long custom-action label
 		// painted straight through the right border and onto the editor
 		// underneath. trimRunes leaves an ellipsis; hovering or selecting
 		// the row flashes the whole thing (revealMenuRowLabel).
-		label := trimRunes(a.menuLabel(item), menuLabelBudget(mw, item))
+		label := trimRunes(a.menuLabel(item), menuLabelBudget(mw-barReserve, item))
 		drawAt(a.screen, mx+2, cy, "▸", chevStyle)
 		drawAt(a.screen, mx+4, cy, label, labelStyle)
 		if item.shortcut != "" {
-			drawAt(a.screen, mx+mw-2-runeLen(item.shortcut), cy, item.shortcut, shortcutStyle)
+			drawAt(a.screen, mx+mw-2-barReserve-runeLen(item.shortcut), cy, item.shortcut, shortcutStyle)
 		}
 	}
 	if len(items) == 0 {
