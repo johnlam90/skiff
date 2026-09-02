@@ -556,6 +556,9 @@ func (a *App) drawStatusBar() {
 			st = style.Foreground(a.theme.Error).
 				Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar | a.theme.Attrs.Error)
 		}
+		if seg.attrs != 0 {
+			st = st.Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar | seg.attrs)
+		}
 		drawAt(a.screen, rightX, sy, seg.text, st)
 	}
 
@@ -568,6 +571,14 @@ type statusRightSegment struct {
 	// warn paints the piece in Error instead of the bar's own
 	// foreground: the disk-conflict marker is a warning, not a readout.
 	warn bool
+	// attrs is OR'd into the bar's attribute mask — how the markdown
+	// chip renders dim at rest and reversed while active without the
+	// segment list growing a color field per idea.
+	attrs tcell.AttrMask
+	// click, when non-nil, is the action a left press on this
+	// segment's cells fires. statusBarClick derives the hit ranges
+	// from this same list, so the paint and the target can't drift.
+	click func(*App)
 }
 
 // statusRightSegments returns the right-hand pieces that fit in a status
@@ -593,7 +604,15 @@ func (a *App) statusRightSegments(sw int) []statusRightSegment {
 		segs = append(segs, statusRightSegment{text: text, warn: warn})
 		used += w
 	}
-	add(a.statusGitSegment(), false)
+	addSeg := func(seg statusRightSegment) {
+		w := runeLen(seg.text)
+		if w == 0 || used+w >= sw {
+			return
+		}
+		segs = append(segs, seg)
+		used += w
+	}
+	addSeg(statusRightSegment{text: a.statusGitSegment(), click: (*App).toggleGitPanel})
 	// Pending-gesture tag: while an Esc is armed (leader or double-tap
 	// window still open) show "Esc…" beside the git segment — vim's
 	// showcmd idea sized for a status bar. The editor's only modifier
@@ -609,6 +628,20 @@ func (a *App) statusRightSegments(sw int) []statusRightSegment {
 	// stays up until the tab is saved, reloaded or closed.
 	if a.tabDiskConflict(a.activeTabPtr()) {
 		add(statusConflictTag, true)
+	}
+	// Markdown preview chip: the subtle standing invitation the ≡ row
+	// alone can't provide. Dim "Preview" at rest, reversed "Edit"
+	// while the rendered view is up — the active mode is loud, the
+	// invitation is quiet. Leftmost of the group so the stable git
+	// segment never jumps as tabs switch.
+	if tab := a.activeMarkdownTab(); tab != nil {
+		chip := statusRightSegment{text: " Preview ", attrs: tcell.AttrDim,
+			click: (*App).menuTogglePreviewMarkdown}
+		if a.mdPreview[tab] != nil {
+			chip.text = " Edit "
+			chip.attrs = tcell.AttrReverse
+		}
+		addSeg(chip)
 	}
 	return segs
 }

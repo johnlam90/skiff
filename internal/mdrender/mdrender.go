@@ -27,6 +27,8 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/extension"
+	extast "github.com/yuin/goldmark/extension/ast"
 	gmtext "github.com/yuin/goldmark/text"
 
 	"github.com/johnlam90/skiff/internal/editor"
@@ -50,7 +52,8 @@ func Render(src []byte, width int, th theme.Theme) ([]string, [][]tcell.Style) {
 	if width < 4 {
 		width = 4
 	}
-	doc := goldmark.New().Parser().Parse(gmtext.NewReader(src))
+	doc := goldmark.New(goldmark.WithExtensions(extension.GFM)).
+		Parser().Parse(gmtext.NewReader(src))
 	r := &renderer{src: src, th: th, width: width}
 	for c := doc.FirstChild(); c != nil; c = c.NextSibling() {
 		r.block(c, "", r.base())
@@ -127,6 +130,8 @@ func (r *renderer) block(n ast.Node, hang string, st tcell.Style) {
 		}
 	case *ast.FencedCodeBlock:
 		r.codeBlock(b)
+	case *extast.Table:
+		r.table(b, st)
 	case *ast.CodeBlock:
 		r.codeLines(rawLines(r.src, n), nil)
 	case *ast.ThematicBreak:
@@ -211,6 +216,14 @@ func (r *renderer) inlines(n ast.Node, st tcell.Style) {
 		case *ast.Image:
 			alt := string(nodeText(r.src, in))
 			r.append("[image: "+alt+"]", r.dim())
+		case *extast.Strikethrough:
+			r.inlines(in, st.StrikeThrough(true))
+		case *extast.TaskCheckBox:
+			box := "☐ "
+			if in.IsChecked {
+				box = "☑ "
+			}
+			r.append(box, st.Foreground(r.th.AccentSoft))
 		case *ast.RawHTML:
 			// Inline HTML is shown dimmed rather than dropped.
 			for i := 0; i < in.Segments.Len(); i++ {
@@ -259,6 +272,150 @@ func (r *renderer) codeLines(lines []string, grid [][]tcell.Style) {
 		}
 		r.flush()
 	}
+}
+
+// styledCell is one captured table cell: its runes with their styles,
+// plus the cell's cluster width, measured once.
+type styledCell struct {
+	runes  []rune
+	styles []tcell.Style
+	width  int
+}
+
+// captureInlines renders a node's inline children into a detached
+// rune/style pair instead of the flowing document — how table cells are
+// measured before the column layout decides where they land. The
+// renderer's accumulation state is swapped out and restored around the
+// walk; the huge temporary width means nothing flushes mid-capture.
+func (r *renderer) captureInlines(n ast.Node, st tcell.Style) styledCell {
+	savedCur, savedSt, savedW := r.cur, r.curSt, r.curW
+	savedWidth, savedIndent, savedIndentSt := r.width, r.indent, r.indentSt
+	savedLines, savedStyles := r.lines, r.styles
+	r.cur, r.curSt, r.curW = nil, nil, 0
+	r.width, r.indent, r.indentSt = 1<<30, nil, nil
+	r.inlines(n, st)
+	cell := styledCell{runes: r.cur, styles: r.curSt, width: r.curW}
+	r.cur, r.curSt, r.curW = savedCur, savedSt, savedW
+	r.width, r.indent, r.indentSt = savedWidth, savedIndent, savedIndentSt
+	r.lines, r.styles = savedLines, savedStyles
+	return cell
+}
+
+// table lays a GFM table out as aligned columns: header bold, a rule
+// under it, one line per row, columns separated by a dim │. Columns
+// size to their widest cell; when the sum overflows the budget the
+// widest columns shrink first and their cells truncate with an
+// ellipsis — a readable narrow table beats a correct overflowing one.
+func (r *renderer) table(t *extast.Table, st tcell.Style) {
+	r.flush()
+	var rows [][]styledCell
+	header := -1
+	for tr := t.FirstChild(); tr != nil; tr = tr.NextSibling() {
+		var row []styledCell
+		for c := tr.FirstChild(); c != nil; c = c.NextSibling() {
+			cst := st
+			if _, ok := tr.(*extast.TableHeader); ok {
+				cst = st.Bold(true)
+			}
+			row = append(row, r.captureInlines(c, cst))
+		}
+		if _, ok := tr.(*extast.TableHeader); ok {
+			header = len(rows)
+		}
+		rows = append(rows, row)
+	}
+	if len(rows) == 0 {
+		return
+	}
+	cols := 0
+	for _, row := range rows {
+		cols = max(cols, len(row))
+	}
+	widths := make([]int, cols)
+	for _, row := range rows {
+		for i, c := range row {
+			widths[i] = max(widths[i], c.width)
+		}
+	}
+	// Shrink the widest column one cell at a time until the row fits;
+	// the floor keeps every column identifiable.
+	const sepW, floor = 3, 5
+	total := func() int {
+		s := (cols - 1) * sepW
+		for _, w := range widths {
+			s += w
+		}
+		return s
+	}
+	for total() > r.width {
+		wi, ww := -1, floor
+		for i, w := range widths {
+			if w > ww {
+				wi, ww = i, w
+			}
+		}
+		if wi < 0 {
+			break // every column at the floor: emit anyway, clipped by draw
+		}
+		widths[wi]--
+	}
+	sepSt := r.dim()
+	for ri, row := range rows {
+		var runes []rune
+		var sts []tcell.Style
+		for i := 0; i < cols; i++ {
+			var c styledCell
+			if i < len(row) {
+				c = row[i]
+			}
+			cr, cs := fitCell(c, widths[i], st)
+			runes = append(runes, cr...)
+			sts = append(sts, cs...)
+			if i < cols-1 {
+				for _, sr := range " │ " {
+					runes = append(runes, sr)
+					sts = append(sts, sepSt)
+				}
+			}
+		}
+		r.lines = append(r.lines, string(runes))
+		r.styles = append(r.styles, sts)
+		if ri == header {
+			r.emitLine(strings.Repeat("─", min(total(), r.width)), r.dim())
+		}
+	}
+}
+
+// fitCell truncates or pads one captured cell to exactly w cells,
+// ellipsising a cut so a shrunken column still says it lost something.
+func fitCell(c styledCell, w int, pad tcell.Style) ([]rune, []tcell.Style) {
+	var runes []rune
+	var sts []tcell.Style
+	used := 0
+	if c.width <= w {
+		runes = append(runes, c.runes...)
+		sts = append(sts, c.styles...)
+		used = c.width
+	} else {
+		for i, ru := range c.runes {
+			rw := uniseg.StringWidth(string(ru))
+			if used+rw > w-1 {
+				break
+			}
+			runes = append(runes, ru)
+			sts = append(sts, c.styles[i])
+			used += rw
+		}
+		runes = append(runes, '…')
+		sts = append(sts, pad.Foreground(tcell.ColorDefault).Dim(true))
+		used++
+	}
+	for used < w {
+		runes = append(runes, ' ')
+		sts = append(sts, pad)
+		used++
+	}
+	return runes, sts
 }
 
 // blank emits one empty separator line unless the document is already

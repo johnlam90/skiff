@@ -209,3 +209,71 @@ func findPreviewLine(a *App, tab *editor.Tab, sub string) int {
 	}
 	return -1
 }
+
+// TestStatusBar_PreviewChip pins the subtle affordance: with a markdown
+// tab in front the status bar shows a dim "Preview" chip, flipping to
+// "Edit" while the preview is up — and no chip at all for other files.
+func TestStatusBar_PreviewChip(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	seedMarkdownTab(t, a, "notes.md", "# T\n")
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+	if !strings.Contains(screenLine(scr, a.height-1), "Preview") {
+		t.Fatalf("status bar missing the Preview chip: %q", screenLine(scr, a.height-1))
+	}
+
+	a.menuTogglePreviewMarkdown()
+	a.statusMsg = "" // the toggle's own flash also names the modes
+	a.draw()
+	scr.Show()
+	// Judge only the right-hand group — the left side is the flash/path
+	// text, which legitimately mentions the mode names.
+	bar := screenLine(scr, a.height-1)
+	right := bar[len(bar)-20:]
+	if !strings.Contains(right, "Edit") || strings.Contains(right, "Preview") {
+		t.Fatalf("chip should read Edit while previewing: %q", right)
+	}
+
+	goPath := filepath.Join(a.rootDir, "x.go")
+	if err := os.WriteFile(goPath, []byte("package x\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	openTabAtPath(t, a, goPath)
+	a.draw()
+	scr.Show()
+	bar = screenLine(scr, a.height-1)
+	if strings.Contains(bar, "Preview") || strings.Contains(bar, "Edit") {
+		t.Fatalf("chip must vanish for non-markdown tabs: %q", bar)
+	}
+}
+
+// TestStatusBarClick_TogglesPreview pins the chip's click target using
+// the same segment geometry the draw pass uses — the whole point of
+// deriving both from statusRightSegments is that they cannot disagree.
+func TestStatusBarClick_TogglesPreview(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "# T\n")
+
+	chipX := func() int {
+		sx, _, sw, _ := a.statusRect()
+		rightX := sx + sw
+		for _, seg := range a.statusRightSegments(sw) {
+			rightX -= runeLen(seg.text)
+			if strings.Contains(seg.text, "Preview") || strings.Contains(seg.text, "Edit") {
+				return rightX
+			}
+		}
+		t.Fatal("chip segment not in statusRightSegments")
+		return -1
+	}
+
+	a.statusBarClick(chipX())
+	if a.mdPreview[tab] == nil {
+		t.Fatal("clicking the chip should enable the preview")
+	}
+	a.statusBarClick(chipX())
+	if a.mdPreview[tab] != nil {
+		t.Fatal("clicking the Edit chip should disable the preview")
+	}
+}
