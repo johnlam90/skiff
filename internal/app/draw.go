@@ -559,6 +559,12 @@ func (a *App) drawStatusBar() {
 		if seg.attrs != 0 {
 			st = st.Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar | seg.attrs)
 		}
+		if seg.fg != 0 {
+			st = st.Foreground(seg.fg)
+		}
+		if seg.bg != 0 {
+			st = st.Background(seg.bg)
+		}
 		drawAt(a.screen, rightX, sy, seg.text, st)
 	}
 
@@ -579,6 +585,11 @@ type statusRightSegment struct {
 	// segment's cells fires. statusBarClick derives the hit ranges
 	// from this same list, so the paint and the target can't drift.
 	click func(*App)
+	// fg/bg override the bar's own colors when non-zero — how the
+	// powerline branch chip gets its block background and how its
+	// transition arrow paints the chip color over the bar. The zero
+	// value inherits, so ordinary segments never think about them.
+	fg, bg tcell.Color
 }
 
 // statusRightSegments returns the right-hand pieces that fit in a status
@@ -612,7 +623,22 @@ func (a *App) statusRightSegments(sw int) []statusRightSegment {
 		segs = append(segs, seg)
 		used += w
 	}
-	addSeg(statusRightSegment{text: a.statusGitSegment(), click: (*App).toggleGitPanel})
+	// The git segment: a powerline chip when Nerd Font glyphs are on
+	// (branch glyph + name on the Selection block, joined to the bar by
+	// the  transition whose fg IS the chip background), today's
+	// plain text otherwise — private-use glyphs on a non-Nerd-Font
+	// terminal would render as boxes. Text on Selection is the one
+	// fg/bg pairing every palette already guarantees readable (it is
+	// the editor's own selection). Chip first, then the arrow: this
+	// list builds rightmost-first.
+	if gitText := a.statusGitSegment(); gitText != "" && a.iconsOn() {
+		addSeg(statusRightSegment{text: " " + gitText,
+			fg: a.theme.Text, bg: a.theme.Selection, click: (*App).toggleGitPanel})
+		addSeg(statusRightSegment{text: "",
+			fg: a.theme.Selection, click: (*App).toggleGitPanel})
+	} else {
+		addSeg(statusRightSegment{text: gitText, click: (*App).toggleGitPanel})
+	}
 	// Pending-gesture tag: while an Esc is armed (leader or double-tap
 	// window still open) show "Esc…" beside the git segment — vim's
 	// showcmd idea sized for a status bar. The editor's only modifier
