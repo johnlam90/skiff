@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gdamore/tcell/v2"
+
 	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 )
@@ -134,5 +136,76 @@ func TestRender_CJKWrapStaysInBudget(t *testing.T) {
 		if w := textdraw.Width(l); w > 12 {
 			t.Fatalf("CJK line %q is %d cells, budget 12", l, w)
 		}
+	}
+}
+
+// TestRender_TableRendersAlignedColumns pins the GFM table treatment —
+// the bug that motivated it: without the extension, pipe rows collapsed
+// into a mangled paragraph. A table must come out as aligned columns
+// with a bold header, a separator rule, and one output line per row.
+func TestRender_TableRendersAlignedColumns(t *testing.T) {
+	th := theme.Default()
+	src := []byte("| What | Address |\n|---|---|\n| Bastion | 100.82.16.4 |\n| DNS | 100.82.0.42 |\n")
+	lines, styles := Render(src, 60, th)
+
+	hi := findLine(lines, "What")
+	if hi < 0 || !strings.Contains(lines[hi], "Address") {
+		t.Fatalf("header row missing: %q", lines)
+	}
+	j := strings.Index(lines[hi], "What")
+	if _, _, attrs := styles[hi][j].Decompose(); attrs&boldAttr == 0 {
+		t.Fatal("header cells should be bold")
+	}
+	bi := findLine(lines, "Bastion")
+	di := findLine(lines, "DNS")
+	if bi < 0 || di < 0 {
+		t.Fatalf("body rows missing: %q", lines)
+	}
+	// Columns align: the second column starts at the same x in each row.
+	if strings.Index(lines[bi], "100.82.16.4") != strings.Index(lines[di], "100.82.0.42") {
+		t.Fatalf("columns not aligned:\n%q\n%q", lines[bi], lines[di])
+	}
+	// A separator rule sits between header and body.
+	if !strings.Contains(lines[hi+1], "─") {
+		t.Fatalf("no separator under the header: %q", lines[hi+1])
+	}
+	// And no raw pipe-syntax leakage.
+	if findLine(lines, "|---|") >= 0 {
+		t.Fatalf("raw table syntax leaked: %q", lines)
+	}
+}
+
+// TestRender_WideTableStaysInBudget pins the overflow rule: a table
+// wider than the viewport shrinks its widest columns and truncates
+// cells with an ellipsis instead of overflowing the width.
+func TestRender_WideTableStaysInBudget(t *testing.T) {
+	src := []byte("| A | B |\n|---|---|\n| " + strings.Repeat("longcell ", 12) + " | " + strings.Repeat("wide ", 10) + " |\n")
+	lines, _ := Render(src, 40, theme.Default())
+	for _, l := range lines {
+		if w := textdraw.Width(l); w > 40 {
+			t.Fatalf("table line %q is %d cells, budget 40", l, w)
+		}
+	}
+	if findLine(lines, "…") < 0 {
+		t.Fatalf("no ellipsis on truncated cells: %q", lines)
+	}
+}
+
+// TestRender_TaskListAndStrikethrough pins the remaining GFM inlines a
+// README actually uses: checkboxes render as glyphs and ~~struck~~
+// text carries the strikethrough attribute.
+func TestRender_TaskListAndStrikethrough(t *testing.T) {
+	th := theme.Default()
+	lines, styles := Render([]byte("- [x] done\n- [ ] todo\n\nthis is ~~gone~~ now\n"), 60, th)
+	if findLine(lines, "☑") < 0 || findLine(lines, "☐") < 0 {
+		t.Fatalf("task checkboxes missing: %q", lines)
+	}
+	i := findLine(lines, "gone")
+	if i < 0 {
+		t.Fatalf("strikethrough text missing: %q", lines)
+	}
+	j := strings.Index(lines[i], "gone")
+	if _, _, attrs := styles[i][j].Decompose(); attrs&tcell.AttrStrikeThrough == 0 {
+		t.Fatal("~~text~~ should carry StrikeThrough")
 	}
 }

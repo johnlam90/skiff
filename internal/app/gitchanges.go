@@ -1131,20 +1131,19 @@ func (a *App) statusGitSegment() string {
 	return seg + " "
 }
 
-// statusBarClick handles a left press on the status bar row. The git
-// segment on the right is the one live target — clicking it flips the
-// sidebar to the Git panel, the mouse-first sibling of Esc-g.
+// statusBarClick handles a left press on the status bar row by mapping
+// x onto the same right-hand segment list drawStatusBar painted from —
+// one geometry, so a segment's pixels and its hit range cannot drift.
+// Segments without a click action (the Esc tag, the conflict marker)
+// are inert.
 func (a *App) statusBarClick(x int) {
-	seg := a.statusGitSegment()
-	if seg == "" {
-		return
-	}
 	sx, _, sw, _ := a.statusRect()
-	rw := runeLen(seg)
-	if rw >= sw {
-		return
-	}
-	if x >= sx+sw-rw && x < sx+sw {
-		a.toggleGitPanel()
+	rightX := sx + sw
+	for _, seg := range a.statusRightSegments(sw) {
+		rightX -= runeLen(seg.text)
+		if seg.click != nil && x >= rightX && x < rightX+runeLen(seg.text) {
+			seg.click(a)
+			return
+		}
 	}
 }
