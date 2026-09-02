@@ -25,6 +25,7 @@ import (
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/mdrender"
 	"github.com/johnlam90/skiff/internal/scrollbar"
+	"github.com/johnlam90/skiff/internal/theme"
 	"github.com/rivo/uniseg"
 )
 
@@ -36,6 +37,11 @@ type mdPreviewState struct {
 	styles [][]tcell.Style
 	width  int
 	scroll int
+	// th is the theme the style grid was rendered with. The grid bakes
+	// colors in, so a theme change (the picker previews live) must
+	// re-render — drawMdPreview compares against the app's current
+	// theme the same way it compares width.
+	th theme.Theme
 }
 
 // isMarkdownPath reports whether path names a markdown file — the one
@@ -122,7 +128,7 @@ func (a *App) mdPreviewContentWidth() int {
 func (a *App) renderMdPreview(tab *editor.Tab) *mdPreviewState {
 	w := a.mdPreviewContentWidth()
 	lines, styles := mdrender.Render([]byte(tab.Buffer.String()), w, a.theme)
-	return &mdPreviewState{lines: lines, styles: styles, width: w}
+	return &mdPreviewState{lines: lines, styles: styles, width: w, th: a.theme}
 }
 
 // invalidateMdPreview re-renders tab's preview if one is active —
@@ -197,7 +203,7 @@ func (a *App) mdPreviewPress(st *mdPreviewState, x, y int) bool {
 // document is taller than the view, re-rendering first if the width
 // changed since the cache was built.
 func (a *App) drawMdPreview(tab *editor.Tab, st *mdPreviewState, x, y, w, h int) {
-	if st.width != a.mdPreviewContentWidth() {
+	if st.width != a.mdPreviewContentWidth() || st.th != a.theme {
 		fresh := a.renderMdPreview(tab)
 		fresh.scroll = st.scroll
 		*st = *fresh

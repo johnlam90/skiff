@@ -21,6 +21,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/theme"
 )
 
 // seedMarkdownTab writes a small markdown file and opens it, returning
@@ -275,5 +276,46 @@ func TestStatusBarClick_TogglesPreview(t *testing.T) {
 	a.statusBarClick(chipX())
 	if a.mdPreview[tab] != nil {
 		t.Fatal("clicking the Edit chip should disable the preview")
+	}
+}
+
+// TestPreviewMarkdown_ThemeChangeRerenders pins the live-theme
+// contract: the preview cache bakes theme colors into its style grid,
+// so switching themes (the picker previews live) must re-render it —
+// without this, a light theme paints its ground while the cached runes
+// keep the old dark backgrounds, striping the page.
+func TestPreviewMarkdown_ThemeChangeRerenders(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "# Title\n\nbody words\n")
+	a.menuTogglePreviewMarkdown()
+	oldBG := a.theme.BG
+
+	light, ok := theme.ByID("github-light")
+	if !ok {
+		t.Fatal("github-light missing from the registry")
+	}
+	a.theme = light
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+
+	st := a.mdPreview[tab]
+	if st == nil {
+		t.Fatal("preview vanished")
+	}
+	// Every cached rune style must now sit on the new theme's ground.
+	for li, row := range st.styles {
+		for ri, s := range row {
+			_, bg, _ := s.Decompose()
+			if bg == oldBG {
+				t.Fatalf("line %d rune %d still carries the old theme bg", li, ri)
+			}
+		}
+	}
+	// And the painted body cell agrees.
+	ex, ey, _, _ := a.editorRect()
+	cells, w, _ := scr.GetContents()
+	if _, bg, _ := cells[ey*w+ex+1].Style.Decompose(); bg == oldBG {
+		t.Fatal("painted preview cell still on the old theme bg")
 	}
 }
