@@ -60,6 +60,16 @@ type leaderBinding struct {
 // terminal user already has. Alt+Left / Alt+Right run the same two word
 // motions for people whose terminal sends them; see keys.go.
 //
+// . / , switch tabs. They used to be ] and [, the bracket pair every
+// editor uses for "next / previous", but a leader rune is a byte that
+// arrives right after ESC — and ESC [ is CSI, ESC ] is OSC. At typing
+// speed (or under tmux, which forwards a fast Esc ] as the bytes
+// "\x1b]") tcell's parser reads the pair as the start of a control
+// sequence: ESC ] then swallows every keystroke until a BEL or ESC \
+// arrives, so the editor looks dead; ESC [ turns the next key into a
+// CSI final byte. No leader key may be one of those introducer bytes;
+// TestLeaderBindings_NoSequenceIntroducers is the fence.
+//
 // Intentionally not bound:
 //   - rename / delete / revert — destructive enough that we want the
 //     menu's confirm dialog to gate the action as a deliberate gesture.
@@ -69,8 +79,8 @@ func leaderBindings() []leaderBinding {
 		{'n', (*App).menuNewFile, "new file", "File"},
 		{'w', (*App).menuClose, "close tab", "File"},
 		{'o', (*App).menuReopenTab, "reopen closed tab", "File"},
-		{']', (*App).menuNextTab, "next tab", "File"},
-		{'[', (*App).menuPrevTab, "previous tab", "File"},
+		{'.', (*App).menuNextTab, "next tab", "File"},
+		{',', (*App).menuPrevTab, "previous tab", "File"},
 		{'u', (*App).menuUndo, "undo", "Edit"},
 		{'r', (*App).menuRedo, "redo", "Edit"},
 		{'c', (*App).menuCopy, "copy", "Edit"},

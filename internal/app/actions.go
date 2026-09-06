@@ -676,14 +676,14 @@ func (a *App) menuSelectLine() {
 	}
 }
 
-// menuNextTab switches to the tab on the right, wrapping. Esc ] on the
+// menuNextTab switches to the tab on the right, wrapping. Esc . on the
 // keyboard; the row is for terminals where the leader gets eaten.
 func (a *App) menuNextTab() {
 	a.closeMenu()
 	a.activateNextTab()
 }
 
-// menuPrevTab switches to the tab on the left, wrapping. Esc [.
+// menuPrevTab switches to the tab on the left, wrapping. Esc ,.
 func (a *App) menuPrevTab() {
 	a.closeMenu()
 	a.activatePrevTab()

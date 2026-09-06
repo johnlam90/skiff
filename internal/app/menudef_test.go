@@ -77,7 +77,7 @@ var postRedesignMenuActions = []string{
 	"Go to start of file", "Go to end of file",
 	// The selection gestures behind Esc a / Esc L.
 	"Select all", "Select line",
-	// Keyboard tab switching (Esc ] / Esc [) and the close-others row.
+	// Keyboard tab switching (Esc . / Esc ,) and the close-others row.
 	"Next tab", "Previous tab", "Close other tabs",
 	// Repeat the last in-file search without the bar (Esc ;).
 	"Find next",
