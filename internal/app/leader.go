@@ -22,8 +22,14 @@ package app
 type leaderBinding struct {
 	key    rune
 	action func(*App)
-	// desc is the two-or-three-word label the cheat-strip renders next
-	// to the key while the leader window is armed. See leaderstrip.go.
+	// desc is the short label the cheat-strip renders next to the key
+	// while the leader window is armed (leaderstrip.go) and the Esc ?
+	// sheet prints beside it (cheatsheet.go). It is the ≡ menu row's own
+	// label, lower-cased — or a substring of it when the full label
+	// would be long ("matching bracket" for "Go to matching bracket") —
+	// so the strip, the sheet and the menu teach ONE name per action.
+	// "goto line" next to a menu row reading "Go to line" made the user
+	// learn two. TestLeaderBindings_DescsMatchMenuLabels is the fence.
 	desc string
 	// group is the cheat-overlay heading this binding files under. The
 	// names deliberately match the ≡ menu's top-level groups so a user
@@ -62,26 +68,26 @@ func leaderBindings() []leaderBinding {
 		{'s', (*App).menuSave, "save", "File"},
 		{'n', (*App).menuNewFile, "new file", "File"},
 		{'w', (*App).menuClose, "close tab", "File"},
-		{'o', (*App).menuReopenTab, "reopen tab", "File"},
+		{'o', (*App).menuReopenTab, "reopen closed tab", "File"},
 		{'u', (*App).menuUndo, "undo", "Edit"},
 		{'r', (*App).menuRedo, "redo", "Edit"},
 		{'c', (*App).menuCopy, "copy", "Edit"},
 		{'x', (*App).menuCut, "cut", "Edit"},
 		{'v', (*App).menuPaste, "paste", "Edit"},
-		{'/', (*App).menuToggleLineComment, "comment", "Edit"},
+		{'/', (*App).menuToggleLineComment, "line comment", "Edit"},
 		{'k', (*App).menuMoveLineUp, "line up", "Edit"},
 		{'j', (*App).menuMoveLineDown, "line down", "Edit"},
-		{'d', (*App).menuDuplicateLine, "duplicate", "Edit"},
-		{'f', (*App).openFind, "find", "Go"},
+		{'d', (*App).menuDuplicateLine, "duplicate line", "Edit"},
+		{'f', (*App).openFind, "find in file", "Go"},
 		{'F', (*App).menuFindInProject, "find in project", "Go"},
-		{'l', (*App).menuGoToLine, "goto line", "Go"},
-		{'p', (*App).openFinder, "open file", "Go"},
-		{'b', (*App).menuMoveWordLeft, "word left", "Go"},
-		{'e', (*App).menuMoveWordRight, "word right", "Go"},
-		{'%', (*App).menuGoToMatchingBracket, "match bracket", "Go"},
-		{'g', (*App).focusGitPanel, "git panel", "Git"},
-		{'t', (*App).menuToggleSidebar, "sidebar", "View"},
-		{'z', (*App).menuToggleWrap, "wrap", "View"},
+		{'l', (*App).menuGoToLine, "go to line", "Go"},
+		{'p', (*App).openFinder, "find file in project", "Go"},
+		{'b', (*App).menuMoveWordLeft, "previous word", "Go"},
+		{'e', (*App).menuMoveWordRight, "next word", "Go"},
+		{'%', (*App).menuGoToMatchingBracket, "matching bracket", "Go"},
+		{'g', (*App).focusGitPanel, "git changes", "Git"},
+		{'t', (*App).menuToggleSidebar, "file explorer", "View"},
+		{'z', (*App).menuToggleWrap, "wrap long lines", "View"},
 		{'?', (*App).menuKeyboardShortcuts, "shortcuts", "View"},
 		{'q', (*App).menuQuit, "quit", "Quit"},
 	}

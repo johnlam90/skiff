@@ -71,26 +71,26 @@ func TestLeaderActionFor_BindingsFireIntendedMethods(t *testing.T) {
 		{'s', (*App).menuSave, "save", "File"},
 		{'n', (*App).menuNewFile, "new file", "File"},
 		{'w', (*App).menuClose, "close tab", "File"},
-		{'o', (*App).menuReopenTab, "reopen tab", "File"},
+		{'o', (*App).menuReopenTab, "reopen closed tab", "File"},
 		{'u', (*App).menuUndo, "undo", "Edit"},
 		{'r', (*App).menuRedo, "redo", "Edit"},
 		{'c', (*App).menuCopy, "copy", "Edit"},
 		{'x', (*App).menuCut, "cut", "Edit"},
 		{'v', (*App).menuPaste, "paste", "Edit"},
-		{'/', (*App).menuToggleLineComment, "comment", "Edit"},
+		{'/', (*App).menuToggleLineComment, "line comment", "Edit"},
 		{'k', (*App).menuMoveLineUp, "line up", "Edit"},
 		{'j', (*App).menuMoveLineDown, "line down", "Edit"},
-		{'d', (*App).menuDuplicateLine, "duplicate", "Edit"},
-		{'f', (*App).openFind, "find", "Go"},
+		{'d', (*App).menuDuplicateLine, "duplicate line", "Edit"},
+		{'f', (*App).openFind, "find in file", "Go"},
 		{'F', (*App).menuFindInProject, "find in project", "Go"},
-		{'l', (*App).menuGoToLine, "goto line", "Go"},
-		{'p', (*App).openFinder, "open file", "Go"},
-		{'b', (*App).menuMoveWordLeft, "word left", "Go"},
-		{'e', (*App).menuMoveWordRight, "word right", "Go"},
-		{'%', (*App).menuGoToMatchingBracket, "match bracket", "Go"},
-		{'g', (*App).focusGitPanel, "git panel", "Git"},
-		{'t', (*App).menuToggleSidebar, "sidebar", "View"},
-		{'z', (*App).menuToggleWrap, "wrap", "View"},
+		{'l', (*App).menuGoToLine, "go to line", "Go"},
+		{'p', (*App).openFinder, "find file in project", "Go"},
+		{'b', (*App).menuMoveWordLeft, "previous word", "Go"},
+		{'e', (*App).menuMoveWordRight, "next word", "Go"},
+		{'%', (*App).menuGoToMatchingBracket, "matching bracket", "Go"},
+		{'g', (*App).focusGitPanel, "git changes", "Git"},
+		{'t', (*App).menuToggleSidebar, "file explorer", "View"},
+		{'z', (*App).menuToggleWrap, "wrap long lines", "View"},
 		{'?', (*App).menuKeyboardShortcuts, "shortcuts", "View"},
 		{'q', (*App).menuQuit, "quit", "Quit"},
 	}
@@ -524,5 +524,39 @@ func TestHandleKey_LeaderCopyCutPaste(t *testing.T) {
 	a.handleKey(keyEv(tcell.KeyRune, 'v'))
 	if got := tab.Buffer.Lines[0]; got != "worldhello " {
 		t.Fatalf("Esc-v: line = %q, want %q", got, "worldhello ")
+	}
+}
+
+// TestLeaderBindings_DescsMatchMenuLabels pins the one-name rule: a
+// binding's desc must be a case-insensitive substring of the ≡ menu row
+// that advertises its "Esc <key>" hint, so the leader strip, the Esc ?
+// sheet and the menu never teach two names for one action ("goto line"
+// next to "Go to line", "sidebar" next to "Hide file explorer"). Rows
+// are matched by their shortcut column, the same field
+// TestMenuCatalog_ShortcutsAreRealLeaderBindings walks in the other
+// direction; a binding with no row advertising it fails here too,
+// because a shortcut the menu never mentions is undiscoverable.
+func TestLeaderBindings_DescsMatchMenuLabels(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	rows := make(map[rune][]string)
+	for _, it := range menuCatalog() {
+		if rs := []rune(it.shortcut); len(rs) == 5 {
+			rows[rs[4]] = append(rows[rs[4]], a.menuLabel(it))
+		}
+	}
+	for _, b := range leaderBindings() {
+		labels, ok := rows[b.key]
+		if !ok {
+			t.Errorf("Esc %c (%s) has no ≡ menu row advertising it", b.key, b.desc)
+			continue
+		}
+		if n := len([]rune(b.desc)); n > 25 {
+			t.Errorf("Esc %c desc %q is %d runes; the Esc ? sheet budgets 25", b.key, b.desc, n)
+		}
+		for _, label := range labels {
+			if !strings.Contains(strings.ToLower(label), strings.ToLower(b.desc)) {
+				t.Errorf("Esc %c desc %q is not part of its menu row label %q", b.key, b.desc, label)
+			}
+		}
 	}
 }
