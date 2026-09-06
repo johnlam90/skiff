@@ -580,9 +580,10 @@ func (a *App) drawMenu() {
 		}
 	}
 
-	// Title row: " Menu" on the left, "esc " on the right.
+	// Title row: " Menu" on the left, the key hint on the right — Enter
+	// runs the highlighted row, so say so, the way the prefab frames do.
 	drawAt(a.screen, mx+1, my+menuTitleY, " Menu", titleStyle)
-	hint := "esc "
+	hint := "⏎ run · esc "
 	drawAt(a.screen, mx+mw-1-len([]rune(hint)), my+menuTitleY, hint, mutedStyle)
 
 	// Filter field, on the darker editor background so it reads as an

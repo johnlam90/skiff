@@ -1340,3 +1340,38 @@ func TestStatusBarClick_BranchChipOpensGitPanel(t *testing.T) {
 		t.Fatal("clicking the branch chip should open the git panel")
 	}
 }
+
+// TestDraw_PrefabFramesAdvertiseEnter pins the per-prefab hint each
+// frame paints in its title row, because the prefabs disagree about
+// Enter — the prompt submits, the dirty prompt presses Cancel, the form
+// moves to the next field, the info overlay dismisses, the menu runs
+// the highlighted row — and a frame that said only "esc" left the user
+// to find out by pressing it. Nothing here costs a row: the hint is
+// budgeted out of the title row the way the old "esc" was.
+func TestDraw_PrefabFramesAdvertiseEnter(t *testing.T) {
+	cases := []struct {
+		name string
+		open func(*App)
+		want string
+	}{
+		{"prompt", func(a *App) { a.openPrompt("Rename file", "", "x", nil) }, "⏎ ok · esc"},
+		{"confirm", func(a *App) { a.openConfirm("Delete file", "sure?", nil) }, "⏎ no · esc"},
+		{"dirty", func(a *App) { a.openDirtyClose("Unsaved changes", "m", nil, nil) }, "⏎ cancel · esc"},
+		{"form", func(a *App) {
+			a.openForm("Copy", []customactions.Prompt{{Key: "H", Label: "Host", Type: customactions.PromptText}}, nil)
+		}, "⇥ next · esc"},
+		{"info", func(a *App) { a.openInfo("Report", []string{"l"}) }, "⏎ ok · esc"},
+		{"menu", func(a *App) { a.openMenu() }, "⏎ run · esc"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := newTestApp(t, t.TempDir())
+			c.open(a)
+			a.draw()
+			a.screen.Show()
+			if !screenHasText(t, a, c.want) {
+				t.Errorf("%s frame never painted %q", c.name, c.want)
+			}
+		})
+	}
+}

@@ -192,7 +192,7 @@ func (d *Dirty) HandleMouse(x, y int, btn tcell.ButtonMask) {
 func (d *Dirty) Draw(scr tcell.Screen) {
 	r := d.rect()
 	th := d.Theme
-	DrawFrame(scr, r, d.Title, th)
+	DrawFrameHint(scr, r, d.Title, EnterHint(d.labels()[d.Hover]), th)
 
 	bg := th.LineHL
 	bodyStyle := tcell.StyleDefault.Background(bg).Foreground(th.Text)

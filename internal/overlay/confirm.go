@@ -328,7 +328,10 @@ func (c *Confirm) HandleMouse(x, y int, btn tcell.ButtonMask) {
 func (c *Confirm) Draw(scr tcell.Screen) {
 	r := c.rect()
 	th := c.Theme
-	DrawFrame(scr, r, c.Title, th)
+	// The hint names what Enter would press right now — the focused
+	// caption — so a confirm focused on its action says so before the
+	// key is hit.
+	DrawFrameHint(scr, r, c.Title, EnterHint(c.labels()[c.Hover]), th)
 
 	bg := th.LineHL
 	bodyStyle := tcell.StyleDefault.Background(bg).Foreground(th.Text)

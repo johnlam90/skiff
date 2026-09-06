@@ -162,7 +162,7 @@ func (p *Prompt) HandleMouse(x, y int, btn tcell.ButtonMask) {
 func (p *Prompt) Draw(scr tcell.Screen) {
 	r := p.rect()
 	th := p.Theme
-	DrawFrame(scr, r, p.Title, th)
+	DrawFrameHint(scr, r, p.Title, "⏎ ok · "+FrameHintEsc, th)
 
 	bg := th.LineHL
 	mutedStyle := tcell.StyleDefault.Background(bg).Foreground(th.Muted)

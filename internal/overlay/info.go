@@ -157,7 +157,7 @@ func (n *Info) HandleMouse(x, y int, btn tcell.ButtonMask) {
 func (n *Info) Draw(scr tcell.Screen) {
 	r := n.rect()
 	th := n.Theme
-	DrawFrame(scr, r, n.Title, th)
+	DrawFrameHint(scr, r, n.Title, "⏎ ok · "+FrameHintEsc, th)
 
 	bg := th.LineHL
 	n.ScrollBy(0) // re-clamp after any resize

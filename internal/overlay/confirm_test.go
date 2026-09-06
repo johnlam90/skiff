@@ -629,3 +629,34 @@ func TestConfirm_LabelsFitAtMinWidth(t *testing.T) {
 		}
 	}
 }
+
+// TestConfirm_HintNamesTheFocusedButton pins that the title-row hint
+// tracks focus: Enter presses whichever button is highlighted, so the
+// frame says "⏎ no · esc" at rest and "⏎ delete · esc" once the user
+// has moved onto a relabelled action — the user learns what Enter does
+// before pressing it.
+func TestConfirm_HintNamesTheFocusedButton(t *testing.T) {
+	scr := simScreen(t)
+	c, _ := testConfirm()
+	c.Labels = [2]string{"[ Cancel ]", "[ Delete ]"}
+	titleRow := func() string {
+		r := c.rect()
+		row := ""
+		for x := r.X + 1; x < r.X+r.W-1; x++ {
+			row += string(cellAt(scr, x, r.Y+1))
+		}
+		return row
+	}
+
+	c.Draw(scr)
+	scr.Show()
+	if row := titleRow(); !strings.Contains(row, "⏎ cancel · esc") {
+		t.Fatalf("at rest the hint should name Cancel, got %q", row)
+	}
+	c.HandleKey(tcell.NewEventKey(tcell.KeyRight, 0, 0))
+	c.Draw(scr)
+	scr.Show()
+	if row := titleRow(); !strings.Contains(row, "⏎ delete · esc") {
+		t.Fatalf("focused on the action the hint should name it, got %q", row)
+	}
+}
