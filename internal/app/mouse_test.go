@@ -1760,3 +1760,107 @@ func TestSplitterHit_GrabsItsNeighbours(t *testing.T) {
 	}
 	a.handleMouse(tcell.NewEventMouse(splitX, y, tcell.ButtonNone, 0))
 }
+
+// TestClickRun pins the multi-click arithmetic on its own: same row
+// within the slop and the window continues the run, anything else
+// starts over, and the run wraps after three so a fourth click is a
+// plain click again.
+func TestClickRun(t *testing.T) {
+	now := time.Now()
+	last := clickRecord{x: 10, y: 5, when: now, count: 1}
+	if got := clickRun(last, 10, 5, now); got != 2 {
+		t.Fatalf("same cell: run %d, want 2", got)
+	}
+	if got := clickRun(last, 11, 5, now); got != 2 {
+		t.Fatalf("one column off: run %d, want 2", got)
+	}
+	if got := clickRun(last, 9, 5, now); got != 2 {
+		t.Fatalf("one column back: run %d, want 2", got)
+	}
+	if got := clickRun(last, 12, 5, now); got != 1 {
+		t.Fatalf("two columns off: run %d, want 1", got)
+	}
+	if got := clickRun(last, 10, 6, now); got != 1 {
+		t.Fatalf("next row: run %d, want 1", got)
+	}
+	if got := clickRun(last, 10, 5, now.Add(doubleClickWindow)); got != 1 {
+		t.Fatalf("past the window: run %d, want 1", got)
+	}
+	if got := clickRun(clickRecord{}, 10, 5, now); got != 1 {
+		t.Fatalf("no previous click: run %d, want 1", got)
+	}
+	last.count = 3
+	if got := clickRun(last, 10, 5, now); got != 1 {
+		t.Fatalf("after a triple: run %d, want 1", got)
+	}
+}
+
+// TestEditorPress_DoubleClickToleratesOneColumnOfDrift: a finger or a
+// trackpad tap wobbles by a cell between clicks, and requiring the
+// exact cell made double-click a real-mouse-only gesture.
+func TestEditorPress_DoubleClickToleratesOneColumnOfDrift(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "p.txt")
+	if err := os.WriteFile(target, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	ex, ey, _, _ := a.editorRect()
+	gw := ex + 6 // the line-number gutter; text starts after it
+	a.editorPress(gw+1, ey)
+	a.editorPress(gw+2, ey)
+	tab := a.activeTabPtr()
+	if tab.SelectionText() != "hello" {
+		t.Fatalf("double-click one column over selected %q, want hello", tab.SelectionText())
+	}
+}
+
+// TestEditorPress_TripleClickSelectsTheLine: the third click of a run
+// selects the whole line including its line break (anchor at column 0,
+// caret at the start of the next line), the last line to its end, and
+// a fourth click is a plain caret placement again.
+func TestEditorPress_TripleClickSelectsTheLine(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "p.txt")
+	if err := os.WriteFile(target, []byte("alpha beta\ngamma\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	ex, ey, _, _ := a.editorRect()
+	x := ex + 6 + 2
+	tab := a.activeTabPtr()
+
+	for range 3 {
+		a.editorPress(x, ey)
+	}
+	if tab.Anchor != (editor.Position{Line: 0, Col: 0}) || tab.Cursor != (editor.Position{Line: 1, Col: 0}) {
+		t.Fatalf("triple-click selected %v..%v, want the whole first line and its break", tab.Anchor, tab.Cursor)
+	}
+	if tab.SelectionText() != "alpha beta\n" {
+		t.Fatalf("selection text %q", tab.SelectionText())
+	}
+	a.editorPress(x, ey) // fourth: back to a single click
+	if tab.HasSelection() {
+		t.Fatal("a fourth click must place the caret, not keep the line selected")
+	}
+
+	// The last line has no break to take: the selection ends at its end.
+	a.lastClick = clickRecord{}
+	for range 3 {
+		a.editorPress(x, ey+2)
+	}
+	if want := (editor.Position{Line: 2, Col: 0}); tab.Anchor != want || tab.Cursor != want {
+		// Line 2 is the empty line after the trailing newline; three
+		// clicks on it select nothing but must not panic or overshoot.
+		t.Fatalf("triple-click on the empty last line: %v..%v", tab.Anchor, tab.Cursor)
+	}
+	a.lastClick = clickRecord{}
+	for range 3 {
+		a.editorPress(x, ey+1)
+	}
+	if tab.SelectionText() != "gamma\n" {
+		t.Fatalf("second line selection %q, want gamma + break", tab.SelectionText())
+	}
+}

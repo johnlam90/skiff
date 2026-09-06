@@ -40,11 +40,39 @@ type autoScrollEvent struct {
 // When satisfies the tcell.Event interface.
 func (e *autoScrollEvent) When() time.Time { return e.when }
 
-// clickRecord tracks the last mouse-press location and time so we can
-// detect double-clicks (and select the word under the cursor).
+// clickRecord tracks the last mouse press so the next one can be read
+// as the second or third of a multi-click: where it landed, when, and
+// how many clicks the run is at. A click a row away, more than
+// doubleClickSlop columns off, or past doubleClickWindow starts a new
+// run at one.
 type clickRecord struct {
-	x, y int
-	when time.Time
+	x, y  int
+	when  time.Time
+	count int
+}
+
+// doubleClickSlop is how many columns a repeat click may drift from
+// the previous one and still count as the same spot. A finger on a
+// phone and a trackpad tap both wobble by a cell; requiring the exact
+// cell made double-click a gesture that only worked with a real mouse.
+const doubleClickSlop = 1
+
+// clickRun returns the multi-click count a press at (x, y) at time now
+// continues: last.count+1 when it lands on the same row within slop and
+// window, and 1 otherwise. The run wraps back to a single click after
+// the third, so a fourth click places the caret instead of
+// re-selecting the line.
+func clickRun(last clickRecord, x, y int, now time.Time) int {
+	if last.count == 0 || y != last.y || now.Sub(last.when) >= doubleClickWindow {
+		return 1
+	}
+	if dx := x - last.x; dx > doubleClickSlop || dx < -doubleClickSlop {
+		return 1
+	}
+	if last.count >= 3 {
+		return 1
+	}
+	return last.count + 1
 }
 
 // mouseState is the dispatcher's memory between events. held is the
@@ -626,14 +654,32 @@ func (a *App) editorPress(x, y int) bool {
 	}
 
 	now := time.Now()
-	if a.lastClick.x == x && a.lastClick.y == y && now.Sub(a.lastClick.when) < doubleClickWindow {
+	count := clickRun(a.lastClick, x, y, now)
+	a.lastClick = clickRecord{x: x, y: y, when: now, count: count}
+	switch count {
+	case 2:
 		a.selectWordAt(tab, pos)
-		a.lastClick = clickRecord{} // prevent triple-click from selecting nothing.
-		return true
+	case 3:
+		a.selectLineAt(tab, pos.Line)
+	default:
+		tab.MoveCursorTo(pos, false)
 	}
-	a.lastClick = clickRecord{x: x, y: y, when: now}
-	tab.MoveCursorTo(pos, false)
 	return true
+}
+
+// selectLineAt selects the whole of buffer line `line` including its
+// line break — the triple-click gesture, so a copy or delete of the
+// selection takes the line out cleanly rather than leaving an empty
+// one. The last line has no break to take, so the selection ends at
+// its end. Built from MoveCursorTo so the caret-moved flag and the
+// undo-group break come for free.
+func (a *App) selectLineAt(tab *editor.Tab, line int) {
+	tab.MoveCursorTo(editor.Position{Line: line, Col: 0}, false)
+	end := editor.Position{Line: line + 1, Col: 0}
+	if line+1 >= tab.Buffer.LineCount() {
+		end = editor.Position{Line: line, Col: len(tab.Buffer.LineRunes(line))}
+	}
+	tab.MoveCursorTo(end, true)
 }
 
 // openGitHunkAt kicks a diff preview when the user clicks a gutter
