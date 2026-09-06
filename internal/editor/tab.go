@@ -681,6 +681,13 @@ func (t *Tab) InsertString(s string) {
 // Only "\n" is ever inserted; the file's own ending is restored by Save
 // (see Tab.LineEnding), so a CRLF file must not get a CR spliced into the
 // middle of a line here.
+//
+// The line being left is blanked when it holds nothing but whitespace —
+// which is exactly the auto-indent a previous Enter put there. Without
+// this, Enter twice inside a block wrote a whitespace-only line to
+// disk, the one thing every linter and diff flags first. The blanking
+// is part of the same edit step, so one undo still returns the buffer
+// to where it was.
 func (t *Tab) InsertNewline() {
 	if t.IsImage() {
 		return
@@ -690,7 +697,28 @@ func (t *Tab) InsertNewline() {
 	if at.Col < len(prefix) {
 		prefix = prefix[:at.Col]
 	}
-	t.InsertString("\n" + autoIndentFor(prefix, t.IndentUnit, t.Path))
+	indent := autoIndentFor(prefix, t.IndentUnit, t.Path)
+	// After the split the line left behind is exactly prefix: deleting
+	// a selection never touches the runes ahead of its start.
+	blankLeft := len(prefix) > 0 && isAllIndent(prefix)
+	t.edit(undoGroupStructural, func() {
+		t.dropSelection()
+		t.Cursor = t.Buffer.InsertString(t.Cursor, "\n"+indent)
+		t.Anchor = t.Cursor
+		if blankLeft {
+			t.Buffer.Lines[t.Cursor.Line-1] = ""
+		}
+	})
+}
+
+// isAllIndent reports whether runes is nothing but spaces and tabs.
+func isAllIndent(runes []rune) bool {
+	for _, r := range runes {
+		if r != ' ' && r != '\t' {
+			return false
+		}
+	}
+	return true
 }
 
 // InsertRune inserts a single typed character at the cursor. Coalesces
@@ -717,7 +745,46 @@ func (t *Tab) InsertRune(r rune) {
 		t.dropSelection()
 		t.Cursor = t.Buffer.InsertString(t.Cursor, string(r))
 		t.Anchor = t.Cursor
+		t.realignClosingBracket(r)
 	})
+}
+
+// realignClosingBracket is the de-dent half of auto-indent: a closing
+// bracket typed as the first non-blank rune of a line takes the indent
+// of the line holding its opener, so "}" after an auto-indented block
+// lands where the block started instead of one level in. It runs
+// inside InsertRune's edit step, after the rune is in the buffer, so
+// the bracket matcher can see the pair and one undo removes both the
+// rune and the re-indent. Anything else — a bracket typed after text,
+// an unmatched one, an opener — is left exactly where it was typed.
+// Deliberately no auto-close: the editor never inserts a bracket the
+// user did not type.
+func (t *Tab) realignClosingBracket(r rune) {
+	if r != ')' && r != ']' && r != '}' {
+		return
+	}
+	line := t.Cursor.Line
+	runes := t.Buffer.LineRunes(line)
+	at := t.Cursor.Col - 1 // the bracket just inserted
+	if at < 0 || at >= len(runes) || !isAllIndent(runes[:at]) {
+		return
+	}
+	m := MatchBracketAt(t.Buffer, Position{Line: line, Col: at})
+	if !m.Matched || m.Match.Line == line {
+		return
+	}
+	opener := t.Buffer.LineRunes(m.Match.Line)
+	n := 0
+	for n < len(opener) && (opener[n] == ' ' || opener[n] == '\t') {
+		n++
+	}
+	indent := string(opener[:n])
+	if indent == string(runes[:at]) {
+		return
+	}
+	t.Buffer.Lines[line] = indent + string(runes[at:])
+	t.Cursor = Position{Line: line, Col: n + 1}
+	t.Anchor = t.Cursor
 }
 
 // startsWordBreak reports whether typing r at the caret ends a word:

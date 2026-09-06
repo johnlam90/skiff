@@ -2520,15 +2520,17 @@ func TestTab_InsertNewline_UsesSelectionStartIndent(t *testing.T) {
 // TestTab_InsertNewline_SplitInsideIndent keeps a mid-indentation Enter
 // from shifting the code: the text that moves down keeps its own leading
 // whitespace, and the new line only inherits what was actually behind the
-// caret, so the visible column of the code is unchanged.
+// caret, so the visible column of the code is unchanged. The two spaces
+// left behind are whitespace-only and are blanked rather than written
+// to disk as a trailing-whitespace line.
 func TestTab_InsertNewline_SplitInsideIndent(t *testing.T) {
 	tab := newIndentTab(t, "app.js", "        code();\n")
 	tab.Cursor = Position{Line: 0, Col: 2}
 	tab.Anchor = tab.Cursor
 	tab.InsertNewline()
 
-	if got := tab.Buffer.Lines[0]; got != "  " {
-		t.Fatalf("line 0 = %q", got)
+	if got := tab.Buffer.Lines[0]; got != "" {
+		t.Fatalf("line 0 = %q, want the whitespace-only remnant blanked", got)
 	}
 	if got := tab.Buffer.Lines[1]; got != "        code();" {
 		t.Fatalf("line 1 = %q — the code moved column", got)
@@ -2729,5 +2731,83 @@ func TestTab_MoveDocHomeEnd(t *testing.T) {
 	img.MoveDocEnd(false)
 	if img.cursorMoved {
 		t.Fatal("image tabs must ignore the jump")
+	}
+}
+
+// TestTab_InsertNewline_BlanksAWhitespaceOnlyLine pins the trailing-
+// whitespace fix: Enter on a line holding nothing but auto-indent
+// blanks that line (the indent still carries to the new one), and the
+// whole press is still one undo step. A line with text before the
+// caret keeps it.
+func TestTab_InsertNewline_BlanksAWhitespaceOnlyLine(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("if x {"), IndentUnit: "\t", Path: "a.go"}
+	tab.initUndo()
+	tab.MoveLineEnd(false)
+	tab.InsertNewline() // opens the block: "\t"
+	tab.InsertNewline() // leaves a whitespace-only line behind
+	if got := tab.Buffer.String(); got != "if x {\n\n\t" {
+		t.Fatalf("Enter twice gave %q, want the middle line blanked", got)
+	}
+	if tab.Cursor != (Position{Line: 2, Col: 1}) {
+		t.Fatalf("cursor should sit after the carried indent, got %+v", tab.Cursor)
+	}
+	tab.Undo()
+	if got := tab.Buffer.String(); got != "if x {\n\t" {
+		t.Fatalf("one undo should restore the whitespace line, got %q", got)
+	}
+
+	keep := &Tab{Buffer: NewBuffer("x = 1"), IndentUnit: "    "}
+	keep.initUndo()
+	keep.MoveLineEnd(false)
+	keep.InsertNewline()
+	if got := keep.Buffer.Lines[0]; got != "x = 1" {
+		t.Fatalf("a line with text must be left alone, got %q", got)
+	}
+}
+
+// TestTab_InsertRune_ClosingBracketDedents pins the de-dent half of
+// auto-indent: a closing bracket typed as the first non-blank rune of a
+// line takes its opener's indent, in the same undo step as the rune. A
+// bracket after text, an unmatched one, and an opener are all left
+// where they were typed.
+func TestTab_InsertRune_ClosingBracketDedents(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("\tif x {"), IndentUnit: "\t", Path: "a.go"}
+	tab.initUndo()
+	tab.MoveLineEnd(false)
+	tab.InsertNewline() // "\t\t"
+	tab.InsertRune('}')
+	if got := tab.Buffer.Lines[1]; got != "\t}" {
+		t.Fatalf("closing brace should take the opener's indent, got %q", got)
+	}
+	if tab.Cursor != (Position{Line: 1, Col: 2}) {
+		t.Fatalf("cursor should follow the re-indented brace, got %+v", tab.Cursor)
+	}
+	tab.Undo()
+	if got := tab.Buffer.Lines[1]; got != "\t\t" {
+		t.Fatalf("one undo should remove both the brace and the re-indent, got %q", got)
+	}
+
+	after := &Tab{Buffer: NewBuffer("f(x\n    y"), IndentUnit: "    "}
+	after.initUndo()
+	after.MoveDocEnd(false)
+	after.InsertRune(')')
+	if got := after.Buffer.Lines[1]; got != "    y)" {
+		t.Fatalf("a bracket after text must stay put, got %q", got)
+	}
+
+	orphan := &Tab{Buffer: NewBuffer("    "), IndentUnit: "    "}
+	orphan.initUndo()
+	orphan.MoveLineEnd(false)
+	orphan.InsertRune(']')
+	if got := orphan.Buffer.Lines[0]; got != "    ]" {
+		t.Fatalf("an unmatched bracket must stay put, got %q", got)
+	}
+
+	opener := &Tab{Buffer: NewBuffer("    "), IndentUnit: "    "}
+	opener.initUndo()
+	opener.MoveLineEnd(false)
+	opener.InsertRune('{')
+	if got := opener.Buffer.Lines[0]; got != "    {" {
+		t.Fatalf("an opener is never re-indented, got %q", got)
 	}
 }
