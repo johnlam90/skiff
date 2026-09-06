@@ -583,8 +583,15 @@ func newSingleFileApp(scr tcell.Screen, filePath string) *App {
 // event. Kept apart from newApp so tests can hand newApp a
 // SimulationScreen instead of a live terminal.
 func newTerminalScreen() (tcell.Screen, error) {
-	scr, err := tcell.NewScreen()
-	if err != nil {
+	// Prefer the /dev/tty screen with the ESC ESC rewrite (esctty.go) so
+	// a fast double-tap of Esc opens the menu; fall back to tcell's own
+	// choice where no dev tty exists.
+	scr, err := newDoubleEscScreen()
+	if scr == nil {
+		if scr, err = tcell.NewScreen(); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
 		return nil, err
 	}
 	if err := scr.Init(); err != nil {
