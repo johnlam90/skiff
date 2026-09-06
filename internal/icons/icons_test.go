@@ -135,6 +135,7 @@ func TestResolveExplicitOverrides(t *testing.T) {
 // stops the filesystem fallback from wandering into the host's real
 // font dirs and making the result machine-dependent.
 func TestResolveAutoFollowsDetection(t *testing.T) {
+	t.Setenv("SSH_CONNECTION", "") // a local session: detection may answer
 	prevList, prevTimeout := fcList, detectTimeout
 	t.Cleanup(func() { fcList, detectTimeout = prevList, prevTimeout })
 
@@ -348,5 +349,37 @@ func TestDetectFcListTimeoutFallsThrough(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Detect() never returned; the fc-list deadline is not wired up")
+	}
+}
+
+// TestResolveAutoIsOffOverSSH pins the remote rule: inside an SSH
+// session "auto" resolves to off WITHOUT consulting detection, even
+// when the server's own fc-list would say yes — the server's fonts are
+// not the fonts the user's terminal renders with. Explicit "on" is
+// still honoured there, which is the whole point of the picker.
+func TestResolveAutoIsOffOverSSH(t *testing.T) {
+	t.Setenv("SSH_CONNECTION", "10.0.0.2 51234 10.0.0.1 22")
+	prev := fcList
+	t.Cleanup(func() { fcList = prev })
+	consulted := false
+	fcList = func(context.Context) ([]byte, error) {
+		consulted = true
+		return []byte("Hack Nerd Font Mono\n"), nil
+	}
+	if !Undecidable() {
+		t.Fatal("an SSH session must report detection as undecidable")
+	}
+	if Resolve(userconfig.IconsAuto) {
+		t.Fatal("auto must resolve off over SSH regardless of the server's fonts")
+	}
+	if consulted {
+		t.Fatal("detection must not run at all over SSH — it inspects the wrong machine")
+	}
+	if !Resolve(userconfig.IconsOn) {
+		t.Fatal("an explicit on must still win over SSH")
+	}
+	t.Setenv("SSH_CONNECTION", "")
+	if Undecidable() {
+		t.Fatal("a local session must be decidable")
 	}
 }

@@ -54,6 +54,12 @@ const (
 // any field the file omitted, so consumers never need to nil-check.
 type Config struct {
 	Icons IconsMode
+	// IconsSet reports whether the file carried an explicit icons key
+	// at all. The app uses it to decide whether the user has ever made
+	// the choice: an "auto" that was never written is the one case
+	// worth a hint when detection cannot answer (over SSH), an "auto"
+	// the user typed is a decision to respect silently.
+	IconsSet bool
 	// Theme is the theme id to start with ("" = default). Validated by
 	// the app against the theme registry, not here — the config loader
 	// shouldn't need to import the palette table.
@@ -146,11 +152,11 @@ func Load(path string) (Config, error) {
 	case "":
 		// field omitted — keep default
 	case IconsAuto:
-		cfg.Icons = IconsAuto
+		cfg.Icons, cfg.IconsSet = IconsAuto, true
 	case IconsOn:
-		cfg.Icons = IconsOn
+		cfg.Icons, cfg.IconsSet = IconsOn, true
 	case IconsOff:
-		cfg.Icons = IconsOff
+		cfg.Icons, cfg.IconsSet = IconsOff, true
 	default:
 		return Defaults(), fmt.Errorf(
 			"%s: icons must be %q, %q, or %q (got %q)",
@@ -210,6 +216,24 @@ func SetTheme(path, id string) error {
 		_ = json.Unmarshal(data, &raw)
 	}
 	raw["theme"] = id
+	return writeRaw(path, raw)
+}
+
+// SetIcons persists the Nerd Font icons mode into the config file at
+// path, with the same create-if-needed / preserve-unknown-keys contract
+// as SetTheme. The mode is written as its string form, which is what
+// Load parses back.
+func SetIcons(path string, mode IconsMode) error {
+	if path == "" {
+		return errors.New("no config path available")
+	}
+	raw := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+		// Same tradeoff as SetTheme: a malformed file is overwritten —
+		// keeping the user's fresh choice beats preserving broken JSON.
+		_ = json.Unmarshal(data, &raw)
+	}
+	raw["icons"] = string(mode)
 	return writeRaw(path, raw)
 }
 

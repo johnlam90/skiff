@@ -102,6 +102,14 @@ func (a *App) loadUserConfig() {
 	}
 	if a.tree != nil {
 		a.tree.IconsEnabled = icons.Resolve(cfg.Icons)
+		// Once per config: a user who never chose, on a host where
+		// detection cannot answer (SSH), is told where the choice lives.
+		// An explicit key — even "auto" — is a decision, and stays quiet.
+		// A malformed config already flashed its error, which outranks
+		// the hint.
+		if err == nil && !cfg.IconsSet && cfg.Icons == userconfig.IconsAuto && icons.Undecidable() {
+			a.flash(iconsUndecidableHint)
+		}
 		// filetree.New already read the root with filtering on (the
 		// config default), so only a config that disagrees costs a
 		// re-read.

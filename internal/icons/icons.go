@@ -31,9 +31,14 @@
 // startup indefinitely.
 //
 // Neither strategy can tell whether the *terminal* is configured to
-// render the font — only that the OS knows about it. That's why the
-// editor pairs detection with a manual override in config.json: users
-// who hit a false positive can flip icons:"off" and move on.
+// render the font — only that the OS knows about it. And both inspect
+// the machine skiff RUNS on, which over SSH — the editor's primary
+// habitat — is the wrong machine entirely: the fonts that matter are on
+// the client, and nothing here can see them. Resolve therefore treats
+// an SSH session as "detection cannot answer" (Undecidable) and the
+// editor pairs detection with a manual choice: ≡ → Icons… (or the
+// icons key in config.json) is the door for the user who knows their
+// terminal has a Nerd Font, and for the one who hit a false positive.
 package icons
 
 import (
@@ -81,8 +86,9 @@ func runFcList(ctx context.Context) ([]byte, error) {
 }
 
 // Resolve maps a user's IconsMode preference to a concrete on/off
-// decision, running detection iff the mode is "auto". Centralised so
-// the App startup path stays readable: cfg + detect → bool.
+// decision, running detection iff the mode is "auto" and detection can
+// answer here (see Undecidable). Centralised so the App startup path
+// stays readable: cfg + detect → bool.
 func Resolve(mode userconfig.IconsMode) bool {
 	switch mode {
 	case userconfig.IconsOn:
@@ -90,8 +96,22 @@ func Resolve(mode userconfig.IconsMode) bool {
 	case userconfig.IconsOff:
 		return false
 	default:
+		if Undecidable() {
+			return false
+		}
 		return Detect()
 	}
+}
+
+// Undecidable reports whether auto-detection cannot answer on this
+// host. Over SSH — SSH_CONNECTION is set by every sshd for the session
+// it spawns — the fonts that matter are installed on the client, which
+// this process cannot inspect, so "auto" would be a guess about the
+// wrong machine. Resolve answers "off" there, the safe default (a
+// private-use glyph on a terminal without the font is a box), and the
+// app points the user at ≡ → Icons… once instead.
+func Undecidable() bool {
+	return os.Getenv("SSH_CONNECTION") != ""
 }
 
 // Detect reports whether a Nerd Font is installed on this system.

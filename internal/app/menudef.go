@@ -205,6 +205,10 @@ func viewMenuGroup() []menuItemDef {
 		// beats waiting.
 		{label: "Refresh file tree", action: (*App).menuRefreshTree, enabled: alwaysTrue, visible: (*App).hasTree},
 		{label: "Theme…", action: (*App).menuTheme, enabled: alwaysTrue},
+		// Beside Theme… because it is the other appearance picker, and
+		// visible only with a tree because the resolved answer lives on
+		// it (iconsOn) — single-file mode has nothing to stamp.
+		{label: "Icons…", action: (*App).menuIcons, enabled: alwaysTrue, visible: (*App).hasTree},
 		// Last row of the group on purpose: it is the one row that
 		// teaches the other rows. Sourced from leaderBindings(), so it
 		// can never advertise a gesture the dispatch dropped.
