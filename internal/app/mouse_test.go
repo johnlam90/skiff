@@ -2218,3 +2218,64 @@ func TestTabBarClick_WholeBadgeSlotIsTheChevron(t *testing.T) {
 		t.Fatalf("the right slot's unpainted cell activated tab %d", a.tabs.ActiveIndex())
 	}
 }
+
+// TestGutterMarkerAt_IsWrapAware pins the gutter's row-to-line map in
+// wrap mode. With line 0 wrapped over k rows and line 1 modified, the
+// marker is painted on row k — the first row of line 1 — and nowhere
+// else; ScrollY+row named line k instead, so the splitter's neighbour
+// took the marker's press and a press on a continuation row of line 0
+// opened line 1's hunk. Both the splitter guard and the hunk opener
+// go through the same wrap-aware map.
+func TestGutterMarkerAt_IsWrapAware(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "w.txt")
+	long := strings.Repeat("wrap ", 40)
+	if err := os.WriteFile(target, []byte(long+"\nchanged\nplain\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 70, 24)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	tab.Wrap = true
+	tab.GitLines = map[int]editor.GitLineChange{1: editor.GitLineModified}
+	a.draw()
+
+	// Find line 1's first row through the editor's own contract.
+	_, ey, ew, eh := a.editorRect()
+	k := -1
+	for row := 0; row < eh; row++ {
+		if pos, ok := tab.HitTest(0, row, ew, eh); ok && pos.Line == 1 {
+			k = row
+			break
+		}
+	}
+	if k < 2 {
+		t.Fatalf("precondition: line 0 should wrap over at least two rows, line 1 starts on row %d", k)
+	}
+
+	if !a.gutterMarkerAt(ey + k) {
+		t.Fatalf("row %d is line 1's first row and carries the marker", k)
+	}
+	if a.gutterMarkerAt(ey + 1) {
+		t.Fatal("row 1 is a continuation of line 0: its gutter is blank")
+	}
+	if a.gutterMarkerAt(ey + k + 1) {
+		t.Fatal("row k+1 is the clean line 2")
+	}
+
+	fake := &git.Fake{}
+	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target,
+		"@@ -2 +2 @@\n-change\n+changed\n", nil)
+	a.gitRunner = fake
+	if a.openGitHunkAt(tab, 0, 1) {
+		t.Fatal("a press on a continuation row must not open a hunk")
+	}
+	if !a.openGitHunkAt(tab, 0, k) {
+		t.Fatal("a press on the marker's row must open its hunk")
+	}
+	pumpUntil(t, a, "diff load", idle(&a.diffLoad))
+	if !diffIsOpen(a) {
+		t.Fatal("the marker press should have opened the hunk diff")
+	}
+}

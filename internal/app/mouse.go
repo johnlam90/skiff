@@ -797,8 +797,8 @@ func (a *App) openGitHunkAt(tab *editor.Tab, localX, localY int) bool {
 	if localX != 0 || localY < 0 {
 		return false
 	}
-	line := tab.ScrollY + localY
-	if tab.GitLines[line] == editor.GitLineNone {
+	line, ok := a.gutterLineAt(tab, localY)
+	if !ok {
 		return false
 	}
 	path := tab.Path
@@ -1007,7 +1007,30 @@ func (a *App) gutterMarkerAt(y int) bool {
 	if y < ey || y >= ey+eh {
 		return false
 	}
-	return tab.GitLines[tab.ScrollY+(y-ey)] != editor.GitLineNone
+	_, ok := a.gutterLineAt(tab, y-ey)
+	return ok
+}
+
+// gutterLineAt maps editor-local row localY to the buffer line whose
+// git marker is painted in that row's gutter, and reports false when
+// the row carries none: it is past the buffer's end, the line is
+// clean, or — in wrap mode — it is a continuation row, whose gutter
+// is blank because only a line's first segment shows its number and
+// marker. The row goes through the tab's own HitTest so the answer is
+// wrap-aware: ScrollY+localY names the wrong line as soon as any line
+// above it wraps, and the gutter click used to open the hunk of a
+// line the marker was not on. A gutter hit lands on the segment's
+// first rune, so Col == 0 is exactly "this is the line's first row".
+func (a *App) gutterLineAt(tab *editor.Tab, localY int) (int, bool) {
+	_, _, ew, eh := a.editorRect()
+	pos, ok := tab.HitTest(0, localY, ew, eh)
+	if !ok || pos.Col != 0 {
+		return 0, false
+	}
+	if tab.GitLines[pos.Line] == editor.GitLineNone {
+		return 0, false
+	}
+	return pos.Line, true
 }
 
 // scrollbarTo scrolls the active tab so the thumb centers on the
