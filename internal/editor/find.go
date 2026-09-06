@@ -237,7 +237,14 @@ func (t *Tab) FocusCurrentMatch() {
 	if t.FindIndex < 0 || t.FindIndex >= len(t.FindMatches) {
 		return
 	}
-	m := t.FindMatches[t.FindIndex]
+	t.selectMatch(t.FindMatches[t.FindIndex])
+}
+
+// selectMatch is the one way a find hit becomes the selection: anchor
+// at its start, caret at its end. FocusCurrentMatch and the suspended
+// half of FindAgain both land here so a hit reached with the bar up
+// and one reached bar-less are selected identically.
+func (t *Tab) selectMatch(m Match) {
 	t.Anchor = MatchPosition(m)
 	t.Cursor = MatchEndPosition(m)
 	t.cursorMoved = true
@@ -333,10 +340,15 @@ func (t *Tab) matchAtRune(line, col int) int {
 
 // FindAgain jumps to the next hit of the remembered query without the
 // bar: with the search live it is FindNext; after ClearFindHighlights
-// it re-runs the query (relighting the highlights) and lands on the
-// first hit at or after the caret — which, with the last hit still
-// selected, is the one after it. Reports false when there is no query
-// or it matches nothing, so the caller can say so.
+// it runs the query once, transiently, and selects the first hit at or
+// after the caret — which, with the last hit still selected, is the one
+// after it. The search stays suspended: nothing is painted, FindMatches
+// stays empty and the next keystroke does not re-scan. Going through
+// SetFindQuery here used to lift the suspension, which left the match
+// tint up with no bar to take it down again and put a full FindAll
+// back on every keystroke — Esc ; is "jump", not "reopen the search".
+// Reports false when there is no query or it matches nothing, so the
+// caller can say so.
 func (t *Tab) FindAgain() bool {
 	if t.IsImage() || t.FindQuery == "" {
 		return false
@@ -348,12 +360,12 @@ func (t *Tab) FindAgain() bool {
 		t.FindNext()
 		return true
 	}
-	t.SetFindQuery(t.FindQuery)
-	t.FindIndex = FirstMatchAtOrAfter(t.FindMatches, t.Cursor)
-	if t.FindIndex < 0 {
+	matches := FindAllWith(t.Buffer, t.FindQuery, t.findOptions())
+	i := FirstMatchAtOrAfter(matches, t.Cursor)
+	if i < 0 {
 		return false
 	}
-	t.FocusCurrentMatch()
+	t.selectMatch(matches[i])
 	return true
 }
 
