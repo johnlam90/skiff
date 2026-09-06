@@ -402,7 +402,13 @@ func (t *Tab) ClearFind() {
 // replace, replace" walks the file forward — including when the
 // replacement contains the query ("foo" → "foo_bar"), where keeping
 // the index would point it at the text just written and the next
-// Enter would rewrite that into "foo_bar_bar" forever.
+// Enter would immediately rewrite that into "foo_bar_bar". The walk
+// is forward-only, not a guarantee of termination: once the caret
+// passes the last original hit the index wraps to the top of the file,
+// and a replacement that still contains the query is a hit there like
+// any other, so holding Enter past the end starts a second pass over
+// the text this pass wrote. The user sees the caret jump back to the
+// top and the count stay put, which is the cue to stop.
 //
 // The replacement follows the case of the text it replaces when the
 // query is smart-case (no uppercase): a match spelled FOO takes REPL,
