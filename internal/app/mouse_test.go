@@ -1290,3 +1290,158 @@ func TestScrollbarTo_CaretFollowsWhenEnabled(t *testing.T) {
 		t.Fatalf("caret at line %d not inside viewport [%d,%d)", tab.Cursor.Line, tab.ScrollY, tab.ScrollY+eh)
 	}
 }
+
+// TestMouseState_Fresh pins the press-vs-motion split every dispatcher
+// branch reads: a button is fresh on the first event that carries it
+// and not on the ones that follow, and releasing it re-arms the next
+// press. Two buttons are tracked independently.
+func TestMouseState_Fresh(t *testing.T) {
+	var m mouseState
+	if got := m.fresh(tcell.Button1); got != tcell.Button1 {
+		t.Fatalf("first Button1 event: fresh = %v, want Button1", got)
+	}
+	if got := m.fresh(tcell.Button1); got != 0 {
+		t.Fatalf("held Button1: fresh = %v, want none", got)
+	}
+	if got := m.fresh(tcell.Button1 | tcell.Button2); got != tcell.Button2 {
+		t.Fatalf("Button2 added while Button1 held: fresh = %v, want Button2", got)
+	}
+	if got := m.fresh(tcell.ButtonNone); got != 0 {
+		t.Fatalf("release: fresh = %v, want none", got)
+	}
+	if got := m.fresh(tcell.Button1); got != tcell.Button1 {
+		t.Fatalf("press after release: fresh = %v, want Button1", got)
+	}
+	// Wheel bits are not buttons: they never latch and never count.
+	if got := m.fresh(tcell.WheelDown); got != 0 {
+		t.Fatalf("wheel: fresh = %v, want none", got)
+	}
+}
+
+// TestHandleMouse_DragAcrossTabStripClosesOnlyThePressedTab is the
+// re-fire regression: with the button held, a sideways drag delivers a
+// motion event over every cell it crosses, and each one used to
+// re-enter the press dispatch — so crossing a second tab's × closed
+// that tab too. Only the tab under the PRESS may close.
+func TestHandleMouse_DragAcrossTabStripClosesOnlyThePressedTab(t *testing.T) {
+	dir := t.TempDir()
+	pa := filepath.Join(dir, "a.txt")
+	pb := filepath.Join(dir, "b.txt")
+	for _, p := range []string{pa, pb} {
+		if err := os.WriteFile(p, []byte("x"), 0644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	a := newTestApp(t, dir)
+	a.openFile(pa)
+	a.openFile(pb)
+	a.draw()
+	if len(a.lastTabRects) != 2 {
+		t.Fatalf("fixture: want 2 tab rects, got %d", len(a.lastTabRects))
+	}
+	closeA, closeB := a.lastTabRects[0].CloseX, a.lastTabRects[1].CloseX
+
+	a.handleMouse(tcell.NewEventMouse(closeA, 0, tcell.Button1, 0))
+	a.draw() // the loop repaints between events, so the rects are fresh
+	a.handleMouse(tcell.NewEventMouse(closeB, 0, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(closeB, 0, tcell.ButtonNone, 0))
+
+	if a.tabs.Len() != 1 {
+		t.Fatalf("drag across the strip left %d tabs, want 1", a.tabs.Len())
+	}
+	if got := a.activeTabPtr().Path; got != pb {
+		t.Fatalf("the surviving tab is %q, want %q", got, pb)
+	}
+}
+
+// treeRowY returns the screen row of the tree entry named name, walking
+// the sidebar's rows through the same hit-test a click uses.
+func treeRowY(t *testing.T, a *App, name string) int {
+	t.Helper()
+	sx, sy, _, sh := a.sidebarRect()
+	for ly := 0; ly < sh; ly++ {
+		if n, ok := a.tree.HitTest(sx, ly); ok && n.Name == name {
+			return sy + ly
+		}
+	}
+	t.Fatalf("tree row %q not on screen", name)
+	return -1
+}
+
+// TestHandleMouse_DragDownTreeTogglesOnlyThePressedRow is the vertical
+// twin: a press on one folder followed by motion over another must
+// toggle the first and leave the second alone. Before the fresh-press
+// gate, the drag opened every folder (and every file) it passed over.
+func TestHandleMouse_DragDownTreeTogglesOnlyThePressedRow(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"alpha", "beta"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0755); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, d, "f.txt"), []byte("x"), 0644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	a := newTestApp(t, dir)
+	a.draw()
+	yA := treeRowY(t, a, "alpha")
+	yB := treeRowY(t, a, "beta")
+
+	a.handleMouse(tcell.NewEventMouse(4, yA, tcell.Button1, 0))
+	a.draw()
+	a.handleMouse(tcell.NewEventMouse(4, yB, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(4, yB, tcell.ButtonNone, 0))
+
+	nodeA, _ := a.tree.HitTest(0, yA)
+	if !nodeA.Expanded {
+		t.Fatal("the pressed folder should have toggled open")
+	}
+	yB = treeRowY(t, a, "beta")
+	nodeB, _ := a.tree.HitTest(0, yB)
+	if nodeB.Expanded {
+		t.Fatal("dragging over a second folder must not toggle it")
+	}
+	if a.tabs.Len() != 0 {
+		t.Fatalf("the drag opened %d files", a.tabs.Len())
+	}
+}
+
+// TestHandleMouse_MdPreviewScrollbarPressAndDrag: the preview's bar
+// used to work by accident — its press returned "not mine", so every
+// motion event re-entered the dispatch and re-pressed the bar. With
+// the dispatch running once per press, the bar needs its own drag
+// latch, and this pins that it has one: press jumps, drag follows the
+// row, release ends it, and none of it starts a text selection.
+func TestHandleMouse_MdPreviewScrollbarPressAndDrag(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	body := strings.Repeat("paragraph line\n\n", 200)
+	tab := seedMarkdownTab(t, a, "long.md", "# Title\n\n"+body)
+	a.menuTogglePreviewMarkdown()
+	a.draw()
+	st := a.mdPreview[tab]
+	if st == nil {
+		t.Fatal("fixture: preview not active")
+	}
+	ex, ey, ew, eh := a.editorRect()
+	barX := ex + ew - 1
+
+	a.handleMouse(tcell.NewEventMouse(barX, ey+eh-1, tcell.Button1, 0))
+	if a.dragMode != dragMdPreviewScrollbar {
+		t.Fatalf("dragMode = %d, want the preview bar drag", a.dragMode)
+	}
+	bottom := st.scroll
+	if bottom == 0 {
+		t.Fatal("pressing the foot of the bar should scroll the preview")
+	}
+	a.handleMouse(tcell.NewEventMouse(barX-10, ey, tcell.Button1, 0))
+	if st.scroll != 0 {
+		t.Fatalf("dragging to the top row should return to 0, got %d", st.scroll)
+	}
+	if st.selA != st.selB {
+		t.Fatal("a bar drag must not select rendered text")
+	}
+	a.handleMouse(tcell.NewEventMouse(barX, ey, tcell.ButtonNone, 0))
+	if a.dragMode != dragNone {
+		t.Fatalf("release should clear dragMode, got %d", a.dragMode)
+	}
+}

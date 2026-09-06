@@ -26,6 +26,7 @@ import (
 	"github.com/johnlam90/skiff/internal/diff"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/git"
+	"github.com/johnlam90/skiff/internal/scrollbar"
 )
 
 // autoScrollEvent is the custom tcell event our auto-scroll goroutine
@@ -45,6 +46,26 @@ type clickRecord struct {
 	when time.Time
 }
 
+// mouseState is the dispatcher's memory between events. held is the
+// button mask the previous event carried, which is what turns a stream
+// of Button1 reports into one press followed by motion: a fresh press is
+// a button in the mask now that was not in it last time, and everything
+// else with the button set is the same gesture continuing.
+type mouseState struct {
+	held tcell.ButtonMask
+}
+
+// fresh reports which buttons btn presses for the first time — set now
+// and not on the previous event — and records btn as the new baseline.
+// Called exactly once per event, at the top of handleMouse, so every
+// branch below reads the same answer.
+func (m *mouseState) fresh(btn tcell.ButtonMask) tcell.ButtonMask {
+	const buttons = tcell.Button1 | tcell.Button2 | tcell.Button3
+	pressed := btn & buttons &^ m.held
+	m.held = btn & buttons
+	return pressed
+}
+
 // handleMouse routes a mouse event to whichever panel the cursor is over,
 // tracking drag state so a click-drag inside the editor extends the
 // selection. When the action menu is open it absorbs all mouse events:
@@ -52,6 +73,7 @@ type clickRecord struct {
 func (a *App) handleMouse(ev *tcell.EventMouse) {
 	x, y := ev.Position()
 	btn := ev.Buttons()
+	pressed := a.mouse.fresh(btn)
 
 	// Remember when we last saw Shift held down on ANY mouse event.
 	// Zellij + macOS Terminal split shift+wheel into two events: a
@@ -73,6 +95,12 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	// (ADR-0001's pass-through, now the adapter's answer rather than an
 	// absent branch here).
 	if ov := a.overlays.Top(); ov != nil {
+		// The overlay owns the pointer now, so whatever base-UI drag
+		// was in progress is over — an overlay opened mid-drag would
+		// otherwise leave the mode latched until a release the overlay
+		// swallows.
+		a.dragMode = dragNone
+		a.stopAutoScroll()
 		ov.HandleMouse(x, y, btn)
 		return
 	}
@@ -143,6 +171,7 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	}
 
 	leftDown := btn&tcell.Button1 != 0
+	leftPress := pressed&tcell.Button1 != 0
 
 	// Drag continuation: while we're mid-drag in the editor, every event
 	// with the button held extends the selection — even if the cursor has
@@ -191,8 +220,31 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		return
 	}
 
-	// Initial press dispatch.
-	if leftDown && a.dragMode == dragNone {
+	// The preview's thumb drag: the bar is painted by drawMdPreview,
+	// so the grab contract is the editor bar's, applied to the rendered
+	// view's own scroll offset.
+	if leftDown && a.dragMode == dragMdPreviewScrollbar {
+		if st := a.activeMdPreview(); st != nil {
+			a.mdPreviewScrollbarTo(st, y)
+		}
+		return
+	}
+
+	// Motion with the button still held and no drag claimed above is
+	// nothing: the press already ran its handler, and running it again
+	// at every cell the pointer crosses is how a sideways drag used to
+	// close every tab in its path and a downward one toggled every
+	// folder. Only a FRESH press — Button1 set now, clear on the
+	// previous event — reaches the dispatch, so it runs once per press.
+	if leftDown && !leftPress {
+		return
+	}
+
+	// Initial press dispatch. A drag mode still set here is a stale
+	// latch (the release never reached us), and a new press ends it.
+	if leftPress {
+		a.dragMode = dragNone
+		a.stopAutoScroll()
 		sw := a.sidebarW()
 		splitX := a.splitterX()
 		// A press anywhere but the sidebar means the user has moved on
@@ -226,6 +278,21 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		case y == a.height-1:
 			a.statusBarClick(x)
 		case y > 0 && y < a.height-1:
+			// The preview replaces the editor's surface wholesale, bar
+			// included: its bar has to be tested before the editor's,
+			// or a long markdown file's own scrollbar (still "visible"
+			// on the tab) claims the column the preview painted.
+			if st := a.activeMdPreview(); st != nil {
+				if a.mdPreviewScrollbarHit(st, x, y) {
+					a.mdPreviewScrollbarTo(st, y)
+					a.dragMode = dragMdPreviewScrollbar
+					return
+				}
+				if a.mdPreviewPress(st, x, y) {
+					a.dragMode = dragMdPreview
+				}
+				return
+			}
 			if localY, ok := a.scrollbarHit(x, y); ok {
 				a.scrollbarTo(localY)
 				a.dragMode = dragScrollbar
@@ -238,14 +305,6 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 			// arming unconditionally let the next motion event drag out
 			// a selection the user never started — and the release copy
 			// it to the clipboard.
-			if t := a.activeTabPtr(); t != nil {
-				if st := a.mdPreviewFor(t); st != nil {
-					if a.mdPreviewPress(st, x, y) {
-						a.dragMode = dragMdPreview
-					}
-					return
-				}
-			}
 			if a.editorPress(x, y) {
 				a.dragMode = dragEditor
 			}
@@ -748,6 +807,39 @@ func (a *App) gitPanelScrollbarTo(y int) {
 	}
 	_, sy, _, _ := a.sidebarRect()
 	a.gitPanelScrollToBar(y - sy)
+}
+
+// activeMdPreview returns the active tab's markdown preview state, or
+// nil when the active tab is not in preview mode — the one question
+// every preview branch in the dispatcher asks first.
+func (a *App) activeMdPreview() *mdPreviewState {
+	t := a.activeTabPtr()
+	if t == nil {
+		return nil
+	}
+	return a.mdPreviewFor(t)
+}
+
+// mdPreviewScrollbarHit reports whether (x, y) lands on the preview's
+// scrollbar: the editor rect's rightmost column, and only while
+// drawMdPreview paints a bar there (a document that fits has none).
+func (a *App) mdPreviewScrollbarHit(st *mdPreviewState, x, y int) bool {
+	ex, ey, ew, eh := a.editorRect()
+	if x != ex+ew-1 || y < ey || y >= ey+eh {
+		return false
+	}
+	_, _, ok := scrollbar.Geom(len(st.lines), eh, st.scroll)
+	return ok
+}
+
+// mdPreviewScrollbarTo scrolls the preview so its thumb centers on
+// screen row y — shared by the press and the drag, like every other bar.
+func (a *App) mdPreviewScrollbarTo(st *mdPreviewState, y int) {
+	_, ey, _, eh := a.editorRect()
+	if _, _, ok := scrollbar.Geom(len(st.lines), eh, st.scroll); !ok {
+		return
+	}
+	st.scroll = scrollbar.TargetForThumb(len(st.lines), eh, y-ey)
 }
 
 // selectWordAt selects the word under the buffer position p (or does

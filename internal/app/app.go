@@ -159,6 +159,7 @@ const (
 	dragTreeScrollbar
 	dragGitPanelScrollbar
 	dragMdPreview
+	dragMdPreviewScrollbar
 )
 
 // App is the editor's top-level state holder and event-loop owner.
@@ -264,6 +265,10 @@ type App struct {
 	dragMode     dragKind // dragEditor while a drag-select is active, etc.
 	lastClick    clickRecord
 	lastTabRects []tabRect
+	// mouse is the dispatcher's cross-event memory — which buttons the
+	// previous event carried, which overlay a press landed on, how
+	// many events have arrived at all. See mouseState in mouse.go.
+	mouse mouseState
 
 	// lastShiftAt is the wall-clock time we last saw any mouse event
 	// carrying the Shift modifier. Some terminals (notably Zellij over
