@@ -411,3 +411,39 @@ func TestDiffLineStyle_TintsChangedRows(t *testing.T) {
 		t.Fatalf("low-color bg = %v, must keep the passed surface", bg)
 	}
 }
+
+// TestInfo_DragFromBodyDoesNotDismiss is the drag-dismissal regression
+// for the report surface. A 300-line stderr dump is read by scrolling,
+// and a press in the body followed by a drag that left the frame — or
+// crossed the OK button — delivered a Button1 event on a dismissal
+// target and closed the report mid-read. Only a fresh press may
+// dismiss; the bar still follows the same drag.
+func TestInfo_DragFromBodyDoesNotDismiss(t *testing.T) {
+	scr := infoScreen(t)
+	n, closed := testInfo(300)
+	for i := range n.Lines {
+		n.Lines[i] = "stderr line"
+	}
+	infoBarColumn(t, scr, n)
+	r := n.rect()
+
+	n.HandleMouse(r.X+2, r.Y+4, tcell.Button1) // press in the body
+	n.HandleMouse(r.X-1, r.Y-1, tcell.Button1) // drag out of the frame
+	if *closed != 0 {
+		t.Fatal("a drag out of the frame dismissed the report")
+	}
+	n.HandleMouse(r.X+(r.W-10)/2+1, r.Y+r.H-3, tcell.Button1) // drag over OK
+	if *closed != 0 {
+		t.Fatal("a drag over OK dismissed the report")
+	}
+	b := n.bar(r)
+	n.HandleMouse(b.x, b.top+b.viewH-1, tcell.Button1)
+	if n.Scroll() == 0 {
+		t.Fatal("a drag onto the bar should still scroll")
+	}
+	n.HandleMouse(r.X-1, r.Y-1, tcell.ButtonNone)
+	n.HandleMouse(r.X-1, r.Y-1, tcell.Button1)
+	if *closed != 1 {
+		t.Fatalf("a fresh outside press after the release must dismiss, closed %d times", *closed)
+	}
+}

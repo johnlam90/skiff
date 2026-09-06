@@ -41,6 +41,13 @@ type Info struct {
 	Size  func() (w, h int)
 	Close func()
 
+	// press is the click latch: OK and the outside-click dismissal
+	// answer a fresh press, never a held drag — see Press. A press in
+	// the body followed by a drag past the frame used to dismiss a
+	// 300-line stderr report mid-read; the scroll indicator still
+	// follows the raw mask.
+	press Press
+
 	// scroll is the first visible body ROW (post-wrap); scrolling
 	// clamps it.
 	scroll int
@@ -181,10 +188,11 @@ func (n *Info) HandleKey(ev *tcell.EventKey) {
 
 // HandleMouse: wheel scrolls the body (WheelUp/WheelDown — the masks
 // tcell actually emits for wheels and trackpads); a press on the scroll
-// indicator jumps the thumb there; a click on OK or outside the modal
-// dismisses.
+// indicator jumps the thumb there; a FRESH click on OK or outside the
+// modal dismisses — the motion of a held button never does.
 func (n *Info) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	r := n.rect()
+	fresh := n.press.Fresh(btn)
 	if btn&tcell.WheelUp != 0 {
 		n.ScrollBy(-3)
 		return
@@ -202,6 +210,9 @@ func (n *Info) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	// having one.
 	if b := n.bar(r); b.Hit(x, y) {
 		n.scroll = b.Target(y)
+		return
+	}
+	if !fresh {
 		return
 	}
 	if !r.Contains(x, y) {

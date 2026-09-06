@@ -507,3 +507,37 @@ func TestFinderDraw_FailedIndexExplainsItself(t *testing.T) {
 		t.Error("the old cryptic tail is still painted")
 	}
 }
+
+// TestFinderMouse_DragAcrossRowsOpensNothing pins the finder's click
+// latch: a press in the query field followed by a drag down the
+// result rows used to open whichever file the drag landed on, and a
+// drag out of the frame closed the finder. The hover still follows
+// the drag; only a fresh press opens or dismisses.
+func TestFinderMouse_DragAcrossRowsOpensNothing(t *testing.T) {
+	a, _ := withFinder(t)
+	a.openFinder()
+	fo := finderOv(t, a)
+	if len(fo.results) < 2 {
+		t.Fatalf("need at least 2 results, got %d", len(fo.results))
+	}
+	fr := fo.rect()
+	tabsBefore := a.tabs.Len()
+
+	fo.HandleMouse(fr.X+5, fr.Y+3, tcell.Button1)   // press in the field
+	fo.HandleMouse(fr.X+5, fr.Y+4+1, tcell.Button1) // drag onto row 1
+	if !finderIsOpen(a) || a.tabs.Len() != tabsBefore {
+		t.Fatal("a drag onto a row opened it")
+	}
+	if fo.Sel() != 1 {
+		t.Fatalf("the drag should still move the highlight, sel = %d", fo.Sel())
+	}
+	fo.HandleMouse(0, 0, tcell.Button1) // drag out of the frame
+	if !finderIsOpen(a) {
+		t.Fatal("a drag out of the frame closed the finder")
+	}
+	fo.HandleMouse(fr.X+5, fr.Y+4+1, tcell.ButtonNone)
+	fo.HandleMouse(fr.X+5, fr.Y+4+1, tcell.Button1)
+	if finderIsOpen(a) || a.tabs.Len() != tabsBefore+1 {
+		t.Fatal("a fresh press on the row after the release must open it")
+	}
+}

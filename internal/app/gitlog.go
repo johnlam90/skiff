@@ -52,6 +52,10 @@ type gitLogOverlay struct {
 	title   string
 	path    string
 	entries []git.Commit
+	// press is the click latch: a commit opens and an outside click
+	// dismisses on a fresh press only; the hover highlight and the
+	// scroll indicator keep following a held drag — see overlay.Press.
+	press overlay.Press
 }
 
 // sync derives the window height from the entry count and the terminal,
@@ -180,6 +184,7 @@ func (g *gitLogOverlay) HandleKey(ev *tcell.EventKey) {
 // the scroll indicator's column, which the bar claims for itself.
 func (g *gitLogOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	r := g.sync()
+	fresh := g.press.Fresh(btn)
 	if btn&tcell.WheelUp != 0 {
 		g.ScrollBy(-3)
 		return
@@ -208,7 +213,11 @@ func (g *gitLogOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	if row >= 0 {
 		g.Select(row)
 	}
-	if btn&tcell.Button1 == 0 {
+	// Opening and dismissing answer a FRESH press: a drag that starts
+	// on the thumb or the title row and crosses the commits must not
+	// show whichever one it lands on, or close the history when it
+	// leaves the frame.
+	if !fresh {
 		return
 	}
 	if !r.Contains(x, y) {

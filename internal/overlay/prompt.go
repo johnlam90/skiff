@@ -49,6 +49,12 @@ type Prompt struct {
 	Hover int
 	Theme theme.Theme
 
+	// press is the click latch: the buttons and the outside-click
+	// dismissal answer a fresh press, never the motion of a held one
+	// — see Press. A press in the field followed by a drag onto OK
+	// used to submit the rename.
+	press Press
+
 	// Size reports the screen dimensions — injected by the opener so
 	// the prompt owns its geometry without a screen handle.
 	Size func() (w, h int)
@@ -108,9 +114,13 @@ func (p *Prompt) HandleKey(ev *tcell.EventKey) {
 
 // HandleMouse processes mouse input: hovering a button highlights it,
 // clicks on the buttons activate them, a click outside cancels, and a
-// click in the input field repositions the cursor.
+// click in the input field repositions the cursor. The buttons and the
+// outside-click cancel answer a FRESH press only; the field's caret
+// keeps following a held drag, which is the one thing a drag along an
+// input can usefully do.
 func (p *Prompt) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	r := p.rect()
+	fresh := p.press.Fresh(btn)
 	cancelX, okX := p.buttonCols()
 	// Hover tracking — runs on every event, button held or not.
 	if x >= r.X && x < r.X+r.W && y == r.Y+6 {
@@ -125,19 +135,21 @@ func (p *Prompt) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	if btn&tcell.Button1 == 0 {
 		return
 	}
-	if !r.Contains(x, y) {
-		p.cancel()
-		return
-	}
-	if y == r.Y+6 {
-		relX := x - r.X
-		switch {
-		case relX >= cancelX && relX < cancelX+promptBtnCancelW:
+	if fresh {
+		if !r.Contains(x, y) {
 			p.cancel()
 			return
-		case relX >= okX && relX < okX+promptBtnOKW:
-			p.submit()
-			return
+		}
+		if y == r.Y+6 {
+			relX := x - r.X
+			switch {
+			case relX >= cancelX && relX < cancelX+promptBtnCancelW:
+				p.cancel()
+				return
+			case relX >= okX && relX < okX+promptBtnOKW:
+				p.submit()
+				return
+			}
 		}
 	}
 	// Click in the input field — move the cursor to the clicked rune.
