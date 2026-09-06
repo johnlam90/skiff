@@ -207,3 +207,62 @@ func (t *Tab) MoveWordRight(extend bool) {
 	cur.Col = WordRight(runes, cur.Col)
 	t.MoveCursorTo(cur, extend)
 }
+
+// DeleteWordLeft removes the text between the caret and the start of
+// the word to its left — the span Alt+Left would have walked — or the
+// selection when there is one. At column 0 it joins the line onto the
+// previous one, exactly like Backspace, so the gesture never stalls at
+// a line boundary. Always its own undo step: a word is a deliberate
+// unit and must not merge into the typing burst around it.
+func (t *Tab) DeleteWordLeft() {
+	if t.IsImage() {
+		return
+	}
+	if t.HasSelection() {
+		t.DeleteSelection()
+		return
+	}
+	cur := t.Cursor
+	var from Position
+	if cur.Col <= 0 {
+		if cur.Line == 0 {
+			return
+		}
+		from = t.clusterLeftOf(cur)
+	} else {
+		from = Position{Line: cur.Line, Col: WordLeft(t.Buffer.LineRunes(cur.Line), cur.Col)}
+	}
+	t.edit(undoGroupStructural, func() {
+		t.Cursor = t.Buffer.DeleteRange(from, cur)
+		t.Anchor = t.Cursor
+	})
+}
+
+// DeleteWordRight removes the text between the caret and the end of the
+// word to its right — Alt+Right's span — or the selection when there is
+// one. At the end of a line it joins the next line on, like Delete.
+// Always its own undo step, for the same reason as DeleteWordLeft.
+func (t *Tab) DeleteWordRight() {
+	if t.IsImage() {
+		return
+	}
+	if t.HasSelection() {
+		t.DeleteSelection()
+		return
+	}
+	cur := t.Cursor
+	runes := t.Buffer.LineRunes(cur.Line)
+	var to Position
+	if cur.Col >= len(runes) {
+		if cur.Line >= t.Buffer.LineCount()-1 {
+			return
+		}
+		to = t.clusterRightOf(cur)
+	} else {
+		to = Position{Line: cur.Line, Col: WordRight(runes, cur.Col)}
+	}
+	t.edit(undoGroupStructural, func() {
+		t.Cursor = t.Buffer.DeleteRange(cur, to)
+		t.Anchor = t.Cursor
+	})
+}

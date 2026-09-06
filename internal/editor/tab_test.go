@@ -2705,3 +2705,29 @@ func TestTab_SelectionSpansLines(t *testing.T) {
 		t.Fatal("a selection reaching the next line spans lines")
 	}
 }
+
+// TestTab_MoveDocHomeEnd pins the document jumps: start of buffer, one
+// past the last rune, Shift-extends, and each is a no-op on images.
+func TestTab_MoveDocHomeEnd(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("ab\ncd\nef")}
+	tab.initUndo()
+	tab.Cursor = Position{Line: 1, Col: 1}
+	tab.Anchor = tab.Cursor
+	tab.MoveDocEnd(false)
+	if tab.Cursor != (Position{Line: 2, Col: 2}) || tab.HasSelection() {
+		t.Fatalf("MoveDocEnd: cursor %+v, selection %v", tab.Cursor, tab.HasSelection())
+	}
+	tab.MoveDocHome(true)
+	if tab.Cursor != (Position{}) || tab.SelectionText() != "ab\ncd\nef" {
+		t.Fatalf("MoveDocHome(extend): cursor %+v, selection %q", tab.Cursor, tab.SelectionText())
+	}
+	if !tab.cursorMoved {
+		t.Fatal("the jumps must flag cursorMoved so the view follows")
+	}
+
+	img := &Tab{Buffer: NewBuffer(""), Mode: imageMode}
+	img.MoveDocEnd(false)
+	if img.cursorMoved {
+		t.Fatal("image tabs must ignore the jump")
+	}
+}

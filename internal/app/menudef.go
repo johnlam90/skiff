@@ -169,6 +169,8 @@ func goMenuGroup() []menuItemDef {
 		{label: "Move to previous word", shortcut: "Esc b", action: (*App).menuMoveWordLeft, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 		{label: "Move to next word", shortcut: "Esc e", action: (*App).menuMoveWordRight, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 		{label: "Find file in project", shortcut: "Esc p", action: (*App).menuFindFile, enabled: (*App).hasFinder, visible: (*App).hasTree},
+		{label: "Go to start of file", shortcut: "Esc <", action: (*App).menuGoToDocStart, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		{label: "Go to end of file", shortcut: "Esc >", action: (*App).menuGoToDocEnd, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 	}
 }
 

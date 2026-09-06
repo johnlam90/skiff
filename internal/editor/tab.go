@@ -876,6 +876,24 @@ func (t *Tab) MoveLineEnd(extend bool) {
 	t.breakUndoGroup()
 }
 
+// MoveDocHome moves the cursor to the very start of the buffer, keeping
+// the anchor when extend is set. Ctrl+Home and the Esc < leader.
+func (t *Tab) MoveDocHome(extend bool) {
+	if t.IsImage() {
+		return
+	}
+	t.MoveCursorTo(Position{}, extend)
+}
+
+// MoveDocEnd moves the cursor just past the last rune of the buffer,
+// keeping the anchor when extend is set. Ctrl+End and the Esc > leader.
+func (t *Tab) MoveDocEnd(extend bool) {
+	if t.IsImage() {
+		return
+	}
+	t.MoveCursorTo(t.Buffer.EndPos(), extend)
+}
+
 // JumpToLine moves the cursor to column 0 of the 1-based line n,
 // clamping to the buffer. The selection collapses — a goto is
 // navigation, not extension — and cursorMoved is set so the next

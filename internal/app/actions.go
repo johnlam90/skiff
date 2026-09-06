@@ -622,3 +622,21 @@ func (a *App) menuOutdentLines() {
 		a.flash("Nothing to outdent")
 	}
 }
+
+// menuGoToDocStart jumps the caret to the very start of the file. Also
+// on Ctrl+Home and Esc <; the menu row is where a user discovers it.
+func (a *App) menuGoToDocStart() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.MoveDocHome(false)
+	}
+}
+
+// menuGoToDocEnd jumps the caret just past the last rune of the file.
+// Also on Ctrl+End and Esc >.
+func (a *App) menuGoToDocEnd() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.MoveDocEnd(false)
+	}
+}

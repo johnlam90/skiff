@@ -70,6 +70,8 @@ var postRedesignMenuActions = []string{
 	// row whose label starts with "in" would outrank "Find in file"
 	// for the filter query the palette test pins.
 	"Shift lines right", "Shift lines left",
+	// The document-end jumps behind Ctrl+Home / Ctrl+End and Esc < / >.
+	"Go to start of file", "Go to end of file",
 }
 
 // menuCatalog flattens every built-in row the ≡ menu can reach — the top

@@ -459,3 +459,56 @@ func TestHandleKey_LFOutsidePasteIsEnter(t *testing.T) {
 		t.Fatalf("KeyLF outside a paste gave %q, want an auto-indented split", got)
 	}
 }
+
+// TestHandleKey_CtrlArrowsMoveByWord makes Ctrl+arrow the same word
+// motion as Alt+arrow: it is what most terminals send for word motion,
+// and a modified arrow is a motion, not a Ctrl+letter command, so it
+// collides with nothing tmux or the terminal claims.
+func TestHandleKey_CtrlArrowsMoveByWord(t *testing.T) {
+	a, tab := newNavTestApp(t, "alpha beta\n")
+	a.handleKey(tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModCtrl))
+	if want := (editor.Position{Line: 0, Col: 5}); tab.Cursor != want {
+		t.Fatalf("Ctrl+Right: cursor = %v, want %v", tab.Cursor, want)
+	}
+	a.handleKey(tcell.NewEventKey(tcell.KeyLeft, 0, tcell.ModCtrl|tcell.ModShift))
+	if got := tab.SelectionText(); got != "alpha" {
+		t.Fatalf("Ctrl+Shift+Left selected %q, want %q", got, "alpha")
+	}
+}
+
+// TestHandleKey_CtrlHomeEndReachTheDocumentEnds pins Ctrl+Home /
+// Ctrl+End as document jumps while plain Home / End stay line-local.
+func TestHandleKey_CtrlHomeEndReachTheDocumentEnds(t *testing.T) {
+	a, tab := newNavTestApp(t, "ab\ncd\nef")
+	tab.Cursor = editor.Position{Line: 1, Col: 1}
+	tab.Anchor = tab.Cursor
+	a.handleKey(tcell.NewEventKey(tcell.KeyEnd, 0, tcell.ModCtrl))
+	if want := (editor.Position{Line: 2, Col: 2}); tab.Cursor != want {
+		t.Fatalf("Ctrl+End: cursor = %v, want %v", tab.Cursor, want)
+	}
+	a.handleKey(keyEv(tcell.KeyHome, 0))
+	if want := (editor.Position{Line: 2, Col: 0}); tab.Cursor != want {
+		t.Fatalf("plain Home must stay on its line: cursor = %v, want %v", tab.Cursor, want)
+	}
+	a.handleKey(tcell.NewEventKey(tcell.KeyHome, 0, tcell.ModCtrl|tcell.ModShift))
+	if got := tab.SelectionText(); got != "ab\ncd\n" {
+		t.Fatalf("Ctrl+Shift+Home selected %q", got)
+	}
+}
+
+// TestHandleKey_ModifiedBackspaceDeleteTakeWords pins Alt/Ctrl+Backspace
+// and Alt/Ctrl+Delete as word deletes, where they used to degrade
+// silently to a single-character delete.
+func TestHandleKey_ModifiedBackspaceDeleteTakeWords(t *testing.T) {
+	a, tab := newNavTestApp(t, "alpha beta gamma\n")
+	tab.Cursor = editor.Position{Line: 0, Col: 10}
+	tab.Anchor = tab.Cursor
+	a.handleKey(tcell.NewEventKey(tcell.KeyBackspace2, 0, tcell.ModAlt))
+	if got := tab.Buffer.Lines[0]; got != "alpha  gamma" {
+		t.Fatalf("Alt+Backspace gave %q", got)
+	}
+	a.handleKey(tcell.NewEventKey(tcell.KeyDelete, 0, tcell.ModCtrl))
+	if got := tab.Buffer.Lines[0]; got != "alpha " {
+		t.Fatalf("Ctrl+Delete gave %q", got)
+	}
+}

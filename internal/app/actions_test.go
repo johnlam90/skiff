@@ -872,3 +872,20 @@ func TestMenuIndentOutdentLines(t *testing.T) {
 	empty.menuIndentLines() // must not panic with no tab
 	empty.menuOutdentLines()
 }
+
+// TestMenuGoToDocStartEnd pins the Go rows behind Esc < / Esc >: each
+// jumps the caret to its end of the file and both are safe with no tab.
+func TestMenuGoToDocStartEnd(t *testing.T) {
+	a, tab := newNavTestApp(t, "ab\ncd")
+	a.menuGoToDocEnd()
+	if want := (editor.Position{Line: 1, Col: 2}); tab.Cursor != want {
+		t.Fatalf("Go to end of file: cursor = %v, want %v", tab.Cursor, want)
+	}
+	a.menuGoToDocStart()
+	if tab.Cursor != (editor.Position{}) {
+		t.Fatalf("Go to start of file: cursor = %v, want origin", tab.Cursor)
+	}
+	empty := newTestApp(t, t.TempDir())
+	empty.menuGoToDocStart()
+	empty.menuGoToDocEnd()
+}

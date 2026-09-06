@@ -160,11 +160,16 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		return
 	}
 	extend := ev.Modifiers()&tcell.ModShift != 0
-	// Alt turns the horizontal arrows into word motion. Alt is safe where
-	// Ctrl is not: no multiplexer prefix and no terminal flow control
-	// claims it, and every terminal already sends Alt+arrow for exactly
-	// this. See leader.go for the Esc-b / Esc-e equivalents.
-	byWord := ev.Modifiers()&tcell.ModAlt != 0
+	// Alt or Ctrl turns the horizontal arrows (and Backspace / Delete)
+	// into word motion. A modified ARROW is a motion, not a command: no
+	// multiplexer prefix and no flow-control key is Ctrl+Left, so the
+	// "no Ctrl shortcuts" rule is about letters, and Ctrl+arrow is what
+	// most terminals send for word motion by default. Alt stays because
+	// macOS Terminal sends it. See leader.go for Esc-b / Esc-e.
+	byWord := ev.Modifiers()&(tcell.ModAlt|tcell.ModCtrl) != 0
+	// Ctrl+Home / Ctrl+End reach the ends of the document; the leader
+	// pair Esc < / Esc > is the tmux-safe spelling of the same jumps.
+	byDoc := ev.Modifiers()&tcell.ModCtrl != 0
 
 	switch ev.Key() {
 	case tcell.KeyUp:
@@ -184,9 +189,17 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 			tab.MoveCursor(0, 1, extend)
 		}
 	case tcell.KeyHome:
-		tab.MoveLineHome(extend)
+		if byDoc {
+			tab.MoveDocHome(extend)
+		} else {
+			tab.MoveLineHome(extend)
+		}
 	case tcell.KeyEnd:
-		tab.MoveLineEnd(extend)
+		if byDoc {
+			tab.MoveDocEnd(extend)
+		} else {
+			tab.MoveLineEnd(extend)
+		}
 	case tcell.KeyPgUp:
 		_, h := a.editorSize()
 		tab.MoveCursor(-h, 0, extend)
@@ -199,9 +212,17 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		// they are buffered above, with the source's own indentation.
 		tab.InsertNewline()
 	case tcell.KeyBackspace, tcell.KeyBackspace2:
-		tab.Backspace()
+		if byWord {
+			tab.DeleteWordLeft()
+		} else {
+			tab.Backspace()
+		}
 	case tcell.KeyDelete:
-		tab.Delete()
+		if byWord {
+			tab.DeleteWordRight()
+		} else {
+			tab.Delete()
+		}
 	case tcell.KeyTab:
 		// Over a selection that spans lines, Tab indents the block —
 		// inserting would replace forty selected lines with one indent

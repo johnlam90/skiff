@@ -93,6 +93,8 @@ func TestLeaderActionFor_BindingsFireIntendedMethods(t *testing.T) {
 		{'z', (*App).menuToggleWrap, "wrap", "View"},
 		{'?', (*App).menuKeyboardShortcuts, "shortcuts", "View"},
 		{'q', (*App).menuQuit, "quit", "Quit"},
+		{'<', (*App).menuGoToDocStart, "file start", "Go"},
+		{'>', (*App).menuGoToDocEnd, "file end", "Go"},
 	}
 
 	bound := make(map[rune]leaderBinding, len(want))
