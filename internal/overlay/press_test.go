@@ -39,3 +39,19 @@ func TestPress_FreshOnlyOnTheFirstButton1Event(t *testing.T) {
 		t.Fatal("the wheel event must have re-armed the latch")
 	}
 }
+
+// TestPress_SyncSeedsFromTheHeldMask pins the opener's seam: a latch
+// synced to a held Button1 answers the next Button1 event as motion,
+// and one synced to no button answers it as a fresh press — without
+// Sync itself counting as an event.
+func TestPress_SyncSeedsFromTheHeldMask(t *testing.T) {
+	var p Press
+	p.Sync(tcell.Button1)
+	if p.Fresh(tcell.Button1) {
+		t.Fatal("held motion after a Sync(Button1) must not read as a fresh press")
+	}
+	p.Sync(tcell.ButtonNone)
+	if !p.Fresh(tcell.Button1) {
+		t.Fatal("a press after a Sync(ButtonNone) must read as fresh")
+	}
+}
