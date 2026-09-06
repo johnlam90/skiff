@@ -953,14 +953,25 @@ func (a *App) scrollbarHit(x, y int) (int, bool) {
 // hunk diff. A plain row cell or an unmarked gutter cell goes to the
 // splitter, whose miss is the cheapest — a grab released in place
 // changes nothing.
+//
+// The neighbours widen the grab on the body rows only. On the tab bar
+// the right neighbour is the ≡ button's first cell (menuButtonRect
+// starts at sidebarW) and the left one the sidebar header's last; on
+// the status row both are the bar's own targets. A press there used
+// to arm a sidebar drag instead of opening the menu — on a phone, the
+// cell most likely to be hit first.
 func (a *App) splitterHit(x, y int) bool {
 	splitX := a.splitterX()
 	if splitX < 0 {
 		return false
 	}
-	switch x {
-	case splitX:
+	if x == splitX {
 		return true
+	}
+	if y <= 0 || y >= a.height-1 {
+		return false
+	}
+	switch x {
 	case splitX - 1:
 		return !a.treeScrollbarHit(x, y) && !a.gitPanelScrollbarHit(x, y)
 	case splitX + 1:

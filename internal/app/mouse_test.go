@@ -2056,3 +2056,49 @@ func TestHandleMouse_GitPanelClickableWhenItFillsTheWindow(t *testing.T) {
 		t.Fatal("a press inside the filling panel must not drop its keyboard capture")
 	}
 }
+
+// TestSplitterHit_NeighboursYieldOnTheTabAndStatusRows pins the widened
+// grab to the body rows. The ≡ button's first cell is x = sidebarW,
+// which is exactly the splitter's right neighbour, and a press there
+// used to arm a sidebar drag instead of opening the menu; the status
+// row's cells and the sidebar header's last cell are targets of their
+// own for the same reason.
+func TestSplitterHit_NeighboursYieldOnTheTabAndStatusRows(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.draw()
+	splitX := a.splitterX()
+	mx, _, _, _ := a.menuButtonRect()
+	if mx != splitX+1 {
+		t.Fatalf("fixture: ≡ starts at %d, want the splitter's right neighbour %d", mx, splitX+1)
+	}
+
+	a.handleMouse(tcell.NewEventMouse(splitX+1, 0, tcell.Button1, 0))
+	if a.dragMode == dragSidebar {
+		t.Fatal("a press on the ≡ button's first cell armed a sidebar drag")
+	}
+	if !a.menuOpen {
+		t.Fatal("a press on the ≡ button's first cell must open the menu")
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX+1, 0, tcell.ButtonNone, 0))
+	a.closeAllModals()
+
+	for _, x := range []int{splitX - 1, splitX + 1} {
+		a.handleMouse(tcell.NewEventMouse(x, a.height-1, tcell.Button1, 0))
+		if a.dragMode == dragSidebar {
+			t.Fatalf("x=%d on the status row armed a sidebar drag", x)
+		}
+		a.handleMouse(tcell.NewEventMouse(x, a.height-1, tcell.ButtonNone, 0))
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX-1, 0, tcell.Button1, 0))
+	if a.dragMode == dragSidebar {
+		t.Fatal("the sidebar header's last cell armed a sidebar drag")
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX-1, 0, tcell.ButtonNone, 0))
+
+	// The painted column itself still grabs on every row.
+	a.handleMouse(tcell.NewEventMouse(splitX, 0, tcell.Button1, 0))
+	if a.dragMode != dragSidebar {
+		t.Fatal("the splitter column on the tab row must still grab")
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX, 0, tcell.ButtonNone, 0))
+}
