@@ -579,3 +579,74 @@ func FuzzFindAll(f *testing.F) {
 		}
 	})
 }
+
+// TestReplaceCurrentMatch_AdvancesPastAReplacementHoldingTheQuery is
+// the "foo → foo_bar" regression: the edit trailer re-ran the query and
+// kept the index, which now named the text just written, so every Enter
+// appended another "_bar" to the same spot and the counter never moved.
+// The index now walks to the first match after the replacement.
+func TestReplaceCurrentMatch_AdvancesPastAReplacementHoldingTheQuery(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("foo foo")}
+	tab.initUndo()
+	tab.SetFindQuery("foo")
+	tab.ReplaceCurrentMatch("foo_bar")
+	if got := tab.Buffer.Lines[0]; got != "foo_bar foo" {
+		t.Fatalf("after first replace: %q", got)
+	}
+	if got := tab.FindMatches[tab.FindIndex].Col; got != 8 {
+		t.Fatalf("index should point at the untouched second hit (col 8), got col %d", got)
+	}
+	tab.ReplaceCurrentMatch("foo_bar")
+	if got := tab.Buffer.Lines[0]; got != "foo_bar foo_bar" {
+		t.Fatalf("after second replace: %q", got)
+	}
+	// Both hits are replacements now; the index wraps to the first so
+	// the counter stays truthful rather than freezing.
+	if tab.FindIndex != 0 {
+		t.Fatalf("index should wrap to 0, got %d", tab.FindIndex)
+	}
+}
+
+// TestReplaceCurrentMatch_PreservesCase pins the smart-case rule: a
+// lowercase query replaces FOO with BAR and Foo with Bar, while an
+// uppercase query (an exact search) replaces exactly as typed.
+func TestReplaceCurrentMatch_PreservesCase(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("FOO Foo foo")}
+	tab.initUndo()
+	tab.SetFindQuery("foo")
+	for range 3 {
+		tab.ReplaceCurrentMatch("bar")
+	}
+	if got := tab.Buffer.Lines[0]; got != "BAR Bar bar" {
+		t.Fatalf("smart-case replace gave %q", got)
+	}
+
+	exact := &Tab{Buffer: NewBuffer("FOO")}
+	exact.initUndo()
+	exact.SetFindQuery("FOO")
+	exact.ReplaceCurrentMatch("bar")
+	if got := exact.Buffer.Lines[0]; got != "bar" {
+		t.Fatalf("an exact query must replace as typed, got %q", got)
+	}
+}
+
+// TestPreserveCase covers the helper's edges: single letters count as
+// capitalised, mixed case is left alone, and non-letters don't vote.
+func TestPreserveCase(t *testing.T) {
+	cases := []struct{ query, matched, repl, want string }{
+		{"foo", "FOO", "bar", "BAR"},
+		{"foo", "Foo", "bar", "Bar"},
+		{"foo", "foo", "bar", "bar"},
+		{"foo", "fOo", "bar", "bar"},
+		{"a", "A", "foo", "Foo"},
+		{"foo", "FOO", "", ""},
+		{"f_o", "F_O", "bar", "BAR"},
+		{"Foo", "Foo", "bar", "bar"},
+		{"123", "123", "bar", "bar"},
+	}
+	for _, c := range cases {
+		if got := preserveCase(c.query, c.matched, c.repl); got != c.want {
+			t.Errorf("preserveCase(%q, %q, %q) = %q, want %q", c.query, c.matched, c.repl, got, c.want)
+		}
+	}
+}

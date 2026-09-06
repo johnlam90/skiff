@@ -17,7 +17,10 @@
 
 package editor
 
-import "unicode"
+import (
+	"strings"
+	"unicode"
+)
 
 // Match describes one find hit. Line and Col follow the same rune-indexed
 // convention as Position; Width is the rune count of the query so the
@@ -309,23 +312,75 @@ func (t *Tab) ClearFind() {
 // ReplaceCurrentMatch swaps the current find match for repl and
 // re-runs the query so the highlights (and the match count) stay
 // truthful. The cursor lands just after the replacement and the
-// current index stays put, so "replace, replace, replace" walks the
-// file forward naturally. Returns false when there is nothing to
-// replace.
+// current index moves to the first match at or after it, so "replace,
+// replace, replace" walks the file forward — including when the
+// replacement contains the query ("foo" → "foo_bar"), where keeping
+// the index would point it at the text just written and the next
+// Enter would rewrite that into "foo_bar_bar" forever.
+//
+// The replacement follows the case of the text it replaces when the
+// query is smart-case (no uppercase): a match spelled FOO takes REPL,
+// one spelled Foo takes Repl, anything else takes repl as typed. A
+// query with an uppercase letter is an exact search and its
+// replacement is exact too. See preserveCase.
+//
+// Returns false when there is nothing to replace.
 func (t *Tab) ReplaceCurrentMatch(repl string) bool {
 	if t.IsImage() || t.FindIndex < 0 || t.FindIndex >= len(t.FindMatches) {
 		return false
 	}
 	m := t.FindMatches[t.FindIndex]
+	start := Position{Line: m.Line, Col: m.Col}
+	end := Position{Line: m.Line, Col: m.Col + m.Width}
+	repl = preserveCase(t.FindQuery, t.Buffer.Substring(start, end), repl)
 	t.edit(undoGroupStructural, func() {
-		start := Position{Line: m.Line, Col: m.Col}
-		end := Position{Line: m.Line, Col: m.Col + m.Width}
 		t.Buffer.DeleteRange(start, end)
 		after := t.Buffer.InsertString(start, repl)
 		t.Cursor = after
 		t.Anchor = after
 	})
+	// The edit trailer re-ran the query and kept the old index, which
+	// is only right when the replacement holds no match of its own.
+	t.FindIndex = FirstMatchAtOrAfter(t.FindMatches, t.Cursor)
 	return true
+}
+
+// preserveCase adapts repl to the letter case of matched, the text a
+// smart-case query hit: all capitals give an all-capital replacement,
+// a capitalised match gives a capitalised one, and anything else — or
+// a case-sensitive query, which already spells the case it wants —
+// leaves repl as typed. A single-letter match counts as capitalised
+// rather than all-capital, so "A" → "foo" gives "Foo", not "FOO".
+func preserveCase(query, matched, repl string) string {
+	if hasUpper(query) || repl == "" {
+		return repl
+	}
+	letters, uppers := 0, 0
+	firstUpper := false
+	for i, r := range matched {
+		if !unicode.IsLetter(r) {
+			continue
+		}
+		if unicode.IsUpper(r) {
+			uppers++
+			if i == 0 {
+				firstUpper = true
+			}
+		}
+		letters++
+	}
+	if letters == 0 || uppers == 0 {
+		return repl
+	}
+	if uppers == letters && letters > 1 {
+		return strings.ToUpper(repl)
+	}
+	if firstUpper && uppers == 1 {
+		rs := []rune(repl)
+		rs[0] = unicode.ToUpper(rs[0])
+		return string(rs)
+	}
+	return repl
 }
 
 // ReplaceAllMatches swaps every match for repl as ONE undo step and
