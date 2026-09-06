@@ -675,11 +675,12 @@ func (a *App) tabBarClick(x, _ int) {
 	// from — so the count cell beside the chevron is part of the button
 	// rather than a dead cell that activates the tab underneath it.
 	leftChev, rightChev := a.tabChevrons()
-	if leftChev.hit(x) {
+	bw := a.tabBadgeWidth()
+	if leftChev.hit(x, bw) {
 		a.scrollTabStrip(-tabScrollStep)
 		return
 	}
-	if rightChev.hit(x) {
+	if rightChev.hit(x, bw) {
 		a.scrollTabStrip(tabScrollStep)
 		return
 	}

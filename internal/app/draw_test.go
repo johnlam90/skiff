@@ -538,7 +538,7 @@ func TestTabStrip_BadgeOwnsItsCells(t *testing.T) {
 			t.Fatalf("hit rect %+v has a CloseX outside itself", r)
 		}
 	}
-	if left.hit(winX) || right.hit(winX+winW-1) {
+	if bw := a.tabBadgeWidth(); left.hit(winX, bw) || right.hit(winX+winW-1, bw) {
 		t.Fatal("badge hit ranges must not reach into the tab window")
 	}
 }
@@ -1357,7 +1357,7 @@ func TestTabChevrons_DropCountsOnACrampedStrip(t *testing.T) {
 		t.Fatalf("cramped strip badges = %q / %q, want the bare chevrons",
 			left.Label, right.Label)
 	}
-	if !left.hit(left.X) || !right.hit(right.X) {
+	if bw := a.tabBadgeWidth(); !left.hit(left.X, bw) || !right.hit(right.X, bw) {
 		t.Fatal("the bare chevrons must still be click targets")
 	}
 }

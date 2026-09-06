@@ -2163,3 +2163,58 @@ func TestHandleMouse_MiddlePressMidDragIsIgnored(t *testing.T) {
 		t.Fatal("a plain middle press after the drag must still close the tab")
 	}
 }
+
+// TestTabBarClick_WholeBadgeSlotIsTheChevron pins the badge's click
+// target to the slot the strip reserves, not just the painted label. A
+// "‹2" badge paints two of its three cells; the third used to be a dead
+// cell that activated the tab clipped beneath it, one column from the
+// chevron the user was aiming at. The left slot's unpainted cell is
+// its last, the right slot's is its first.
+func TestTabBarClick_WholeBadgeSlotIsTheChevron(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	openManyTabs(t, a, dir, 6)
+	if bw := a.tabBadgeWidth(); bw != tabBadgeCells {
+		t.Fatalf("precondition: want a %d-cell slot, got %d", tabBadgeCells, bw)
+	}
+	stripX, stripW := a.tabStripRegion()
+
+	// Scrolled to the end: the left badge paints "‹N" from the slot's
+	// first cell, so the slot's last cell is the unpainted one.
+	a.tabScroll = a.maxTabScroll()
+	left, _ := a.tabChevrons()
+	if runeLen(left.Label) >= tabBadgeCells {
+		t.Fatalf("precondition: want a label narrower than the slot, got %q", left.Label)
+	}
+	slotEnd := stripX + tabBadgeCells - 1
+	before, wasActive := a.tabScroll, a.tabs.ActiveIndex()
+	a.drawTabBar()
+	a.tabBarClick(slotEnd, 0)
+	if a.tabScroll >= before {
+		t.Fatalf("the left slot's unpainted cell should scroll (%d -> %d)", before, a.tabScroll)
+	}
+	if a.tabs.ActiveIndex() != wasActive {
+		t.Fatalf("the left slot's unpainted cell activated tab %d", a.tabs.ActiveIndex())
+	}
+
+	// Scrolled to the start: the right badge paints "N›" ending on the
+	// slot's last cell, so the slot's first cell is the unpainted one.
+	a.tabScroll = 0
+	_, right := a.tabChevrons()
+	if runeLen(right.Label) >= tabBadgeCells {
+		t.Fatalf("precondition: want a label narrower than the slot, got %q", right.Label)
+	}
+	slotStart := stripX + stripW - tabBadgeCells
+	if slotStart >= right.X {
+		t.Fatalf("precondition: slot start %d should sit left of the label at %d", slotStart, right.X)
+	}
+	a.drawTabBar()
+	a.tabBarClick(slotStart, 0)
+	if a.tabScroll <= 0 {
+		t.Fatal("the right slot's unpainted cell should scroll")
+	}
+	if a.tabs.ActiveIndex() != wasActive {
+		t.Fatalf("the right slot's unpainted cell activated tab %d", a.tabs.ActiveIndex())
+	}
+}
