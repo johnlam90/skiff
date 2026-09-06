@@ -448,6 +448,15 @@ func (a *App) gitPanelClick(x, y int) {
 				if a.gitPanelKeysOn() && !a.gitOp.Busy() {
 					a.gitPanel.onBtns, a.gitPanel.btn = true, i
 				}
+				// A glyph tier's button does not say what it does, and
+				// the press fires with no confirmation: name the verb in
+				// the status bar first, the way revealMenuRowLabel
+				// flashes a clipped menu row, so a wrong press is at
+				// least a legible one. A label that spells the verb
+				// needs no echo.
+				if !strings.Contains(b.label, b.verb) {
+					a.flash(b.verb)
+				}
 				b.action(a, sx+b.x0, sy+3)
 				return
 			}
@@ -600,15 +609,20 @@ func (a *App) gitPanelButtons(sw int) []gitPanelBtn {
 	}
 	bare := []string{"[✓]", "[↑]", "[↓]", "[⋯]"}
 
-	labels, gap := wide, 1
-	if 1+rowWidth(labels, gap) > sw {
-		labels, gap = medium, 1
-	}
-	if 1+rowWidth(labels, gap) > sw {
-		labels, gap = compact, 0
-	}
-	if 1+rowWidth(labels, gap) > sw {
-		labels, gap = bare, 0
+	// The gap never closes. The glyph tiers used to butt their buttons
+	// together to buy three cells, which turned "[✓][↑][↓][⋯]" into one
+	// run where a press one cell wide of Commit was Push — and the
+	// press fires with no readback. A row that cannot keep its gaps
+	// sheds the ⋯ instead: everything behind it is in the ≡ menu, and
+	// the three verbs stay separable.
+	const gap = gitPanelBtnGap
+	tiers := [][]string{wide, medium, compact, bare, bare[:3]}
+	labels := tiers[len(tiers)-1]
+	for _, tier := range tiers {
+		if 1+rowWidth(tier, gap) <= sw {
+			labels = tier
+			break
+		}
 	}
 
 	actions := []func(a *App, x, y int){
@@ -627,6 +641,11 @@ func (a *App) gitPanelButtons(sw int) []gitPanelBtn {
 	}
 	return out
 }
+
+// gitPanelBtnGap is the one cell that separates neighbouring buttons at
+// every tier of the ladder — see gitPanelButtons for why it never
+// drops to zero.
+const gitPanelBtnGap = 1
 
 // rowWidth sums a button row's cell width for the fit ladder.
 func rowWidth(labels []string, gap int) int {

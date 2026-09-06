@@ -1542,3 +1542,77 @@ func TestGitPanelScrollbar_TwoCellGrab(t *testing.T) {
 		t.Fatal("two cells in is a row, not the bar")
 	}
 }
+
+// TestGitPanelButtons_KeepTheirGapAtEveryTier pins the ladder's one
+// invariant: neighbouring buttons never touch. The glyph tiers used to
+// close the gap to fit, which made "[✓][↑][↓][⋯]" one run where a press
+// one cell wide of Commit was Push. A row that cannot keep its gaps
+// sheds the ⋯ (the ≡ menu has everything behind it) and keeps the
+// three verbs apart.
+func TestGitPanelButtons_KeepTheirGapAtEveryTier(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.gitSnap.IsRepo = true
+	a.gitSnap.Ahead, a.gitSnap.Behind = 12, 3
+	a.gitPanel.rows = []gitChangeRow{{Abs: "/p/a.go"}, {Abs: "/p/b.go"}}
+	sawThree := false
+	for sw := 60; sw >= 14; sw-- {
+		btns := a.gitPanelButtons(sw)
+		if len(btns) < 3 {
+			t.Fatalf("sw=%d: the three verbs must survive, got %d buttons", sw, len(btns))
+		}
+		if len(btns) == 3 {
+			sawThree = true
+		}
+		for i := 1; i < len(btns); i++ {
+			if btns[i].x0-btns[i-1].x1 < gitPanelBtnGap {
+				t.Fatalf("sw=%d: %q (ends %d) and %q (starts %d) touch", sw,
+					btns[i-1].label, btns[i-1].x1, btns[i].label, btns[i].x0)
+			}
+		}
+		if last := btns[len(btns)-1]; last.x1 > sw && sw >= 1+rowWidth([]string{"[✓]", "[↑]", "[↓]"}, gitPanelBtnGap) {
+			t.Fatalf("sw=%d: row ends at %d, past the panel", sw, last.x1)
+		}
+	}
+	if !sawThree {
+		t.Fatal("the narrowest widths should shed the ⋯ rather than close the gap")
+	}
+	// Wide labels with live counts still lead the ladder.
+	if got := a.gitPanelButtons(60)[1].label; got != "[ Push ↑12 ]" {
+		t.Fatalf("wide tier label = %q", got)
+	}
+}
+
+// TestGitPanelClick_GlyphButtonFlashesItsVerb: a glyph-tier button
+// does not say what it does and fires on the press, so the press names
+// the verb in the status bar first (revealMenuRowLabel's idea). A wide
+// label that already spells the verb flashes nothing.
+func TestGitPanelClick_GlyphButtonFlashesItsVerb(t *testing.T) {
+	a := gitPanelApp(t, 5)
+	a.sidebarWidth = minSidebarWidth
+	a.draw()
+	_, _, sw, _ := a.sidebarRect()
+	btns := a.gitPanelButtons(sw)
+	more := btns[len(btns)-1]
+	if strings.Contains(more.label, more.verb) {
+		t.Fatalf("fixture: expected a glyph tier at %d cells, got %q", sw, more.label)
+	}
+	a.gitPanelClick(more.x0, 2)
+	if a.statusMsg != more.verb {
+		t.Fatalf("status = %q, want the verb %q flashed before the action", a.statusMsg, more.verb)
+	}
+	a.closeAllModals()
+
+	a.sidebarWidth = 40
+	a.statusMsg = ""
+	a.gitRunner = &git.Fake{}
+	a.draw()
+	_, _, sw, _ = a.sidebarRect()
+	push := a.gitPanelButtons(sw)[1]
+	if !strings.Contains(push.label, push.verb) {
+		t.Fatalf("fixture: expected a wide tier at %d cells, got %q", sw, push.label)
+	}
+	a.gitPanelClick(push.x0, 2)
+	if a.statusMsg == push.verb {
+		t.Fatal("a label that spells its verb needs no echo")
+	}
+}
