@@ -512,3 +512,32 @@ func TestHandleKey_ModifiedBackspaceDeleteTakeWords(t *testing.T) {
 		t.Fatalf("Ctrl+Delete gave %q", got)
 	}
 }
+
+// TestHandleKey_DownStepsWrappedRows drives the arrow through the app
+// with soft wrap on: after a render has fixed the wrap width, Down
+// stays on the wrapped line and moves to its next visual row instead
+// of jumping a whole paragraph.
+func TestHandleKey_DownStepsWrappedRows(t *testing.T) {
+	long := strings.Repeat("word ", 60)
+	var body strings.Builder
+	for range 60 {
+		body.WriteString(long + "\n")
+	}
+	a, tab := newNavTestApp(t, body.String())
+	tab.SetWrap(true)
+	a.draw()
+
+	a.handleKey(keyEv(tcell.KeyDown, 0))
+	if tab.Cursor.Line != 0 || tab.Cursor.Col == 0 {
+		t.Fatalf("Down on a wrapped line should reach its next row, got %+v", tab.Cursor)
+	}
+	a.handleKey(keyEv(tcell.KeyEnd, 0))
+	if tab.Cursor.Col >= len([]rune(long)) {
+		t.Fatalf("first End should stop at the row end, not the line end: col %d", tab.Cursor.Col)
+	}
+	_, h := a.editorSize()
+	a.handleKey(keyEv(tcell.KeyPgDn, 0))
+	if tab.Cursor.Line == 0 || tab.Cursor.Line >= h-1 {
+		t.Fatalf("PgDn should move a screen of ROWS — several wrapped lines, not %d lines: got %+v", h, tab.Cursor)
+	}
+}

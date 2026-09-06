@@ -173,9 +173,12 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 
 	switch ev.Key() {
 	case tcell.KeyUp:
-		tab.MoveCursor(-1, 0, extend)
+		// Vertical motion is by VISUAL row: with soft wrap on, Down
+		// steps to a wrapped paragraph's next row rather than over it,
+		// and a page is a screen of rows. Unwrapped, a row is a line.
+		tab.MoveCursorRows(-1, extend)
 	case tcell.KeyDown:
-		tab.MoveCursor(1, 0, extend)
+		tab.MoveCursorRows(1, extend)
 	case tcell.KeyLeft:
 		if byWord {
 			tab.MoveWordLeft(extend)
@@ -202,10 +205,10 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		}
 	case tcell.KeyPgUp:
 		_, h := a.editorSize()
-		tab.MoveCursor(-h, 0, extend)
+		tab.MoveCursorRows(-h, extend)
 	case tcell.KeyPgDn:
 		_, h := a.editorSize()
-		tab.MoveCursor(h, 0, extend)
+		tab.MoveCursorRows(h, extend)
 	case tcell.KeyEnter, tcell.KeyLF:
 		// A bare LF reaches tcell as KeyLF (Ctrl+J); outside a paste
 		// it is Enter by another name. Pasted newlines never get here —

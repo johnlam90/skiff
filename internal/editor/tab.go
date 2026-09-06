@@ -109,6 +109,14 @@ type Tab struct {
 	ScrollSeg int
 	lastWrapW int
 
+	// Sticky cell column for wrap-mode vertical caret motion: the
+	// column a run of Up / Down / PgUp / PgDn started in, valid only
+	// while the caret still sits where the last such move left it
+	// (stickyFor). See MoveCursorRows.
+	stickyCol   int
+	stickyFor   Position
+	stickyValid bool
+
 	// ScrollbarActive is a pure presentational flag: the app sets it
 	// while the user is dragging this tab's scrollbar thumb so
 	// renderScrollbar can brighten the thumb to Accent, exactly the way
@@ -835,6 +843,7 @@ func (t *Tab) MoveCursor(dLine, dCol int, extend bool) {
 		t.Anchor = cur
 	}
 	t.cursorMoved = true
+	t.stickyValid = false
 	// Cursor moved on the user's explicit command — close any open
 	// coalescing window so the next typing burst is a fresh undo step.
 	t.breakUndoGroup()
@@ -853,26 +862,42 @@ func (t *Tab) MoveCursorTo(p Position, extend bool) {
 		t.Anchor = p
 	}
 	t.cursorMoved = true
+	t.stickyValid = false
 	t.breakUndoGroup()
 }
 
-// MoveLineHome moves the cursor to column 0 of the current line.
+// MoveLineHome moves the cursor to column 0 of the current line. With
+// soft wrap on (and a rendered width to measure against) it first stops
+// at the start of the caret's visual row; a second press reaches column
+// 0. See wrapHomeCol.
 func (t *Tab) MoveLineHome(extend bool) {
-	t.Cursor.Col = 0
+	col := 0
+	if t.Wrap && t.lastWrapW > 0 {
+		col = t.wrapHomeCol(t.lastWrapW)
+	}
+	t.Cursor.Col = col
 	if !extend {
 		t.Anchor = t.Cursor
 	}
 	t.cursorMoved = true
+	t.stickyValid = false
 	t.breakUndoGroup()
 }
 
 // MoveLineEnd moves the cursor to the last column of the current line.
+// With soft wrap on it first stops at the end of the caret's visual
+// row; a second press reaches the logical line end. See wrapEndCol.
 func (t *Tab) MoveLineEnd(extend bool) {
-	t.Cursor.Col = len([]rune(t.Buffer.Lines[t.Cursor.Line]))
+	col := len(t.Buffer.LineRunes(t.Cursor.Line))
+	if t.Wrap && t.lastWrapW > 0 {
+		col = t.wrapEndCol(t.lastWrapW)
+	}
+	t.Cursor.Col = col
 	if !extend {
 		t.Anchor = t.Cursor
 	}
 	t.cursorMoved = true
+	t.stickyValid = false
 	t.breakUndoGroup()
 }
 
