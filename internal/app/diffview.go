@@ -553,23 +553,31 @@ func (d *diffOverlay) buttonRects() (open, closeBtn btnRect) {
 // Rows (relY):
 //
 //	0     top border
-//	1     title — " Diff · path             esc"
+//	1     title — " Diff · path      ⏎ open file · esc"
 //	2     divider
 //	3..N  diff body (side-by-side or unified)
 //	N+1   blank
 //	N+2   buttons — [ Open file ]    [ Close ]
 //	N+3   bottom border
 //
-// The frame — fill, border, title row with its esc hint, divider — is
-// overlay.DrawFrame's, the same chrome every prefab paints, so the
+// The frame — fill, border, title row with its hint, divider — is
+// overlay.DrawFrameHint's, the same chrome every prefab paints, so the
 // title is budgeted against the frame like theirs: a long repo-relative
 // path used to be written with an unbounded drawAt and ran straight
-// through the ┐ on a 40-column terminal.
+// through the ┐ on a 40-column terminal (and a title that crowds the
+// hint drops it back to the bare esc, as every prefab's does).
 func (d *diffOverlay) Draw(scr tcell.Screen) {
 	a := d.app
 	mx, my, mw, mh := d.modalRect()
 	bg := a.theme.LineHL
-	overlay.DrawFrame(scr, overlay.Rect{X: mx, Y: my, W: mw, H: mh}, d.title, a.theme)
+	// The hint names what Enter would press right now — the focused
+	// button — the same contract Confirm's frame follows, so the
+	// keyboard user reads "open file" or "close" before committing.
+	hint := overlay.EnterHint("[ Close ]")
+	if d.openPath != "" && d.hover == 1 {
+		hint = overlay.EnterHint("[ Open file ]")
+	}
+	overlay.DrawFrameHint(scr, overlay.Rect{X: mx, Y: my, W: mw, H: mh}, d.title, hint, a.theme)
 
 	d.scrollBy(0)
 	bodyX, bodyW := mx+2, mw-4

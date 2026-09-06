@@ -588,9 +588,28 @@ type tabChevron struct {
 	Label string
 }
 
-// hit reports whether screen column x lands on the badge.
-func (c tabChevron) hit(x int) bool {
-	return c.Label != "" && x >= c.X && x < c.X+textdraw.Width(c.Label)
+// hit reports whether screen column x lands on the badge's reserved
+// slot — slotW cells (tabBadgeWidth), of which the label paints only
+// the outer part: the left badge starts on the slot's first cell, the
+// right badge ends on its last. The unpainted remainder used to be a
+// dead cell that activated the tab clipped beneath it, one column from
+// the chevron the user was aiming at; the whole slot the strip
+// reserves is the target now. Which edge the badge sits on is read off
+// its own chevron — ‹ opens a left label, › closes a right one — the
+// same glyph tabChevrons built the label from.
+func (c tabChevron) hit(x, slotW int) bool {
+	if c.Label == "" {
+		return false
+	}
+	lw := textdraw.Width(c.Label)
+	if slotW < lw {
+		slotW = lw
+	}
+	if strings.HasPrefix(c.Label, "‹") {
+		return x >= c.X && x < c.X+slotW
+	}
+	end := c.X + lw
+	return x >= end-slotW && x < end
 }
 
 // tabOverflow counts the tabs scrolled entirely out of the tab window

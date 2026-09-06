@@ -25,6 +25,7 @@ import (
 
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/git"
+	"github.com/johnlam90/skiff/internal/overlay"
 )
 
 // TestSelectWordAt_UsesSharedWordPredicate pins the contract that matters
@@ -2004,5 +2005,277 @@ func TestStartMouseProbe_LandsOnTheLoopOnlyUnderTmux(t *testing.T) {
 	pumpUntil(t, a, "mouse probe", func() bool { return a.mouse.hintShown })
 	if a.statusMsg != mouseHintMsg {
 		t.Fatalf("status %q, want the tmux hint", a.statusMsg)
+	}
+}
+
+// TestHandleMouse_GitPanelClickableWhenItFillsTheWindow pins the
+// narrow-window press path. At 48 columns an open Git panel takes the
+// whole window and splitterX is -1; the press dispatch used to measure
+// the sidebar band against the splitter, so `x < -1` was never true and
+// every press on the panel — a change row, a button — fell through
+// while the wheel and right-click (measured against sidebarW) kept
+// working. A row press must open the diff and a button press must
+// fire, exactly as they do beside an editor.
+func TestHandleMouse_GitPanelClickableWhenItFillsTheWindow(t *testing.T) {
+	a, _, _ := dirtyRepoApp(t)
+	resizeTestApp(t, a, 48, 16)
+	a.toggleGitPanel()
+	if !a.gitPanelFillsWidth() {
+		t.Fatal("fixture: the panel should fill a 48-column window")
+	}
+	a.draw()
+
+	// A row: the first change opens its diff.
+	a.handleMouse(tcell.NewEventMouse(5, gitPanelListTop, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(5, gitPanelListTop, tcell.ButtonNone, 0))
+	if !diffIsOpen(a) {
+		t.Fatal("a press on a change row must open the diff when the panel fills the window")
+	}
+	a.closeAllModals()
+
+	// A button: the ⋯ extras open their pick on the press itself.
+	_, _, sw, _ := a.sidebarRect()
+	btns := a.gitPanelButtons(sw)
+	extras := btns[len(btns)-1]
+	if extras.verb != "More actions" {
+		t.Fatalf("fixture: last button is %q, want the extras", extras.verb)
+	}
+	a.handleMouse(tcell.NewEventMouse(extras.x0+1, 2, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(extras.x0+1, 2, tcell.ButtonNone, 0))
+	if _, ok := a.overlays.Top().(*overlay.Pick); !ok {
+		t.Fatalf("a press on the extras button must open its pick, top = %T", a.overlays.Top())
+	}
+	a.closeAllModals()
+
+	// Keyboard mode survives a press inside the panel: the capture is
+	// dropped only for presses OUTSIDE the sidebar band.
+	a.enterGitPanelKeys()
+	a.handleMouse(tcell.NewEventMouse(5, gitPanelListTop, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(5, gitPanelListTop, tcell.ButtonNone, 0))
+	if !a.gitPanelKeysOn() {
+		t.Fatal("a press inside the filling panel must not drop its keyboard capture")
+	}
+}
+
+// TestSplitterHit_NeighboursYieldOnTheTabAndStatusRows pins the widened
+// grab to the body rows. The ≡ button's first cell is x = sidebarW,
+// which is exactly the splitter's right neighbour, and a press there
+// used to arm a sidebar drag instead of opening the menu; the status
+// row's cells and the sidebar header's last cell are targets of their
+// own for the same reason.
+func TestSplitterHit_NeighboursYieldOnTheTabAndStatusRows(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.draw()
+	splitX := a.splitterX()
+	mx, _, _, _ := a.menuButtonRect()
+	if mx != splitX+1 {
+		t.Fatalf("fixture: ≡ starts at %d, want the splitter's right neighbour %d", mx, splitX+1)
+	}
+
+	a.handleMouse(tcell.NewEventMouse(splitX+1, 0, tcell.Button1, 0))
+	if a.dragMode == dragSidebar {
+		t.Fatal("a press on the ≡ button's first cell armed a sidebar drag")
+	}
+	if !a.menuOpen {
+		t.Fatal("a press on the ≡ button's first cell must open the menu")
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX+1, 0, tcell.ButtonNone, 0))
+	a.closeAllModals()
+
+	for _, x := range []int{splitX - 1, splitX + 1} {
+		a.handleMouse(tcell.NewEventMouse(x, a.height-1, tcell.Button1, 0))
+		if a.dragMode == dragSidebar {
+			t.Fatalf("x=%d on the status row armed a sidebar drag", x)
+		}
+		a.handleMouse(tcell.NewEventMouse(x, a.height-1, tcell.ButtonNone, 0))
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX-1, 0, tcell.Button1, 0))
+	if a.dragMode == dragSidebar {
+		t.Fatal("the sidebar header's last cell armed a sidebar drag")
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX-1, 0, tcell.ButtonNone, 0))
+
+	// The painted column itself still grabs on every row.
+	a.handleMouse(tcell.NewEventMouse(splitX, 0, tcell.Button1, 0))
+	if a.dragMode != dragSidebar {
+		t.Fatal("the splitter column on the tab row must still grab")
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX, 0, tcell.ButtonNone, 0))
+}
+
+// TestHandleMouse_TooSmallEndsALiveDrag pins the gate's second duty:
+// a drag that was live when the window shrank under the floor must be
+// ended there, because the release that would end it is dropped with
+// every other event. Left latched, the auto-scroll ticker kept moving
+// the buffer behind the resize notice until the next press.
+func TestHandleMouse_TooSmallEndsALiveDrag(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "d.txt")
+	if err := os.WriteFile(target, []byte(strings.Repeat("line\n", 200)), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	ex, ey, _, eh := a.editorRect()
+	a.handleMouse(tcell.NewEventMouse(ex+2, ey+1, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(ex+2, ey+eh+1, tcell.Button1, 0)) // below: auto-scroll
+	if a.dragMode != dragEditor || a.autoScrollStop == nil {
+		t.Fatalf("fixture: want a live editor drag with auto-scroll, mode %d stop %v", a.dragMode, a.autoScrollStop)
+	}
+
+	resizeTestApp(t, a, minWidth-1, minHeight)
+	a.handleMouse(tcell.NewEventMouse(ex+2, ey+eh+1, tcell.ButtonNone, 0))
+	if a.dragMode != dragNone {
+		t.Fatalf("the too-small gate left dragMode = %d latched", a.dragMode)
+	}
+	if a.autoScrollStop != nil {
+		t.Fatal("the too-small gate left the auto-scroll ticker running")
+	}
+}
+
+// TestHandleMouse_MiddlePressMidDragIsIgnored pins the slip guard: a
+// middle press on the strip while a left drag is live used to close
+// that tab, and the drag — still armed — then extended a selection in
+// whichever tab became active. The press is inert while the drag
+// lasts; a plain middle press afterwards still closes.
+func TestHandleMouse_MiddlePressMidDragIsIgnored(t *testing.T) {
+	a, _, pb := twoTabApp(t)
+	ra := a.lastTabRects[0]
+	ex, ey, _, _ := a.editorRect()
+	a.handleMouse(tcell.NewEventMouse(ex+1, ey, tcell.Button1, 0))
+	if a.dragMode != dragEditor {
+		t.Fatalf("fixture: want an editor drag, got mode %d", a.dragMode)
+	}
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 0, tcell.Button1|tcell.Button2, 0))
+	if a.tabs.Len() != 2 {
+		t.Fatal("a middle press mid-drag closed a tab")
+	}
+	if got := a.activeTabPtr().Path; got != pb {
+		t.Fatalf("a middle press mid-drag switched the active tab to %q", got)
+	}
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 0, tcell.ButtonNone, 0))
+	if a.dragMode != dragNone {
+		t.Fatal("the release must still end the drag")
+	}
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 0, tcell.Button2, 0))
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 0, tcell.ButtonNone, 0))
+	if a.tabs.Len() != 1 {
+		t.Fatal("a plain middle press after the drag must still close the tab")
+	}
+}
+
+// TestTabBarClick_WholeBadgeSlotIsTheChevron pins the badge's click
+// target to the slot the strip reserves, not just the painted label. A
+// "‹2" badge paints two of its three cells; the third used to be a dead
+// cell that activated the tab clipped beneath it, one column from the
+// chevron the user was aiming at. The left slot's unpainted cell is
+// its last, the right slot's is its first.
+func TestTabBarClick_WholeBadgeSlotIsTheChevron(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	openManyTabs(t, a, dir, 6)
+	if bw := a.tabBadgeWidth(); bw != tabBadgeCells {
+		t.Fatalf("precondition: want a %d-cell slot, got %d", tabBadgeCells, bw)
+	}
+	stripX, stripW := a.tabStripRegion()
+
+	// Scrolled to the end: the left badge paints "‹N" from the slot's
+	// first cell, so the slot's last cell is the unpainted one.
+	a.tabScroll = a.maxTabScroll()
+	left, _ := a.tabChevrons()
+	if runeLen(left.Label) >= tabBadgeCells {
+		t.Fatalf("precondition: want a label narrower than the slot, got %q", left.Label)
+	}
+	slotEnd := stripX + tabBadgeCells - 1
+	before, wasActive := a.tabScroll, a.tabs.ActiveIndex()
+	a.drawTabBar()
+	a.tabBarClick(slotEnd, 0)
+	if a.tabScroll >= before {
+		t.Fatalf("the left slot's unpainted cell should scroll (%d -> %d)", before, a.tabScroll)
+	}
+	if a.tabs.ActiveIndex() != wasActive {
+		t.Fatalf("the left slot's unpainted cell activated tab %d", a.tabs.ActiveIndex())
+	}
+
+	// Scrolled to the start: the right badge paints "N›" ending on the
+	// slot's last cell, so the slot's first cell is the unpainted one.
+	a.tabScroll = 0
+	_, right := a.tabChevrons()
+	if runeLen(right.Label) >= tabBadgeCells {
+		t.Fatalf("precondition: want a label narrower than the slot, got %q", right.Label)
+	}
+	slotStart := stripX + stripW - tabBadgeCells
+	if slotStart >= right.X {
+		t.Fatalf("precondition: slot start %d should sit left of the label at %d", slotStart, right.X)
+	}
+	a.drawTabBar()
+	a.tabBarClick(slotStart, 0)
+	if a.tabScroll <= 0 {
+		t.Fatal("the right slot's unpainted cell should scroll")
+	}
+	if a.tabs.ActiveIndex() != wasActive {
+		t.Fatalf("the right slot's unpainted cell activated tab %d", a.tabs.ActiveIndex())
+	}
+}
+
+// TestGutterMarkerAt_IsWrapAware pins the gutter's row-to-line map in
+// wrap mode. With line 0 wrapped over k rows and line 1 modified, the
+// marker is painted on row k — the first row of line 1 — and nowhere
+// else; ScrollY+row named line k instead, so the splitter's neighbour
+// took the marker's press and a press on a continuation row of line 0
+// opened line 1's hunk. Both the splitter guard and the hunk opener
+// go through the same wrap-aware map.
+func TestGutterMarkerAt_IsWrapAware(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "w.txt")
+	long := strings.Repeat("wrap ", 40)
+	if err := os.WriteFile(target, []byte(long+"\nchanged\nplain\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 70, 24)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	tab.Wrap = true
+	tab.GitLines = map[int]editor.GitLineChange{1: editor.GitLineModified}
+	a.draw()
+
+	// Find line 1's first row through the editor's own contract.
+	_, ey, ew, eh := a.editorRect()
+	k := -1
+	for row := 0; row < eh; row++ {
+		if pos, ok := tab.HitTest(0, row, ew, eh); ok && pos.Line == 1 {
+			k = row
+			break
+		}
+	}
+	if k < 2 {
+		t.Fatalf("precondition: line 0 should wrap over at least two rows, line 1 starts on row %d", k)
+	}
+
+	if !a.gutterMarkerAt(ey + k) {
+		t.Fatalf("row %d is line 1's first row and carries the marker", k)
+	}
+	if a.gutterMarkerAt(ey + 1) {
+		t.Fatal("row 1 is a continuation of line 0: its gutter is blank")
+	}
+	if a.gutterMarkerAt(ey + k + 1) {
+		t.Fatal("row k+1 is the clean line 2")
+	}
+
+	fake := &git.Fake{}
+	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target,
+		"@@ -2 +2 @@\n-change\n+changed\n", nil)
+	a.gitRunner = fake
+	if a.openGitHunkAt(tab, 0, 1) {
+		t.Fatal("a press on a continuation row must not open a hunk")
+	}
+	if !a.openGitHunkAt(tab, 0, k) {
+		t.Fatal("a press on the marker's row must open its hunk")
+	}
+	pumpUntil(t, a, "diff load", idle(&a.diffLoad))
+	if !diffIsOpen(a) {
+		t.Fatal("the marker press should have opened the hunk diff")
 	}
 }

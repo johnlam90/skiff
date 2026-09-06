@@ -1592,3 +1592,31 @@ func TestDrawMenu_FlattenedRowNamesItsDrillIn(t *testing.T) {
 		t.Fatal("a flattened row with a leader hint must paint both the parent and the hint")
 	}
 }
+
+// TestOpenMenu_ReArmsTheClickLatch pins the latch reset. A click that
+// closes the menu — on a row, or outside the frame — does so on the
+// press, so the release goes to the base UI and never reaches
+// handleMenuMouse to clear overlay.Press. The next menu opened from
+// the keyboard (Esc Esc) inherited a latch that still read "down", and
+// its first click was treated as held motion: the row did not run.
+func TestOpenMenu_ReArmsTheClickLatch(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.width, a.height = 120, 60
+	a.openMenu()
+	// Close it with a press outside the frame; the release lands on
+	// the base UI, exactly as it does in a terminal.
+	a.handleMouse(tcell.NewEventMouse(0, a.height-2, tcell.Button1, 0))
+	if a.menuOpen {
+		t.Fatal("fixture: the outside press should close the menu")
+	}
+	a.handleMouse(tcell.NewEventMouse(0, a.height-2, tcell.ButtonNone, 0))
+
+	a.openMenu() // keyboard path: no press involved
+	mx, _, _, _ := a.menuModalRect()
+	y := menuRowY(t, a, "Hide file explorer")
+	before := a.sidebarShown
+	a.handleMouse(tcell.NewEventMouse(mx+5, y, tcell.Button1, 0))
+	if a.sidebarShown == before {
+		t.Fatal("the first click on a keyboard-opened menu must run its row")
+	}
+}

@@ -32,3 +32,14 @@ func (p *Press) Fresh(btn tcell.ButtonMask) bool {
 	p.down = down
 	return fresh
 }
+
+// Sync sets the latch from btn without answering, for an opener whose
+// surface may appear under a button that is already held. A menu
+// re-opened by the row that closed it must not read the held motion
+// that follows as a fresh press; a menu opened from the keyboard,
+// after a release the previous surface never saw, must not inherit a
+// latch still reading "down". Seeding from the dispatcher's own held
+// mask gets both right.
+func (p *Press) Sync(btn tcell.ButtonMask) {
+	p.down = btn&tcell.Button1 != 0
+}

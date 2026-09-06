@@ -206,6 +206,12 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	// them and route nothing until the window grows back.
 	if a.width < minWidth || a.height < minHeight {
 		a.lastTabRects = nil
+		// The release is dropped with everything else, so a drag that
+		// was live when the window shrank has to be ended here — left
+		// latched, its auto-scroll ticker kept moving the buffer under
+		// a notice the user could not see past, until the next press.
+		a.dragMode = dragNone
+		a.stopAutoScroll()
 		return
 	}
 	leftDown := btn&tcell.Button1 != 0
@@ -263,6 +269,13 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	// the strip must not close every tab in its path, and a held one
 	// is otherwise inert.
 	if pressed&tcell.Button2 != 0 {
+		// A middle press while a left drag is live is a slip, not a
+		// close: honouring it swapped the active tab under a drag
+		// that stayed armed, so the next motion extended a selection
+		// in a buffer the user never pressed in.
+		if leftDown && a.dragMode != dragNone {
+			return
+		}
 		if r, ok := a.tabRectAt(x, y); ok {
 			a.requestCloseTab(a.tabs.At(r.Index))
 		}
@@ -407,17 +420,23 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		a.dragMode = dragNone
 		a.stopAutoScroll()
 		sw := a.sidebarW()
-		splitX := a.splitterX()
 		// A press anywhere but the sidebar means the user has moved on
 		// from the Git panel's keyboard mode — drop the key capture so
 		// Enter/Space go back to the editor. No-op when unarmed.
-		if !(sw > 0 && x <= splitX) {
+		if !(sw > 0 && x < sw) {
 			a.exitGitPanelKeys()
 		}
+		// The sidebar's band is measured against sidebarW, not the
+		// splitter: when the Git panel fills a narrow window splitterX
+		// is -1 (there is no editor to resize against), and a test
+		// against it dropped every press on the panel — rows, the
+		// branch line, the buttons — while the wheel and right-click,
+		// which already measured against sw, kept working. The splitter
+		// column itself is claimed by the case above.
 		switch {
 		case a.splitterHit(x, y):
 			a.dragMode = dragSidebar
-		case sw > 0 && x < splitX:
+		case sw > 0 && x < sw:
 			// The tree's bar and the Git panel's sit on the columns
 			// just left of the splitter — whichever panel is up, they
 			// have to be claimed before the row hit-test the rest of
@@ -656,11 +675,12 @@ func (a *App) tabBarClick(x, _ int) {
 	// from — so the count cell beside the chevron is part of the button
 	// rather than a dead cell that activates the tab underneath it.
 	leftChev, rightChev := a.tabChevrons()
-	if leftChev.hit(x) {
+	bw := a.tabBadgeWidth()
+	if leftChev.hit(x, bw) {
 		a.scrollTabStrip(-tabScrollStep)
 		return
 	}
-	if rightChev.hit(x) {
+	if rightChev.hit(x, bw) {
 		a.scrollTabStrip(tabScrollStep)
 		return
 	}
@@ -777,8 +797,8 @@ func (a *App) openGitHunkAt(tab *editor.Tab, localX, localY int) bool {
 	if localX != 0 || localY < 0 {
 		return false
 	}
-	line := tab.ScrollY + localY
-	if tab.GitLines[line] == editor.GitLineNone {
+	line, ok := a.gutterLineAt(tab, localY)
+	if !ok {
 		return false
 	}
 	path := tab.Path
@@ -947,14 +967,25 @@ func (a *App) scrollbarHit(x, y int) (int, bool) {
 // hunk diff. A plain row cell or an unmarked gutter cell goes to the
 // splitter, whose miss is the cheapest — a grab released in place
 // changes nothing.
+//
+// The neighbours widen the grab on the body rows only. On the tab bar
+// the right neighbour is the ≡ button's first cell (menuButtonRect
+// starts at sidebarW) and the left one the sidebar header's last; on
+// the status row both are the bar's own targets. A press there used
+// to arm a sidebar drag instead of opening the menu — on a phone, the
+// cell most likely to be hit first.
 func (a *App) splitterHit(x, y int) bool {
 	splitX := a.splitterX()
 	if splitX < 0 {
 		return false
 	}
-	switch x {
-	case splitX:
+	if x == splitX {
 		return true
+	}
+	if y <= 0 || y >= a.height-1 {
+		return false
+	}
+	switch x {
 	case splitX - 1:
 		return !a.treeScrollbarHit(x, y) && !a.gitPanelScrollbarHit(x, y)
 	case splitX + 1:
@@ -976,7 +1007,30 @@ func (a *App) gutterMarkerAt(y int) bool {
 	if y < ey || y >= ey+eh {
 		return false
 	}
-	return tab.GitLines[tab.ScrollY+(y-ey)] != editor.GitLineNone
+	_, ok := a.gutterLineAt(tab, y-ey)
+	return ok
+}
+
+// gutterLineAt maps editor-local row localY to the buffer line whose
+// git marker is painted in that row's gutter, and reports false when
+// the row carries none: it is past the buffer's end, the line is
+// clean, or — in wrap mode — it is a continuation row, whose gutter
+// is blank because only a line's first segment shows its number and
+// marker. The row goes through the tab's own HitTest so the answer is
+// wrap-aware: ScrollY+localY names the wrong line as soon as any line
+// above it wraps, and the gutter click used to open the hunk of a
+// line the marker was not on. A gutter hit lands on the segment's
+// first rune, so Col == 0 is exactly "this is the line's first row".
+func (a *App) gutterLineAt(tab *editor.Tab, localY int) (int, bool) {
+	_, _, ew, eh := a.editorRect()
+	pos, ok := tab.HitTest(0, localY, ew, eh)
+	if !ok || pos.Col != 0 {
+		return 0, false
+	}
+	if tab.GitLines[pos.Line] == editor.GitLineNone {
+		return 0, false
+	}
+	return pos.Line, true
 }
 
 // scrollbarTo scrolls the active tab so the thumb centers on the

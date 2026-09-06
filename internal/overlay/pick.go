@@ -314,7 +314,7 @@ func (p *Pick) rect() Rect {
 func (p *Pick) Draw(scr tcell.Screen) {
 	r := p.sync()
 	th := p.Theme
-	DrawFrame(scr, r, p.Title, th)
+	DrawFrameHint(scr, r, p.Title, "⏎ pick · "+FrameHintEsc, th)
 
 	bg := th.LineHL
 	mutedStyle := tcell.StyleDefault.Background(bg).Foreground(th.Muted)

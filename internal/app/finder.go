@@ -81,6 +81,10 @@ type finderOverlay struct {
 	app     *App
 	query   overlay.Field
 	results []finder.Result
+	// press is the click latch: a row opens and an outside click
+	// dismisses on a fresh press only, while the hover highlight keeps
+	// following a held drag — see overlay.Press.
+	press overlay.Press
 }
 
 // sync pushes the live result count and the window the frame can paint
@@ -214,6 +218,7 @@ func (fo *finderOverlay) HandleKey(ev *tcell.EventKey) {
 // click opens it, and a click outside the modal dismisses.
 func (fo *finderOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	r := fo.sync()
+	fresh := fo.press.Fresh(btn)
 	if btn&tcell.WheelUp != 0 {
 		fo.ScrollBy(-3)
 		return
@@ -234,7 +239,10 @@ func (fo *finderOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
 		// without clicking.
 		fo.Select(idx)
 	}
-	if btn&tcell.Button1 == 0 {
+	// Opening and dismissing answer a FRESH press: a drag that starts
+	// in the query field and crosses the rows must not open whichever
+	// file it lands on, or close the finder when it leaves the frame.
+	if !fresh {
 		return
 	}
 	if !r.Contains(x, y) {
@@ -307,7 +315,7 @@ func (fo *finderOverlay) Draw(scr tcell.Screen) {
 	a := fo.app
 	r := fo.sync()
 	th := a.theme
-	overlay.DrawFrame(scr, r, "Find file", th)
+	overlay.DrawFrameHint(scr, r, "Find file", "⏎ open · "+overlay.FrameHintEsc, th)
 
 	bg := th.LineHL
 	bgStyle := tcell.StyleDefault.Background(bg).Foreground(th.Text)

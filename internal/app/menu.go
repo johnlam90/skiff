@@ -196,6 +196,16 @@ func (a *App) openMenu() {
 	a.overlays.Open(menuOverlay{a})
 	a.menuList = overlay.List{}
 	a.menuFilter = overlay.Field{}
+	// The click latch is seeded from the button state the dispatcher
+	// is tracking, not left over from the last menu: a press on a row
+	// or outside the frame closes the menu on the press, so the release
+	// that would have reset the latch lands on the base UI, and the
+	// latch stayed "down" into the next keyboard-opened menu — whose
+	// first click was then read as held motion and ignored. Seeding
+	// (rather than clearing) keeps the other case honest: a menu
+	// re-opened under a still-held button treats the motion that
+	// follows as the drag it is.
+	a.mouse.menuPress.Sync(a.mouse.held)
 	a.menuFilterChanged()
 }
 
