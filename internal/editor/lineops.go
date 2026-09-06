@@ -89,8 +89,11 @@ func (t *Tab) DuplicateLines() {
 // to disk — while a lone blank line is indented on request, because
 // that is the only thing the gesture could possibly mean there.
 // Cursor and anchor ride along with the text they sit in, so a
-// selection keeps covering the same lines afterwards. Returns false
-// when nothing changed, in which case no undo entry is recorded.
+// selection keeps covering the same lines afterwards; a bare caret at
+// column 0 rides too, landing just past the new indent, because column
+// 0 only means "the whole line" when a selection is anchored there.
+// Returns false when nothing changed, in which case no undo entry is
+// recorded.
 func (t *Tab) IndentLines() bool {
 	if t.IsImage() {
 		return false
@@ -113,6 +116,14 @@ func (t *Tab) IndentLines() bool {
 	t.edit(undoGroupStructural, func() {
 		for i := range shifted {
 			t.Buffer.Lines[i] = unit + t.Buffer.Lines[i]
+		}
+		if !t.HasSelection() {
+			// shiftIndentPos pins column 0 for the sake of a whole-line
+			// selection; with no selection the caret has nothing to
+			// mark and belongs after the indent it just asked for.
+			t.Cursor.Col += shifted[t.Cursor.Line]
+			t.Anchor = t.Cursor
+			return
 		}
 		t.Cursor = shiftIndentPos(t.Cursor, shifted)
 		t.Anchor = shiftIndentPos(t.Anchor, shifted)
