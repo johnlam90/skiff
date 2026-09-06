@@ -25,6 +25,7 @@ import (
 
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/git"
+	"github.com/johnlam90/skiff/internal/overlay"
 )
 
 // TestSelectWordAt_UsesSharedWordPredicate pins the contract that matters
@@ -2004,5 +2005,54 @@ func TestStartMouseProbe_LandsOnTheLoopOnlyUnderTmux(t *testing.T) {
 	pumpUntil(t, a, "mouse probe", func() bool { return a.mouse.hintShown })
 	if a.statusMsg != mouseHintMsg {
 		t.Fatalf("status %q, want the tmux hint", a.statusMsg)
+	}
+}
+
+// TestHandleMouse_GitPanelClickableWhenItFillsTheWindow pins the
+// narrow-window press path. At 48 columns an open Git panel takes the
+// whole window and splitterX is -1; the press dispatch used to measure
+// the sidebar band against the splitter, so `x < -1` was never true and
+// every press on the panel — a change row, a button — fell through
+// while the wheel and right-click (measured against sidebarW) kept
+// working. A row press must open the diff and a button press must
+// fire, exactly as they do beside an editor.
+func TestHandleMouse_GitPanelClickableWhenItFillsTheWindow(t *testing.T) {
+	a, _, _ := dirtyRepoApp(t)
+	resizeTestApp(t, a, 48, 16)
+	a.toggleGitPanel()
+	if !a.gitPanelFillsWidth() {
+		t.Fatal("fixture: the panel should fill a 48-column window")
+	}
+	a.draw()
+
+	// A row: the first change opens its diff.
+	a.handleMouse(tcell.NewEventMouse(5, gitPanelListTop, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(5, gitPanelListTop, tcell.ButtonNone, 0))
+	if !diffIsOpen(a) {
+		t.Fatal("a press on a change row must open the diff when the panel fills the window")
+	}
+	a.closeAllModals()
+
+	// A button: the ⋯ extras open their pick on the press itself.
+	_, _, sw, _ := a.sidebarRect()
+	btns := a.gitPanelButtons(sw)
+	extras := btns[len(btns)-1]
+	if extras.verb != "More actions" {
+		t.Fatalf("fixture: last button is %q, want the extras", extras.verb)
+	}
+	a.handleMouse(tcell.NewEventMouse(extras.x0+1, 2, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(extras.x0+1, 2, tcell.ButtonNone, 0))
+	if _, ok := a.overlays.Top().(*overlay.Pick); !ok {
+		t.Fatalf("a press on the extras button must open its pick, top = %T", a.overlays.Top())
+	}
+	a.closeAllModals()
+
+	// Keyboard mode survives a press inside the panel: the capture is
+	// dropped only for presses OUTSIDE the sidebar band.
+	a.enterGitPanelKeys()
+	a.handleMouse(tcell.NewEventMouse(5, gitPanelListTop, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(5, gitPanelListTop, tcell.ButtonNone, 0))
+	if !a.gitPanelKeysOn() {
+		t.Fatal("a press inside the filling panel must not drop its keyboard capture")
 	}
 }

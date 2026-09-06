@@ -407,17 +407,23 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		a.dragMode = dragNone
 		a.stopAutoScroll()
 		sw := a.sidebarW()
-		splitX := a.splitterX()
 		// A press anywhere but the sidebar means the user has moved on
 		// from the Git panel's keyboard mode — drop the key capture so
 		// Enter/Space go back to the editor. No-op when unarmed.
-		if !(sw > 0 && x <= splitX) {
+		if !(sw > 0 && x < sw) {
 			a.exitGitPanelKeys()
 		}
+		// The sidebar's band is measured against sidebarW, not the
+		// splitter: when the Git panel fills a narrow window splitterX
+		// is -1 (there is no editor to resize against), and a test
+		// against it dropped every press on the panel — rows, the
+		// branch line, the buttons — while the wheel and right-click,
+		// which already measured against sw, kept working. The splitter
+		// column itself is claimed by the case above.
 		switch {
 		case a.splitterHit(x, y):
 			a.dragMode = dragSidebar
-		case sw > 0 && x < splitX:
+		case sw > 0 && x < sw:
 			// The tree's bar and the Git panel's sit on the columns
 			// just left of the splitter — whichever panel is up, they
 			// have to be claimed before the row hit-test the rest of
