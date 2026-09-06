@@ -429,6 +429,30 @@ func TestTab_FindAgain_StaysSuspendedUnderTyping(t *testing.T) {
 	}
 }
 
+// TestReplaceAllMatches_PreservesCase: replace-all follows each hit's
+// case the way ReplaceCurrentMatch does, so "FOO Foo foo" → "BAR Bar
+// bar" whether the user pressed Enter three times or Shift+Enter once.
+// Inserting repl verbatim used to flatten it to "bar bar bar".
+func TestReplaceAllMatches_PreservesCase(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("FOO Foo foo")}
+	tab.initUndo()
+	tab.SetFindQuery("foo")
+	if got := tab.ReplaceAllMatches("bar"); got != 3 {
+		t.Fatalf("replaced %d, want 3", got)
+	}
+	if got := tab.Buffer.Lines[0]; got != "BAR Bar bar" {
+		t.Fatalf("smart-case replace-all gave %q", got)
+	}
+
+	exact := &Tab{Buffer: NewBuffer("FOO FOO")}
+	exact.initUndo()
+	exact.SetFindQuery("FOO")
+	exact.ReplaceAllMatches("bar")
+	if got := exact.Buffer.Lines[0]; got != "bar bar" {
+		t.Fatalf("an exact query must replace as typed, got %q", got)
+	}
+}
+
 // TestReplaceLines pins the open-buffer path of project replace: whole
 // lines swap in one undo step, out-of-range indexes are ignored, and
 // the tab reports dirty.

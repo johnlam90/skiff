@@ -472,7 +472,11 @@ func preserveCase(query, matched, repl string, opts FindOptions) string {
 
 // ReplaceAllMatches swaps every match for repl as ONE undo step and
 // returns how many were replaced. Matches are applied last-to-first so
-// earlier spans stay valid while later ones are rewritten.
+// earlier spans stay valid while later ones are rewritten. Each hit
+// takes the same case-following replacement ReplaceCurrentMatch would
+// give it (see preserveCase), so replace-all and Enter-until-done
+// leave the same text — "FOO Foo foo" → "BAR Bar bar" either way,
+// where inserting repl verbatim used to flatten it to "bar bar bar".
 func (t *Tab) ReplaceAllMatches(repl string) int {
 	if t.IsImage() || len(t.FindMatches) == 0 {
 		return 0
@@ -480,13 +484,15 @@ func (t *Tab) ReplaceAllMatches(repl string) int {
 	// Hold the list being replaced: the edit trailer re-runs the query,
 	// so t.FindMatches stops describing the spans this call swapped.
 	matches := t.FindMatches
+	opts := t.findOptions()
 	t.edit(undoGroupStructural, func() {
 		for i := len(matches) - 1; i >= 0; i-- {
 			m := matches[i]
 			start := Position{Line: m.Line, Col: m.Col}
 			end := Position{Line: m.Line, Col: m.Col + m.Width}
+			cased := preserveCase(t.FindQuery, t.Buffer.Substring(start, end), repl, opts)
 			t.Buffer.DeleteRange(start, end)
-			t.Buffer.InsertString(start, repl)
+			t.Buffer.InsertString(start, cased)
 		}
 	})
 	return len(matches)
