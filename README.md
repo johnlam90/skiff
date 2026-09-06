@@ -361,6 +361,16 @@ Forty columns is the widest fixed button row (`[ Cancel ]`
 identifiable. 40×10 is also a phone in landscape with the soft keyboard
 up, which is the smallest real terminal Skiff targets.
 
+### Under tmux
+
+tmux does not pass mouse events through to the programs inside it
+unless mouse mode is on. If clicks, drags and the wheel do nothing in
+Skiff inside a tmux session, add `set -g mouse on` to `~/.tmux.conf`
+(or run `tmux set -g mouse on` in the current server). Skiff notices
+when it has been running under tmux for ten seconds without a single
+mouse event and flashes that hint once; the keyboard path (`Esc ?`)
+works regardless.
+
 ### Hotkeys
 
 Skiff deliberately avoids `Ctrl+`-style shortcuts (they fight `tmux`,

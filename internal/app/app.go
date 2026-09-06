@@ -523,6 +523,7 @@ func New(rootDir string) (*App, error) {
 	a.refreshGitStatus()
 	a.flash("Welcome — click a file to open · click  ≡  for the menu")
 	a.startTreeRefresh()
+	a.startMouseProbe(tmuxActive(), mouseProbeDelay)
 	// Kick off the project file index in the background so that by
 	// the time the user hits Esc-p (or ≡ → Find file) the modal can
 	// open with results already in hand. On a 50k-file repo this

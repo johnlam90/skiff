@@ -18,11 +18,13 @@
 package app
 
 import (
+	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/asyncjob"
 	"github.com/johnlam90/skiff/internal/diff"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/git"
@@ -98,6 +100,62 @@ type mouseState struct {
 	// faster than one hovering the editor's last row without the
 	// ticker itself running any faster.
 	autoScrollStep int
+	// events counts every mouse event the terminal has delivered.
+	// Zero after mouseProbeDelay under tmux is the one symptom of
+	// `set -g mouse` being off that the editor can observe — see
+	// noteMouseProbe.
+	events int
+	// hintShown records that the tmux mouse hint has flashed once
+	// this session; it never flashes twice.
+	hintShown bool
+}
+
+// mouseProbeDelay is how long after startup the tmux mouse hint waits
+// for a first mouse event before concluding none are coming. Ten
+// seconds is long enough that a keyboard-first user who has not
+// touched the mouse yet is not nagged the moment the editor opens.
+const mouseProbeDelay = 10 * time.Second
+
+// mouseHintMsg is the one-time flash when skiff runs under tmux and no
+// mouse event has arrived by mouseProbeDelay. tmux swallows mouse
+// reporting unless `set -g mouse on` is in its config, and from inside
+// the editor that looks exactly like a mouse-first UI ignoring every
+// click; the hint names the fix and the keyboard fallback.
+const mouseHintMsg = "No mouse events yet — tmux may need `set -g mouse on` (Esc ? for keyboard)"
+
+// tmuxActive reports whether the editor is running inside tmux, the
+// one multiplexer whose default config drops mouse reporting.
+func tmuxActive() bool {
+	return os.Getenv("TMUX") != ""
+}
+
+// startMouseProbe schedules the tmux mouse hint: after `after`, a
+// one-shot timer posts a Notify event that runs noteMouseProbe on the
+// loop. Nothing is scheduled outside tmux — a bare terminal with mouse
+// reporting off is a choice, not a misconfiguration. The timer's
+// callback goes through runGuarded so a panic there still reaches the
+// crash guard, and the mutation itself happens on the loop, never in
+// the timer goroutine.
+func (a *App) startMouseProbe(inTmux bool, after time.Duration) {
+	if !inTmux {
+		return
+	}
+	scr := a.screen
+	time.AfterFunc(after, func() {
+		a.runGuarded("mouse-probe", func() {
+			_ = scr.PostEvent(asyncjob.Notify(a.noteMouseProbe))
+		})
+	})
+}
+
+// noteMouseProbe is the probe's on-loop half: flash the tmux hint if no
+// mouse event has arrived, and only once per session.
+func (a *App) noteMouseProbe() {
+	if a.mouse.events > 0 || a.mouse.hintShown {
+		return
+	}
+	a.mouse.hintShown = true
+	a.flash(mouseHintMsg)
 }
 
 // autoScrollEdgeRows is how many rows at the top and bottom of the
@@ -139,6 +197,7 @@ func (m *mouseState) fresh(btn tcell.ButtonMask) tcell.ButtonMask {
 func (a *App) handleMouse(ev *tcell.EventMouse) {
 	x, y := ev.Position()
 	btn := ev.Buttons()
+	a.mouse.events++
 	pressed := a.mouse.fresh(btn)
 	// Under minWidth/minHeight draw() paints only the "too small"
 	// notice, so there is nothing on screen to hit — but the tab rects

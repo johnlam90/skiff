@@ -1947,3 +1947,60 @@ func TestEditorPress_TripleClickSelectsTheLine(t *testing.T) {
 		t.Fatalf("second line selection %q, want gamma + break", tab.SelectionText())
 	}
 }
+
+// TestNoteMouseProbe_FlashesOnceOnlyWhenNoEventsArrived pins the hint's
+// gate: it flashes when no mouse event has arrived, never when one has,
+// and never twice — the probe is a one-time nudge, not a nag.
+func TestNoteMouseProbe_FlashesOnceOnlyWhenNoEventsArrived(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.handleMouse(tcell.NewEventMouse(5, 5, tcell.ButtonNone, 0))
+	a.noteMouseProbe()
+	if a.statusMsg == mouseHintMsg {
+		t.Fatal("a session that has seen a mouse event must not be told to enable the mouse")
+	}
+	if a.mouse.hintShown {
+		t.Fatal("no hint was shown, so the once-flag must stay clear")
+	}
+
+	b := newTestApp(t, t.TempDir())
+	b.noteMouseProbe()
+	if b.statusMsg != mouseHintMsg {
+		t.Fatalf("no events by the probe: status %q, want the tmux hint", b.statusMsg)
+	}
+	b.statusMsg = ""
+	b.noteMouseProbe()
+	if b.statusMsg == mouseHintMsg {
+		t.Fatal("the hint must never flash twice")
+	}
+	// Events that arrive later count too: the hint is about "none
+	// yet", so a late first click keeps a second probe quiet even if
+	// the once-flag were reset.
+	b.mouse.hintShown = false
+	b.handleMouse(tcell.NewEventMouse(5, 5, tcell.WheelDown, 0))
+	b.noteMouseProbe()
+	if b.statusMsg == mouseHintMsg {
+		t.Fatal("a mouse event seen before the probe silences it")
+	}
+}
+
+// TestStartMouseProbe_LandsOnTheLoopOnlyUnderTmux drives the timer with
+// a zero delay: outside tmux nothing is scheduled, and inside it the
+// hint arrives as an asyncjob.Notify event the loop lands — the flash
+// happens on the loop, never in the timer's goroutine.
+func TestStartMouseProbe_LandsOnTheLoopOnlyUnderTmux(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.startMouseProbe(false, 0)
+	deadline := time.Now().Add(50 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if a.screen.HasPendingEvent() {
+			t.Fatal("outside tmux the probe must schedule nothing")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	a.startMouseProbe(true, 0)
+	pumpUntil(t, a, "mouse probe", func() bool { return a.mouse.hintShown })
+	if a.statusMsg != mouseHintMsg {
+		t.Fatalf("status %q, want the tmux hint", a.statusMsg)
+	}
+}
