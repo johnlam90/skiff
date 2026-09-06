@@ -359,3 +359,74 @@ func TestDiffTints_DerivedFromPalette(t *testing.T) {
 		t.Fatal("low-color palettes must opt out of tinting")
 	}
 }
+
+// TestFieldBG_KeepsAReadableSelection pins the no-op half of the
+// derivation: on the default palette Text already clears 4.5:1 on
+// Selection, so the focused field IS the selection tint — the walk
+// must not shift a surface that needs no help.
+func TestFieldBG_KeepsAReadableSelection(t *testing.T) {
+	th := Default()
+	if r := ContrastRatio(th.Text, th.Selection); r < minFieldContrast {
+		t.Fatalf("fixture: Text on Selection is %.2f, the test needs a passing pair", r)
+	}
+	if got := th.FieldBG(); got != th.Selection {
+		t.Fatalf("FieldBG moved a readable Selection: %v -> %v", th.Selection, got)
+	}
+}
+
+// TestFieldBG_WalksAnUnreadableSelection pins the correcting half: a
+// Selection that Text cannot be read on is walked away from Text until
+// it clears the floor, and minimally — the field should still read as
+// a tinted selection, not a white box.
+func TestFieldBG_WalksAnUnreadableSelection(t *testing.T) {
+	th := Default()
+	th.Selection = tcell.NewRGBColor(0xa0, 0xa8, 0xc8) // ~1.4:1 under Text
+	got := th.FieldBG()
+	if got == th.Selection {
+		t.Fatal("FieldBG left an unreadable Selection alone")
+	}
+	if r := ContrastRatio(th.Text, got); r < minFieldContrast {
+		t.Fatalf("corrected field is %.2f, need >= %.1f", r, minFieldContrast)
+	}
+	if got == tcell.NewRGBColor(0, 0, 0) {
+		t.Fatal("the walk snapped straight to the pole instead of stopping at the floor")
+	}
+}
+
+// TestFieldBG_HoldsToTheBodyFloorWhenThePaletteShipsUnderIt pins the
+// affordance rule on the palette that motivates it: Solarized Light's
+// body text is 4.13:1 by design and its Selection reads at 3.64 under
+// Text, so the field is walked up to the body's own contrast — never
+// forced past it to the pole, which would turn the tint into a white
+// box on a palette whose author chose low contrast.
+func TestFieldBG_HoldsToTheBodyFloorWhenThePaletteShipsUnderIt(t *testing.T) {
+	th, ok := ByID("solarized-light")
+	if !ok {
+		t.Fatal("solarized-light left the registry; pick another palette that ships under 4.5")
+	}
+	body := ContrastRatio(th.Text, th.BG)
+	if body >= minFieldContrast || ContrastRatio(th.Text, th.Selection) >= body {
+		t.Fatalf("fixture: body %.2f, selection %.2f — the test needs a palette under the floor whose Selection fails it",
+			body, ContrastRatio(th.Text, th.Selection))
+	}
+	got := th.FieldBG()
+	if got == th.Selection {
+		t.Fatal("FieldBG left a Selection that fails the body floor alone")
+	}
+	if r := ContrastRatio(th.Text, got); r < body {
+		t.Fatalf("field is %.2f, under the body's own %.2f", r, body)
+	}
+	if got == tcell.NewRGBColor(0, 0, 0) || got == tcell.NewRGBColor(255, 255, 255) {
+		t.Fatalf("the walk should stop at the body floor, not run to the pole: %v", got)
+	}
+}
+
+// TestFieldBG_LowColorPassesSelectionThrough pins the degraded path: a
+// palette whose surfaces have been flattened to the terminal default
+// has nothing to blend, so the field is whatever Selection is.
+func TestFieldBG_LowColorPassesSelectionThrough(t *testing.T) {
+	th := Degrade(Default(), 8)
+	if got := th.FieldBG(); got != th.Selection {
+		t.Fatalf("low-color FieldBG = %v, want Selection %v untouched", got, th.Selection)
+	}
+}

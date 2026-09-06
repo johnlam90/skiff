@@ -119,6 +119,37 @@ func (t Theme) SelectionFg(fg tcell.Color) tcell.Color {
 	return t.Text
 }
 
+// minFieldContrast is the readability floor for text typed into a
+// focused input. WCAG AA, not the 3:1 graphics bar: the custom-action
+// form's field is where the user reads their own keystrokes back, so
+// it is content, not chrome. Palettes whose body text ships under it
+// (Solarized Light's 4.13:1) are held to their own Text/BG instead —
+// the field is never less readable than the editor around it, and
+// readable() deliberately never repaints a palette's Text.
+const minFieldContrast = 4.5
+
+// FieldBG returns the surface a focused input paints Text over. It
+// starts from Selection — the palette's own "this is the active
+// range" tint, so a focused field reads as focused — and is walked
+// away from Text only when Text fails the floor the palette affords
+// (see minFieldContrast). Subtle used to play this role; readable()
+// now lifts Subtle toward white to clear the 3:1 GRAPHICS floor, which
+// pushed it toward Text on every dark palette and left the one field
+// the user types into at 1.1–3.6:1. Derived at draw time like
+// DiffTints rather than stored, so no palette literal has to carry it
+// and the registry test fences every theme with one loop. A low-color
+// palette (Selection flattened to ColorDefault) comes back as is:
+// there is nothing to blend and the terminal paints its own default.
+func (t Theme) FieldBG() tcell.Color {
+	if !t.Selection.Valid() || !t.Text.Valid() {
+		return t.Selection
+	}
+	floor := math.Min(minFieldContrast, ContrastRatio(t.Text, t.BG))
+	// Contrast is symmetric, so walking the BACKGROUND toward the pole
+	// that gains against Text is the same routine that walks StatusFg.
+	return ensureContrast(t.Selection, t.Text, floor)
+}
+
 // minStatusContrast is the readability floor for status-bar text.
 // Below WCAG AA (4.5) on purpose — the bar is short, bold, and
 // upstream palettes ship deliberately tinted chips — but 3.0 is where

@@ -308,3 +308,52 @@ func TestForm_DragOntoSubmitDoesNotSubmit(t *testing.T) {
 		t.Fatalf("a fresh press after the release must submit, got %v", *log)
 	}
 }
+
+// formStyleAt returns the style painted at (x, y) after a Show — the
+// companion of cellAt for the assertions that care about the surface
+// rather than the glyph.
+func formStyleAt(scr tcell.SimulationScreen, x, y int) tcell.Style {
+	cells, w, _ := scr.GetContents()
+	return cells[y*w+x].Style
+}
+
+// TestForm_FocusedFieldIsReadableOnEveryPalette pins the surface the
+// focused input paints on: the theme's FieldBG under Text, on the
+// palettes where the old Subtle background failed worst — Offshore
+// (3.55:1 through readable()) and Solarized Light (1.11:1). The
+// unfocused row stays on the editor BG so the focus cue survives, and
+// the ratio the user types under must clear the palette's floor: 4.5,
+// or the body's own Text/BG where the palette ships under it.
+func TestForm_FocusedFieldIsReadableOnEveryPalette(t *testing.T) {
+	for _, id := range []string{"offshore", "solarized-light", "nord", "one-dark"} {
+		th, ok := theme.ByID(id)
+		if !ok {
+			t.Fatalf("%s: not in the registry", id)
+		}
+		scr := simScreen(t)
+		f, _ := testForm()
+		f.Theme = th
+		f.Draw(scr)
+		scr.Show()
+		r := f.rect()
+		focused := formStyleAt(scr, r.X+3, r.Y+4)
+		fg, bg, _ := focused.Decompose()
+		if bg != th.FieldBG() || fg != th.Text {
+			t.Fatalf("%s: focused field = %v on %v, want Text on FieldBG %v", id, fg, bg, th.FieldBG())
+		}
+		if bg == th.Subtle {
+			t.Fatalf("%s: focused field still on Subtle", id)
+		}
+		floor := 4.5
+		if body := theme.ContrastRatio(th.Text, th.BG); body < floor {
+			floor = body
+		}
+		if ratio := theme.ContrastRatio(fg, bg); ratio < floor {
+			t.Fatalf("%s: focused field reads at %.2f:1, need >= %.2f", id, ratio, floor)
+		}
+		_, idle, _ := formStyleAt(scr, r.X+3, r.Y+6).Decompose()
+		if idle != th.BG {
+			t.Fatalf("%s: unfocused field bg = %v, want BG so focus stays visible", id, idle)
+		}
+	}
+}
