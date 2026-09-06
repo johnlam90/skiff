@@ -528,7 +528,6 @@ func New(rootDir string) (*App, error) {
 
 	a := newApp(scr, rootDir, tree, true)
 	a.refreshGitStatus()
-	a.flash("Welcome — click a file to open · click  ≡  for the menu")
 	a.startTreeRefresh()
 	a.startMouseProbe(tmuxActive(), mouseProbeDelay)
 	// Kick off the project file index in the background so that by
@@ -544,7 +543,34 @@ func New(rootDir string) (*App, error) {
 	// Put the user back where they left this project: tabs, cursors,
 	// expanded folders, sidebar. Best-effort — no session, no change.
 	a.restoreSession()
+	// After the restore on purpose: the greeting is for a session with
+	// nothing open, and a user coming back to five restored tabs does
+	// not need to be told how to open a file.
+	a.welcomeFlash()
 	return a, nil
+}
+
+// welcomeProject and welcomeSingleFile are the first-run greetings. Both
+// name the keyboard route as well as the mouse one — skiff's habitat is
+// an SSH session where the mouse may not be wired through — and both
+// stay under 40 cells so they sit in the status bar at minWidth instead
+// of spilling onto a two-row flash strip. The single-file variant skips
+// the ≡ mention: the file the user asked for is already open, so the
+// only thing worth teaching is how to reach the menu and the key list.
+const (
+	welcomeProject    = "Welcome — ≡ or Esc Esc opens the menu"
+	welcomeSingleFile = "Menu: Esc Esc · Shortcuts: Esc ?"
+)
+
+// welcomeFlash greets a project session that starts with nothing open.
+// A session the restore just repopulated is not greeted: the tabs are
+// the greeting, and a "how to open a file" line over them reads as the
+// editor having forgotten what it just did.
+func (a *App) welcomeFlash() {
+	if a.tabs.Len() > 0 {
+		return
+	}
+	a.flash(welcomeProject)
 }
 
 // NewSingleFile is the lean alternative to New for the "skiff
@@ -587,6 +613,12 @@ func newSingleFileApp(scr tcell.Screen, filePath string) *App {
 	// `git diff`), so single-file mode shows change bars on open without
 	// the whole-repo status or tree walk that New performs.
 	a.openFile(filePath)
+	// Only over a successful open: a failed one has just flashed why,
+	// and that line matters more than a greeting. The "Opened x" flash
+	// it replaces said nothing the tab strip does not already show.
+	if a.tabs.Len() > 0 {
+		a.flash(welcomeSingleFile)
+	}
 	return a
 }
 

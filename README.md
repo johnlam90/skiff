@@ -66,15 +66,18 @@ The goals, in order:
   to auto-scroll a selection.
 - **Syntax highlighting** for dozens of languages via Chroma.
 - **Action menu, filterable** — open it with the `≡` icon, right-click,
-  or a double-tap of `Esc`, then just type: the filter narrows every
-  top-level group at once ("comment" finds **Toggle line comment**, and
-  so does "tlc"). Seven groups — File, Edit, Go, Git, View, Custom,
-  Quit — with the git verbs and the file-clipboard actions one
-  keystroke deeper behind **Git…** and **File clipboard…** (each pick
-  has a filter field of its own). Arrows + `Enter` still walk the
-  list; `Esc` clears the filter, a second `Esc` closes. Rows that
-  can't apply right now (git verbs with no repo, edit verbs with no
-  tab) are hidden rather than greyed out.
+  or a double-tap of `Esc`, then just type: the filter searches every
+  row at once, the ones behind a drill-in included ("comment" finds
+  **Toggle line comment**, so does "tlc"; "branch" finds **Switch
+  branch…** and the four branch verbs, each tagged with where it lives
+  — `Git ›`). Six groups — File, Edit, Go, Git, View, Quit — plus a
+  Custom group whenever `actions.json` defines any, with the git verbs
+  and the file-clipboard actions one keystroke deeper behind **Git…**
+  and **File clipboard…** (each pick has a filter field of its own).
+  Arrows + `Enter` still walk the list; `Esc` clears the filter, a
+  second `Esc` closes. Rows that can't apply right now (git verbs with
+  no repo, edit verbs with no tab) are hidden rather than greyed out,
+  and a row that asks before acting ends in `…`.
 - **Live file tree** — auto-refreshes every 10 seconds so files added
   or removed from disk show up without you doing anything. A directory
   it can't read is labelled `(unreadable)` rather than drawn as empty,
@@ -164,6 +167,22 @@ The goals, in order:
 - **File clipboard** — cut, copy, paste, and duplicate files or folders
   from the tree's right-click menu or the main `≡` menu. Nothing is
   ever overwritten: a taken name becomes `name copy.ext`.
+- **Undo delete** — deleting a file or folder moves it to a
+  per-session trash rather than the void; the flash that follows
+  offers `≡` → **Undo delete**, which puts it back where it was.
+- **Revert file** — `≡` → **Revert file** returns the buffer to what
+  is on disk (or what it held when opened) as one undo step, so
+  `Esc u` restores your edits if that was the wrong call.
+- **Caret follows scroll, if you want it** — by default the wheel and
+  scrollbar move the view and leave the caret where it was (VS Code's
+  behavior). `≡` → **Make caret follow scroll** pulls the caret along
+  so it always sits on a visible line, and persists
+  (`{"scrollcaret": "on"}` in the config file).
+- **Branches and worktrees** — switch, create, merge, rename and
+  delete branches, and add, list or remove `git worktree`s, all from
+  `≡` → **Git…** (the less-used verbs sit one level deeper behind
+  **More git actions…**, which is also the git panel's `[ ⋯ ]`
+  button). See [Git changes](#git-changes).
 - **Session restore** — reopening a project brings back your open tabs
   (cursor and scroll included), expanded folders, and sidebar exactly
   as you left them. State lives in one file per project under
@@ -401,15 +420,17 @@ within half a second tap one of the keys below.
 | `Esc b`     | Move to previous word  | Go    |
 | `Esc e`     | Move to next word      | Go    |
 | `Esc %`     | Go to matching bracket | Go    |
-| `Esc g`     | Focus the Git panel    | Git   |
-| `Esc t`     | Toggle sidebar         | View  |
-| `Esc z`     | Toggle line wrap       | View  |
+| `Esc g`     | Git changes (the panel)| Git   |
+| `Esc t`     | Show / hide file explorer | View |
+| `Esc z`     | Wrap / unwrap long lines | View |
 | `Esc ?`     | Keyboard shortcuts     | View  |
-| `Esc q`     | Quit                   | Quit  |
+| `Esc q`     | Quit editor            | Quit  |
 
 The rows are in `leaderBindings()`' own order, and the Group column is
 its `group` field — the same six headings the ≡ menu uses, so "where
-does this live?" has one answer.
+does this live?" has one answer. The Action column is the ≡ menu row's
+own name: the leader strip, the `Esc ?` sheet and the menu all teach
+one name per action.
 
 **Forgot one? `Esc ?`** opens the whole table as a scrollable overlay,
 grouped exactly as above, plus a short note on the ≡ menu and its
@@ -441,7 +462,7 @@ the hotkeys are just a faster path for the actions you reach for most.
 above the status bar:
 
 ```
- Find: foo█                       3 of 12   Enter: next · Shift+Enter: prev · Esc: close
+ Find: foo█            3 of 12   Enter: next · Shift+Enter: prev · Tab: replace · Esc: close
 ```
 
 - Type to search — matching is **smart-case substring**: an
@@ -562,10 +583,20 @@ Skiff panel:
   explanation. Fetch lives under `[ ⋯ ]`.
 - **Branches.** Click the branch line (or `≡` → **Switch branch…**)
   to pick any local or remote branch — picking `origin/x` creates the
-  local tracking branch the way you'd expect. **New branch…** is
-  under `[ ⋯ ]`, next to **Stash changes**, **Pop stash**, and
-  **Undo last commit** (a soft reset: the commit disappears, its
-  changes stay in your tree).
+  local tracking branch the way you'd expect. **New branch…**,
+  **Merge branch…** (into the current one, `--no-edit`; a conflict
+  stops with git's own reason), **Rename branch…** and **Delete
+  branch…** (an unmerged branch is refused first, then offered a
+  second, explicit **Force delete**) are under `[ ⋯ ]` — the same
+  list as `≡` → **Git…** → **More git actions…** — next to **Stash
+  changes**, **Pop stash**, and **Undo last commit…** (a soft reset:
+  the commit disappears, its changes stay in your tree).
+- **Worktrees.** **New worktree…** checks a branch out into a sibling
+  directory, **List worktrees** shows every checkout of the repo with
+  its branch, and **Remove worktree…** takes one away (a dirty
+  worktree is refused first, then offered **Force remove**). All three
+  live under `[ ⋯ ]` / **More git actions…**; Skiff itself keeps
+  editing the tree it was opened in.
 - **Compare against any ref.** `[ ⋯ ]` → **Compare against…** points
   the *whole editor* at another branch: tree tint, gutter bars, the
   panel's list and every diff show what changed versus that ref —
@@ -578,8 +609,7 @@ Skiff panel:
   git mutation runs on a background goroutine (never blocking typing),
   one at a time, and refreshes the panel, tree tint, and gutter marks
   when it lands.
-- **Commit history** (`≡` menu, or under the panel's `[ ⋯ ]` button)
-  lists recent commits — SHA, subject, relative age — and a
+- **Commit history** (`≡` → **Git…**) lists recent commits — SHA, subject, relative age — and a
   click opens that commit's full diff, with per-file boundary rows
   for multi-file commits. **History of this file** does the same
   scoped to the active tab (with `--follow`, so renames don't

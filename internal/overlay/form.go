@@ -268,7 +268,7 @@ func (f *Form) HandleMouse(x, y int, btn tcell.ButtonMask) {
 func (f *Form) Draw(scr tcell.Screen) {
 	r := f.rect()
 	th := f.Theme
-	DrawFrame(scr, r, f.Title, th)
+	DrawFrameHint(scr, r, f.Title, "⇥ next · "+FrameHintEsc, th)
 
 	bg := th.LineHL
 	titleStyle := tcell.StyleDefault.Background(bg).Foreground(th.Accent).Bold(true)

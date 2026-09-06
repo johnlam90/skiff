@@ -293,8 +293,8 @@ func TestMenuGitCommit_OpensPromptAndCommits(t *testing.T) {
 	skipInShortMode(t)
 	a, _, _ := dirtyRepoApp(t)
 	a.menuGitCommit()
-	if p := promptPrefab(t, a); p.Title != "Commit message" {
-		t.Fatalf("commit prompt should open, got title %q", p.Title)
+	if p := promptPrefab(t, a); p.Title != "Commit message" || p.Hint != "2 files" {
+		t.Fatalf("commit prompt should open with a real plural, got title %q hint %q", p.Title, p.Hint)
 	}
 	promptPrefab(t, a).Field.SetText("from the panel")
 	submitPrompt(a)
@@ -472,5 +472,46 @@ func TestComparePickSetsAndClearsBase(t *testing.T) {
 	a.setDiffBase("main") // current branch → degrades to HEAD
 	if a.diffBase != "" {
 		t.Fatalf("current-branch base should degrade to HEAD, got %q", a.diffBase)
+	}
+}
+
+// TestGitConfirms_NameTheirVerb pins the caption pairs on the git
+// ladders: Undo last commit, Delete branch and the three second-step
+// confirms handleGitOpDone opens each name the verb Enter would run,
+// so "Delete x? Unmerged work would be lost." is never answered by a
+// bare Yes the user has to re-read the question to decode.
+func TestGitConfirms_NameTheirVerb(t *testing.T) {
+	a, _ := fakeRepoApp(t)
+
+	a.menuGitUndoCommit()
+	if c := confirmPrefab(t, a); c.Labels != confirmButtons("Undo commit") {
+		t.Errorf("undo commit buttons = %v", c.Labels)
+	}
+
+	a.closeAllModals()
+	a.openDeleteBranchPick([]string{"main", "feature"})
+	pickChoose(t, a, 0)
+	if c := confirmPrefab(t, a); c.Labels != confirmButtons("Delete branch") {
+		t.Errorf("delete branch buttons = %v", c.Labels)
+	}
+
+	a.closeAllModals()
+	a.handleGitOpDone(gitOpResult{label: "Push"}, &git.OpError{NonFastForward: true})
+	if c := confirmPrefab(t, a); c.Labels != confirmButtons("Pull, then push") {
+		t.Errorf("push-rejected buttons = %v", c.Labels)
+	}
+
+	a.closeAllModals()
+	a.gitDeleteTarget = "feature"
+	a.handleGitOpDone(gitOpResult{label: "Delete branch"}, &git.OpError{NotMerged: true})
+	if c := confirmPrefab(t, a); c.Labels != confirmButtons("Force delete") {
+		t.Errorf("force-delete buttons = %v", c.Labels)
+	}
+
+	a.closeAllModals()
+	a.gitWorktreeTarget = "/tmp/wt"
+	a.handleGitOpDone(gitOpResult{label: "Remove worktree"}, &git.OpError{WorktreeDirty: true})
+	if c := confirmPrefab(t, a); c.Labels != confirmButtons("Force remove") {
+		t.Errorf("force-remove buttons = %v", c.Labels)
 	}
 }

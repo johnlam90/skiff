@@ -54,6 +54,11 @@ const confirmMaxBodyRows = 14
 // are added on top, so a one-row body reproduces confirmHeight exactly.
 const confirmChromeRows = confirmHeight - 1
 
+// confirmDefaultLabels are the stock captions. A caller that leaves
+// Labels zero gets these plus the pinned columns, so every existing
+// Yes/No confirm renders byte-identically.
+var confirmDefaultLabels = [2]string{"[  No  ]", "[ Yes ]"}
+
 // Confirm is the Yes/No overlay: a centered box with a title, a body,
 // and a No / Yes button row. Default focus is No so an accidental Enter
 // is harmless — important for destructive actions like Delete. Esc, a No
@@ -70,6 +75,15 @@ type Confirm struct {
 	// one line cannot carry informed consent — the formatter-trust
 	// prompt has to show every command it would run.
 	Body []string
+	// Labels optionally replaces the two button captions, left (the
+	// dismissal) then right (the action), for confirms whose Yes is a
+	// named destructive verb — "[ Cancel ] [ Delete branch ]" answers
+	// "Delete x? Unmerged work would be lost." where a bare Yes makes
+	// the user re-read the question. Leave it zero for No / Yes.
+	// Captions carry their own brackets, exactly as Dirty's do, because
+	// the bracket style is part of the label; keep them short — the
+	// pair has to fit a 38-cell frame at minWidth (see buttonCols).
+	Labels [2]string
 	// Hover is the highlighted button: 0 = No (the safe default),
 	// 1 = Yes.
 	Hover int
@@ -114,18 +128,41 @@ func (c *Confirm) frameWidth() int {
 	return fit(natural, w)
 }
 
-// buttonCols returns the No and Yes x offsets inside the frame. At or
-// above the classic 54 cells they are the pinned columns (shifted by
-// buttonOffset for the wide Body form), so ordinary terminals render
-// byte-identically; below it the pair is re-centered inside whatever
-// frame the screen allowed.
+// labels returns the captions to draw, falling back to the stock pair.
+// Individual empty entries fall back too, so a caller can rename the
+// action button without restating the dismissal.
+func (c *Confirm) labels() [2]string {
+	out := c.Labels
+	for i := range out {
+		if out[i] == "" {
+			out[i] = confirmDefaultLabels[i]
+		}
+	}
+	return out
+}
+
+// buttonWidths returns the cell width of each caption — the hit zone
+// and the painted label are the same cells only if both read it here.
+func (c *Confirm) buttonWidths() (noW, yesW int) {
+	l := c.labels()
+	return runeLen(l[0]), runeLen(l[1])
+}
+
+// buttonCols returns the No and Yes x offsets inside the frame. With
+// the stock captions at or above the classic 54 cells they are the
+// pinned columns (shifted by buttonOffset for the wide Body form), so
+// ordinary terminals render byte-identically; custom Labels, or a
+// frame the screen squeezed below 54, lay the pair out with
+// buttonRowCols — the only rule that stays right for captions and
+// widths this file has not seen.
 func (c *Confirm) buttonCols() (noX, yesX int) {
 	fw := c.frameWidth()
-	if fw >= confirmWidth {
+	if fw >= confirmWidth && c.labels() == confirmDefaultLabels {
 		off := c.buttonOffset()
 		return off + confirmBtnNoX, off + confirmBtnYesX
 	}
-	cols := buttonRowCols(fw, confirmBtnGap, []int{confirmBtnNoW, confirmBtnYesW})
+	noW, yesW := c.buttonWidths()
+	cols := buttonRowCols(fw, confirmBtnGap, []int{noW, yesW})
 	return cols[0], cols[1]
 }
 
@@ -254,12 +291,13 @@ func (c *Confirm) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	}
 	btnY := r.Y + c.buttonRow()
 	noX, yesX := c.buttonCols()
+	noW, yesW := c.buttonWidths()
 	if x >= r.X && x < r.X+r.W && y == btnY {
 		relX := x - r.X
 		switch {
-		case relX >= noX && relX < noX+confirmBtnNoW:
+		case relX >= noX && relX < noX+noW:
 			c.Hover = 0
-		case relX >= yesX && relX < yesX+confirmBtnYesW:
+		case relX >= yesX && relX < yesX+yesW:
 			c.Hover = 1
 		}
 	}
@@ -284,9 +322,9 @@ func (c *Confirm) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	if y == btnY {
 		relX := x - r.X
 		switch {
-		case relX >= noX && relX < noX+confirmBtnNoW:
+		case relX >= noX && relX < noX+noW:
 			c.cancel()
-		case relX >= yesX && relX < yesX+confirmBtnYesW:
+		case relX >= yesX && relX < yesX+yesW:
 			c.yes()
 		}
 	}
@@ -294,12 +332,16 @@ func (c *Confirm) HandleMouse(x, y int, btn tcell.ButtonMask) {
 
 // Draw renders the confirm: frame, the body (a centered rune-safe
 // message, or the visible slice of a left-aligned multi-line Body —
-// commands and paths read poorly centered), and the No / Yes buttons,
-// Yes in the error color because every Yes in the editor is destructive.
+// commands and paths read poorly centered), and the two buttons — the
+// stock No / Yes or the caller's Labels — the action one in the error
+// color because every Yes in the editor is destructive.
 func (c *Confirm) Draw(scr tcell.Screen) {
 	r := c.rect()
 	th := c.Theme
-	DrawFrame(scr, r, c.Title, th)
+	// The hint names what Enter would press right now — the focused
+	// caption — so a confirm focused on its action says so before the
+	// key is hit.
+	DrawFrameHint(scr, r, c.Title, EnterHint(c.labels()[c.Hover]), th)
 
 	bg := th.LineHL
 	bodyStyle := tcell.StyleDefault.Background(bg).Foreground(th.Text)
@@ -319,8 +361,9 @@ func (c *Confirm) Draw(scr tcell.Screen) {
 
 	btnY := r.Y + c.buttonRow()
 	noX, yesX := c.buttonCols()
-	DrawButton(scr, r.X+noX, btnY, "[  No  ]", bg, th.Text, c.Hover == 0)
-	DrawButton(scr, r.X+yesX, btnY, "[ Yes ]", bg, th.Error, c.Hover == 1)
+	labels := c.labels()
+	DrawButton(scr, r.X+noX, btnY, labels[0], bg, th.Text, c.Hover == 0)
+	DrawButton(scr, r.X+yesX, btnY, labels[1], bg, th.Error, c.Hover == 1)
 	scr.HideCursor()
 }
 

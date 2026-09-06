@@ -466,16 +466,42 @@ func (a *App) drawSplitter() {
 }
 
 // emptyEditorHints are the ways out of the "no file open" state, in the
-// order a new user is likely to want them. Both a mouse line and a
-// keyboard line are shown on purpose: skiff is mouse-first, but its
-// natural habitat is an SSH session where the mouse may not be wired
-// through at all, and a hint that only names the mouse is a dead end
-// there. The Esc leader is the only shortcut mechanism the editor has
-// (no Ctrl+ bindings), so naming its three most useful gestures is the
-// whole keyboard onboarding story.
-var emptyEditorHints = []string{
-	"Click a file in the tree, or  ≡  for the menu",
-	"Esc p  find file  ·  Esc n  new file  ·  Esc Esc  menu",
+// order a new user is likely to want them, for the session shape the
+// editor is actually in. The lines used to be one fixed pair that told
+// a single-file session to "click a file in the tree" it does not have
+// (and whose Esc p only flashes a refusal), told an empty project the
+// same about a tree showing "(folder is empty)", and pointed at a tree
+// the responsive layout had just hidden. Each shape now names only
+// gestures that work in it:
+//
+//   - a tree with rows: both a mouse line and a keyboard line, on
+//     purpose — skiff is mouse-first, but its habitat is an SSH session
+//     where the mouse may not be wired through, and a hint that only
+//     names the mouse is a dead end there;
+//   - the tree hidden (Esc t, or auto-hidden under 58 columns): the
+//     key that brings it back leads, then the finder and the menu;
+//   - single-file mode: no tree and no finder exist, so New file and
+//     the menu are the whole story;
+//   - an empty project: nothing to click and nothing to find yet, so
+//     New file and the menu.
+//
+// The Esc leader is the only shortcut mechanism the editor has (no
+// Ctrl+ bindings), so each line's keys are the keyboard onboarding for
+// that shape; TestDrawEmptyEditor_HintsAreLeaderBindings keeps every
+// advertised key bound.
+func (a *App) emptyEditorHints() []string {
+	switch {
+	case a.tree == nil:
+		return []string{"Esc n  new file  ·  Esc Esc  menu"}
+	case !a.sidebarShown:
+		return []string{"Esc t  file explorer  ·  Esc p  find file  ·  Esc Esc  menu"}
+	case len(a.tree.Root.Children) == 0:
+		return []string{"Esc n  new file, or  ≡  for the menu"}
+	}
+	return []string{
+		"Click a file in the tree, or  ≡  for the menu",
+		"Esc p  find file  ·  Esc n  new file  ·  Esc Esc  menu",
+	}
 }
 
 // drawEmptyEditor paints the placeholder shown when no tabs are open.
@@ -501,7 +527,7 @@ func (a *App) drawEmptyEditor() {
 	// Hints stack downward from one row below the title. Rows that
 	// would fall outside the editor rect are dropped rather than
 	// clipped, so a two-row pane still shows the title cleanly.
-	for h, hint := range emptyEditorHints {
+	for h, hint := range a.emptyEditorHints() {
 		hy := cy + 1 + h
 		if hy >= ey+eh {
 			break

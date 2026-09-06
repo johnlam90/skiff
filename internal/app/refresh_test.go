@@ -128,8 +128,8 @@ func TestLoadCustomActions_MalformedFileFlashesInsteadOfBlocking(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.loadCustomActions()
 
-	if !strings.HasPrefix(a.statusMsg, "custom actions:") {
-		t.Fatalf("expected a custom-actions flash, got %q", a.statusMsg)
+	if !strings.HasPrefix(a.statusMsg, "Couldn't read actions.json:") {
+		t.Fatalf("expected a flash naming actions.json, got %q", a.statusMsg)
 	}
 	if len(a.customActions) != 0 {
 		t.Fatalf("malformed config should leave no actions, got %+v", a.customActions)
@@ -190,8 +190,8 @@ func TestLoadUserConfig_MalformedFileFlashesAndFallsBack(t *testing.T) {
 	a.wrapOn = false
 	a.loadUserConfig()
 
-	if !strings.HasPrefix(a.statusMsg, "config:") {
-		t.Fatalf("expected a config flash, got %q", a.statusMsg)
+	if !strings.HasPrefix(a.statusMsg, "Couldn't read config.json:") {
+		t.Fatalf("expected a flash naming config.json, got %q", a.statusMsg)
 	}
 	if !a.wrapOn {
 		t.Fatal("malformed config should fall back to Defaults(), which wraps")

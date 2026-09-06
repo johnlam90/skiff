@@ -34,10 +34,10 @@ import (
 var preRedesignMenuActions = []string{
 	"Save", "Save & close tab", "Close tab", "Reopen closed tab",
 	"Undo", "Redo", "Revert file",
-	"Find in file", "Find in project", "Go to line", "Find file in project",
+	"Find in file", "Find in project", "Go to line…", "Find file in project",
 	"Git changes", "Diff this file", "History of this file", "Commit history",
 	"Commit changes…", "Push", "Pull", "Switch branch…", "More git actions…",
-	"New file", "Rename file", "Delete file", "Rename folder", "Delete folder",
+	"New file…", "Rename file…", "Delete file…", "Rename folder…", "Delete folder…",
 	"Undo delete", "Cut file", "Copy file", "Paste into …", "Duplicate file",
 	"Copy relative path", "Copy absolute path",
 	"Copy selection", "Cut selection", "Paste", "Toggle line comment",
@@ -78,6 +78,12 @@ var postRedesignMenuActions = []string{
 	"Next tab", "Previous tab", "Close other tabs",
 	// Repeat the last in-file search without the bar (Esc ;).
 	"Find next",
+	// The "More git actions…" drill-in: the verbs that used to hide in
+	// an unregistered popup the reachability walk could not see.
+	"Fetch", "Compare against…",
+	"New branch…", "Merge branch…", "Rename branch…", "Delete branch…",
+	"New worktree…", "List worktrees", "Remove worktree…",
+	"Stash changes", "Pop stash", "Undo last commit…",
 }
 
 // menuCatalog flattens every built-in row the ≡ menu can reach — the top
@@ -249,14 +255,14 @@ func TestMenuCatalog_Shortcuts(t *testing.T) {
 		"Revert file":            "",
 		"Find in file":           "Esc f",
 		"Find in project":        "Esc F",
-		"Go to line":             "Esc l",
+		"Go to line…":            "Esc l",
 		"Go to matching bracket": "Esc %",
 		"Move to previous word":  "Esc b",
 		"Move to next word":      "Esc e",
 		"Find file in project":   "Esc p",
-		"New file":               "Esc n",
-		"Rename file":            "",
-		"Delete file":            "",
+		"New file…":              "Esc n",
+		"Rename file…":           "",
+		"Delete file…":           "",
 		"Copy relative path":     "",
 		"Copy absolute path":     "",
 		"Copy selection":         "Esc c",
@@ -378,11 +384,16 @@ func TestMenuDrillIns_HoldEveryDemotedAction(t *testing.T) {
 			}
 		}
 	}
-	// The nine git verbs and the six file-clipboard actions are exactly
-	// what the top level is allowed to demote.
+	// The nine git verbs, the twelve extras behind "More git actions…"
+	// and the six file-clipboard actions are exactly what the top level
+	// is allowed to demote.
 	wantDemoted := []string{
 		"Git changes", "Commit changes…", "Push", "Pull", "Switch branch…",
 		"Diff this file", "History of this file", "Commit history", "More git actions…",
+		"Fetch", "Compare against…",
+		"New branch…", "Merge branch…", "Rename branch…", "Delete branch…",
+		"New worktree…", "List worktrees", "Remove worktree…",
+		"Stash changes", "Pop stash", "Undo last commit…",
 		"Cut file", "Copy file", "Duplicate file", "Paste into …",
 		"Copy relative path", "Copy absolute path",
 	}
@@ -619,7 +630,7 @@ func TestMenuLayout_FilterCrossesGroups(t *testing.T) {
 	if len(dividers) != 1 {
 		t.Errorf("a filtered list has no group dividers, got %v", dividers)
 	}
-	for _, want := range []string{"New file", "Rename file", "Delete file", "Find in file", "File clipboard…"} {
+	for _, want := range []string{"New file…", "Rename file…", "Delete file…", "Find in file", "File clipboard…"} {
 		found := false
 		for _, l := range got {
 			if l == want {
@@ -728,5 +739,33 @@ func TestMenuNaturalWidth_GrowsForLongLabel(t *testing.T) {
 	if got := menuLabelBudget(w, row); got < runeLen(long) {
 		t.Fatalf("grown width %d still clips the label (budget %d < %d)",
 			w, got, runeLen(long))
+	}
+}
+
+// TestMenuCatalog_PromptingRowsEndWithEllipsis pins the "…" convention
+// menudef.go's header states: a row that asks before acting (a prompt,
+// a pick, a confirm) ends in an ellipsis so the user knows a click is
+// safe to explore, and a row that acts on the click does not. Both
+// halves are spelled out by hand because the catalog cannot tell a
+// prompting action from a direct one without running it.
+func TestMenuCatalog_PromptingRowsEndWithEllipsis(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	have := make(map[string]bool)
+	for _, it := range menuCatalog() {
+		have[menuCatalogLabel(a, it)] = true
+	}
+	for _, label := range []string{
+		"New file…", "Rename file…", "Delete file…", "Rename folder…", "Delete folder…",
+		"Go to line…", "Theme…", "Commit changes…", "Switch branch…",
+		"Resolve disk conflict…", "Keyboard shortcuts…", "Git…", "File clipboard…",
+	} {
+		if !have[label] {
+			t.Errorf("prompting row %q is missing its ellipsis form from the catalog", label)
+		}
+	}
+	for _, label := range []string{"Save", "Push", "Pull", "Undo", "Redo", "Revert file", "Refresh file tree"} {
+		if !have[label] {
+			t.Errorf("direct row %q should carry no ellipsis", label)
+		}
 	}
 }

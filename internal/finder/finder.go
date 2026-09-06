@@ -148,6 +148,15 @@ func (f *Finder) Stats() (State, int, bool) {
 	return f.state, len(f.paths), f.viaGit
 }
 
+// Err returns the error the last build ended with, or nil after a
+// clean build. The finder overlay names it in place of an empty result
+// list so "index failed" is a sentence the user can act on.
+func (f *Finder) Err() error {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.lastErr
+}
+
 // Files returns a copy of the indexed project-relative paths — the
 // project-search sweep iterates it from a goroutine, so the snapshot
 // must not alias the finder's own slice. Empty until a build finishes.

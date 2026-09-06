@@ -68,7 +68,7 @@ func (a *App) runFormatOnSave(tab *editor.Tab) {
 
 	cfg, err := format.Load(a.rootDir)
 	if err != nil {
-		a.flash("format: " + err.Error())
+		a.flash("Couldn't read .skiff/format.json: " + err.Error())
 		return
 	}
 
@@ -93,12 +93,12 @@ func (a *App) runWithTrust(tab *editor.Tab, cfg *format.Config, argv []string) {
 	// refuse to run must not reach the prompt — the user would be
 	// approving a list containing an entry we'd silently drop.
 	if err := validateFormatterConfig(cfg); err != nil {
-		a.flash("format: refused — " + err.Error())
+		a.flash(".skiff/format.json refused: " + err.Error())
 		return
 	}
 	trust, err := format.LoadTrust(format.DefaultTrustPath())
 	if err != nil {
-		a.flash("format trust: " + err.Error())
+		a.flash(trustFileMessage("read", err))
 		return
 	}
 	switch trust.CheckTrust(a.rootDir, cfg.Hash()) {
@@ -126,7 +126,7 @@ func (a *App) runWithTrust(tab *editor.Tab, cfg *format.Config, argv []string) {
 func (a *App) maybeOfferInstall(tab *editor.Tab, tabPath string) {
 	defaults, err := format.LoadDefaults(format.DefaultsPath())
 	if err != nil {
-		a.flash("format defaults: " + err.Error())
+		a.flash("Couldn't read " + filepath.Base(format.DefaultsPath()) + ": " + err.Error())
 		return
 	}
 	if defaults == nil {
@@ -156,7 +156,7 @@ func (a *App) maybeOfferInstall(tab *editor.Tab, tabPath string) {
 
 	tf, err := format.LoadTrust(format.DefaultTrustPath())
 	if err != nil {
-		a.flash("format trust: " + err.Error())
+		a.flash(trustFileMessage("read", err))
 		return
 	}
 	if tf.IsInstallDeclined(a.rootDir, ext) {
@@ -472,7 +472,7 @@ func (a *App) openFormatInstallPrompt(tab *editor.Tab, ext string, argvTemplate 
 		// the merged file on its own terms before anything runs.
 		freshCfg, err := format.Load(root)
 		if err != nil || freshCfg == nil {
-			app.flash("format: reload after install failed")
+			app.flash("Formatter installed, but .skiff/format.json wouldn't reload — save again to retry")
 			return
 		}
 		app.openFormatTrustPrompt(tab, freshCfg, substituteFile(argvTemplate, tabPath))
@@ -534,7 +534,7 @@ func (a *App) persistInstallDecline(root, ext string, declined bool) {
 	}
 	tf.SetInstallDeclined(root, ext, declined)
 	if err := format.SaveTrust(format.DefaultTrustPath(), tf); err != nil {
-		a.flash("format trust: " + err.Error())
+		a.flash(trustFileMessage("save", err))
 	}
 }
 
@@ -549,8 +549,16 @@ func (a *App) persistTrust(root, hash string, trusted bool) {
 	}
 	tf.SetTrust(root, hash, trusted)
 	if err := format.SaveTrust(format.DefaultTrustPath(), tf); err != nil {
-		a.flash("format trust: " + err.Error())
+		a.flash(trustFileMessage("save", err))
 	}
+}
+
+// trustFileMessage is the flash for a trust-store IO failure: it names
+// the file by its basename and the verb that failed, because "format
+// trust: permission denied" told the user neither what was being
+// touched nor what to look at.
+func trustFileMessage(verb string, err error) string {
+	return "Couldn't " + verb + " " + filepath.Base(format.DefaultTrustPath()) + ": " + err.Error()
 }
 
 // formatTimeoutDefault is the wall-clock budget for one formatter run.
@@ -593,7 +601,7 @@ var formatTimeout = formatTimeoutDefault
 func (a *App) execFormatter(tabPath string, argv []string) {
 	if err := validateFormatterArgv(argv); err != nil {
 		if len(argv) > 0 {
-			a.flash("format: refused — " + err.Error())
+			a.flash(".skiff/format.json refused: " + err.Error())
 		}
 		return
 	}

@@ -288,8 +288,8 @@ func wantPopupLabels(t *testing.T, a *App, want []string) {
 	}
 }
 
-// TestOpenTreeContext_Folder offers New File + Rename + Delete plus the
-// two clipboard rows.
+// TestOpenTreeContext_Folder offers New file… + the folder-worded
+// rename / delete / clipboard trio plus the two path rows.
 func TestOpenTreeContext_Folder(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "child")
@@ -309,11 +309,12 @@ func TestOpenTreeContext_Folder(t *testing.T) {
 		t.Fatal("child node not in tree")
 	}
 	a.openTreeContext(node, 5, 5)
-	wantPopupLabels(t, a, []string{"New File", "Rename", "Delete", "Cut", "Copy", "Duplicate", "Copy rel path", "Copy abs path"})
+	wantPopupLabels(t, a, []string{"New file…", "Rename folder…", "Delete folder…", "Cut folder", "Copy folder", "Duplicate folder", "Copy relative path", "Copy absolute path"})
 }
 
-// TestOpenTreeContext_File offers Rename / Delete / Cut / Copy /
-// Duplicate plus the two path-copy rows. New File is folder-only.
+// TestOpenTreeContext_File offers the ≡ menu's own file rows — rename,
+// delete, cut, copy, duplicate, the two path copies — verbatim. New
+// file… is folder-only.
 func TestOpenTreeContext_File(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "f.txt")
@@ -332,15 +333,15 @@ func TestOpenTreeContext_File(t *testing.T) {
 		t.Fatal("file node not in tree")
 	}
 	a.openTreeContext(node, 5, 5)
-	wantPopupLabels(t, a, []string{"Rename", "Delete", "Cut", "Copy", "Duplicate", "Copy rel path", "Copy abs path"})
+	wantPopupLabels(t, a, []string{"Rename file…", "Delete file…", "Cut file", "Copy file", "Duplicate file", "Copy relative path", "Copy absolute path"})
 }
 
-// TestOpenTreeContext_Root offers New File and the two clipboard rows —
+// TestOpenTreeContext_Root offers New file… and the two path rows —
 // Rename / Delete on the project root would be a footgun.
 func TestOpenTreeContext_Root(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.openTreeContext(a.tree.Root, 5, 5)
-	wantPopupLabels(t, a, []string{"New File", "Copy rel path", "Copy abs path"})
+	wantPopupLabels(t, a, []string{"New file…", "Copy relative path", "Copy absolute path"})
 }
 
 // TestRuneLen counts visible cells one-per-rune.
@@ -712,5 +713,54 @@ func TestCloseAllModals_TearsDownProjectFindThroughOnePath(t *testing.T) {
 	pumpUntil(t, a, "retired sweep", idle(&a.projFind.sweep))
 	if a.projFind.findMatches != nil {
 		t.Fatal("a retired sweep must not land into the closed panel")
+	}
+}
+
+// TestOpenTreeContext_ReadsTheMenuLabels pins the one-name rule between
+// the two surfaces: every row the popup offers for a FILE node is,
+// verbatim, a row of the ≡ menu catalog (and the paste row is the
+// menu's "Paste into x/" form), and the popup is as wide as its
+// longest label rather than a pinned 19 cells that would clip "Copy
+// absolute path".
+func TestOpenTreeContext_ReadsTheMenuLabels(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := writeFile(target, "x"); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestApp(t, dir)
+	catalog := make(map[string]bool)
+	for _, it := range menuCatalog() {
+		catalog[menuCatalogLabel(a, it)] = true
+	}
+
+	var node *filetree.Node
+	for _, c := range a.tree.Root.Children {
+		if c.Name == "f.txt" {
+			node = c
+		}
+	}
+	if node == nil {
+		t.Fatal("file node not in tree")
+	}
+	a.clipCopyPath(target) // arms the paste row
+	a.openTreeContext(node, 5, 5)
+	pop := popupPrefab(t, a)
+	for _, it := range pop.Items {
+		label := it.Label
+		if strings.HasPrefix(label, labelPasteInto) {
+			label = "Paste into …"
+		}
+		if !catalog[label] {
+			t.Errorf("popup row %q is not a ≡ menu row", it.Label)
+		}
+	}
+	if want := overlay.PopupWidth(pop.Items, 0); pop.At.W != want {
+		t.Errorf("popup width = %d, want the %d its labels measure", pop.At.W, want)
+	}
+	for _, it := range pop.Items {
+		if 4+runeLen(it.Label)+2 > pop.At.W {
+			t.Errorf("label %q would clip in a %d-cell popup", it.Label, pop.At.W)
+		}
 	}
 }

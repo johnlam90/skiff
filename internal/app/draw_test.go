@@ -127,7 +127,7 @@ func TestDraw_AllPanels(t *testing.T) {
 
 	a.openTreeContext(a.tree.Root, 5, 5)
 	a.draw()
-	paints("tree context", "Copy rel path")
+	paints("tree context", "Copy relative path")
 	a.closeAllModals()
 
 	a.flash("hello")
@@ -381,7 +381,9 @@ func TestDrawStatusBar_ArmedEscTag(t *testing.T) {
 // the editor pane: on a narrow pane the 45-rune hint used to start left
 // of the editor rect and overwrite file-tree rows and the splitter.
 func TestDrawEmptyEditor_ClipsToEditorRect(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
+	dir := t.TempDir()
+	mkFile(t, dir, "a.txt", "x") // a tree with rows: the two-line hint shape
+	a := newTestApp(t, dir)
 	scr := a.screen.(tcell.SimulationScreen)
 	scr.SetSize(60, 24)
 	a.width, a.height = scr.Size()
@@ -406,7 +408,9 @@ func TestDrawEmptyEditor_ClipsToEditorRect(t *testing.T) {
 // reporting, so the empty state has to name the Esc-leader gestures that
 // actually open something: Esc p, Esc n, and Esc Esc for the menu.
 func TestDrawEmptyEditor_NamesKeyboardRoutes(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
+	dir := t.TempDir()
+	mkFile(t, dir, "a.txt", "x")
+	a := newTestApp(t, dir)
 	a.draw()
 	a.screen.Show()
 
@@ -418,19 +422,118 @@ func TestDrawEmptyEditor_NamesKeyboardRoutes(t *testing.T) {
 }
 
 // TestDrawEmptyEditor_HintsAreLeaderBindings guards the hint text
-// against the bindings drifting out from under it: every key the second
-// hint advertises must still be a live leader binding, because a hint
-// that names a removed gesture is worse than no hint.
+// against the bindings drifting out from under it: every "Esc <key>"
+// any shape's hint advertises must still be a live leader binding,
+// because a hint that names a removed gesture is worse than no hint.
+// The keys are read off the hint text itself, so a new shape cannot
+// advertise a key this test never heard of.
 func TestDrawEmptyEditor_HintsAreLeaderBindings(t *testing.T) {
-	hint := emptyEditorHints[len(emptyEditorHints)-1]
 	bound := map[rune]bool{}
 	for _, b := range leaderBindings() {
 		bound[b.key] = true
 	}
-	for _, key := range []rune{'p', 'n'} {
-		if !bound[key] {
-			t.Fatalf("hint %q advertises Esc %c but nothing is bound to it", hint, key)
+	for _, shape := range emptyEditorShapes(t) {
+		for _, hint := range shape.app.emptyEditorHints() {
+			words := strings.Fields(hint)
+			for i := 0; i+1 < len(words); i++ {
+				if words[i] != "Esc" {
+					continue
+				}
+				if words[i+1] == "Esc" { // the double-tap that opens the menu
+					i++
+					continue
+				}
+				key := []rune(words[i+1])
+				if len(key) != 1 || !bound[key[0]] {
+					t.Errorf("%s: hint %q advertises Esc %s but nothing is bound to it", shape.name, hint, words[i+1])
+				}
+			}
 		}
+	}
+}
+
+// emptyEditorShape is one session shape the empty-editor hint answers
+// for, with the app already in that shape and the text every hint line
+// must (and must not) carry.
+type emptyEditorShape struct {
+	name    string
+	app     *App
+	want    []string
+	forbids []string
+}
+
+// emptyEditorShapes builds the four shapes emptyEditorHints branches on:
+// a tree with rows, the tree hidden, single-file mode, and an empty
+// project. Shared by the hint tests so each pins the same apps.
+func emptyEditorShapes(t *testing.T) []emptyEditorShape {
+	t.Helper()
+	withRows := t.TempDir()
+	mkFile(t, withRows, "a.txt", "x")
+	tree := newTestApp(t, withRows)
+
+	hidden := newTestApp(t, withRows)
+	hidden.menuToggleSidebar()
+
+	single := newSingleFileTestApp(t, filepath.Join(t.TempDir(), "only.txt"))
+	if single.tabs.Len() != 1 {
+		t.Fatalf("single-file fixture opened %d tabs, want 1", single.tabs.Len())
+	}
+	single.closeTab(single.activeTabPtr())
+
+	empty := newTestApp(t, t.TempDir())
+
+	return []emptyEditorShape{
+		{"tree with rows", tree, []string{"Click a file", "Esc p", "Esc n", "Esc Esc"}, []string{"Esc t"}},
+		{"tree hidden", hidden, []string{"Esc t", "file explorer", "Esc p", "Esc Esc"}, []string{"Click a file"}},
+		{"single file", single, []string{"Esc n", "Esc Esc"}, []string{"Click a file", "Esc p", "Esc t"}},
+		{"empty project", empty, []string{"Esc n", "≡"}, []string{"Click a file", "Esc p"}},
+	}
+}
+
+// newSingleFileTestApp builds the real single-file shape (tree nil,
+// sidebar hidden, no finder) on a simulation screen over a freshly
+// seeded file.
+func newSingleFileTestApp(t *testing.T, path string) *App {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("one\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	t.Cleanup(func() { scr.Fini() })
+	scr.SetSize(120, 40)
+	a := newSingleFileApp(scr, path)
+	a.width, a.height = scr.Size()
+	return a
+}
+
+// TestDrawEmptyEditor_HintsFollowTheSessionShape pins the per-shape
+// text: a single-file session is no longer told to click a tree it does
+// not have, an empty project is not told to click a file that does not
+// exist, and a hidden tree is told the key that brings it back. Each
+// shape is drawn, so the assertion is on the painted screen.
+func TestDrawEmptyEditor_HintsFollowTheSessionShape(t *testing.T) {
+	for _, shape := range emptyEditorShapes(t) {
+		t.Run(shape.name, func(t *testing.T) {
+			a := shape.app
+			if a.tabs.Len() != 0 {
+				t.Fatalf("fixture has %d tabs open; the empty editor needs none", a.tabs.Len())
+			}
+			a.draw()
+			a.screen.Show()
+			for _, want := range shape.want {
+				if !screenHasText(t, a, want) {
+					t.Errorf("empty editor should mention %q; hints = %v", want, a.emptyEditorHints())
+				}
+			}
+			for _, bad := range shape.forbids {
+				if screenHasText(t, a, bad) {
+					t.Errorf("empty editor must not mention %q; hints = %v", bad, a.emptyEditorHints())
+				}
+			}
+		})
 	}
 }
 
@@ -438,7 +541,9 @@ func TestDrawEmptyEditor_HintsAreLeaderBindings(t *testing.T) {
 // guarantee to the keyboard hint: the longer second line is the one most
 // likely to overrun, and it must not paint on the splitter either.
 func TestDrawEmptyEditor_ClipsEveryHintRow(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
+	dir := t.TempDir()
+	mkFile(t, dir, "a.txt", "x")
+	a := newTestApp(t, dir)
 	scr := a.screen.(tcell.SimulationScreen)
 	scr.SetSize(60, 24)
 	a.width, a.height = scr.Size()
@@ -448,7 +553,7 @@ func TestDrawEmptyEditor_ClipsEveryHintRow(t *testing.T) {
 	cells, w, _ := scr.GetContents()
 	_, ey, _, eh := a.editorRect()
 	sx := a.splitterX()
-	for row := range len(emptyEditorHints) {
+	for row := range len(a.emptyEditorHints()) {
 		y := ey + eh/2 + 1 + row
 		if r := cells[y*w+sx].Runes[0]; r != '│' {
 			t.Fatalf("hint row %d bled onto the splitter: %q", row, r)
@@ -1050,8 +1155,11 @@ func TestDraw_EveryPrefabFitsAtTheMinimumSize(t *testing.T) {
 		}, []string{"first choice"}},
 		{"menu", func(a *App) { a.openMenu() }, []string{"Menu", "New file", "v" + version.Version}},
 		{"cheat sheet", func(a *App) { a.menuKeyboardShortcuts() }, []string{"Esc is the", "[  OK  ]"}},
-		{"tree context", func(a *App) { a.openTreeContext(a.tree.Root, 2, 2) }, []string{"Copy rel path"}},
-		{"git extras", func(a *App) { a.openGitExtras(2, 2) }, []string{"Fetch", "▼"}},
+		{"tree context", func(a *App) { a.openTreeContext(a.tree.Root, 2, 2) }, []string{"Copy relative path"}},
+		{"git extras", func(a *App) {
+			a.gitSnap.IsRepo, a.gitSnap.Branch = true, "main"
+			a.openGitExtras(2, 2)
+		}, []string{"More git actions", "Fetch"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1230,5 +1338,40 @@ func TestStatusBarClick_BranchChipOpensGitPanel(t *testing.T) {
 	a.statusBarClick(chipX)
 	if !a.gitPanel.active {
 		t.Fatal("clicking the branch chip should open the git panel")
+	}
+}
+
+// TestDraw_PrefabFramesAdvertiseEnter pins the per-prefab hint each
+// frame paints in its title row, because the prefabs disagree about
+// Enter — the prompt submits, the dirty prompt presses Cancel, the form
+// moves to the next field, the info overlay dismisses, the menu runs
+// the highlighted row — and a frame that said only "esc" left the user
+// to find out by pressing it. Nothing here costs a row: the hint is
+// budgeted out of the title row the way the old "esc" was.
+func TestDraw_PrefabFramesAdvertiseEnter(t *testing.T) {
+	cases := []struct {
+		name string
+		open func(*App)
+		want string
+	}{
+		{"prompt", func(a *App) { a.openPrompt("Rename file", "", "x", nil) }, "⏎ ok · esc"},
+		{"confirm", func(a *App) { a.openConfirm("Delete file", "sure?", nil) }, "⏎ no · esc"},
+		{"dirty", func(a *App) { a.openDirtyClose("Unsaved changes", "m", nil, nil) }, "⏎ cancel · esc"},
+		{"form", func(a *App) {
+			a.openForm("Copy", []customactions.Prompt{{Key: "H", Label: "Host", Type: customactions.PromptText}}, nil)
+		}, "⇥ next · esc"},
+		{"info", func(a *App) { a.openInfo("Report", []string{"l"}) }, "⏎ ok · esc"},
+		{"menu", func(a *App) { a.openMenu() }, "⏎ run · esc"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := newTestApp(t, t.TempDir())
+			c.open(a)
+			a.draw()
+			a.screen.Show()
+			if !screenHasText(t, a, c.want) {
+				t.Errorf("%s frame never painted %q", c.name, c.want)
+			}
+		})
 	}
 }
