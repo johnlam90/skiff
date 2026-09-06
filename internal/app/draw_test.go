@@ -622,6 +622,52 @@ func TestTabBar_ActiveTabScrollsIntoView(t *testing.T) {
 	}
 }
 
+// TestTabScroll_SnapsToTabBoundaries pins the whole-tab window: after
+// the active tab is scrolled into view, and after every chevron / wheel
+// step, the window's left edge sits exactly on a tab start — never
+// inside a tab, where the strip used to paint a bare filename tail.
+func TestTabScroll_SnapsToTabBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	openManyTabs(t, a, dir, 8)
+	winX, winW := a.tabWindow()
+	onBoundary := func(what string) {
+		t.Helper()
+		for _, r := range a.layoutTabs() {
+			if r.X-winX == a.tabScroll {
+				return
+			}
+		}
+		t.Fatalf("%s: tabScroll %d is not a tab start", what, a.tabScroll)
+	}
+	a.ensureActiveTabVisible()
+	if a.tabScroll == 0 {
+		t.Fatal("precondition: the last of 8 tabs should need scrolling at 80 columns")
+	}
+	onBoundary("after ensureActiveTabVisible")
+	if r := a.layoutTabs()[a.tabs.ActiveIndex()]; r.X-a.tabScroll < winX || r.X+r.Width-a.tabScroll > winX+winW {
+		t.Fatal("snapping must keep the active tab in the window")
+	}
+	before := a.tabScroll
+	a.scrollTabStrip(-tabScrollStep)
+	onBoundary("after a step left")
+	if a.tabScroll >= before {
+		t.Fatalf("a step left should move to the previous tab start, got %d from %d", a.tabScroll, before)
+	}
+	a.scrollTabStrip(tabScrollStep)
+	onBoundary("after a step right")
+	if a.tabScroll != before {
+		t.Fatalf("right then left should return to %d, got %d", before, a.tabScroll)
+	}
+	for i := 0; i < 20; i++ {
+		a.scrollTabStrip(-tabScrollStep)
+	}
+	if a.tabScroll != 0 {
+		t.Fatalf("stepping left past the start should stop at 0, got %d", a.tabScroll)
+	}
+}
+
 // TestTabBar_ChevronsMarkOverflow pins the marker rules: at scroll 0
 // with overflow only a › shows; scrolled to the end only a ‹ shows.
 func TestTabBar_ChevronsMarkOverflow(t *testing.T) {

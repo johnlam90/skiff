@@ -309,20 +309,68 @@ func (a *App) ensureActiveTabVisible() {
 		a.tabScroll = r.X + r.Width - winX - winW
 	}
 	a.clampTabScroll()
+	a.snapTabScroll(rects)
+}
+
+// snapTabScroll rounds tabScroll UP to the nearest tab start so the
+// window's left edge always lands on a whole tab. Scrolling in cells
+// left whatever tab straddled that edge painted as a bare tail
+// ("‹2 ffer.go ×"), which reads as a file that does not exist. Rounding
+// up can only move the window right, so a tab that was made visible by
+// aligning its right edge stays visible; past the last tab start the
+// scroll stops there, and the right badge simply does not show because
+// every remaining tab fits.
+func (a *App) snapTabScroll(rects []tabRect) {
+	if a.tabScroll <= 0 || len(rects) == 0 {
+		return
+	}
+	winX, _ := a.tabWindow()
+	for _, r := range rects {
+		if b := r.X - winX; b >= a.tabScroll {
+			a.tabScroll = b
+			return
+		}
+	}
+	a.tabScroll = rects[len(rects)-1].X - winX
 }
 
 // scrollTabStrip moves the strip by delta cells (negative = toward the
 // first tab), clamped. Fired by the ‹ › chevron clicks and by wheel
 // events over the tab bar.
 func (a *App) scrollTabStrip(delta int) {
-	a.tabScroll += delta
-	a.clampTabScroll()
+	rects := a.layoutTabs()
+	if len(rects) == 0 || delta == 0 {
+		return
+	}
+	winX, _ := a.tabWindow()
+	if delta > 0 {
+		// The first tab start past the current edge; none means the
+		// window already begins on the last tab.
+		for _, r := range rects {
+			if b := r.X - winX; b > a.tabScroll {
+				a.tabScroll = b
+				return
+			}
+		}
+		return
+	}
+	// The last tab start before the current edge, or the very start.
+	prev := 0
+	for _, r := range rects {
+		b := r.X - winX
+		if b >= a.tabScroll {
+			break
+		}
+		prev = b
+	}
+	a.tabScroll = prev
 }
 
-// tabScrollStep is how many cells one chevron click or wheel tick moves
-// the tab strip — enough to reveal most of a typical tab without
-// disorienting jumps.
-const tabScrollStep = 8
+// tabScrollStep is the direction one chevron click or wheel tick moves
+// the strip: scrollTabStrip walks whole tabs, so only the sign matters.
+// Stepping in cells used to leave a partial tab at the window's edge;
+// see snapTabScroll.
+const tabScrollStep = 1
 
 // layoutTabs computes the tabRect geometry for every tab. Tabs are laid
 // out from the tab window's origin (right of the ≡ button and the left

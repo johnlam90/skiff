@@ -818,19 +818,21 @@ func TestTabBar_ClickMapsThroughScroll(t *testing.T) {
 	a.drawTabBar()
 	a.screen.Show()
 
-	// Click inside the second-to-last tab's visible rect.
-	target := a.tabs.Len() - 2
-	var rect tabRect
-	found := false
+	// Click inside a visible tab other than the active one when the
+	// window holds two; the strip snaps to whole tabs, so which
+	// neighbour is painted depends on the widths, not on the index.
+	active := a.tabs.ActiveIndex()
+	if len(a.lastTabRects) == 0 {
+		t.Fatal("the scrolled strip should store the visible rects")
+	}
+	rect := a.lastTabRects[0]
 	for _, r := range a.lastTabRects {
-		if r.Index == target {
-			rect, found = r, true
+		if r.Index != active {
+			rect = r
 			break
 		}
 	}
-	if !found {
-		t.Fatal("second-to-last tab should have a stored rect")
-	}
+	target := rect.Index
 	a.tabBarClick(rect.X+3, 0)
 	if a.tabs.ActiveIndex() != target {
 		t.Fatalf("click on scrolled tab selected %d, want %d", a.tabs.ActiveIndex(), target)
