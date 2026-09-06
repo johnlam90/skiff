@@ -65,8 +65,10 @@ func TestOpenFile_ErrorFlash(t *testing.T) {
 	}
 	a := newTestApp(t, dir)
 	a.openFile(sub)
-	if !strings.Contains(a.statusMsg, "Error") {
-		t.Fatalf("expected error flash, got %q", a.statusMsg)
+	// The flash names the file and the verb — "Error: is a directory"
+	// never said which click it was about.
+	if !strings.HasPrefix(a.statusMsg, "Couldn't open subdir:") {
+		t.Fatalf("expected a flash naming the file, got %q", a.statusMsg)
 	}
 	if a.tabs.Len() != 0 {
 		t.Fatalf("expected no tabs, got %d", a.tabs.Len())
@@ -304,8 +306,8 @@ func TestCopyCutPaste(t *testing.T) {
 	// and leave the buffer alone.
 	a.clipBuf = ""
 	a.pasteClipboard()
-	if !strings.Contains(a.statusMsg, "clipboard empty") {
-		t.Fatalf("expected empty-clip flash, got %q", a.statusMsg)
+	if !strings.Contains(a.statusMsg, "Nothing copied yet") || strings.Contains(a.statusMsg, "Cmd") {
+		t.Fatalf("expected a platform-neutral empty-clip flash, got %q", a.statusMsg)
 	}
 	if got := string(tab.Buffer.LineRunes(0)); got != "llo" {
 		t.Fatalf("refused paste edited the buffer: line 0 = %q, want %q", got, "llo")
@@ -379,5 +381,22 @@ func TestCopySelection_OversizedFlashesDistinctly(t *testing.T) {
 	}
 	if strings.Contains(a.statusMsg, "unavailable") {
 		t.Fatalf("oversized copy must not reuse the generic failure copy, got %q", a.statusMsg)
+	}
+}
+
+// TestSaveTab_UntitledNamesTheNextStep pins the refusal on an untitled
+// buffer: "not supported yet" promised a feature; the flash now says
+// what to do instead (≡ New file… creates the named file).
+func TestSaveTab_UntitledNamesTheNextStep(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	scratch, err := editor.NewTab("")
+	if err != nil {
+		t.Fatalf("untitled tab: %v", err)
+	}
+	if a.saveTab(scratch) {
+		t.Fatal("an untitled tab has nowhere to save to")
+	}
+	if !strings.Contains(a.statusMsg, "New file…") || strings.Contains(a.statusMsg, "not supported") {
+		t.Fatalf("flash should point at ≡ New file…, got %q", a.statusMsg)
 	}
 }

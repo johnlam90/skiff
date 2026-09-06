@@ -83,7 +83,7 @@ func (a *App) loadCustomActions() {
 	path := customactions.DefaultPath()
 	actions, err := customactions.Load(path)
 	if err != nil {
-		a.flash("custom actions: " + err.Error())
+		a.flash("Couldn't read " + filepath.Base(path) + ": " + err.Error())
 		return
 	}
 	a.customActions = actions
@@ -98,7 +98,7 @@ func (a *App) loadCustomActions() {
 func (a *App) loadUserConfig() {
 	cfg, err := userconfig.Load(userconfig.DefaultPath())
 	if err != nil {
-		a.flash("config: " + err.Error())
+		a.flash("Couldn't read " + filepath.Base(userconfig.DefaultPath()) + ": " + err.Error())
 	}
 	if a.tree != nil {
 		a.tree.IconsEnabled = icons.Resolve(cfg.Icons)

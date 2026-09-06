@@ -113,7 +113,7 @@ func (a *App) openFinder() {
 	// the single-file signal (see NewSingleFile); the finder is a
 	// project-scoped feature that's omitted alongside the tree.
 	if a.tree == nil {
-		a.flash("Find file isn't available in single-file mode")
+		a.flash(singleFileRefusal)
 		return
 	}
 	a.closeAllModals()
@@ -333,7 +333,7 @@ func (fo *finderOverlay) Draw(scr tcell.Screen) {
 	case finder.StateBuilding, finder.StateIdle:
 		tail = "indexing… "
 	case finder.StateErrored:
-		tail = "index err "
+		tail = "index failed "
 	case finder.StateReady:
 		tail = countLabel(len(fo.results), total) + " "
 	}
@@ -353,6 +353,16 @@ func (fo *finderOverlay) Draw(scr tcell.Screen) {
 			continue
 		}
 		fo.drawRow(scr, r, ry, fo.results[idx], idx == fo.Sel(), hitStyle, mutedStyle, bg)
+	}
+	// A failed index has no rows to show, so the first row says why and
+	// names the recovery: the tail alone read as a cryptic badge over an
+	// empty list.
+	if state == finder.StateErrored && len(fo.results) == 0 && a.finder != nil {
+		msg := "Index failed — ≡ Refresh file tree to retry"
+		if err := a.finder.Err(); err != nil {
+			msg = "Index failed: " + err.Error() + " — ≡ Refresh file tree to retry"
+		}
+		drawAt(scr, r.X+2, rowsStart, trimRunes(msg, r.W-4), mutedStyle)
 	}
 }
 

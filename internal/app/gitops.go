@@ -203,7 +203,7 @@ func (a *App) menuGitCommit() {
 		a.flash("Nothing checked to commit")
 		return
 	}
-	hint := fmt.Sprintf("%d file(s)", len(paths))
+	hint := plural(len(paths), "%d file", "%d files")
 	a.openPrompt("Commit message", hint, "", func(app *App, msg string) {
 		app.doGitCommit(paths, msg)
 	})
@@ -211,7 +211,7 @@ func (a *App) menuGitCommit() {
 
 // doGitCommit runs the path-scoped commit for paths.
 func (a *App) doGitCommit(paths []string, message string) {
-	ok := fmt.Sprintf("Committed %d file(s)", len(paths))
+	ok := plural(len(paths), "Committed %d file", "Committed %d files")
 	a.runGitOp("Commit", ok, false, func(r *git.Repo) error { return r.Commit(paths, message) })
 }
 

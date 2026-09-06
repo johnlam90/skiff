@@ -342,3 +342,30 @@ func TestFinder_RebuildUsesPanicGuard(t *testing.T) {
 		t.Fatalf("state: got %v, want StateReady", f.State())
 	}
 }
+
+// TestFinder_ErrReportsTheLastBuild pins the accessor the overlay
+// names a failed index with: nil before any build and after a clean
+// one, the build's own error after a failure, and back to nil once a
+// later build succeeds.
+func TestFinder_ErrReportsTheLastBuild(t *testing.T) {
+	f := New("")
+	if f.Err() != nil {
+		t.Fatal("a never-built finder has no error")
+	}
+	done := make(chan struct{})
+	f.Rebuild(func() { close(done) })
+	<-done
+	if f.State() != StateErrored || f.Err() == nil {
+		t.Fatalf("an empty root should fail the build: state %v err %v", f.State(), f.Err())
+	}
+
+	dir := t.TempDir()
+	mustWrite(t, dir, "a.go", "package a")
+	g := New(dir)
+	done = make(chan struct{})
+	g.Rebuild(func() { close(done) })
+	<-done
+	if g.Err() != nil {
+		t.Fatalf("a clean build must clear the error, got %v", g.Err())
+	}
+}

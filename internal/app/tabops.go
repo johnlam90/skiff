@@ -63,7 +63,7 @@ func (a *App) saveTab(tab *editor.Tab) bool {
 		return false
 	}
 	if tab.Path == "" {
-		a.flash("Saving untitled tabs is not supported yet")
+		a.flash("Untitled tab — use ≡ New file… to create a named file first")
 		return false
 	}
 	if err := tab.Save(); err != nil {
@@ -215,7 +215,7 @@ func (a *App) pasteClipboard() {
 		return
 	}
 	if a.clipBuf == "" {
-		a.flash("Internal clipboard empty — paste from your terminal (Cmd-V)")
+		a.flash("Nothing copied yet — paste with your terminal's paste key")
 		return
 	}
 	tab.InsertString(a.clipBuf)

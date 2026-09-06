@@ -363,8 +363,8 @@ func TestOpenFinder_NoOpInSingleFileMode(t *testing.T) {
 	if finderIsOpen(a) {
 		t.Fatal("openFinder should not open the modal when finder is nil")
 	}
-	if a.statusMsg == "" {
-		t.Fatal("expected a flash explaining the finder is unavailable")
+	if a.statusMsg != singleFileRefusal {
+		t.Fatalf("expected the one single-file refusal, got %q", a.statusMsg)
 	}
 }
 
@@ -476,5 +476,34 @@ func TestFinder_WheelScrollsTheResultList(t *testing.T) {
 	deeper := fo.results[finderResultsVisible+1].Path
 	if finderRowOf(t, a, deeper) < 0 {
 		t.Fatalf("the wheel should have brought %q into the window", deeper)
+	}
+}
+
+// TestFinderDraw_FailedIndexExplainsItself pins the errored state's
+// paint: the input-row tail reads "index failed" and the empty result
+// list carries a sentence naming the error and the recovery (≡ Refresh
+// file tree), where "index err" over a blank list explained nothing.
+func TestFinderDraw_FailedIndexExplainsItself(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	// An empty root is the one input BuildIndex refuses outright, so
+	// the build lands errored without touching the disk.
+	a.finder = finder.New("")
+	a.openFinder()
+	deadline := time.Now().Add(3 * time.Second)
+	for a.finder.State() != finder.StateErrored && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if a.finder.State() != finder.StateErrored {
+		t.Fatalf("fixture: build should have failed, state %v", a.finder.State())
+	}
+	a.draw()
+	a.screen.Show()
+	for _, want := range []string{"index failed", "Index failed:", "Refresh file tree"} {
+		if !screenHasText(t, a, want) {
+			t.Errorf("finder never painted %q", want)
+		}
+	}
+	if screenHasText(t, a, "index err") {
+		t.Error("the old cryptic tail is still painted")
 	}
 }

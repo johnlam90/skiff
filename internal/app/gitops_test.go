@@ -293,8 +293,8 @@ func TestMenuGitCommit_OpensPromptAndCommits(t *testing.T) {
 	skipInShortMode(t)
 	a, _, _ := dirtyRepoApp(t)
 	a.menuGitCommit()
-	if p := promptPrefab(t, a); p.Title != "Commit message" {
-		t.Fatalf("commit prompt should open, got title %q", p.Title)
+	if p := promptPrefab(t, a); p.Title != "Commit message" || p.Hint != "2 files" {
+		t.Fatalf("commit prompt should open with a real plural, got title %q hint %q", p.Title, p.Hint)
 	}
 	promptPrefab(t, a).Field.SetText("from the panel")
 	submitPrompt(a)
