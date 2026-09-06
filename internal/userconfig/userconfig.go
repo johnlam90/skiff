@@ -21,6 +21,7 @@
 //	{"theme": "tokyo-night"}   // any id from internal/theme's registry
 //	{"wrap": "off"}            // long lines pan sideways; "on" (default) wraps
 //	{"gitignore": "off"}       // file tree shows ignored files; "on" (default) hides them
+//	{"scrollcaret": "on"}      // a wheel/scrollbar scroll drags the caret along; "off" (default) leaves it
 //
 // The loader is best-effort the same way customactions is: missing
 // file → defaults, malformed file → error returned for the app to
