@@ -85,6 +85,15 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	x, y := ev.Position()
 	btn := ev.Buttons()
 	pressed := a.mouse.fresh(btn)
+	// Under minWidth/minHeight draw() paints only the "too small"
+	// notice, so there is nothing on screen to hit — but the tab rects
+	// from the last real frame were still there to hit-test against,
+	// and a tap on the notice could close a tab it never showed. Drop
+	// them and route nothing until the window grows back.
+	if a.width < minWidth || a.height < minHeight {
+		a.lastTabRects = nil
+		return
+	}
 	leftDown := btn&tcell.Button1 != 0
 	leftPress := pressed&tcell.Button1 != 0
 	if leftPress {

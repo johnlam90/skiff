@@ -1516,3 +1516,44 @@ func TestHandleMouse_DragAcrossMenuRowsRunsOnlyThePressedRow(t *testing.T) {
 		t.Fatal("dragging out of the frame closed the menu")
 	}
 }
+
+// TestHandleMouse_TooSmallRoutesNothing pins the too-small gate: below
+// minWidth/minHeight the frame shows only the resize notice, so a press
+// where a tab's × used to be must not close that tab — draw() never
+// repainted the strip, but the stale rects were still there to hit.
+func TestHandleMouse_TooSmallRoutesNothing(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("x"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	a.draw()
+	closeX := a.lastTabRects[0].CloseX
+
+	resizeTestApp(t, a, minWidth-1, minHeight)
+	a.draw() // bails to drawTooSmall, leaving the rects alone
+	a.handleMouse(tcell.NewEventMouse(closeX, 0, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(closeX, 0, tcell.ButtonNone, 0))
+	if a.tabs.Len() != 1 {
+		t.Fatal("a press on the too-small notice closed a tab")
+	}
+	if a.lastTabRects != nil {
+		t.Fatal("the gate must drop the stale tab rects")
+	}
+	// The wheel and the menu are gated too: nothing is painted to
+	// scroll or open.
+	a.handleMouse(tcell.NewEventMouse(5, 5, tcell.Button3, 0))
+	if a.menuOpen {
+		t.Fatal("right-click on the too-small notice opened the menu")
+	}
+
+	// Growing back restores routing.
+	resizeTestApp(t, a, 120, 40)
+	a.draw()
+	a.handleMouse(tcell.NewEventMouse(a.lastTabRects[0].CloseX, 0, tcell.Button1, 0))
+	if a.tabs.Len() != 0 {
+		t.Fatal("after the window grows back the × must work again")
+	}
+}
