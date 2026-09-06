@@ -220,3 +220,98 @@ func TestRender_TaskListAndStrikethrough(t *testing.T) {
 		t.Fatal("~~text~~ should carry StrikeThrough")
 	}
 }
+
+// TestRender_HeadingLevelsAreToldApart pins the level scheme: an H1 is
+// followed by a heavy full-width rule, an H2 by a light one, and H3+
+// carry one › per level past two — so six levels stay distinguishable
+// on a monochrome terminal where Accent and AccentSoft are the same
+// colour. The old scheme collapsed all six onto two colours.
+func TestRender_HeadingLevelsAreToldApart(t *testing.T) {
+	th := theme.Default()
+	src := "# One\n\n## Two\n\n### Three\n\n#### Four\n\nbody\n"
+	lines, styles := Render([]byte(src), 40, th)
+	i1 := findLine(lines, "One")
+	if i1 < 0 || lines[i1+1] != strings.Repeat("━", 40) {
+		t.Fatalf("H1 should be followed by a heavy full-width rule, got %q", lines[i1+1])
+	}
+	if fg, _, _ := styles[i1+1][0].Decompose(); fg != th.Accent {
+		t.Fatalf("H1 rule fg = %v, want Accent", fg)
+	}
+	i2 := findLine(lines, "Two")
+	if i2 < 0 || lines[i2+1] != strings.Repeat("─", 40) {
+		t.Fatalf("H2 should be followed by a light full-width rule, got %q", lines[i2+1])
+	}
+	if fg, _, _ := styles[i2+1][0].Decompose(); fg != th.Muted {
+		t.Fatalf("H2 rule fg = %v, want Muted", fg)
+	}
+	if i3 := findLine(lines, "Three"); i3 < 0 || lines[i3] != "› Three" {
+		t.Fatalf("H3 = %q, want a single-chevron prefix", lines[findLine(lines, "Three")])
+	}
+	i4 := findLine(lines, "Four")
+	if i4 < 0 || lines[i4] != "›› Four" {
+		t.Fatalf("H4 = %q, want a double-chevron prefix", lines[i4])
+	}
+	if _, _, attrs := styles[i4][3].Decompose(); attrs&boldAttr == 0 {
+		t.Fatal("H4 text should be bold")
+	}
+	if fg, _, _ := styles[i4][3].Decompose(); fg != th.AccentSoft {
+		t.Fatalf("H4 fg = %v, want AccentSoft", fg)
+	}
+}
+
+// TestRender_CodeBlockIsARectangle pins the fenced block's shape: a
+// blank line inside the fence is a blank ROW (it used to be dropped),
+// every row starts with the rail, every row is padded to the block's
+// widest line so the LineHL surface forms a rectangle, and the padding
+// carries that surface too.
+func TestRender_CodeBlockIsARectangle(t *testing.T) {
+	th := theme.Default()
+	src := "```go\nfunc main() {\n\n\tx := 1\n}\n```\n"
+	lines, styles := Render([]byte(src), 60, th)
+	first := findLine(lines, "func main")
+	if first < 0 {
+		t.Fatalf("code missing in %q", lines)
+	}
+	rows := lines[first : first+4]
+	if !strings.HasPrefix(rows[1], string(codeRail)) || strings.TrimSpace(rows[1][len(string(codeRail)):]) != "" {
+		t.Fatalf("the blank line inside the fence should be a blank rail row, got %q", rows[1])
+	}
+	want := textdraw.Width(rows[0])
+	for i, row := range rows {
+		if !strings.HasPrefix(row, string(codeRail)) {
+			t.Fatalf("row %d %q lacks the rail", i, row)
+		}
+		if w := textdraw.Width(row); w != want {
+			t.Fatalf("row %d is %d cells, want the block width %d: %q", i, w, want, row)
+		}
+		last := styles[first+i][len(styles[first+i])-1]
+		if _, bg, _ := last.Decompose(); bg != th.LineHL {
+			t.Fatalf("row %d padding bg = %v, want LineHL", i, bg)
+		}
+	}
+	if fg, _, _ := styles[first][0].Decompose(); fg != th.Subtle {
+		t.Fatalf("rail fg = %v, want Subtle", fg)
+	}
+}
+
+// TestRender_CodeBlockHardWrapsInsideTheBudget pins the wrap rule for
+// code: a line wider than the budget breaks between clusters (never
+// reflowing at spaces), and every resulting row — rail included — fits
+// the width.
+func TestRender_CodeBlockHardWrapsInsideTheBudget(t *testing.T) {
+	th := theme.Default()
+	src := "```\n" + strings.Repeat("abcdefghij", 5) + "\n```\n"
+	lines, _ := Render([]byte(src), 20, th)
+	rows := 0
+	for _, l := range lines {
+		if strings.HasPrefix(l, string(codeRail)) {
+			rows++
+			if w := textdraw.Width(l); w > 20 {
+				t.Fatalf("code row %q is %d cells, budget 20", l, w)
+			}
+		}
+	}
+	if rows != 3 {
+		t.Fatalf("50 cells over a 19-cell text column should take 3 rows, got %d: %q", rows, lines)
+	}
+}

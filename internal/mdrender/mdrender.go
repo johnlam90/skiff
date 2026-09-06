@@ -106,13 +106,7 @@ func (r *renderer) dim() tcell.Style {
 func (r *renderer) block(n ast.Node, hang string, st tcell.Style) {
 	switch b := n.(type) {
 	case *ast.Heading:
-		fg := r.th.Accent
-		if b.Level > 2 {
-			fg = r.th.AccentSoft
-		}
-		hst := tcell.StyleDefault.Background(r.th.BG).Foreground(fg).Bold(true)
-		r.inlines(b, hst)
-		r.flush()
+		r.heading(b)
 	case *ast.Paragraph, *ast.TextBlock:
 		r.inlines(n, st)
 		r.flush()
@@ -153,6 +147,39 @@ func (r *renderer) block(n ast.Node, hang string, st tcell.Style) {
 			r.inlines(n, st)
 			r.flush()
 		}
+	}
+}
+
+// heading renders one heading with a level cue that survives a
+// monochrome terminal — six levels used to collapse onto two colours,
+// Accent for 1-2 and AccentSoft for 3-6. The scheme, top to bottom:
+//
+//	H1  Accent bold, then a heavy full-width rule (━) in Accent
+//	H2  Accent bold, then a light full-width rule (─) in Muted
+//	H3+ AccentSoft bold, prefixed by one › per level past two
+//	    ("› " for H3, "›› " for H4, …)
+//
+// Rules are rows of their own, the full content width, so an H1 reads
+// as a title bar and an H2 as a section break even when every colour
+// has degraded to the terminal default; the chevron prefix keeps H3–H6
+// apart from body text and from each other the same way.
+func (r *renderer) heading(b *ast.Heading) {
+	r.flush()
+	fg := r.th.Accent
+	if b.Level > 2 {
+		fg = r.th.AccentSoft
+	}
+	hst := tcell.StyleDefault.Background(r.th.BG).Foreground(fg).Bold(true)
+	if b.Level > 2 {
+		r.append(strings.Repeat("›", b.Level-2)+" ", hst)
+	}
+	r.inlines(b, hst)
+	r.flush()
+	switch b.Level {
+	case 1:
+		r.emitLine(strings.Repeat("━", r.width), tcell.StyleDefault.Background(r.th.BG).Foreground(r.th.Accent))
+	case 2:
+		r.emitLine(strings.Repeat("─", r.width), tcell.StyleDefault.Background(r.th.BG).Foreground(r.th.Muted))
 	}
 }
 
@@ -255,26 +282,79 @@ func (r *renderer) codeBlock(b *ast.FencedCodeBlock) {
 	r.codeLines(lines, grid)
 }
 
+// codeRail is the one-cell left edge every code row starts with — the
+// block's margin, painted in Subtle on the code surface, so a block
+// reads as a block even where its first line is blank.
+const codeRail = '▏'
+
 // codeLines emits pre-split code lines with an optional per-rune syntax
-// grid, hard-wrapped at the width (code must not reflow at word
-// boundaries — indentation is meaning).
+// grid as one rectangular block: every row starts with codeRail, is
+// hard-wrapped at the width (code must not reflow at word boundaries —
+// indentation is meaning), and is right-padded to the block's widest
+// row so the LineHL surface forms a rectangle rather than a ragged
+// right edge. A blank line inside the block is a blank ROW, rail and
+// padding included — the accumulate/flush path dropped it, because
+// flush treats an empty line as nothing to emit and trimmed trailing
+// spaces off the rest.
 func (r *renderer) codeLines(lines []string, grid [][]tcell.Style) {
 	r.flush()
-	plain := tcell.StyleDefault.Background(r.th.LineHL).Foreground(r.th.Text)
+	surface := r.th.LineHL
+	plain := tcell.StyleDefault.Background(surface).Foreground(r.th.Text)
+	rail := tcell.StyleDefault.Background(surface).Foreground(r.th.Subtle)
+	textW := r.width - 1 // the rail's cell
+	if textW < 1 {
+		textW = 1
+	}
+	// Split every line into rows of at most textW cells, whole clusters
+	// only, carrying each rune's grid index for its style.
+	type codeRow struct {
+		runes []rune
+		sts   []tcell.Style
+		width int
+	}
+	var rows []codeRow
+	blockW := 0
 	for i, l := range lines {
-		runes := []rune(l)
 		var sts []tcell.Style
 		if grid != nil && i < len(grid) {
 			sts = grid[i]
 		}
-		for j, ru := range runes {
+		row := codeRow{}
+		j := 0 // rune index into l, for the grid lookup
+		for rest := l; rest != ""; {
+			cluster, tail, cw, _ := uniseg.FirstGraphemeClusterInString(rest, -1)
+			if row.width+cw > textW && row.width > 0 {
+				rows = append(rows, row)
+				blockW = max(blockW, row.width)
+				row = codeRow{}
+			}
 			st := plain
 			if sts != nil && j < len(sts) {
-				st = sts[j].Background(r.th.LineHL)
+				st = sts[j].Background(surface)
 			}
-			r.appendRune(ru, st, false)
+			for _, ru := range cluster {
+				row.runes = append(row.runes, ru)
+				row.sts = append(row.sts, st)
+			}
+			row.width += cw
+			j += len([]rune(cluster))
+			rest = tail
 		}
-		r.flush()
+		rows = append(rows, row)
+		blockW = max(blockW, row.width)
+	}
+	if blockW > textW {
+		blockW = textW
+	}
+	for _, row := range rows {
+		runes := append([]rune{codeRail}, row.runes...)
+		sts := append([]tcell.Style{rail}, row.sts...)
+		for w := row.width; w < blockW; w++ {
+			runes = append(runes, ' ')
+			sts = append(sts, plain)
+		}
+		r.lines = append(r.lines, string(runes))
+		r.styles = append(r.styles, sts)
 	}
 }
 
