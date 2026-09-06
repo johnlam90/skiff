@@ -161,6 +161,15 @@ type Tab struct {
 	undoBytes     int
 	lastUndoGroup undoGroup
 	lastUndoAt    time.Time
+	// undoGroupAt is when the open coalescing group started and
+	// undoGroupOps how many edits it has absorbed; canCoalesce caps
+	// both so a continuous burst cannot slide the window forever. See
+	// undoCoalesceMaxSpan / undoCoalesceMaxOps.
+	undoGroupAt  time.Time
+	undoGroupOps int
+	// clock is the undo bookkeeping's time source, nil for time.Now.
+	// Tests inject one so the coalescing caps are pinned without sleeps.
+	clock func() time.Time
 
 	// Mode is "" for a normal text tab and imageMode (= "image") for a
 	// read-only image preview. Image tabs reuse the Tab type so the
@@ -683,12 +692,36 @@ func (t *Tab) InsertRune(r rune) {
 	group := undoGroupTyping
 	if t.HasSelection() {
 		group = undoGroupStructural
+	} else if t.startsWordBreak(r) {
+		// Word-granularity undo: a space or tab typed right after a
+		// word closes the word's group, so one undo peels back a word
+		// and not the whole sentence the burst happened to hold.
+		t.breakUndoGroup()
 	}
 	t.edit(group, func() {
 		t.dropSelection()
 		t.Cursor = t.Buffer.InsertString(t.Cursor, string(r))
 		t.Anchor = t.Cursor
 	})
+}
+
+// startsWordBreak reports whether typing r at the caret ends a word:
+// r is intra-line whitespace and the rune just before the caret is not.
+// Only that transition breaks the typing group — a run of spaces, or a
+// space at the start of a line, keeps coalescing.
+func (t *Tab) startsWordBreak(r rune) bool {
+	if r != ' ' && r != '\t' {
+		return false
+	}
+	if t.Cursor.Col <= 0 {
+		return false
+	}
+	runes := t.Buffer.LineRunes(t.Cursor.Line)
+	if t.Cursor.Col > len(runes) {
+		return false
+	}
+	prev := runes[t.Cursor.Col-1]
+	return prev != ' ' && prev != '\t'
 }
 
 // Backspace deletes the character before the cursor (or the selection if any).
