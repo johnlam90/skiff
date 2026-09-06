@@ -88,6 +88,8 @@ func leaderBindings() []leaderBinding {
 		{'>', (*App).menuGoToDocEnd, "file end", "Go"},
 		{'a', (*App).menuSelectAll, "select all", "Edit"},
 		{'L', (*App).menuSelectLine, "select line", "Edit"},
+		{']', (*App).menuNextTab, "next tab", "File"},
+		{'[', (*App).menuPrevTab, "previous tab", "File"},
 	}
 }
 

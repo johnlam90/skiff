@@ -658,3 +658,25 @@ func (a *App) menuSelectLine() {
 		t.SelectLine()
 	}
 }
+
+// menuNextTab switches to the tab on the right, wrapping. Esc ] on the
+// keyboard; the row is for terminals where the leader gets eaten.
+func (a *App) menuNextTab() {
+	a.closeMenu()
+	a.activateNextTab()
+}
+
+// menuPrevTab switches to the tab on the left, wrapping. Esc [.
+func (a *App) menuPrevTab() {
+	a.closeMenu()
+	a.activatePrevTab()
+}
+
+// menuCloseOtherTabs closes every tab but the active one, refusing
+// with a flash when any of them has unsaved changes.
+func (a *App) menuCloseOtherTabs() {
+	a.closeMenu()
+	if n := a.closeOtherTabs(); n > 0 {
+		a.flash(fmt.Sprintf("Closed %d other tab(s)", n))
+	}
+}

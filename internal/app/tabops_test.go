@@ -381,3 +381,64 @@ func TestCopySelection_OversizedFlashesDistinctly(t *testing.T) {
 		t.Fatalf("oversized copy must not reuse the generic failure copy, got %q", a.statusMsg)
 	}
 }
+
+// TestActivateNextPrevTab pins keyboard tab switching at the app layer:
+// the switch wraps, the tree's active file follows, and a single tab
+// is a harmless no-op.
+func TestActivateNextPrevTab(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	pa := openTestFile(t, a, dir, "a.txt", "a")
+	pb := openTestFile(t, a, dir, "b.txt", "b")
+	a.activateNextTab()
+	if got := a.activeTabPtr().Path; got != pa {
+		t.Fatalf("Next from the last tab should wrap to %s, got %s", pa, got)
+	}
+	if a.tree.ActiveFile != pa {
+		t.Fatalf("the tree should follow the switch, got %q", a.tree.ActiveFile)
+	}
+	a.activatePrevTab()
+	if got := a.activeTabPtr().Path; got != pb {
+		t.Fatalf("Prev should wrap back to %s, got %s", pb, got)
+	}
+
+	empty := newTestApp(t, t.TempDir())
+	empty.activateNextTab()
+	empty.activatePrevTab()
+}
+
+// TestCloseOtherTabs pins the close-others contract: clean siblings
+// close and land on the reopen stack, the active tab survives, and a
+// dirty sibling makes the whole action refuse with a flash instead of
+// closing half the strip.
+func TestCloseOtherTabs(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	openTestFile(t, a, dir, "a.txt", "a")
+	openTestFile(t, a, dir, "b.txt", "b")
+	keep := openTestFile(t, a, dir, "c.txt", "c")
+
+	dirtyTab := a.tabs.Lookup(filepath.Join(dir, "a.txt"))
+	dirtyTab.InsertRune('x')
+	if n := a.closeOtherTabs(); n != 0 || a.tabs.Len() != 3 {
+		t.Fatalf("a dirty sibling must refuse the close: closed %d, %d tabs left", n, a.tabs.Len())
+	}
+	if !strings.Contains(a.statusMsg, "unsaved") {
+		t.Fatalf("the refusal should explain itself, got %q", a.statusMsg)
+	}
+	dirtyTab.Undo()
+	dirtyTab.Dirty = false
+
+	if n := a.closeOtherTabs(); n != 2 {
+		t.Fatalf("closed %d tabs, want 2", n)
+	}
+	if a.tabs.Len() != 1 || a.activeTabPtr().Path != keep {
+		t.Fatalf("the active tab should be the survivor, got %d tabs, active %s", a.tabs.Len(), a.activeTabPtr().Path)
+	}
+	if len(a.closedTabs) != 2 {
+		t.Fatalf("closed siblings should be reopenable, stack has %d", len(a.closedTabs))
+	}
+	if a.hasOtherTabs() {
+		t.Fatal("hasOtherTabs must be false on a single tab")
+	}
+}

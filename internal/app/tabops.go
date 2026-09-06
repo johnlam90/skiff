@@ -287,3 +287,61 @@ func (a *App) hasEditableTab() bool {
 	t := a.activeTabPtr()
 	return t != nil && !t.IsImage()
 }
+
+// activateNextTab switches to the tab right of the active one (wrapping)
+// and runs the same follow-ups a tab-strip click does: keep the new tab
+// on screen in the strip and mirror it into the tree.
+func (a *App) activateNextTab() {
+	if a.tabs.Next() == nil {
+		return
+	}
+	a.ensureActiveTabVisible()
+	a.syncActiveTreeFile()
+}
+
+// activatePrevTab is the leftward twin of activateNextTab.
+func (a *App) activatePrevTab() {
+	if a.tabs.Prev() == nil {
+		return
+	}
+	a.ensureActiveTabVisible()
+	a.syncActiveTreeFile()
+}
+
+// closeOtherTabs closes every tab but the active one. Deliberately
+// simple about unsaved work: if any other tab is dirty (or its file is
+// gone from disk, which makes the buffer the only copy) the whole
+// action refuses with a flash naming how many, rather than opening a
+// chain of prompts — the user saves or closes those by hand and tries
+// again. Clean tabs go through closeTab so each lands on the reopen
+// stack. Returns how many tabs were closed.
+func (a *App) closeOtherTabs() int {
+	active := a.activeTabPtr()
+	if active == nil {
+		return 0
+	}
+	var others []*editor.Tab
+	unsaved := 0
+	for _, tab := range a.tabs.Tabs() {
+		if tab == active {
+			continue
+		}
+		if tab.Dirty || tab.DiskGone {
+			unsaved++
+		}
+		others = append(others, tab)
+	}
+	if unsaved > 0 {
+		a.flash(fmt.Sprintf("%d other tab(s) have unsaved changes — save or close them first", unsaved))
+		return 0
+	}
+	for _, tab := range others {
+		a.closeTab(tab)
+	}
+	return len(others)
+}
+
+// hasOtherTabs reports whether more than one tab is open — the gate for
+// the tab-switching and close-others rows, which have nothing to do on
+// a single tab.
+func (a *App) hasOtherTabs() bool { return a.tabs.Len() > 1 }
