@@ -237,3 +237,44 @@ func TestDrawClipped_NonPositiveBudgetIsNoop(t *testing.T) {
 		t.Errorf("cell painted despite non-positive budget: %q", got)
 	}
 }
+
+// TestWrapWords pins the shared wrap: a fit stays one line, breaks land
+// on spaces with the space dropped, a run wider than a line breaks hard
+// between clusters (never inside a two-cell glyph), an empty string is
+// one empty line, and a non-positive budget hands the input back.
+func TestWrapWords(t *testing.T) {
+	cases := []struct {
+		name string
+		s    string
+		maxW int
+		want []string
+	}{
+		{"fits", "Saved", 20, []string{"Saved"}},
+		{"exact", "Saved", 5, []string{"Saved"}},
+		{"word break", "Saved main.go to disk", 10, []string{"Saved", "main.go to", "disk"}},
+		{"hard break", "aaaaaaaaaa", 4, []string{"aaaa", "aaaa", "aa"}},
+		{"hard break mid line", "ab cdefghij", 5, []string{"ab", "cdefg", "hij"}},
+		{"cjk never split", "日本語です", 5, []string{"日本", "語で", "す"}},
+		{"spaces at a break dropped", "one   two", 4, []string{"one", "two"}},
+		{"spacing inside a line kept", "  Esc s   save", 40, []string{"  Esc s   save"}},
+		{"indent kept on the first line", "    at main.go:12 in something long", 20, []string{"    at main.go:12 in", "something long"}},
+		{"only spaces", "     ", 3, []string{""}},
+		{"empty", "", 10, []string{""}},
+		{"zero budget", "Saved", 0, []string{"Saved"}},
+	}
+	for _, c := range cases {
+		got := WrapWords(c.s, c.maxW)
+		if len(got) != len(c.want) {
+			t.Errorf("WrapWords(%s) = %q, want %q", c.name, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("WrapWords(%s) line %d = %q, want %q (all %q)", c.name, i, got[i], c.want[i], got)
+			}
+			if c.maxW > 0 && Width(got[i]) > c.maxW {
+				t.Errorf("WrapWords(%s) line %d = %q is %d cells, budget %d", c.name, i, got[i], Width(got[i]), c.maxW)
+			}
+		}
+	}
+}

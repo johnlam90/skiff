@@ -19,12 +19,16 @@ package app
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/icons"
+	"github.com/johnlam90/skiff/internal/textdraw"
+	"github.com/rivo/uniseg"
 )
 
 // tabRect remembers where each tab was drawn so click handling can hit-test
@@ -32,7 +36,11 @@ import (
 type tabRect struct {
 	Index    int
 	X, Width int
-	CloseX   int // Cell column of the × close button.
+	CloseX   int // Cell column of the × close button; -1 when scrolled out of the window.
+	// Label is the text the tab was laid out with (tabLabels): the paint
+	// reads it back from here rather than re-deriving it, so the cells
+	// measured and the cells painted are the same string.
+	Label string
 }
 
 // draw paints the entire screen. Called once per event in the main loop.
@@ -67,8 +75,14 @@ func (a *App) draw() {
 
 	a.drawTabBar()
 
-	if tab := a.activeTabPtr(); tab != nil {
-		ex, ey, ew, eh := a.editorRect()
+	ex, ey, ew, eh := a.editorRect()
+	if a.gitPanelFillsWidth() {
+		// The four columns under the ≡ button are not an editor: a
+		// Tab.Render into them would clamp its content to one cell and
+		// paint a scrollbar, and drawEmptyEditor would centre a clipped
+		// "No …". They are blank on purpose — see gitPanelFillsWidth.
+		fillRect(a.screen, ex, ey, ew, eh, tcell.StyleDefault.Background(a.theme.BG))
+	} else if tab := a.activeTabPtr(); tab != nil {
 		tab.ScrollbarActive = a.dragMode == dragScrollbar
 		if st := a.mdPreviewFor(tab); st != nil {
 			a.drawMdPreview(tab, st, ex, ey, ew, eh)
@@ -121,17 +135,140 @@ func (a *App) tabStripRegion() (x, w int) {
 	return
 }
 
+// tabBadgeCells is the width of one overflow-badge slot when the strip
+// can afford it: a chevron and up to two digits ("‹12", "12›").
+const tabBadgeCells = 3
+
+// tabBadgeWidth is how many cells each end of the strip reserves for an
+// overflow badge: none when every tab fits, tabBadgeCells when the strip
+// can hold both slots and a minimal tab, one bare chevron cell
+// otherwise. The slots are reserved whenever the strip overflows at
+// all — not only when a badge is showing — so scrolling never moves the
+// tab origin: a badge that appeared at scroll > 0 used to be painted
+// over the first visible tab's leading cells, which fused "‹2" with the
+// name beside it ("‹2.go ×"). The width depends on the labels and the
+// strip, never on the scroll, so the window and the scroll range are
+// stable under scrolling.
+func (a *App) tabBadgeWidth() int {
+	_, stripW := a.tabStripRegion()
+	if stripW <= 0 || a.tabsTotalWidth() <= stripW {
+		return 0
+	}
+	if stripW >= 2*tabBadgeCells+minVisibleTabCells {
+		return tabBadgeCells
+	}
+	return 1
+}
+
+// tabWindow returns the screen x and width of the cells tabs may paint
+// into: the strip minus a badge slot at each end. Every tab-strip
+// computation — layout origin, scroll range, overflow counts, clipping,
+// hit rects — works against this window, so the badges own their cells
+// outright.
+func (a *App) tabWindow() (x, w int) {
+	stripX, stripW := a.tabStripRegion()
+	bw := a.tabBadgeWidth()
+	x = stripX + bw
+	w = stripW - 2*bw
+	if w < 0 {
+		w = 0
+	}
+	return
+}
+
+// tabsTotalWidth is the laid-out width of every tab end to end — the
+// number the badge reservation is decided from, so it is computed from
+// the labels alone rather than through layoutTabs, whose origin depends
+// on that decision.
+func (a *App) tabsTotalWidth() int {
+	total := 0
+	for _, label := range a.tabLabels() {
+		total += a.tabCellWidth(label)
+	}
+	return total
+}
+
+// tabCellWidth is one tab's width for a given label: pad, dirty slot,
+// optional glyph and its separator, the label, a space, the × and a
+// trailing pad — measured in cells, so a CJK or emoji filename gets the
+// room it paints in.
+func (a *App) tabCellWidth(label string) int {
+	iconW := 0
+	if a.iconsOn() {
+		iconW = 2 // glyph + space
+	}
+	return 1 + 2 + iconW + textdraw.Width(label) + 1 + 1 + 1
+}
+
+// maxTabLabelCells caps a tab's label. Twenty cells fits every ordinary
+// name whole (this repo's longest, gitchanges_test.go, is eighteen) and
+// keeps a generated or hashed file name from taking the strip on its
+// own; longer names are ellipsised, and the status bar's readout
+// carries the full path.
+const maxTabLabelCells = 20
+
+// tabLabels returns the strip's label for every open tab in tab order.
+// A label is the tab's display name, prefixed with as many trailing
+// path components as it takes to tell it apart from another open tab
+// with the same name — three open index.ts files used to render as
+// three identical tabs — and clipped to maxTabLabelCells with an
+// ellipsis. Done here, in the strip's layout, rather than in
+// Tab.DisplayName: the name is a property of the file, the
+// disambiguation is a property of what else is open beside it.
+func (a *App) tabLabels() []string {
+	tabs := a.tabs.Tabs()
+	labels := make([]string, len(tabs))
+	for i, t := range tabs {
+		labels[i] = t.DisplayName()
+	}
+	// Deepen only the colliding labels, one component at a time, until
+	// they differ or the paths run out of components to add.
+	for depth := 1; depth <= 3; depth++ {
+		seen := map[string]int{}
+		for _, l := range labels {
+			seen[l]++
+		}
+		changed := false
+		for i, t := range tabs {
+			if seen[labels[i]] < 2 || t.Path == "" {
+				continue
+			}
+			if deeper := trailingPathComponents(t.Path, depth+1); deeper != labels[i] {
+				labels[i] = deeper
+				changed = true
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	for i, l := range labels {
+		labels[i] = textdraw.ClipEllipsis(l, maxTabLabelCells)
+	}
+	return labels
+}
+
+// trailingPathComponents returns the last n slash-separated components
+// of path ("app/draw.go" for n=2), or the whole path when it has fewer.
+func trailingPathComponents(path string, n int) string {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(path)), "/")
+	if n > len(parts) {
+		n = len(parts)
+	}
+	return strings.Join(parts[len(parts)-n:], "/")
+}
+
 // maxTabScroll returns how far the tab strip can scroll: the overflow
-// between the laid-out tab widths and the strip. Zero when every tab
-// fits.
+// between the laid-out tab widths and the tab window. Zero when every
+// tab fits.
 func (a *App) maxTabScroll() int {
 	rects := a.layoutTabs()
 	if len(rects) == 0 {
 		return 0
 	}
-	stripX, stripW := a.tabStripRegion()
+	winX, winW := a.tabWindow()
 	last := rects[len(rects)-1]
-	over := (last.X + last.Width) - (stripX + stripW)
+	over := (last.X + last.Width) - (winX + winW)
 	if over < 0 {
 		return 0
 	}
@@ -160,16 +297,16 @@ func (a *App) ensureActiveTabVisible() {
 		a.tabScroll = 0
 		return
 	}
-	stripX, stripW := a.tabStripRegion()
-	if stripW <= 0 {
+	winX, winW := a.tabWindow()
+	if winW <= 0 {
 		return
 	}
 	r := rects[a.tabs.ActiveIndex()]
-	left := stripX + a.tabScroll
+	left := winX + a.tabScroll
 	if r.X < left {
-		a.tabScroll = r.X - stripX
-	} else if r.X+r.Width > left+stripW {
-		a.tabScroll = r.X + r.Width - stripX - stripW
+		a.tabScroll = r.X - winX
+	} else if r.X+r.Width > left+winW {
+		a.tabScroll = r.X + r.Width - winX - winW
 	}
 	a.clampTabScroll()
 }
@@ -187,32 +324,35 @@ func (a *App) scrollTabStrip(delta int) {
 // disorienting jumps.
 const tabScrollStep = 8
 
-// layoutTabs computes the tabRect geometry for every tab. Tabs are rendered
-// to the right of the menu button, in the format:
+// layoutTabs computes the tabRect geometry for every tab. Tabs are laid
+// out from the tab window's origin (right of the ≡ button and the left
+// badge slot), in the format:
 //
-//	" <dirty><icon? ><name> × " — a single space pad, two-cell dirty slot
-//	(dot+space, or two spaces), an optional Nerd Font glyph + 1-space
-//	separator (only when icons are enabled), the file name, a separator
-//	space, the close ×, and a trailing space.
+//	" <dirty><icon? ><label> × " — a single space pad, two-cell dirty
+//	slot (dot+space, or two spaces), an optional Nerd Font glyph +
+//	1-space separator (only when icons are enabled), the label
+//	(tabLabels), a separator space, the close ×, and a trailing space.
 //
-// The X coordinates are virtual (as if the strip never scrolled);
-// drawTabBar subtracts tabScroll before painting and stores the
-// shifted rects, so click hit-testing always works in screen space.
+// Widths are cells (textdraw.Width), not rune counts. The X coordinates
+// are virtual (as if the strip never scrolled); drawTabBar subtracts
+// tabScroll before painting and stores the shifted, window-clipped
+// rects, so click hit-testing always works in screen space.
 func (a *App) layoutTabs() []tabRect {
-	out := make([]tabRect, 0, a.tabs.Len())
-	cursor := a.sidebarW() + menuButtonWidth
+	labels := a.tabLabels()
+	out := make([]tabRect, 0, len(labels))
+	cursor, _ := a.tabWindow()
 	iconW := 0
 	if a.iconsOn() {
 		iconW = 2 // glyph + space
 	}
-	for i, t := range a.tabs.Tabs() {
-		nameLen := len([]rune(t.DisplayName()))
-		w := 1 + 2 + iconW + nameLen + 1 + 1 + 1 // pad+dirty+icon?+name+space+×+pad
+	for i, label := range labels {
+		w := a.tabCellWidth(label)
 		out = append(out, tabRect{
 			Index:  i,
 			X:      cursor,
 			Width:  w,
-			CloseX: cursor + 1 + 2 + iconW + nameLen + 1,
+			CloseX: cursor + 1 + 2 + iconW + textdraw.Width(label) + 1,
+			Label:  label,
 		})
 		cursor += w
 	}
@@ -231,14 +371,32 @@ func (a *App) drawTabBar() {
 	a.drawMenuButton()
 
 	// Shift the virtual layout by the strip scroll and remember the
-	// shifted rects — hit-testing then stays in screen coordinates.
-	stripX, _ := a.tabStripRegion()
+	// shifted rects — hit-testing then stays in screen coordinates. The
+	// painted cells are clipped to the tab window, and so are the
+	// remembered rects: a tab half under a badge slot is clickable only
+	// where it is visible, and its × is inert once it has scrolled out.
+	winX, winW := a.tabWindow()
+	winEnd := winX + winW
 	rects := a.layoutTabs()
 	for i := range rects {
 		rects[i].X -= a.tabScroll
 		rects[i].CloseX -= a.tabScroll
 	}
-	a.lastTabRects = rects
+	visible := make([]tabRect, 0, len(rects))
+	for _, r := range rects {
+		end := min(r.X+r.Width, winEnd)
+		start := max(r.X, winX)
+		if start >= end {
+			continue
+		}
+		clipped := r
+		clipped.X, clipped.Width = start, end-start
+		if r.CloseX < winX || r.CloseX >= winEnd {
+			clipped.CloseX = -1
+		}
+		visible = append(visible, clipped)
+	}
+	a.lastTabRects = visible
 	for _, r := range rects {
 		active := r.Index == a.tabs.ActiveIndex()
 		bg := a.theme.SidebarBG
@@ -273,20 +431,15 @@ func (a *App) drawTabBar() {
 		if a.tabs.At(r.Index).IsPreview() {
 			st = st.Italic(true)
 		}
-		// Background. Cells scrolled off either edge of the strip are
-		// skipped; the chevrons painted below mark what's hidden.
-		for cx := r.X; cx < r.X+r.Width; cx++ {
-			if cx < stripX {
-				continue
-			}
-			if cx >= tx+tw {
-				break
-			}
+		// Background. Cells scrolled off either edge of the window are
+		// skipped; the badges painted in their own slots mark what's
+		// hidden.
+		for cx := max(r.X, winX); cx < min(r.X+r.Width, winEnd); cx++ {
 			a.screen.SetContent(cx, ty, ' ', nil, st)
 		}
 		tab := a.tabs.At(r.Index)
 		col := r.X + 1
-		if (tab.Dirty || tab.DiskGone) && col >= stripX && col < tx+tw {
+		if (tab.Dirty || tab.DiskGone) && col >= winX && col < winEnd {
 			// The dot means "needs attention", not just "has edits" — a
 			// DiskGone tab (its file deleted, not yet recreated or
 			// re-saved) shows it too, same as Dirty. Modified is
@@ -312,28 +465,14 @@ func (a *App) drawTabBar() {
 			if active {
 				gst = gst.Bold(true).Underline(true)
 			}
-			for _, gr := range glyph {
-				if col >= tx+tw {
-					break
-				}
-				if col >= stripX {
-					a.screen.SetContent(col, ty, gr, nil, gst)
-				}
-				col++
-			}
+			col = drawTabText(a.screen, col, ty, winX, winEnd, glyph, gst)
 			col++ // separator space after glyph
 		}
-		for _, ru := range tab.DisplayName() {
-			if col >= tx+tw {
-				break
-			}
-			if col >= stripX {
-				a.screen.SetContent(col, ty, ru, nil, st)
-			}
-			col++
-		}
+		// The label is the one layoutTabs measured (r.Label), painted
+		// cluster by cluster so a two-cell glyph advances two cells.
+		col = drawTabText(a.screen, col, ty, winX, winEnd, r.Label, st)
 		col++ // separator space before ×
-		if col >= stripX && col < tx+tw {
+		if col >= winX && col < winEnd {
 			// Emphasis tracks likelihood of use: the active tab's × is
 			// the likeliest close target, so it gets the brighter Muted;
 			// inactive tabs recede to Subtle so their × can't outshine
@@ -350,7 +489,8 @@ func (a *App) drawTabBar() {
 	// clipped lines, now carrying how many tabs are hidden on each side
 	// and painted in reverse video so the marker is unmistakable on a
 	// monochrome terminal too. Each badge is also the click target that
-	// scrolls the strip (tabBarClick hit-tests the same geometry).
+	// scrolls the strip (tabBarClick hit-tests the same geometry). They
+	// paint into their reserved slots, never over a tab.
 	chevStyle := tcell.StyleDefault.Background(a.theme.SidebarBG).
 		Foreground(a.theme.Accent).Attributes(tcell.AttrBold | tcell.AttrReverse)
 	left, right := a.tabChevrons()
@@ -358,8 +498,31 @@ func (a *App) drawTabBar() {
 		if c.Label == "" {
 			continue
 		}
-		drawAt(a.screen, c.X, ty, c.Label, chevStyle)
+		textdraw.DrawClipped(a.screen, c.X, ty, textdraw.Width(c.Label), c.Label, chevStyle)
 	}
+}
+
+// drawTabText paints s cluster by cluster from col on row y, skipping
+// the cells left of winX and stopping at winEnd, and returns the column
+// just past where the whole string WOULD have ended — clipped or not —
+// so the caller's cursor keeps tracking the layout through a tab that
+// is only partly on screen.
+func drawTabText(scr tcell.Screen, col, y, winX, winEnd int, s string, st tcell.Style) int {
+	state := -1
+	for len(s) > 0 {
+		var cluster string
+		var cw int
+		cluster, s, cw, state = uniseg.FirstGraphemeClusterInString(s, state)
+		if cw == 0 {
+			continue
+		}
+		if col >= winX && col+cw <= winEnd {
+			rs := []rune(cluster)
+			scr.SetContent(col, y, rs[0], rs[1:], st)
+		}
+		col += cw
+	}
+	return col
 }
 
 // minVisibleTabCells is one minimal tab's worth of columns — pad, dirty
@@ -379,24 +542,24 @@ type tabChevron struct {
 
 // hit reports whether screen column x lands on the badge.
 func (c tabChevron) hit(x int) bool {
-	return c.Label != "" && x >= c.X && x < c.X+runeLen(c.Label)
+	return c.Label != "" && x >= c.X && x < c.X+textdraw.Width(c.Label)
 }
 
-// tabOverflow counts the tabs scrolled entirely out of the strip on each
-// side. A partially visible tab is not counted: its name is on screen and
-// clicking it works, so counting it would overstate what the badge is
-// promising to reveal.
+// tabOverflow counts the tabs scrolled entirely out of the tab window
+// on each side. A partially visible tab is not counted: its name is on
+// screen and clicking it works, so counting it would overstate what the
+// badge is promising to reveal.
 func (a *App) tabOverflow() (left, right int) {
-	stripX, stripW := a.tabStripRegion()
-	if stripW <= 0 {
+	winX, winW := a.tabWindow()
+	if winW <= 0 {
 		return 0, 0
 	}
 	for _, r := range a.layoutTabs() {
 		x0 := r.X - a.tabScroll
 		switch {
-		case x0+r.Width <= stripX:
+		case x0+r.Width <= winX:
 			left++
-		case x0 >= stripX+stripW:
+		case x0 >= winX+winW:
 			right++
 		}
 	}
@@ -404,46 +567,42 @@ func (a *App) tabOverflow() (left, right int) {
 }
 
 // tabChevrons returns the two overflow badges for the current scroll
-// position. The chevron alone says "there is more"; the count says how
-// much, which is the difference between a marker the eye skips and one
-// that tells the user whether it is worth scrolling. The counts are the
-// first thing dropped when the strip is too cramped to hold them and a
-// readable tab at the same time — the chevrons themselves never are,
-// because they are the click targets.
+// position, each in its reserved slot (tabBadgeWidth): the left one at
+// the strip's first cell, the right one ending on its last. The chevron
+// alone says "there is more"; the count says how much, which is the
+// difference between a marker the eye skips and one that tells the
+// user whether it is worth scrolling. A count is dropped when it does
+// not fit the slot — a one-cell slot on a cramped strip, or a hundred
+// hidden tabs — the chevron itself never is, because it is the click
+// target.
 func (a *App) tabChevrons() (left, right tabChevron) {
 	stripX, stripW := a.tabStripRegion()
-	if stripW <= 0 {
-		return
-	}
-	showLeft := a.tabScroll > 0
-	showRight := a.tabScroll < a.maxTabScroll()
-	if !showLeft && !showRight {
+	bw := a.tabBadgeWidth()
+	if stripW <= 0 || bw == 0 {
 		return
 	}
 	nl, nr := a.tabOverflow()
-	leftLabel, rightLabel := "", ""
-	if showLeft {
-		leftLabel = "‹"
-		if nl > 0 {
-			leftLabel += itoa(nl)
+	badge := func(chev string, n int, countFirst bool) string {
+		label := chev
+		if n > 0 {
+			if countFirst {
+				label = itoa(n) + chev
+			} else {
+				label = chev + itoa(n)
+			}
 		}
+		if textdraw.Width(label) > bw {
+			return chev
+		}
+		return label
 	}
-	if showRight {
-		rightLabel = "›"
-		if nr > 0 {
-			rightLabel = itoa(nr) + "›"
-		}
+	if a.tabScroll > 0 {
+		left = tabChevron{X: stripX, Label: badge("‹", nl, false)}
 	}
-	if runeLen(leftLabel)+runeLen(rightLabel)+minVisibleTabCells > stripW {
-		if showLeft {
-			leftLabel = "‹"
-		}
-		if showRight {
-			rightLabel = "›"
-		}
+	if a.tabScroll < a.maxTabScroll() {
+		label := badge("›", nr, true)
+		right = tabChevron{X: stripX + stripW - textdraw.Width(label), Label: label}
 	}
-	left = tabChevron{X: stripX, Label: leftLabel}
-	right = tabChevron{X: stripX + stripW - runeLen(rightLabel), Label: rightLabel}
 	return
 }
 
@@ -594,7 +753,16 @@ func (a *App) drawStatusBar() {
 		drawAt(a.screen, rightX, sy, seg.text, st)
 	}
 
-	drawStatusText(a.screen, sx, sy, a.statusLeftMax(sw), a.statusLeftText(), style)
+	leftStyle := style
+	if a.flashActive() && a.statusErr && !a.flashStripVisible() {
+		// A failure report is painted the way the disk-conflict marker
+		// is: Error over the bar, with Attrs.Error carrying the signal on
+		// a palette whose red has been degraded away.
+		leftStyle = style.Foreground(a.theme.Error).
+			Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar | a.theme.Attrs.Error)
+	}
+	leftMax := a.statusLeftMax(sw)
+	drawStatusText(a.screen, sx, sy, leftMax, a.statusLeftText(leftMax), leftStyle)
 }
 
 // statusRightSegment is one piece of the status bar's right-hand group.
@@ -619,70 +787,74 @@ type statusRightSegment struct {
 }
 
 // statusRightSegments returns the right-hand pieces that fit in a status
-// bar sw cells wide, rightmost first: the git branch segment, the
-// pending-Esc tag, then the persistent disk-conflict marker. The order is
-// load-bearing — the transient tag sits between the two stable pieces so
-// the conflict marker never jumps around as the leader arms and expires.
+// bar sw cells wide, rightmost first: the git segment, the pending-Esc
+// tag, the persistent disk-conflict marker, then the markdown chip. The
+// paint order is load-bearing — the transient tag sits between the two
+// stable pieces so the conflict marker never jumps around as the leader
+// arms and expires — but it is NOT the drop order. Pieces are admitted
+// by importance: the conflict marker first (a dismissed conflict
+// overlay must not mean a forgotten conflict — it is a decision the
+// user still owes), then the Esc tag (the editor's only modifier must
+// not have invisible state), then the markdown chip, and the git chip
+// last. The git chip is also the one piece that shortens before it
+// goes: full text, then the branch's last path component, then a bare
+// glyph and count (statusGitChipForms). Before this the git chip was
+// admitted first and the conflict marker last, which on a narrow bar
+// dropped the one piece its own comment says must survive.
 //
-// Pure, and the single source of the group's width: drawStatusBar paints
-// from it and statusLeftMax measures from it, so the room the flash is
-// clipped to and the room it is tested against cannot disagree.
+// Pure, and the single source of the group's width: drawStatusBar
+// paints from it and statusLeftMax measures from it, so the room the
+// flash is clipped to and the room it is tested against cannot
+// disagree; statusBarClick walks the same list for its hit ranges.
 func (a *App) statusRightSegments(sw int) []statusRightSegment {
-	var segs []statusRightSegment
+	// Paint positions, rightmost first. Admission below runs in
+	// priority order and the result is sorted back into this order.
+	const (
+		posGit = iota
+		posArrow
+		posEsc
+		posConflict
+		posMd
+	)
+	type placed struct {
+		pos int
+		seg statusRightSegment
+	}
+	var out []placed
 	used := 0
-	add := func(text string, warn bool) {
-		w := runeLen(text)
-		// Pieces are dropped whole rather than clipped: half a branch
-		// name is worse than none, and a clipped piece would silently
-		// reclaim cells the left text was already measured against.
-		if w == 0 || used+w >= sw {
-			return
-		}
-		segs = append(segs, statusRightSegment{text: text, warn: warn})
-		used += w
-	}
-	addSeg := func(seg statusRightSegment) {
+	// fits reports whether w more cells still leave the left text at
+	// least one; pieces are dropped whole rather than clipped — half a
+	// branch name is worse than none, and a clipped piece would
+	// silently reclaim cells the left text was already measured
+	// against.
+	fits := func(w int) bool { return w > 0 && used+w < sw }
+	admit := func(pos int, seg statusRightSegment) bool {
 		w := runeLen(seg.text)
-		if w == 0 || used+w >= sw {
-			return
+		if !fits(w) {
+			return false
 		}
-		segs = append(segs, seg)
+		out = append(out, placed{pos, seg})
 		used += w
+		return true
 	}
-	// The git segment: a powerline chip when Nerd Font glyphs are on
-	// (branch glyph + name on the Selection block, joined to the bar by
-	// the  transition whose fg IS the chip background), today's
-	// plain text otherwise — private-use glyphs on a non-Nerd-Font
-	// terminal would render as boxes. Text on Selection is the one
-	// fg/bg pairing every palette already guarantees readable (it is
-	// the editor's own selection). Chip first, then the arrow: this
-	// list builds rightmost-first.
-	if gitText := a.statusGitSegment(); gitText != "" && a.iconsOn() {
-		addSeg(statusRightSegment{text: " " + gitText,
-			fg: a.theme.Text, bg: a.theme.Selection, click: (*App).toggleGitPanel})
-		addSeg(statusRightSegment{text: "",
-			fg: a.theme.Selection, click: (*App).toggleGitPanel})
-	} else {
-		addSeg(statusRightSegment{text: gitText, click: (*App).toggleGitPanel})
+
+	// 1. Persistent disk-conflict marker for the active tab: dismissing
+	// the conflict overlay must not mean forgetting the conflict, so
+	// this stays up until the tab is saved, reloaded or closed.
+	if a.tabDiskConflict(a.activeTabPtr()) {
+		admit(posConflict, statusRightSegment{text: statusConflictTag, warn: true})
 	}
-	// Pending-gesture tag: while an Esc is armed (leader or double-tap
-	// window still open) show "Esc…" beside the git segment — vim's
-	// showcmd idea sized for a status bar. The editor's only modifier
-	// must not have invisible state: without this, a slow second
-	// keystroke fails with no cue that the gesture died. A
+	// 2. Pending-gesture tag: while an Esc is armed (leader or
+	// double-tap window still open) show "Esc…" beside the git segment
+	// — vim's showcmd idea sized for a status bar. Without this, a slow
+	// second keystroke fails with no cue that the gesture died. A
 	// leaderExpiryEvent posted at arming time repaints the bar so the
 	// tag also clears when the user simply abandons the Esc.
 	if !a.lastEscape.IsZero() && time.Since(a.lastEscape) < menuEscWindow {
-		add("Esc… ", false)
+		admit(posEsc, statusRightSegment{text: "Esc… "})
 	}
-	// Persistent disk-conflict marker for the active tab: dismissing the
-	// conflict overlay must not mean forgetting the conflict, so this
-	// stays up until the tab is saved, reloaded or closed.
-	if a.tabDiskConflict(a.activeTabPtr()) {
-		add(statusConflictTag, true)
-	}
-	// Markdown preview chip: the subtle standing invitation the ≡ row
-	// alone can't provide. Dim "Preview" at rest, reversed "Edit"
+	// 3. Markdown preview chip: the subtle standing invitation the ≡
+	// row alone can't provide. Dim "Preview" at rest, reversed "Edit"
 	// while the rendered view is up — the active mode is loud, the
 	// invitation is quiet. Leftmost of the group so the stable git
 	// segment never jumps as tabs switch.
@@ -693,9 +865,75 @@ func (a *App) statusRightSegments(sw int) []statusRightSegment {
 			chip.text = " Edit "
 			chip.attrs = tcell.AttrReverse
 		}
-		addSeg(chip)
+		admit(posMd, chip)
+	}
+	// 4. The git segment, longest form that fits: a powerline chip when
+	// Nerd Font glyphs are on (branch glyph + name on the Selection
+	// block, joined to the bar by the  transition whose fg IS the chip
+	// background), plain text otherwise — private-use glyphs on a
+	// non-Nerd-Font terminal would render as boxes. Text on Selection
+	// is the one fg/bg pairing every palette already guarantees
+	// readable (it is the editor's own selection). The arrow is one
+	// more cell; a chip without it is still a chip, so it is tried with
+	// the arrow first and admitted alone if that is all that fits.
+	for _, gitText := range a.statusGitChipForms() {
+		if a.iconsOn() {
+			chip := statusRightSegment{text: " " + gitText,
+				fg: a.theme.Text, bg: a.theme.Selection, click: (*App).toggleGitPanel}
+			arrow := statusRightSegment{text: "",
+				fg: a.theme.Selection, click: (*App).toggleGitPanel}
+			if fits(runeLen(chip.text) + runeLen(arrow.text)) {
+				admit(posGit, chip)
+				admit(posArrow, arrow)
+				break
+			}
+			if admit(posGit, chip) {
+				break
+			}
+			continue
+		}
+		if admit(posGit, statusRightSegment{text: gitText, click: (*App).toggleGitPanel}) {
+			break
+		}
+	}
+
+	sort.SliceStable(out, func(i, j int) bool { return out[i].pos < out[j].pos })
+	segs := make([]statusRightSegment, len(out))
+	for i, p := range out {
+		segs[i] = p.seg
 	}
 	return segs
+}
+
+// statusGitChipForms returns the git segment's text at every length it
+// is willing to take, longest first: the full readout (branch, diff
+// base, ahead/behind, dirty count), then the branch's last path
+// component with the dirty count — "feature/widgets/tabs" is
+// "tabs" to the person who checked it out — then a bare branch glyph
+// with the dirty count, which still says "this is a repo, N files
+// changed, click here". Nothing when there is no repo.
+func (a *App) statusGitChipForms() []string {
+	full := a.statusGitSegment()
+	if full == "" {
+		return nil
+	}
+	dirty := ""
+	if a.tree != nil && len(a.tree.DirtyFiles) > 0 {
+		dirty = " · " + itoa(len(a.tree.DirtyFiles))
+	}
+	base := a.gitSnap.Branch
+	if i := strings.LastIndex(base, "/"); i >= 0 && i < len(base)-1 {
+		base = base[i+1:]
+	}
+	forms := []string{full}
+	if short := " " + base + dirty + " "; short != full {
+		forms = append(forms, short)
+	}
+	bare := " ⎇"
+	if dirty != "" {
+		bare += " " + itoa(len(a.tree.DirtyFiles))
+	}
+	return append(forms, bare+" ")
 }
 
 // statusRightWidth is how many cells the right-hand group occupies.
@@ -722,35 +960,110 @@ func (a *App) statusLeftMax(sw int) int {
 	return max
 }
 
-// statusLeftText is the status bar's left-hand text: the live flash, else
-// the active tab's readout, else the project root.
+// statusLeftText is the status bar's left-hand text for a region maxW
+// cells wide: the live flash, else the active tab's readout, else the
+// project root.
 //
 // A flash that moved onto its own strip is skipped here on purpose. The
 // bar then falls back to the readout the flash would have covered, so a
 // long message costs the user nothing — they read the whole sentence on
 // the strip AND keep Ln/Col — instead of trading one for the other.
-func (a *App) statusLeftText() string {
+//
+// The readout is a ladder of tiers (statusReadoutTiers) and the widest
+// tier that fits maxW is used whole: pieces are dropped, never cut,
+// because a bar reading "281 lines ·" or "997 " — which is what a
+// single Sprintf hard-clipped at 48 columns produced — is worse than a
+// shorter bar that is true. Only the flash and the last tier can still
+// be clipped by the paint, and the last tier is "Ln N, Col M".
+func (a *App) statusLeftText(maxW int) string {
 	if a.flashActive() && !a.flashStripVisible() {
 		return " " + a.statusMsg
 	}
-	if tab := a.activeTabPtr(); tab != nil {
-		if tab.IsImage() && tab.Image != nil {
-			b := tab.Image.Bounds()
-			return fmt.Sprintf(" %s · %d×%d · %s",
-				strings.ToUpper(tab.ImageFmt), b.Dx(), b.Dy(), filepath.Base(tab.Path))
-		}
-		// Same "needs attention" gate as the tab-strip dot: DiskGone
-		// alone (a deleted-but-not-yet-recreated file) shows the marker
-		// too, not just Dirty.
-		dirty := ""
-		if tab.Dirty || tab.DiskGone {
-			dirty = " · ●"
-		}
-		return fmt.Sprintf(" %s · Ln %d, Col %d · %d lines%s",
-			detectLangLabel(tab.Path), tab.Cursor.Line+1, tab.Cursor.Col+1,
-			tab.Buffer.LineCount(), dirty)
+	tab := a.activeTabPtr()
+	if tab == nil {
+		return " " + filepath.Base(a.rootDir)
 	}
-	return " " + filepath.Base(a.rootDir)
+	if tab.IsImage() && tab.Image != nil {
+		b := tab.Image.Bounds()
+		return fmt.Sprintf(" %s · %d×%d · %s",
+			strings.ToUpper(tab.ImageFmt), b.Dx(), b.Dy(), filepath.Base(tab.Path))
+	}
+	tiers := a.statusReadoutTiers(tab, maxW)
+	for _, tier := range tiers {
+		if textdraw.Width(tier) <= maxW {
+			return tier
+		}
+	}
+	return tiers[len(tiers)-1]
+}
+
+// statusReadoutTiers builds the active tab's readout at every width it
+// is willing to take, widest first, for a region maxW wide:
+//
+//	" where · Ln 12, Col 4 · 281 lines · ●"
+//	" Ln 12, Col 4 · 281 lines · ●"
+//	" Ln 12, Col 4 · ●"
+//	" Ln 12, Col 4"
+//
+// The lead piece is the tab's repo-relative path (tabLocationLabel),
+// ellipsised from the LEFT to whatever the first tier has room for —
+// "…/app/draw.go" keeps the part that tells two draw.go tabs apart,
+// where the old extension label ("go") said nothing the tab name did
+// not. The dirty dot uses the same "needs attention" gate as the
+// tab-strip dot: DiskGone alone (a deleted-but-not-yet-recreated file)
+// shows it too, not just Dirty.
+func (a *App) statusReadoutTiers(tab *editor.Tab, maxW int) []string {
+	dirty := ""
+	if tab.Dirty || tab.DiskGone {
+		dirty = " · ●"
+	}
+	pos := fmt.Sprintf("Ln %d, Col %d", tab.Cursor.Line+1, tab.Cursor.Col+1)
+	lines := fmt.Sprintf(" · %d lines", tab.Buffer.LineCount())
+	full := " " + pos + lines + dirty
+	tiers := make([]string, 0, 4)
+	// The location gets whatever the full readout leaves it; a path
+	// that cannot keep even its base name inside that is not shown at
+	// all rather than shown as "…".
+	if where, ok := leftEllipsisPath(a.tabLocationLabel(tab), maxW-textdraw.Width(full)-textdraw.Width(" · ")); ok {
+		tiers = append(tiers, " "+where+" · "+pos+lines+dirty)
+	}
+	return append(tiers, full, " "+pos+dirty, " "+pos)
+}
+
+// tabLocationLabel is the status bar's name for a tab: its path
+// relative to the project root ("internal/app/draw.go"), the base name
+// in single-file mode or for a file outside the root, "untitled" for a
+// buffer with no path. Slash-separated whatever the OS uses, because
+// it is read, not opened.
+func (a *App) tabLocationLabel(tab *editor.Tab) string {
+	if tab.Path == "" {
+		return tab.DisplayName()
+	}
+	if a.tree != nil {
+		if rel, ok := relFromRoot(tab.Path, a.tree.Root.Path); ok && rel != "." {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return filepath.Base(tab.Path)
+}
+
+// leftEllipsisPath fits a slash-separated path into maxW cells by
+// dropping leading components — "internal/app/draw.go" becomes
+// "…/app/draw.go", then "…/draw.go" — so the tail, which is the part
+// that distinguishes one file from another, is what survives. ok is
+// false when even the last component alone would not fit; a location
+// reduced to "…" says nothing and should be dropped instead.
+func leftEllipsisPath(path string, maxW int) (string, bool) {
+	if textdraw.Width(path) <= maxW {
+		return path, true
+	}
+	parts := strings.Split(path, "/")
+	for i := 1; i < len(parts); i++ {
+		if cand := "…/" + strings.Join(parts[i:], "/"); textdraw.Width(cand) <= maxW {
+			return cand, true
+		}
+	}
+	return "", false
 }
 
 // statusFlashRoom is how many cells the status bar can give the flash
@@ -792,13 +1105,15 @@ func (e *flashExpiryEvent) When() time.Time { return e.when }
 // message living entirely inside the status bar costs no layout, so
 // letting its text go stale until the next event is free — the same
 // reasoning behind the Esc tag only getting a wake-up when an Esc was
-// armed.
+// armed. The delay is read off statusUntil rather than a constant, so
+// a long message's longer window (flashLifetime) gets a wake-up that
+// lands after it, not one that arrives while it is still due.
 func (a *App) scheduleFlashStripExpiry() {
 	if a.screen == nil || !a.flashStripVisible() {
 		return
 	}
 	scr := a.screen
-	time.AfterFunc(statusFlashFor+50*time.Millisecond, func() {
+	time.AfterFunc(time.Until(a.statusUntil)+50*time.Millisecond, func() {
 		_ = scr.PostEvent(&flashExpiryEvent{when: time.Now()})
 	})
 }
@@ -879,44 +1194,21 @@ func (a *App) flashStripRect() (x, y, w, h int) {
 }
 
 // wrapFlashLines breaks msg into at most flashStripMaxRows lines of w
-// cells, preferring a space break so words stay whole and falling back to
-// a hard break when a single run is wider than the strip. The last line
-// is ellipsised if the message still doesn't fit, because a strip that
-// silently drops its tail is the bug it exists to fix.
+// cells through the chrome's shared wrap (textdraw.WrapWords: space
+// breaks, hard breaks for an over-long run, cluster-measured). What
+// stays here is the strip's own rule: the last row is ellipsised if the
+// message still doesn't fit, because a strip that silently drops its
+// tail is the bug it exists to fix.
 func wrapFlashLines(msg string, w int) []string {
 	if w <= 0 || msg == "" {
 		return nil
 	}
-	rs := []rune(msg)
-	out := make([]string, 0, flashStripMaxRows)
-	for len(rs) > 0 {
-		if len(rs) <= w {
-			return append(out, string(rs))
-		}
-		if len(out) == flashStripMaxRows-1 {
-			return append(out, trimRunes(string(rs), w))
-		}
-		// rs[w] is the rune that would start the next row; when it is
-		// already a space the first w runes are whole words and the full
-		// row is usable. Only when it isn't do we hunt backwards for the
-		// last space that fits — and a run with none breaks hard.
-		cut := w
-		if rs[w] != ' ' {
-			for i := w; i > 0; i-- {
-				if rs[i-1] == ' ' {
-					cut = i
-					break
-				}
-			}
-		}
-		out = append(out, strings.TrimRight(string(rs[:cut]), " "))
-		rs = rs[cut:]
-		// Spaces at a wrap point are the break, not content.
-		for len(rs) > 0 && rs[0] == ' ' {
-			rs = rs[1:]
-		}
+	lines := textdraw.WrapWords(msg, w)
+	if len(lines) <= flashStripMaxRows {
+		return lines
 	}
-	return out
+	rest := strings.Join(lines[flashStripMaxRows-1:], " ")
+	return append(lines[:flashStripMaxRows-1], textdraw.ClipEllipsis(rest, w))
 }
 
 // drawFlashStrip paints the transient flash rows above the status bar,
@@ -1009,16 +1301,10 @@ func (a *App) drawTooSmall() {
 }
 
 // drawStatusText writes s left-aligned into the status bar at (x, y) with a
-// max width of maxW cells. Truncates rather than wraps.
+// max width of maxW cells. Truncates rather than wraps, cluster-aware,
+// so a wide glyph never straddles the boundary with the right group.
 func drawStatusText(scr tcell.Screen, x, y, maxW int, s string, st tcell.Style) {
-	col := 0
-	for _, r := range s {
-		if col >= maxW {
-			return
-		}
-		scr.SetContent(x+col, y, r, nil, st)
-		col++
-	}
+	textdraw.DrawClipped(scr, x, y, maxW, s, st)
 }
 
 // drawAt writes s starting at (x, y) without bounds checking. Callers are
@@ -1045,17 +1331,4 @@ func trimRunes(s string, max int) string {
 	}
 	rs := []rune(s)
 	return string(rs[:max-1]) + "…"
-}
-
-// detectLangLabel returns a short label for the active file's language —
-// just the file extension, or "text" when there is no path or extension.
-func detectLangLabel(path string) string {
-	if path == "" {
-		return "text"
-	}
-	ext := strings.TrimPrefix(filepath.Ext(path), ".")
-	if ext == "" {
-		return "text"
-	}
-	return ext
 }

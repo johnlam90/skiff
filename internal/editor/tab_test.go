@@ -1387,6 +1387,102 @@ func TestTab_Render_HidesCursorWhenOffscreen(t *testing.T) {
 	}
 }
 
+// TestRender_DegradedPaletteKeepsSelectionCursorLineAndFindVisible is
+// the end-to-end fence for the low-colour channels: with the palette
+// degraded to eight colours — every surface on the terminal default —
+// a selected cell still reads as selected (reverse video), the caret's
+// line still reads as current (underline style set, not just the bit),
+// and find hits still read as hits (reverse; the current one bold and
+// underlined too). Before, all three degraded to ColorDefault on
+// ColorDefault: no feedback at all.
+func TestRender_DegradedPaletteKeepsSelectionCursorLineAndFindVisible(t *testing.T) {
+	th := theme.Degrade(theme.Default(), 8)
+	tab, _ := NewTab("")
+	tab.Buffer = NewBuffer("hello world\nhello again\nplain")
+	tab.Cursor = Position{Line: 1, Col: 0}
+	tab.Anchor = Position{Line: 0, Col: 0} // selects all of line 0
+	tab.FindMatches = FindAll(tab.Buffer, "hello")
+	tab.FindIndex = 1
+
+	scr := newSimScreen(t, 40, 10)
+	defer scr.Fini()
+	tab.Render(scr, th, 0, 0, 40, 10)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	contentX := gutterWidthFor(tab.Buffer.LineCount()) + 1
+	styleAt := func(x, y int) tcell.Style { return cells[y*w+x].Style }
+
+	// Line 0, col 7 ("w" of world): selected, not a match.
+	if _, _, attrs := styleAt(contentX+7, 0).Decompose(); attrs&tcell.AttrReverse == 0 {
+		t.Fatalf("selected cell attrs = %v, want reverse video on a degraded palette", attrs)
+	}
+	// Line 2 is neither selected nor the cursor line: nothing set.
+	if st := styleAt(contentX, 2); st.GetUnderlineStyle() != tcell.UnderlineStyleNone {
+		t.Fatal("a plain line must not be underlined")
+	}
+	if _, _, attrs := styleAt(contentX, 2).Decompose(); attrs&tcell.AttrReverse != 0 {
+		t.Fatalf("a plain cell wears reverse video: %v", attrs)
+	}
+	// Line 1 is the cursor line: underlined across the row, blank cells
+	// included, and its "hello" is the CURRENT match — bold too.
+	if st := styleAt(contentX+8, 1); st.GetUnderlineStyle() == tcell.UnderlineStyleNone {
+		t.Fatal("cursor line blank cell lost its underline style")
+	}
+	cur := styleAt(contentX, 1)
+	if _, _, attrs := cur.Decompose(); attrs&tcell.AttrReverse == 0 || attrs&tcell.AttrBold == 0 {
+		t.Fatalf("current find match attrs = %v, want reverse and bold", attrs)
+	}
+	if cur.GetUnderlineStyle() == tcell.UnderlineStyleNone {
+		t.Fatal("current find match lost its underline style")
+	}
+	// Line 0's "hello" is a plain match under the selection: reverse, not bold.
+	if _, _, attrs := styleAt(contentX, 0).Decompose(); attrs&tcell.AttrReverse == 0 || attrs&tcell.AttrBold != 0 {
+		t.Fatalf("plain match attrs = %v, want reverse without bold", attrs)
+	}
+}
+
+// TestTab_HitTestTracksTheGutterWidth pins the seam the narrower gutter
+// depends on: the click inverse and the paint read the SAME width, so a
+// click on the first content cell lands on column 0 for a 5-line file
+// (four-cell gutter) and for a 500-line file (five-cell gutter) alike,
+// and the painted line number sits exactly one cell left of the content
+// in both — a hit-test still assuming the old fixed six would land two
+// runes off in every small file.
+func TestTab_HitTestTracksTheGutterWidth(t *testing.T) {
+	for _, lines := range []int{5, 500} {
+		tab, _ := NewTab("")
+		tab.Buffer = NewBuffer(strings.Repeat("abcdef\n", lines-1) + "abcdef")
+		gw := gutterWidthFor(tab.Buffer.LineCount())
+		if lines == 5 && gw != defaultGutterWidth || lines == 500 && gw != 5 {
+			t.Fatalf("%d lines: gutter %d, want %d", lines, gw, map[int]int{5: defaultGutterWidth, 500: 5}[lines])
+		}
+		contentX := gw + 1
+		pos, ok := tab.HitTest(contentX+3, 0, 40, 10)
+		if !ok || pos != (Position{Line: 0, Col: 3}) {
+			t.Fatalf("%d lines: click at content+3 = %+v ok=%v, want col 3", lines, pos, ok)
+		}
+		if pos, ok := tab.HitTest(contentX-1, 0, 40, 10); !ok || pos.Col != 0 {
+			t.Fatalf("%d lines: separator click = %+v ok=%v, want col 0", lines, pos, ok)
+		}
+
+		scr := newSimScreen(t, 40, 10)
+		tab.Render(scr, theme.Default(), 0, 0, 40, 10)
+		scr.Show()
+		cells, w, _ := scr.GetContents()
+		if c := cells[contentX]; len(c.Runes) == 0 || c.Runes[0] != 'a' {
+			t.Fatalf("%d lines: first content cell = %q, want 'a'", lines, c.Runes)
+		}
+		// Gutter layout: digits right-aligned in gw-1 cells, one pad
+		// cell, then the separator column — so the last digit is three
+		// cells left of the content.
+		if c := cells[contentX-3]; len(c.Runes) == 0 || c.Runes[0] != '1' {
+			t.Fatalf("%d lines: cell three left of the content = %q, want the line number's last digit", lines, c.Runes)
+		}
+		_ = w
+		scr.Fini()
+	}
+}
+
 // TestTab_HitTest_ContentClick converts a click on a content cell back to
 // the matching buffer Position.
 func TestTab_HitTest_ContentClick(t *testing.T) {
@@ -1858,15 +1954,18 @@ func TestTab_Render_NoOverflowIndicator_WhenLineFits(t *testing.T) {
 	}
 }
 
-// TestGutterWidthFor pins the dynamic gutter width: files up to 9999 lines
-// keep the default six-cell gutter, and each extra digit grows it by one so
-// the git change-bar always has a blank leading cell to sit in.
+// TestGutterWidthFor pins the dynamic gutter width: digits plus the
+// marker cell and the pad, with a four-cell floor so a file under 100
+// lines pays for two digits rather than four — on a 40-column phone
+// the old fixed six-cell gutter plus its separator was 17% of the
+// screen — and each extra digit grows it by one so the git change-bar
+// always has a blank leading cell to sit in.
 func TestGutterWidthFor(t *testing.T) {
 	cases := []struct {
 		lines int
 		want  int
 	}{
-		{0, 6}, {1, 6}, {999, 6}, {9999, 6},
+		{0, 4}, {1, 4}, {99, 4}, {100, 5}, {999, 5}, {9999, 6},
 		{10000, 7}, {99999, 7}, {100000, 8},
 	}
 	for _, c := range cases {

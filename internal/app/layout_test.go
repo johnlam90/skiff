@@ -13,8 +13,11 @@
 package app
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/gdamore/tcell/v2"
 )
 
 // TestSidebarW_ShownVsHidden verifies the sidebar width helper returns 0
@@ -255,5 +258,58 @@ func TestSidebarPanelsSurviveTheMinimumHeight(t *testing.T) {
 	if listH+len(hint) != sh-gitPanelListTop {
 		t.Fatalf("panel rows do not add up: list %d + hint %d != %d",
 			listH, len(hint), sh-gitPanelListTop)
+	}
+}
+
+// TestGitPanelFillsNarrowWindow pins the narrow-window rule: at 48
+// columns — under autoHideSidebarWidth — an open Git panel takes every
+// column except the ≡ button's, the splitter is gone, and the editor
+// rect is the blank strip under the button rather than the 11-column
+// sliver a 29-cell sidebar used to leave (every line wrapping character
+// by character). Closing the panel hands the stored width straight
+// back, and a window wide enough for both keeps the ordinary split.
+func TestGitPanelFillsNarrowWindow(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 48, 16)
+	a.sidebarShown = true
+	a.sidebarWidth = 29
+	a.gitPanel.active = true
+
+	if got := a.sidebarW(); got != 48-menuButtonWidth {
+		t.Fatalf("sidebarW = %d, want the window minus the ≡ column (%d)", got, 48-menuButtonWidth)
+	}
+	if _, _, sw, _ := a.sidebarRect(); sw != 48-menuButtonWidth {
+		t.Fatalf("sidebarRect width = %d, want %d (no splitter column)", sw, 48-menuButtonWidth)
+	}
+	if x := a.splitterX(); x != -1 {
+		t.Fatalf("splitterX = %d, want -1 while the panel fills the window", x)
+	}
+	if _, _, ew, _ := a.editorRect(); ew != menuButtonWidth {
+		t.Fatalf("editor width = %d, want just the ≡ column (%d)", ew, menuButtonWidth)
+	}
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+	if row := screenLine(scr, 0); !strings.Contains(row, "≡") {
+		t.Fatalf("the ≡ button must stay on row 0 beside the panel: %q", row)
+	}
+	for y := 1; y < 15; y++ {
+		if strings.ContainsRune(screenLine(scr, y), '│') {
+			t.Fatalf("row %d still paints a splitter: %q", y, screenLine(scr, y))
+		}
+	}
+
+	a.gitPanel.active = false
+	if got := a.sidebarW(); got != 29 {
+		t.Fatalf("closing the panel should restore the stored width 29, got %d", got)
+	}
+	if x := a.splitterX(); x != 28 {
+		t.Fatalf("splitter should return with the explorer, got x=%d", x)
+	}
+
+	a.gitPanel.active = true
+	resizeTestApp(t, a, 80, 24)
+	if got := a.sidebarW(); got != 29 {
+		t.Fatalf("at 80 columns the panel should keep the ordinary split, got sidebarW=%d", got)
 	}
 }

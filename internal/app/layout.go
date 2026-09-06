@@ -17,31 +17,59 @@
 package app
 
 // sidebarW is the effective width of the sidebar block (file tree +
-// splitter): zero when hidden, a.sidebarWidth otherwise. Every layout
-// helper and click router goes through this so toggling/resizing the
-// panel reshapes the entire UI in one place.
+// splitter): zero when hidden, everything but the ≡ button's column
+// while the Git panel fills the window (gitPanelFillsWidth),
+// a.sidebarWidth otherwise. Every layout helper and click router goes
+// through this so toggling/resizing the panel reshapes the entire UI in
+// one place.
 func (a *App) sidebarW() int {
 	if !a.sidebarShown {
 		return 0
 	}
+	if a.gitPanelFillsWidth() {
+		return a.width - menuButtonWidth
+	}
 	return a.sidebarWidth
 }
 
-// sidebarRect returns the file tree's render rectangle (one column
-// narrower than the sidebar block — the rightmost column belongs to the
-// resize splitter). Zero width when the sidebar is hidden.
+// gitPanelFillsWidth reports whether the Git panel owns the window: it
+// is up, and the terminal is narrower than the point where a tree and
+// an editor can both keep their minimum. Below autoHideSidebarWidth the
+// explorer auto-hides for exactly that reason, but Esc g re-shows the
+// sidebar at its remembered width — 29 cells on a 48-column tmux split,
+// leaving an 11-column editor in which every line wraps character by
+// character. Nobody edits beside a panel that narrow; they read the
+// panel, so it gets every column except the ≡ button's four — the
+// menu is the mouse-first door to everything and must stay clickable —
+// and the editor body under that button is painted blank rather than
+// laid out (draw). Derived on every call rather than stored, so there
+// is no restore step to forget: closing the panel hands sidebarW its
+// stored width back.
+func (a *App) gitPanelFillsWidth() bool {
+	return a.sidebarShown && a.gitPanel.active && a.tree != nil && a.width < autoHideSidebarWidth
+}
+
+// sidebarRect returns the sidebar panel's render rectangle: one column
+// narrower than the sidebar block, because the rightmost column belongs
+// to the resize splitter — except when the Git panel fills the window,
+// where there is no editor to resize against and the panel takes the
+// whole block. Zero width when the sidebar is hidden.
 func (a *App) sidebarRect() (x, y, w, h int) {
 	sw := a.sidebarW()
 	if sw <= 0 {
 		return 0, 0, 0, 0
 	}
+	if a.gitPanelFillsWidth() {
+		return 0, 0, sw, a.height - 1
+	}
 	return 0, 0, sw - 1, a.height - 1
 }
 
 // splitterX returns the x coordinate of the resize splitter column, or -1
-// when the sidebar is hidden (no splitter to draw or click).
+// when the sidebar is hidden (no splitter to draw or click) or the Git
+// panel fills the window (nothing on the other side to resize against).
 func (a *App) splitterX() int {
-	if !a.sidebarShown {
+	if !a.sidebarShown || a.gitPanelFillsWidth() {
 		return -1
 	}
 	return a.sidebarWidth - 1

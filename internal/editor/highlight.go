@@ -239,7 +239,11 @@ func styleForToken(tt chroma.TokenType, t theme.Theme, base tcell.Style) tcell.S
 	case chroma.LiteralNumber:
 		return base.Foreground(t.SynNumber)
 	case chroma.Comment:
-		return base.Foreground(t.SynComment).Italic(true)
+		// Attrs.Comment (dim, on a degraded palette) keeps comments
+		// apart from code after SynComment has collapsed onto the
+		// terminal default — the one syntax distinction worth an
+		// attribute.
+		return theme.WithAttrs(base.Foreground(t.SynComment).Italic(true), t.Attrs.Comment)
 	case chroma.Operator:
 		return base.Foreground(t.SynOperator)
 	case chroma.Punctuation:

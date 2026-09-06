@@ -128,19 +128,87 @@ func (t Theme) SelectionFg(fg tcell.Color) tcell.Color {
 // rather than hand-edited away from their upstream character.
 const minStatusContrast = 3.0
 
+// minGraphicsContrast is the floor for Subtle, the colour every
+// non-text control is drawn in: overlay borders, scrollbar tracks, the
+// splitter, an inactive tab's ×, placeholders. WCAG's 3:1 graphics bar
+// rather than the 4.5:1 text bar, because none of it is read — but a
+// border at 1.6:1 (Dracula, as shipped) is not a border, it is a rumour
+// of one, and 21 of the 27 ported palettes landed under 3.0 on at least
+// one of the surfaces Subtle is painted over.
+const minGraphicsContrast = 3.0
+
 // readable returns t with the pairings that fall under the editor's
 // floor nudged back over it. Applied by the registry accessors, so
 // every palette the picker can hand the app has already been
 // corrected — no draw site has to think about it.
 //
-// Only StatusFg is corrected today: it's the one pairing where the
-// ports genuinely fail, and it's the surface a user cannot avoid
-// looking at. Body text is fenced by the tests instead, because
-// silently repainting someone's Solarized would be worse than the
-// 4.13:1 it ships with.
+// Two fields are corrected, and only two. StatusFg is the one text
+// pairing where the ports genuinely fail, and it's the surface a user
+// cannot avoid looking at. Subtle is chrome, not content, and it is
+// painted over three different surfaces — the editor, the sidebar and
+// every overlay's LineHL — so it is walked until it clears the graphics
+// floor on ALL of them; a border that reads on the editor and vanishes
+// on the modal it frames is the failure the multi-surface walk exists
+// for. Body text is fenced by the tests instead, because silently
+// repainting someone's Solarized would be worse than the 4.13:1 it
+// ships with.
 func readable(t Theme) Theme {
 	t.StatusFg = ensureContrast(t.StatusFg, t.StatusBG, minStatusContrast)
+	t.Subtle = ensureContrastOver(t.Subtle, minGraphicsContrast, t.BG, t.SidebarBG, t.LineHL)
 	return t
+}
+
+// subtleSurfaces lists every background Subtle is painted over — the
+// set readable() corrects against and the registry test fences.
+func subtleSurfaces(t Theme) []tcell.Color {
+	return []tcell.Color{t.BG, t.SidebarBG, t.LineHL}
+}
+
+// minContrastOver returns fg's lowest contrast ratio against any of bgs
+// — the number that has to clear a floor for fg to be usable on every
+// surface at once.
+func minContrastOver(fg tcell.Color, bgs []tcell.Color) float64 {
+	worst := math.Inf(1)
+	for _, bg := range bgs {
+		worst = math.Min(worst, ContrastRatio(fg, bg))
+	}
+	return worst
+}
+
+// ensureContrastOver is ensureContrast against several surfaces at
+// once: fg comes back unchanged when it already clears want on every
+// bg, otherwise it walks toward whichever pole lifts the WORST pairing
+// the most until all of them clear. A single-surface walk can't be
+// chained here — three dark surfaces share a pole, but a mid-luminance
+// LineHL beside a dark BG would send two walks in opposite directions.
+// Surfaces that are not real colours (ColorDefault on a partially
+// built Theme) are skipped rather than measured, so a test fixture
+// that only sets the status pair is left alone.
+func ensureContrastOver(fg tcell.Color, want float64, bgs ...tcell.Color) tcell.Color {
+	if !fg.Valid() {
+		return fg
+	}
+	var real []tcell.Color
+	for _, bg := range bgs {
+		if bg.Valid() {
+			real = append(real, bg)
+		}
+	}
+	if len(real) == 0 || minContrastOver(fg, real) >= want {
+		return fg
+	}
+	black, white := tcell.NewRGBColor(0, 0, 0), tcell.NewRGBColor(255, 255, 255)
+	pole := black
+	if minContrastOver(white, real) > minContrastOver(black, real) {
+		pole = white
+	}
+	for i := 1; i <= 20; i++ {
+		c := Blend(fg, pole, float64(i)/20)
+		if minContrastOver(c, real) >= want {
+			return c
+		}
+	}
+	return pole
 }
 
 // ensureContrast returns fg unchanged when it already clears want

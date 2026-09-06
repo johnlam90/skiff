@@ -254,24 +254,63 @@ func TestEnsureContrast_IsMinimal(t *testing.T) {
 	}
 }
 
-// TestReadable_OnlyTouchesStatusFg documents the deliberate narrowness
-// of the load-time correction: body text and syntax colors keep their
-// upstream values (Solarized's 4.13:1 text is a design decision, not a
-// port bug), so only the status foreground may move.
-func TestReadable_OnlyTouchesStatusFg(t *testing.T) {
+// TestReadable_TouchesOnlyStatusFgAndSubtle documents the deliberate
+// narrowness of the load-time correction: body text and syntax colors
+// keep their upstream values (Solarized's 4.13:1 text is a design
+// decision, not a port bug), so only the status foreground and the
+// chrome colour may move — and Subtle moves on every surface it is
+// painted over, not just the editor's.
+func TestReadable_TouchesOnlyStatusFgAndSubtle(t *testing.T) {
 	raw := Theme{
-		Text:     tcell.NewRGBColor(0x30, 0x30, 0x30),
-		BG:       tcell.NewRGBColor(0x40, 0x40, 0x40),
-		StatusFg: tcell.NewRGBColor(0xfc, 0xfc, 0xfc),
-		StatusBG: tcell.NewRGBColor(0xff, 0xb4, 0x54),
+		Text:      tcell.NewRGBColor(0x30, 0x30, 0x30),
+		BG:        tcell.NewRGBColor(0x40, 0x40, 0x40),
+		SidebarBG: tcell.NewRGBColor(0x3a, 0x3a, 0x3a),
+		LineHL:    tcell.NewRGBColor(0x48, 0x48, 0x48),
+		Subtle:    tcell.NewRGBColor(0x50, 0x50, 0x50), // ~1.1:1 on every surface
+		StatusFg:  tcell.NewRGBColor(0xfc, 0xfc, 0xfc),
+		StatusBG:  tcell.NewRGBColor(0xff, 0xb4, 0x54),
 	}
 	got := readable(raw)
 	if got.StatusFg == raw.StatusFg {
 		t.Fatal("readable() left an unreadable status bar alone")
 	}
+	if got.Subtle == raw.Subtle {
+		t.Fatal("readable() left an invisible Subtle alone")
+	}
+	if r := minContrastOver(got.Subtle, subtleSurfaces(got)); r < minGraphicsContrast {
+		t.Fatalf("corrected Subtle still %.2f under the %.1f floor on its worst surface", r, minGraphicsContrast)
+	}
 	got.StatusFg = raw.StatusFg
+	got.Subtle = raw.Subtle
 	if got != raw {
-		t.Fatal("readable() changed a field other than StatusFg")
+		t.Fatal("readable() changed a field other than StatusFg or Subtle")
+	}
+}
+
+// TestEnsureContrastOver_ClearsEverySurface pins the multi-surface
+// walk: a chrome colour that reads on the editor but vanishes on the
+// lighter overlay surface is corrected until the WORST pairing clears,
+// and one that already clears everywhere is returned untouched.
+func TestEnsureContrastOver_ClearsEverySurface(t *testing.T) {
+	dark := tcell.NewRGBColor(0x10, 0x10, 0x10)
+	mid := tcell.NewRGBColor(0x60, 0x60, 0x60)
+	fg := tcell.NewRGBColor(0x70, 0x70, 0x70) // fine on dark, ~1.2:1 on mid
+	if ContrastRatio(fg, dark) < 3.0 {
+		t.Fatal("precondition: fg should already clear the dark surface")
+	}
+	got := ensureContrastOver(fg, 3.0, dark, mid)
+	if got == fg {
+		t.Fatal("a colour failing on one surface was left alone")
+	}
+	if r := minContrastOver(got, []tcell.Color{dark, mid}); r < 3.0 {
+		t.Fatalf("worst surface still %.2f < 3.0", r)
+	}
+	if again := ensureContrastOver(got, 3.0, dark, mid); again != got {
+		t.Fatal("a colour that clears every surface must come back unchanged")
+	}
+	// Non-colours (a half-built fixture) are skipped, not measured.
+	if kept := ensureContrastOver(fg, 3.0, tcell.ColorDefault); kept != fg {
+		t.Fatal("ColorDefault surfaces must not drive a correction")
 	}
 }
 

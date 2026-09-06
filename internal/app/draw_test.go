@@ -23,24 +23,195 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/customactions"
+	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/icons"
+	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 	"github.com/johnlam90/skiff/internal/version"
 )
 
-// TestDetectLangLabel covers the language label helper's three cases.
-func TestDetectLangLabel(t *testing.T) {
-	cases := map[string]string{
-		"":               "text",
-		"foo.go":         "go",
-		"foo":            "text",
-		"path/to/x.py":   "py",
-		"archive.tar.gz": "gz",
+// TestTabLocationLabel pins the readout's lead piece: a project file is
+// named by its repo-relative, slash-separated path (the part that tells
+// two draw.go tabs apart, where the old extension label said nothing
+// the tab name did not), a file outside the root by its base name, and
+// a pathless buffer as "untitled".
+func TestTabLocationLabel(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	inner := filepath.Join(dir, "internal", "app")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
 	}
-	for in, want := range cases {
-		if got := detectLangLabel(in); got != want {
-			t.Errorf("detectLangLabel(%q) = %q, want %q", in, got, want)
+	deep := openTestFile(t, a, inner, "draw.go", "package app\n")
+	if got := a.tabLocationLabel(a.activeTabPtr()); got != "internal/app/draw.go" {
+		t.Fatalf("label = %q, want the repo-relative path", got)
+	}
+	_ = deep
+	outside := openTestFile(t, a, t.TempDir(), "elsewhere.txt", "x\n")
+	if got := a.tabLocationLabel(a.activeTabPtr()); got != "elsewhere.txt" {
+		t.Fatalf("label for %s = %q, want the base name", outside, got)
+	}
+	untitled, _ := editor.NewTab("")
+	if got := a.tabLocationLabel(untitled); got != "untitled" {
+		t.Fatalf("label for a pathless buffer = %q, want untitled", got)
+	}
+}
+
+// TestLeftEllipsisPath pins the left-hand ellipsis: leading components
+// go first so the tail survives, and a path that cannot keep even its
+// last component is reported unfit rather than reduced to "…".
+func TestLeftEllipsisPath(t *testing.T) {
+	cases := []struct {
+		path string
+		maxW int
+		want string
+		ok   bool
+	}{
+		{"internal/app/draw.go", 30, "internal/app/draw.go", true},
+		{"internal/app/draw.go", 14, "…/app/draw.go", true},
+		{"internal/app/draw.go", 10, "…/draw.go", true},
+		{"internal/app/draw.go", 8, "", false},
+		{"draw.go", 7, "draw.go", true},
+		{"draw.go", 6, "", false},
+	}
+	for _, c := range cases {
+		got, ok := leftEllipsisPath(c.path, c.maxW)
+		if got != c.want || ok != c.ok {
+			t.Errorf("leftEllipsisPath(%q, %d) = (%q, %v), want (%q, %v)", c.path, c.maxW, got, ok, c.want, c.ok)
 		}
+	}
+}
+
+// statusReadoutApp opens internal/app/draw.go with a 281-line body and
+// a dirty buffer — the readout shape the narrow-bar bug was observed
+// with ("281 lines ·" and "997 " hard-cut at 48 columns).
+func statusReadoutApp(t *testing.T, w, h int) *App {
+	t.Helper()
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	inner := filepath.Join(dir, "internal", "app")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	openTestFile(t, a, inner, "draw.go", strings.Repeat("package app\n", 280)+"package app")
+	a.activeTabPtr().Dirty = true
+	a.gitSnap.Branch = "feature/status-bar"
+	a.tree.IconsEnabled = false
+	resizeTestApp(t, a, w, h)
+	a.statusMsg = ""
+	return a
+}
+
+// TestStatusLeftText_DropsWholePiecesAtEveryWidth is the ladder's
+// contract: at 80 columns the readout leads with the path, at 48 the
+// path is ellipsised or dropped but "Ln, Col" and the line count stay
+// whole, at 40 whatever remains is still a whole tier — and at NO width
+// does the bar hold a dangling "·" or a cut number.
+func TestStatusLeftText_DropsWholePiecesAtEveryWidth(t *testing.T) {
+	a := statusReadoutApp(t, 80, 24)
+	_, _, sw, _ := a.statusRect()
+	full := a.statusLeftText(a.statusLeftMax(sw))
+	if !strings.HasPrefix(full, " internal/app/draw.go · Ln 1, Col 1 · 281 lines · ●") {
+		t.Fatalf("80-column readout = %q, want the path-led tier", full)
+	}
+	tab := a.activeTabPtr()
+	for width := 4; width <= 80; width++ {
+		got := a.statusLeftText(width)
+		tiers := a.statusReadoutTiers(tab, width)
+		whole := false
+		for _, tier := range tiers {
+			if got == tier {
+				whole = true
+			}
+		}
+		if !whole {
+			t.Fatalf("width %d: readout %q is not a whole tier %q", width, got, tiers)
+		}
+		if runeLen(got) > width && got != tiers[len(tiers)-1] {
+			t.Fatalf("width %d: readout %q overruns while a shorter tier exists", width, got)
+		}
+		if strings.HasSuffix(strings.TrimSpace(got), "·") {
+			t.Fatalf("width %d: readout %q ends on a dangling separator", width, got)
+		}
+	}
+	// The observed failures: at 48 and 40 columns the painted bar must
+	// still read as whole pieces.
+	for _, width := range []int{48, 40} {
+		resizeTestApp(t, a, width, 16)
+		a.draw()
+		scr := a.screen.(tcell.SimulationScreen)
+		scr.Show()
+		bar := screenLine(scr, a.height-1)
+		if !strings.Contains(bar, "Ln 1, Col 1") {
+			t.Fatalf("%d columns: bar lost the caret position: %q", width, bar)
+		}
+		if strings.Contains(bar, "lines ·  ") || strings.Contains(bar, " 28 ") || strings.Contains(bar, "281 lines · ") && !strings.Contains(bar, "●") {
+			t.Fatalf("%d columns: bar shows a cut piece: %q", width, bar)
+		}
+	}
+}
+
+// TestStatusRightSegments_DropOrderFollowsImportance pins the admission
+// order the marker's own comment promised: on a bar too narrow for
+// everything, the disk-conflict marker and the Esc tag survive and the
+// git chip is what shortens — first to the branch's last component,
+// then to a bare glyph — before anything more important is lost. The
+// paint order (git rightmost, conflict left of the Esc tag) is
+// unchanged by the reordering.
+func TestStatusRightSegments_DropOrderFollowsImportance(t *testing.T) {
+	a := statusReadoutApp(t, 80, 24)
+	a.noteDiskConflict(a.activeTabPtr().Path, time.Now())
+	a.lastEscape = time.Now()
+	texts := func(sw int) []string {
+		var out []string
+		for _, seg := range a.statusRightSegments(sw) {
+			out = append(out, seg.text)
+		}
+		return out
+	}
+	wide := texts(80)
+	if len(wide) != 3 || wide[0] != " feature/status-bar " || wide[1] != "Esc… " || wide[2] != statusConflictTag {
+		t.Fatalf("80-column group = %q, want full git chip, Esc tag, conflict marker in paint order", wide)
+	}
+	// Room for the conflict tag and Esc tag with a few cells over: the
+	// chip must shorten rather than the marker vanishing.
+	narrow := texts(runeLen(statusConflictTag) + runeLen("Esc… ") + runeLen(" status-bar ") + 2)
+	if len(narrow) != 3 || narrow[0] != " status-bar " {
+		t.Fatalf("narrow group = %q, want the basename chip beside both tags", narrow)
+	}
+	tighter := texts(runeLen(statusConflictTag) + runeLen("Esc… ") + runeLen(" ⎇ ") + 2)
+	if len(tighter) != 3 || tighter[0] != " ⎇ " {
+		t.Fatalf("tighter group = %q, want the bare glyph chip beside both tags", tighter)
+	}
+	tightest := texts(runeLen(statusConflictTag) + 2)
+	if len(tightest) != 1 || tightest[0] != statusConflictTag {
+		t.Fatalf("tightest group = %q, want the conflict marker alone", tightest)
+	}
+}
+
+// TestStatusGitChipForms pins the chip's ladder, including the dirty
+// count riding every rung: the person who checked out
+// feature/widgets/tabs knows it as "tabs", and even the bare glyph
+// still says "repo, N changed, click here".
+func TestStatusGitChipForms(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.gitSnap.Branch = "feature/widgets/tabs"
+	a.gitSnap.Ahead = 2
+	a.tree.DirtyFiles = map[string]filetree.GitChangeKind{"a": filetree.GitChangeModified, "b": filetree.GitChangeAdded}
+	got := a.statusGitChipForms()
+	want := []string{" feature/widgets/tabs ↑2 · 2 ", " tabs · 2 ", " ⎇ 2 "}
+	if len(got) != len(want) {
+		t.Fatalf("forms = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("form %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	a.gitSnap.Branch = ""
+	if forms := a.statusGitChipForms(); forms != nil {
+		t.Fatalf("no repo should yield no forms, got %q", forms)
 	}
 }
 
@@ -244,6 +415,131 @@ func TestLayoutTabs_IconsExpandWidth(t *testing.T) {
 	if on[0].CloseX != off[0].CloseX+2 {
 		t.Fatalf("CloseX should shift by 2 when icons on: off=%d on=%d",
 			off[0].CloseX, on[0].CloseX)
+	}
+}
+
+// TestTabLabels_DisambiguateSharedBasenames pins the strip's answer to
+// three open index.ts files rendering identically: a label that
+// collides with another open tab's grows a trailing path component
+// until the two differ, while a name nothing else shares stays bare.
+// The disambiguation lives in the strip, not in Tab.DisplayName — it
+// is a property of what else is open, not of the file.
+func TestTabLabels_DisambiguateSharedBasenames(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	for _, sub := range []string{"web", "api", "web/admin"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		openTestFile(t, a, filepath.Join(dir, sub), "index.ts", "export {}\n")
+	}
+	openTestFile(t, a, dir, "README.md", "# r\n")
+	got := a.tabLabels()
+	want := []string{"web/index.ts", "api/index.ts", "admin/index.ts", "README.md"}
+	if len(got) != len(want) {
+		t.Fatalf("labels = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("label %d = %q, want %q (all %q)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestTabLabels_ClipLongNamesInCells pins the cap and its unit: a name
+// past maxTabLabelCells is ellipsised, and the measure is cells — a
+// CJK name of eight ideographs is sixteen cells, not eight runes, and
+// lays out (and closes) at the cell it paints in.
+func TestTabLabels_ClipLongNamesInCells(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	a.tree.IconsEnabled = false
+	long := strings.Repeat("x", maxTabLabelCells+5) + ".go"
+	openTestFile(t, a, dir, long, "package x\n")
+	cjk := "日本語日本語日本.md"
+	openTestFile(t, a, dir, cjk, "# j\n")
+	labels := a.tabLabels()
+	if textdraw.Width(labels[0]) != maxTabLabelCells || !strings.HasSuffix(labels[0], "…") {
+		t.Fatalf("long label = %q (%d cells), want %d cells ending in …", labels[0], textdraw.Width(labels[0]), maxTabLabelCells)
+	}
+	if labels[1] != cjk {
+		t.Fatalf("CJK label = %q, want it whole at %d cells", labels[1], textdraw.Width(cjk))
+	}
+	rects := a.layoutTabs()
+	if want := 1 + 2 + textdraw.Width(cjk) + 3; rects[1].Width != want {
+		t.Fatalf("CJK tab width = %d, want %d cells (not %d runes)", rects[1].Width, want, len([]rune(cjk)))
+	}
+	a.drawTabBar()
+	a.screen.Show()
+	cells, _, _ := a.screen.(tcell.SimulationScreen).GetContents()
+	for _, r := range a.lastTabRects {
+		if c := cells[r.CloseX]; len(c.Runes) == 0 || c.Runes[0] != '×' {
+			t.Fatalf("tab %d: CloseX %d holds %q, want × (layout and paint disagree)", r.Index, r.CloseX, c.Runes)
+		}
+	}
+}
+
+// TestTabStrip_BadgeOwnsItsCells is the regression test for "‹2.go ×":
+// with eight tabs open and the strip scrolled, the left badge paints in
+// its own reserved slot and the first visible tab's label is intact
+// right after it — and every remembered hit rect lies inside the tab
+// window, so a click on the badge's cells never reaches a tab.
+func TestTabStrip_BadgeOwnsItsCells(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	openManyTabs(t, a, dir, 8)
+	a.tabScroll = a.maxTabScroll() / 2
+	if nl, nr := a.tabOverflow(); nl == 0 || nr == 0 {
+		t.Fatalf("precondition: want tabs hidden both ways, got %d/%d", nl, nr)
+	}
+	a.drawTabBar()
+	a.screen.Show()
+	row := []rune(screenLine(a.screen.(tcell.SimulationScreen), 0))
+
+	stripX, stripW := a.tabStripRegion()
+	winX, winW := a.tabWindow()
+	left, right := a.tabChevrons()
+	if left.X != stripX || !strings.HasPrefix(left.Label, "‹") {
+		t.Fatalf("left badge = %+v, want it at the strip's first cell", left)
+	}
+	if right.X+textdraw.Width(right.Label) != stripX+stripW || !strings.HasSuffix(right.Label, "›") {
+		t.Fatalf("right badge = %+v, want it ending on the strip's last cell", right)
+	}
+	// The badge slot holds the badge and then blank cells — never a
+	// tab's glyphs.
+	for x := stripX + textdraw.Width(left.Label); x < winX; x++ {
+		if row[x] != ' ' {
+			t.Fatalf("cell %d in the badge slot holds %q: %q", x, row[x], string(row))
+		}
+	}
+	// The first visible tab: its label appears whole, starting after
+	// the slot.
+	var first *tabRect
+	for i := range a.lastTabRects {
+		r := a.lastTabRects[i]
+		if r.CloseX >= 0 && r.X >= winX {
+			first = &r
+			break
+		}
+	}
+	if first == nil {
+		t.Fatal("no fully visible tab after the badge")
+	}
+	painted := string(row[first.X : first.X+first.Width])
+	if !strings.Contains(painted, first.Label) || strings.ContainsRune(painted, '‹') {
+		t.Fatalf("first visible tab painted as %q, want %q intact after the badge", painted, first.Label)
+	}
+	for _, r := range a.lastTabRects {
+		if r.X < winX || r.X+r.Width > winX+winW {
+			t.Fatalf("hit rect %+v escapes the tab window [%d,%d)", r, winX, winX+winW)
+		}
+		if r.CloseX >= 0 && (r.CloseX < r.X || r.CloseX >= r.X+r.Width) {
+			t.Fatalf("hit rect %+v has a CloseX outside itself", r)
+		}
+	}
+	if left.hit(winX) || right.hit(winX+winW-1) {
+		t.Fatal("badge hit ranges must not reach into the tab window")
 	}
 }
 
@@ -611,6 +907,31 @@ func TestDrawStatusBar_LowColorUsesAttributes(t *testing.T) {
 	_, _, attrs := cells[sy*w].Style.Decompose()
 	if attrs&tcell.AttrReverse == 0 {
 		t.Fatalf("degraded status bar attrs = %v, want AttrReverse", attrs)
+	}
+}
+
+// TestDrawStatusBar_ErrorFlashPaintsInErrorColour pins the visual half
+// of flashError: a failure report on the bar takes the palette's Error
+// foreground (the disk-conflict marker's treatment), where a plain
+// flash keeps StatusFg — so the two kinds are told apart at a glance.
+func TestDrawStatusBar_ErrorFlashPaintsInErrorColour(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 80, 24)
+	scr := a.screen.(tcell.SimulationScreen)
+	cellFg := func() tcell.Color {
+		a.drawStatusBar()
+		scr.Show()
+		cells, w, _ := scr.GetContents()
+		fg, _, _ := cells[(a.height-1)*w+1].Style.Decompose()
+		return fg
+	}
+	a.flash("Copied")
+	if got := cellFg(); got != a.theme.StatusFg {
+		t.Fatalf("info flash fg = %v, want StatusFg %v", got, a.theme.StatusFg)
+	}
+	a.flashError("save failed")
+	if got := cellFg(); got != a.theme.Error {
+		t.Fatalf("error flash fg = %v, want Error %v", got, a.theme.Error)
 	}
 }
 
