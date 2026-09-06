@@ -116,6 +116,17 @@ func (a *App) openConfirm(title, message string, callback func(*App)) *overlay.C
 	return c
 }
 
+// confirmButtons builds the caption pair for a Confirm whose action is
+// a named verb: "[ Cancel ]" on the left and "[ <verb> ]" on the right,
+// bracketed the way every prefab button is. Every destructive confirm
+// the app owns should name its verb — a bare Yes under "Delete x?
+// Unmerged work would be lost." makes the user re-read the question to
+// learn what Enter does. Keep verbs short: the pair must fit the
+// 38-cell frame a minWidth terminal leaves the confirm.
+func confirmButtons(verb string) [2]string {
+	return [2]string{"[ Cancel ]", "[ " + verb + " ]"}
+}
+
 // openInfo shows the single-button report overlay — an overlay.Info —
 // for passive reporting: most importantly, the full stderr from a
 // failed custom action where the status-bar flash isn't enough room.

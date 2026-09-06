@@ -553,3 +553,79 @@ func TestConfirm_ShortScreenKeepsButtonRowVisible(t *testing.T) {
 		t.Fatalf("modal covers the status bar row: %+v on %d rows", r, scrH)
 	}
 }
+
+// TestConfirm_LabelsDrawAndHitTestTogether pins the optional captions:
+// a caller naming its verb gets "[ Cancel ] [ Delete branch ]" painted
+// on the button row, the stock geometry is left alone only for the
+// stock pair, and the click zones follow the painted widths — the
+// last cell of a 17-cell caption must still press it, which the fixed
+// 7-cell Yes zone used to miss.
+func TestConfirm_LabelsDrawAndHitTestTogether(t *testing.T) {
+	scr := simScreen(t)
+	c, log := testConfirm()
+	c.Labels = [2]string{"[ Cancel ]", "[ Delete branch ]"}
+	c.Draw(scr)
+	scr.Show()
+
+	r := c.rect()
+	btnY := r.Y + c.buttonRow()
+	noX, yesX := c.buttonCols()
+	row := ""
+	for x := r.X + 1; x < r.X+r.W-1; x++ {
+		row += string(cellAt(scr, x, btnY))
+	}
+	for _, want := range []string{"[ Cancel ]", "[ Delete branch ]"} {
+		if !strings.Contains(row, want) {
+			t.Errorf("button row %q never painted %q", row, want)
+		}
+	}
+	if noX == confirmBtnNoX && yesX == confirmBtnYesX {
+		t.Fatal("custom captions must be laid out by width, not the pinned No/Yes columns")
+	}
+	if noW, _ := c.buttonWidths(); noX+noW >= yesX {
+		t.Fatalf("captions overlap: cancel ends at %d, action starts at %d", noX+noW, yesX)
+	}
+
+	_, yesW := c.buttonWidths()
+	c.HandleMouse(r.X+yesX+yesW-1, btnY, tcell.Button1)
+	if len(*log) != 2 || (*log)[1] != "yes" {
+		t.Fatalf("click on the caption's last cell should press it, got %v", *log)
+	}
+
+	// The stock pair keeps the pinned columns a hundred hit-zone tests
+	// spell out.
+	d, _ := testConfirm()
+	if noX, yesX := d.buttonCols(); noX != confirmBtnNoX || yesX != confirmBtnYesX {
+		t.Fatalf("default captions drifted off the pinned columns: %d/%d", noX, yesX)
+	}
+}
+
+// TestConfirm_LabelsFitAtMinWidth is the floor check for the longest
+// pair the app uses: at 40 columns the frame is 38 cells and both
+// captions must still sit inside it without overlapping, because a
+// button painted over the border is a control the user cannot read.
+func TestConfirm_LabelsFitAtMinWidth(t *testing.T) {
+	scr := simScreen(t)
+	scr.SetSize(40, 10)
+	c, _ := testConfirm()
+	c.Size = func() (int, int) { return 40, 10 }
+	c.Labels = [2]string{"[ Cancel ]", "[ Pull, then push ]"}
+	c.Draw(scr)
+	scr.Show()
+
+	r := c.rect()
+	noX, yesX := c.buttonCols()
+	noW, yesW := c.buttonWidths()
+	if noX < 1 || yesX+yesW > r.W-1 {
+		t.Fatalf("captions outside the %d-cell frame: cancel=%d action=%d..%d", r.W, noX, yesX, yesX+yesW)
+	}
+	if noX+noW >= yesX {
+		t.Fatalf("captions overlap at minWidth: %d..%d and %d", noX, noX+noW, yesX)
+	}
+	btnY := r.Y + c.buttonRow()
+	for i, want := range "[ Pull, then push ]" {
+		if got := cellAt(scr, r.X+yesX+i, btnY); got != want {
+			t.Fatalf("action caption cell %d = %q, want %q", i, got, want)
+		}
+	}
+}

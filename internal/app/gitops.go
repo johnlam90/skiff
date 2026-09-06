@@ -74,32 +74,35 @@ func (a *App) handleGitOpDone(r gitOpResult, err error) {
 	case err == nil:
 		a.flash(r.okFlash)
 	case opErr != nil && opErr.NonFastForward && r.label == "Push":
-		a.openConfirm("Push rejected",
+		c := a.openConfirm("Push rejected",
 			"origin has commits you don't. Pull (merge), then push?",
 			func(app *App) { app.doGitPullAndPush() })
+		c.Labels = confirmButtons("Pull, then push")
 	case opErr != nil && opErr.NotMerged && r.label == "Delete branch" && a.gitDeleteTarget != "":
 		// `-d` refused an unmerged branch — losing work needs its own
 		// explicit yes, so the force delete is a second confirm, never
 		// the default.
 		name := a.gitDeleteTarget
 		a.gitDeleteTarget = ""
-		a.openConfirm("Branch not merged",
+		c := a.openConfirm("Branch not merged",
 			name+" has commits that aren't merged anywhere. Force delete?",
 			func(app *App) {
 				app.runGitOp("Force delete", "Deleted "+name, false,
 					func(r *git.Repo) error { return r.DeleteBranch(name, true) })
 			})
+		c.Labels = confirmButtons("Force delete")
 	case opErr != nil && opErr.WorktreeDirty && r.label == "Remove worktree" && a.gitWorktreeTarget != "":
 		// A plain remove refused uncommitted work — force is a second
 		// confirm, mirroring the branch-delete ladder.
 		path := a.gitWorktreeTarget
 		a.gitWorktreeTarget = ""
-		a.openConfirm("Worktree not clean",
+		c := a.openConfirm("Worktree not clean",
 			path+" has uncommitted or untracked files. Force remove?",
 			func(app *App) {
 				app.runGitOp("Force remove worktree", "Removed worktree", false,
 					func(r *git.Repo) error { return r.WorktreeRemove(path, true) })
 			})
+		c.Labels = confirmButtons("Force remove")
 	case opErr != nil:
 		lines := []string{opErr.Advice, ""}
 		lines = append(lines, splitNonEmptyLines(opErr.Output)...)
@@ -465,12 +468,13 @@ func (a *App) menuGitUndoCommit() {
 	if !a.hasGitRepo() {
 		return
 	}
-	a.openConfirm("Undo last commit",
+	c := a.openConfirm("Undo last commit",
 		"Remove the last commit? Its changes stay in your working tree. "+
 			"If it was already pushed, the next push will need a merge.",
 		func(app *App) {
 			app.runGitOp("Undo commit", "Last commit undone", false, (*git.Repo).UndoCommit)
 		})
+	c.Labels = confirmButtons("Undo commit")
 }
 
 // menuGitMergeBranch picks any other branch and merges it into the
@@ -547,13 +551,14 @@ func (a *App) openDeleteBranchPick(all []string) {
 			if _, ok := app.safeRef(name); !ok {
 				return
 			}
-			app.openConfirm("Delete branch",
+			c := app.openConfirm("Delete branch",
 				"Delete "+name+"? Unmerged work on it would be lost.",
 				func(app2 *App) {
 					app2.gitDeleteTarget = name
 					app2.runGitOp("Delete branch", "Deleted "+name, false,
 						func(r *git.Repo) error { return r.DeleteBranch(name, false) })
 				})
+			c.Labels = confirmButtons("Delete branch")
 		}, nil, nil)
 }
 
