@@ -244,8 +244,9 @@ func (b *Buffer) Substring(a, c Position) string {
 	return sb.String()
 }
 
-// EndPos returns the position just after the last rune of the buffer.
-// Useful for select-all and end-of-document navigation.
+// EndPos returns the position just after the last rune of the buffer —
+// where Tab.SelectAll parks the caret, where Tab.MoveDocEnd jumps to,
+// and the bound Delete checks before removing a cluster.
 func (b *Buffer) EndPos() Position {
 	last := len(b.Lines) - 1
 	return Position{Line: last, Col: len(b.LineRunes(last))}
