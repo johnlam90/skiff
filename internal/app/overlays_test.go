@@ -50,7 +50,12 @@ func TestOpeners_PushOverlayStack(t *testing.T) {
 			a.openForm("T", []customactions.Prompt{{Key: "k", Label: "L"}}, nil)
 		}},
 		{"treeContext", nil, func(a *App) { a.openTreeContext(a.tree.Root, 2, 2) }},
-		{"gitExtras", nil, func(a *App) { a.openGitExtras(2, 2) }},
+		{"gitExtras", nil, func(a *App) {
+			// The extras pick omits every verb without a repo and then
+			// refuses to open an empty frame, so fake the snapshot.
+			a.gitSnap.IsRepo, a.gitSnap.Branch = true, "main"
+			a.openGitExtras(2, 2)
+		}},
 		{"listPick", nil, func(a *App) {
 			a.openListPick("T", []listPickItem{{Label: "one"}}, nil, nil, nil)
 		}},

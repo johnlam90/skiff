@@ -1051,7 +1051,10 @@ func TestDraw_EveryPrefabFitsAtTheMinimumSize(t *testing.T) {
 		{"menu", func(a *App) { a.openMenu() }, []string{"Menu", "New file", "v" + version.Version}},
 		{"cheat sheet", func(a *App) { a.menuKeyboardShortcuts() }, []string{"Esc is the", "[  OK  ]"}},
 		{"tree context", func(a *App) { a.openTreeContext(a.tree.Root, 2, 2) }, []string{"Copy rel path"}},
-		{"git extras", func(a *App) { a.openGitExtras(2, 2) }, []string{"Fetch", "▼"}},
+		{"git extras", func(a *App) {
+			a.gitSnap.IsRepo, a.gitSnap.Branch = true, "main"
+			a.openGitExtras(2, 2)
+		}, []string{"More git actions", "Fetch"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -1033,8 +1033,8 @@ func TestGitPanelKeys_TabReachesButtonsAndEnterRuns(t *testing.T) {
 		t.Fatalf("→ should walk the button row, got %d", a.gitPanel.btn)
 	}
 	a.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
-	if labels := popupLabels(t, a); len(labels) == 0 {
-		t.Fatal("enter on the ⋯ button should open the git extras popup")
+	if !pickIsOpen(a) {
+		t.Fatalf("enter on the ⋯ button should open the More git actions pick; top = %T", a.overlays.Top())
 	}
 }
 

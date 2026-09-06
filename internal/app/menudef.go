@@ -81,9 +81,16 @@ type menuItemDef struct {
 // menuDrillIn is one demoted cluster: the title of the pick it opens
 // and the rows that live inside it. Kept as a value (not a closure) so
 // tests can walk the rows without opening an overlay.
+//
+// visible is the door's own predicate — the same one the top-level row
+// that opens the pick carries — so a flattened filter can ask "would
+// this cluster be reachable right now" without hunting for the door
+// row: no repo means no git verbs in the match list, however well
+// "push" matches.
 type menuDrillIn struct {
-	title string
-	items []menuItemDef
+	title   string
+	items   []menuItemDef
+	visible func(*App) bool
 }
 
 // builtinMenuGroups returns the editor's built-in action groups in
@@ -231,7 +238,7 @@ func quitMenuGroup() []menuItemDef {
 // keeps the exact label, action and predicate it had as a top-level
 // row so muscle memory and the Esc-g hint survive the demotion.
 func gitDrillIn() menuDrillIn {
-	return menuDrillIn{title: "Git", items: []menuItemDef{
+	return menuDrillIn{title: "Git", visible: (*App).hasGitActions, items: []menuItemDef{
 		{label: "Git changes", shortcut: "Esc g", action: (*App).menuGitChanges, enabled: (*App).hasGitRepo},
 		{label: "Commit changes…", action: (*App).menuGitCommit, enabled: (*App).hasGitChanges},
 		{label: "Push", action: (*App).menuGitPush, enabled: (*App).hasGitRepo},
@@ -244,12 +251,41 @@ func gitDrillIn() menuDrillIn {
 	}}
 }
 
+// gitExtrasDrillIn is the pick behind "More git actions…" — and behind
+// the git panel's ⋯ button, which opens the same list. It used to be an
+// anchored overlay.Popup with no filter and no registration, so the
+// reachability test could not see Fetch, the branch verbs, the
+// worktree verbs or the stashes, and the menu's type-to-filter could
+// not find them either. As a drill-in it is one more entry in
+// menuDrillIns and rides the same openMenuDrillIn path as Git…: rows
+// that cannot apply are omitted, the pick filters, and every verb is
+// reachable from the top-level filter by name.
+//
+// Commit history lives in gitDrillIn only: a row listed twice would
+// show twice in a flattened match list.
+func gitExtrasDrillIn() menuDrillIn {
+	return menuDrillIn{title: "More git actions", visible: (*App).hasGitRepo, items: []menuItemDef{
+		{label: "Fetch", action: (*App).menuGitFetch, enabled: (*App).hasGitRepo},
+		{label: "Compare against…", action: (*App).menuGitCompareAgainst, enabled: (*App).hasGitRepo},
+		{label: "New branch…", action: (*App).menuGitNewBranch, enabled: (*App).hasGitRepo},
+		{label: "Merge branch…", action: (*App).menuGitMergeBranch, enabled: (*App).hasGitRepo},
+		{label: "Rename branch…", action: (*App).menuGitRenameBranch, enabled: (*App).hasGitRepo},
+		{label: "Delete branch…", action: (*App).menuGitDeleteBranch, enabled: (*App).hasGitRepo},
+		{label: "New worktree…", action: (*App).menuGitNewWorktree, enabled: (*App).hasGitRepo},
+		{label: "List worktrees", action: (*App).menuGitListWorktrees, enabled: (*App).hasGitRepo},
+		{label: "Remove worktree…", action: (*App).menuGitRemoveWorktree, enabled: (*App).hasGitRepo},
+		{label: "Stash changes", action: (*App).menuGitStash, enabled: (*App).hasGitRepo},
+		{label: "Pop stash", action: (*App).menuGitStashPop, enabled: (*App).hasGitRepo},
+		{label: "Undo last commit…", action: (*App).menuGitUndoCommit, enabled: (*App).hasGitRepo},
+	}}
+}
+
 // fileClipDrillIn is the pick behind the "File clipboard…" row: the
 // cut / copy / duplicate / paste quartet plus the two copy-path rows,
 // which are the same gesture ("put something about this file on a
 // clipboard") and were the other half of the twelve-row File group.
 func fileClipDrillIn() menuDrillIn {
-	return menuDrillIn{title: "File clipboard", items: []menuItemDef{
+	return menuDrillIn{title: "File clipboard", visible: (*App).hasFileClipActions, items: []menuItemDef{
 		{label: "Cut file", action: (*App).menuCutFile, enabled: (*App).hasFileTab},
 		{label: "Copy file", action: (*App).menuCopyFile, enabled: (*App).hasFileTab},
 		{label: "Duplicate file", action: (*App).menuDuplicateFile, enabled: (*App).hasFileTab},
@@ -264,7 +300,7 @@ func fileClipDrillIn() menuDrillIn {
 // drill-in" generically: a future drill-in is covered the moment it is
 // registered here, and an action can never quietly leave the ≡ menu.
 func menuDrillIns() []menuDrillIn {
-	return []menuDrillIn{gitDrillIn(), fileClipDrillIn()}
+	return []menuDrillIn{gitDrillIn(), gitExtrasDrillIn(), fileClipDrillIn()}
 }
 
 // alwaysTrue is the default predicate for actions with no preconditions

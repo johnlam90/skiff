@@ -710,7 +710,7 @@ func TestOpenMenuDrillIn_EmptyFlashesInsteadOfOpening(t *testing.T) {
 	if pickIsOpen(a) {
 		t.Fatal("an all-disabled drill-in must not open an empty pick")
 	}
-	if !strings.Contains(a.statusMsg, "git actions") {
+	if !strings.Contains(a.statusMsg, "Nothing under Git…") {
 		t.Fatalf("expected a flash explaining the empty drill-in, got %q", a.statusMsg)
 	}
 }
@@ -1408,5 +1408,63 @@ func TestDrawMenu_ScrollbarNeverTouchesShortcuts(t *testing.T) {
 	}
 	if !foundEdge {
 		t.Fatal("with no bar, shortcuts should extend to the full-width column")
+	}
+}
+
+// TestMenuDrillIn_GitExtrasIsARegisteredPick pins the shape "More git
+// actions…" now has: an overlay.Pick built by openMenuDrillIn from
+// gitExtrasDrillIn — filterable, registered, and holding every verb the
+// old anchored popup listed — reached identically from the ≡ row and
+// from the git panel's ⋯ button. Without a repo the door stays shut
+// with a flash rather than an empty frame.
+func TestMenuDrillIn_GitExtrasIsARegisteredPick(t *testing.T) {
+	a, _ := fakeRepoApp(t)
+	a.openMenu()
+	row := drillInItemByLabel(t, a, "More git actions…")
+	row.action(a)
+
+	pick := pickPrefab(t, a)
+	if pick.Title != "More git actions" {
+		t.Fatalf("pick title = %q, want More git actions", pick.Title)
+	}
+	got := make(map[string]bool, len(pick.Items))
+	for _, it := range pick.Items {
+		got[it.Label] = true
+	}
+	for _, want := range []string{
+		"Fetch", "Compare against…",
+		"New branch…", "Merge branch…", "Rename branch…", "Delete branch…",
+		"New worktree…", "List worktrees", "Remove worktree…",
+		"Stash changes", "Pop stash", "Undo last commit…",
+	} {
+		if !got[want] {
+			t.Errorf("extras pick is missing %q; has %v", want, pick.Items)
+		}
+	}
+
+	// The panel's ⋯ button opens the very same list.
+	a.closeAllModals()
+	a.openGitExtras(3, 3)
+	if p := pickPrefab(t, a); p.Title != "More git actions" || len(p.Items) != len(pick.Items) {
+		t.Fatalf("panel ⋯ opened %q with %d rows, want the %d-row extras pick", p.Title, len(p.Items), len(pick.Items))
+	}
+
+	registered := false
+	for _, d := range menuDrillIns() {
+		if d.title == "More git actions" {
+			registered = true
+		}
+	}
+	if !registered {
+		t.Fatal("the extras drill-in must be registered in menuDrillIns for the reachability test to see it")
+	}
+
+	b := newTestApp(t, t.TempDir())
+	b.openGitExtras(2, 2)
+	if pickIsOpen(b) {
+		t.Fatal("no repo: the extras pick must not open with nothing to run")
+	}
+	if !strings.Contains(b.statusMsg, "More git actions") {
+		t.Fatalf("no repo: expected a flash naming the drill-in, got %q", b.statusMsg)
 	}
 }

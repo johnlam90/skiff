@@ -408,7 +408,7 @@ func (a *App) openMenuDrillIn(d menuDrillIn) {
 		// The row's own visibility predicate should have hidden it, but
 		// predicates and contents can drift — say so instead of opening
 		// an empty frame.
-		a.flash("No " + strings.ToLower(d.title) + " actions available right now")
+		a.flash("Nothing under " + d.title + "… applies right now")
 		return
 	}
 	a.openListPick(d.title, items, func(app *App, i int) { rows[i].action(app) }, nil, nil)

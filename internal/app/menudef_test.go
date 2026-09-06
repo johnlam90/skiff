@@ -65,6 +65,12 @@ var postRedesignMenuActions = []string{
 	// The markdown preview toggle (both label forms; the row itself is
 	// visibility-gated on a markdown tab being active).
 	"Preview Markdown", "Edit Markdown",
+	// The "More git actions…" drill-in: the verbs that used to hide in
+	// an unregistered popup the reachability walk could not see.
+	"Fetch", "Compare against…",
+	"New branch…", "Merge branch…", "Rename branch…", "Delete branch…",
+	"New worktree…", "List worktrees", "Remove worktree…",
+	"Stash changes", "Pop stash", "Undo last commit…",
 }
 
 // menuCatalog flattens every built-in row the ≡ menu can reach — the top
@@ -365,11 +371,16 @@ func TestMenuDrillIns_HoldEveryDemotedAction(t *testing.T) {
 			}
 		}
 	}
-	// The nine git verbs and the six file-clipboard actions are exactly
-	// what the top level is allowed to demote.
+	// The nine git verbs, the twelve extras behind "More git actions…"
+	// and the six file-clipboard actions are exactly what the top level
+	// is allowed to demote.
 	wantDemoted := []string{
 		"Git changes", "Commit changes…", "Push", "Pull", "Switch branch…",
 		"Diff this file", "History of this file", "Commit history", "More git actions…",
+		"Fetch", "Compare against…",
+		"New branch…", "Merge branch…", "Rename branch…", "Delete branch…",
+		"New worktree…", "List worktrees", "Remove worktree…",
+		"Stash changes", "Pop stash", "Undo last commit…",
 		"Cut file", "Copy file", "Duplicate file", "Paste into …",
 		"Copy relative path", "Copy absolute path",
 	}
