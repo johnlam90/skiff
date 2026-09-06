@@ -36,7 +36,10 @@
 
 package app
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // Modal chrome rows, as offsets from the modal's top border. The title
 // and the filter field are fixed chrome; only rows at menuContentY and
@@ -76,6 +79,12 @@ type menuItemDef struct {
 	// buffer, Undo with an empty history). The first is noise and gets
 	// dropped; the second is a dimmed row that teaches.
 	visible func(*App) bool
+	// via names the drill-in a flattened filter match came out of ("Git",
+	// "File clipboard"); empty for a top-level row. Only the copies
+	// matchMenuGroups hands the layout carry it, so the tables stay
+	// oblivious. drawMenu paints it in the tag column as "Git ›" so
+	// "Push" in a match list does not read as a top-level row.
+	via string
 }
 
 // menuDrillIn is one demoted cluster: the title of the pick it opens
@@ -332,6 +341,22 @@ func (a *App) hasFileClipActions() bool {
 	return a.hasFileTab() || a.hasFileClip()
 }
 
+// menuTag is the text a row paints in its right-hand column: the Esc
+// hint, the drill-in it was matched out of ("Git ›"), or both ("Git ›
+// Esc g") — the cheat-sheet hint must survive flattening, and the
+// parent must be named or a demoted verb reads as a top-level row.
+// Every reader of the column — the width the row asks for, the budget
+// its label gets, the draw — goes through here so they cannot disagree.
+func menuTag(it menuItemDef) string {
+	switch {
+	case it.via != "" && it.shortcut != "":
+		return it.via + " › " + it.shortcut
+	case it.via != "":
+		return it.via + " ›"
+	}
+	return it.shortcut
+}
+
 // menuLabel resolves a row's display label, preferring the dynamic
 // labelFor hook. Every surface that needs the user-visible string —
 // drawMenu, the drill-in picks, the filter matcher — goes through here
@@ -437,8 +462,8 @@ func (a *App) menuNaturalHeight() int {
 // refused the columns.
 func (a *App) menuRowWidth(it menuItemDef) int {
 	w := 5 + runeLen(a.menuLabel(it))
-	if it.shortcut != "" {
-		w += 3 + runeLen(it.shortcut)
+	if tag := menuTag(it); tag != "" {
+		w += 3 + runeLen(tag)
 	}
 	return w
 }
@@ -447,8 +472,8 @@ func (a *App) menuRowWidth(it menuItemDef) int {
 // a modal mw cells wide. The inverse of menuRowWidth.
 func menuLabelBudget(mw int, it menuItemDef) int {
 	b := mw - 5
-	if it.shortcut != "" {
-		b -= 3 + runeLen(it.shortcut)
+	if tag := menuTag(it); tag != "" {
+		b -= 3 + runeLen(tag)
 	}
 	return b
 }
@@ -473,24 +498,59 @@ func (a *App) menuNaturalWidth() int {
 	return w
 }
 
-// matchMenuGroups narrows every group down to the rows matching q and
+// matchMenuGroups narrows the menu down to the rows matching q and
 // returns them as a single flat group (nil when nothing matched).
-// Matching runs across all groups at once — that's the point of the
-// filter: "branch" should find Switch branch without the user knowing
-// it lives behind Git.
+// Matching runs across every group AND every registered drill-in at
+// once — that is the point of the filter: "branch" finds Switch
+// branch… and the four branch verbs behind More git actions… without
+// the user knowing where any of them lives. It used to walk only the
+// groups it was handed, so every demoted verb was unreachable by name
+// while cheatsheet.go promised the opposite.
+//
+// A drill-in row is a candidate when its door is open (the drill-in's
+// own visible predicate) and its own visible predicate agrees; its
+// enabled predicate is left to dim the row exactly as a top-level row
+// dims, so "commit" on a clean tree still teaches that the verb exists.
+// Hits are ordered by rank (menuMatchRank) and then by table order, so
+// Enter and the top of the list agree on the row the user meant; the
+// rank used to be computed and thrown away.
 func (a *App) matchMenuGroups(groups [][]menuItemDef, q string) [][]menuItemDef {
-	var hits []menuItemDef
+	type hit struct {
+		it   menuItemDef
+		rank int
+	}
+	var hits []hit
+	consider := func(it menuItemDef, via string) {
+		if rank := menuMatchRank(strings.ToLower(a.menuLabel(it)), q); rank >= 0 {
+			it.via = via
+			hits = append(hits, hit{it, rank})
+		}
+	}
 	for _, g := range groups {
 		for _, it := range g {
-			if menuMatchRank(strings.ToLower(a.menuLabel(it)), q) >= 0 {
-				hits = append(hits, it)
+			consider(it, "")
+		}
+	}
+	for _, d := range menuDrillIns() {
+		if d.visible != nil && !d.visible(a) {
+			continue
+		}
+		for _, it := range d.items {
+			if it.visible != nil && !it.visible(a) {
+				continue
 			}
+			consider(it, d.title)
 		}
 	}
 	if len(hits) == 0 {
 		return nil
 	}
-	return [][]menuItemDef{hits}
+	sort.SliceStable(hits, func(i, j int) bool { return hits[i].rank < hits[j].rank })
+	flat := make([]menuItemDef, len(hits))
+	for i, h := range hits {
+		flat[i] = h.it
+	}
+	return [][]menuItemDef{flat}
 }
 
 // layoutMenuGroups stamps relY onto every row of groups and reports the

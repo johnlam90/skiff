@@ -1468,3 +1468,125 @@ func TestMenuDrillIn_GitExtrasIsARegisteredPick(t *testing.T) {
 		t.Fatalf("no repo: expected a flash naming the drill-in, got %q", b.statusMsg)
 	}
 }
+
+// TestMenuFilter_ReachesDrillInRows is the bug the flattened filter
+// fixes: typing "branch", "push" or "paste" with the menu up used to
+// say "no matches" because matchMenuGroups walked only the top level,
+// while the Esc ? sheet promised that "sb" finds Switch branch…. Every
+// demoted row is now a candidate, tagged with the drill-in it came out
+// of, and the list is ordered by rank so the best match leads.
+func TestMenuFilter_ReachesDrillInRows(t *testing.T) {
+	a, _ := fakeRepoApp(t)
+	openTestFile(t, a, a.rootDir, "a.txt", "x")
+	a.openMenu()
+
+	type want struct {
+		query string
+		label string
+		via   string
+	}
+	for _, w := range []want{
+		{"sb", "Switch branch…", "Git"},
+		{"branch", "Switch branch…", "Git"},
+		{"branch", "New branch…", "More git actions"},
+		{"branch", "Delete branch…", "More git actions"},
+		{"push", "Push", "Git"},
+		{"paste", "Paste", ""},
+		{"paste", "Paste into …", "File clipboard"},
+	} {
+		a.clearMenuFilter()
+		for _, r := range w.query {
+			a.handleMenuKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+		}
+		items, _, _ := a.menuLayout()
+		found := false
+		for _, it := range items {
+			if menuCatalogLabel(a, it) == w.label {
+				found = true
+				if it.via != w.via {
+					t.Errorf("%q → %q carries via %q, want %q", w.query, w.label, it.via, w.via)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("filter %q should find %q; got %v", w.query, w.label, menuLabels(a, items))
+		}
+	}
+
+	// Rank orders the flat list: for "git" the two whole-label prefixes
+	// (Git…, Git changes) lead and the word-prefix hit trails them.
+	a.clearMenuFilter()
+	for _, r := range "git" {
+		a.handleMenuKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
+	items, _, _ := a.menuLayout()
+	labels := menuLabels(a, items)
+	pos := func(l string) int {
+		for i, got := range labels {
+			if got == l {
+				return i
+			}
+		}
+		t.Fatalf("filter 'git' should find %q; got %v", l, labels)
+		return -1
+	}
+	if pos("More git actions…") < pos("Git…") || pos("More git actions…") < pos("Git changes") {
+		t.Errorf("rank must order the matches, got %v", labels)
+	}
+
+	// Enter on the leading match runs the demoted row's own action.
+	a.clearMenuFilter()
+	for _, r := range "push" {
+		a.handleMenuKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
+	items, _, _ = a.menuLayout()
+	if a.hoveredMenuRow < 0 || a.menuLabel(items[a.hoveredMenuRow]) != "Push" {
+		t.Fatalf("Push should be the selected match, got row %d of %v", a.hoveredMenuRow, menuLabels(a, items))
+	}
+	a.handleMenuKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if a.menuOpen {
+		t.Fatal("Enter on a flattened drill-in row must run it and close the menu")
+	}
+}
+
+// TestMenuFilter_ClosedDoorHidesItsRows pins the other half of the
+// flattening: a drill-in whose door is shut for this session shape (no
+// repo, so Git… is hidden) contributes nothing, however well its rows
+// match — "push" with no repository is honestly "no matches".
+func TestMenuFilter_ClosedDoorHidesItsRows(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.openMenu()
+	for _, r := range "push" {
+		a.handleMenuKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
+	if items, _, _ := a.menuLayout(); len(items) != 0 {
+		t.Fatalf("no repo: 'push' should match nothing, got %v", menuLabels(a, items))
+	}
+}
+
+// TestDrawMenu_FlattenedRowNamesItsDrillIn checks the tag column: a
+// demoted verb in the match list paints "Git ›" where a top-level row
+// paints its Esc hint, so the user can tell Push is one level down —
+// and a demoted row that also has a hint keeps it ("Git › Esc g").
+func TestDrawMenu_FlattenedRowNamesItsDrillIn(t *testing.T) {
+	a, _ := fakeRepoApp(t)
+	a.openMenu()
+	for _, r := range "push" {
+		a.handleMenuKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
+	a.draw()
+	a.screen.Show()
+	if !screenHasText(t, a, "Git ›") {
+		t.Fatal("the flattened Push row never painted its Git › tag")
+	}
+
+	a.clearMenuFilter()
+	for _, r := range "git changes" {
+		a.handleMenuKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
+	a.draw()
+	a.screen.Show()
+	if !screenHasText(t, a, "Git › Esc g") {
+		t.Fatal("a flattened row with a leader hint must paint both the parent and the hint")
+	}
+}

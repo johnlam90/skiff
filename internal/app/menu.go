@@ -234,9 +234,12 @@ func (a *App) menuMoveSelection(dir int) {
 // menuFilterChanged re-selects after the query moved: scroll back to the
 // top and highlight the best-ranked enabled match (ties break toward
 // menu order), so Enter runs the row the user was aiming at rather than
-// whichever match happens to sit highest in the table. With an empty
-// query every row ranks 0 and this degenerates to "select the first
-// enabled row" — the pre-filter open behaviour.
+// whichever match happens to sit highest in the table. matchMenuGroups
+// already sorts the list by rank, so this is normally the first enabled
+// row; the rank walk stays because a dimmed better match must not steal
+// the selection from an enabled one. With an empty query every row
+// ranks 0 and this degenerates to "select the first enabled row" — the
+// pre-filter open behaviour.
 func (a *App) menuFilterChanged() {
 	a.menuList = overlay.List{}
 	items, _, _ := a.menuLayout()
@@ -668,8 +671,10 @@ func (a *App) drawMenu() {
 		label := trimRunes(a.menuLabel(item), menuLabelBudget(mw-barReserve, item))
 		drawAt(a.screen, mx+2, cy, "▸", chevStyle)
 		drawAt(a.screen, mx+4, cy, label, labelStyle)
-		if item.shortcut != "" {
-			drawAt(a.screen, mx+mw-2-barReserve-runeLen(item.shortcut), cy, item.shortcut, shortcutStyle)
+		// The tag column: the Esc hint, or the drill-in a flattened
+		// match came out of ("Git ›"), or both — see menuTag.
+		if tag := menuTag(item); tag != "" {
+			drawAt(a.screen, mx+mw-2-barReserve-runeLen(tag), cy, tag, shortcutStyle)
 		}
 	}
 	if len(items) == 0 {
