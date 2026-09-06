@@ -1387,6 +1387,48 @@ func TestTab_Render_HidesCursorWhenOffscreen(t *testing.T) {
 	}
 }
 
+// TestTab_HitTestTracksTheGutterWidth pins the seam the narrower gutter
+// depends on: the click inverse and the paint read the SAME width, so a
+// click on the first content cell lands on column 0 for a 5-line file
+// (four-cell gutter) and for a 500-line file (five-cell gutter) alike,
+// and the painted line number sits exactly one cell left of the content
+// in both — a hit-test still assuming the old fixed six would land two
+// runes off in every small file.
+func TestTab_HitTestTracksTheGutterWidth(t *testing.T) {
+	for _, lines := range []int{5, 500} {
+		tab, _ := NewTab("")
+		tab.Buffer = NewBuffer(strings.Repeat("abcdef\n", lines-1) + "abcdef")
+		gw := gutterWidthFor(tab.Buffer.LineCount())
+		if lines == 5 && gw != defaultGutterWidth || lines == 500 && gw != 5 {
+			t.Fatalf("%d lines: gutter %d, want %d", lines, gw, map[int]int{5: defaultGutterWidth, 500: 5}[lines])
+		}
+		contentX := gw + 1
+		pos, ok := tab.HitTest(contentX+3, 0, 40, 10)
+		if !ok || pos != (Position{Line: 0, Col: 3}) {
+			t.Fatalf("%d lines: click at content+3 = %+v ok=%v, want col 3", lines, pos, ok)
+		}
+		if pos, ok := tab.HitTest(contentX-1, 0, 40, 10); !ok || pos.Col != 0 {
+			t.Fatalf("%d lines: separator click = %+v ok=%v, want col 0", lines, pos, ok)
+		}
+
+		scr := newSimScreen(t, 40, 10)
+		tab.Render(scr, theme.Default(), 0, 0, 40, 10)
+		scr.Show()
+		cells, w, _ := scr.GetContents()
+		if c := cells[contentX]; len(c.Runes) == 0 || c.Runes[0] != 'a' {
+			t.Fatalf("%d lines: first content cell = %q, want 'a'", lines, c.Runes)
+		}
+		// Gutter layout: digits right-aligned in gw-1 cells, one pad
+		// cell, then the separator column — so the last digit is three
+		// cells left of the content.
+		if c := cells[contentX-3]; len(c.Runes) == 0 || c.Runes[0] != '1' {
+			t.Fatalf("%d lines: cell three left of the content = %q, want the line number's last digit", lines, c.Runes)
+		}
+		_ = w
+		scr.Fini()
+	}
+}
+
 // TestTab_HitTest_ContentClick converts a click on a content cell back to
 // the matching buffer Position.
 func TestTab_HitTest_ContentClick(t *testing.T) {
@@ -1858,15 +1900,18 @@ func TestTab_Render_NoOverflowIndicator_WhenLineFits(t *testing.T) {
 	}
 }
 
-// TestGutterWidthFor pins the dynamic gutter width: files up to 9999 lines
-// keep the default six-cell gutter, and each extra digit grows it by one so
-// the git change-bar always has a blank leading cell to sit in.
+// TestGutterWidthFor pins the dynamic gutter width: digits plus the
+// marker cell and the pad, with a four-cell floor so a file under 100
+// lines pays for two digits rather than four — on a 40-column phone
+// the old fixed six-cell gutter plus its separator was 17% of the
+// screen — and each extra digit grows it by one so the git change-bar
+// always has a blank leading cell to sit in.
 func TestGutterWidthFor(t *testing.T) {
 	cases := []struct {
 		lines int
 		want  int
 	}{
-		{0, 6}, {1, 6}, {999, 6}, {9999, 6},
+		{0, 4}, {1, 4}, {99, 4}, {100, 5}, {999, 5}, {9999, 6},
 		{10000, 7}, {99999, 7}, {100000, 8},
 	}
 	for _, c := range cases {

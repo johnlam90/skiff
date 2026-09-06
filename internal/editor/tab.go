@@ -24,19 +24,22 @@ import (
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
-// defaultGutterWidth is the line-number column width for files up to 9999
-// lines: five digits plus a one-cell pad on the right, with the git
-// change-bar sitting in the blank cell at the far-left of the right-aligned
-// number. Larger files grow the gutter via gutterWidthFor so the marker
-// never overlaps the first digit.
-const defaultGutterWidth = 6
+// defaultGutterWidth is the narrowest line-number column: the git
+// change-bar's cell at the far left, two digits, and a one-cell pad on
+// the right — what a file under 100 lines needs. It used to be six (four
+// digits' worth of slack for every file), which with the separator was
+// seven cells before the first character of code: 17% of a 40-column
+// phone, spent on digits a 30-line file never shows. Bigger files grow
+// the gutter via gutterWidthFor, so the floor is the small-file case.
+const defaultGutterWidth = 4
 
 // gutterWidthFor returns the line-number column width for a buffer of
-// lineCount lines. It keeps defaultGutterWidth for files that fit and grows
-// by one cell per extra digit so the git change-bar always has a blank
-// leading cell to sit in. Without this, a 10000-line file would render
-// "10000" as "▌0000" with the bar overwriting the first digit, because the
-// right-aligned number fills every cell the marker shares.
+// lineCount lines: the digit count plus two, never under
+// defaultGutterWidth. The two extra cells are the blank leading cell the
+// git change-bar sits in and the trailing pad — without the leading one
+// a 10000-line file would render "10000" as "▌0000" with the bar
+// overwriting the first digit, because the right-aligned number fills
+// every cell the marker shares.
 func gutterWidthFor(lineCount int) int {
 	if lineCount <= 0 {
 		return defaultGutterWidth

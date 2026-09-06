@@ -251,17 +251,23 @@ func TestSetWrap(t *testing.T) {
 	}
 }
 
+// wrapViewW is the viewport width the wrap-layout tests render into: a
+// nine-cell content column beside whatever gutter a small file gets, so
+// the wrap points these tests pin move with the gutter floor instead of
+// silently shifting when it changes.
+const wrapViewW = defaultGutterWidth + 1 + 9
+
 // TestRenderWrapped_ContinuationRows renders one wrapping line plus a
 // short second line and pins the wrap-mode body layout: content flows
 // onto continuation rows, the gutter number appears only on a line's
 // first row, the next line's number lands after the wrapped rows, and no
 // horizontal-overflow chevron is drawn.
 func TestRenderWrapped_ContinuationRows(t *testing.T) {
-	scr := newSimScreen(t, 16, 6) // gutter 6 → content width 9
+	scr := newSimScreen(t, wrapViewW, 6) // content width 9 beside the gutter
 	defer scr.Fini()
 
 	tab := wrapTestTab(t, "alpha beta gamma\nsecond")
-	tab.Render(scr, theme.Default(), 0, 0, 16, 6)
+	tab.Render(scr, theme.Default(), 0, 0, wrapViewW, 6)
 	scr.Show()
 
 	rows := simScreenRows(scr)
@@ -293,13 +299,13 @@ func TestRenderWrapped_ContinuationRows(t *testing.T) {
 // glyph owns two cells, and the caret on the continuation row lands at the
 // segment-local cell — not the segment-local rune.
 func TestRenderWrapped_WideGlyphsRowLayout(t *testing.T) {
-	scr := newSimScreen(t, 16, 6) // gutter 6 → content width 9
+	scr := newSimScreen(t, wrapViewW, 6) // content width 9 beside the gutter
 	defer scr.Fini()
 
 	tab := wrapTestTab(t, "日本語です。ました")
 	tab.Cursor = Position{Line: 0, Col: 5} // second row, one glyph in
 	tab.Anchor = tab.Cursor
-	tab.Render(scr, theme.Default(), 0, 0, 16, 6)
+	tab.Render(scr, theme.Default(), 0, 0, wrapViewW, 6)
 	scr.Show()
 
 	cells, w, _ := scr.GetContents()
@@ -338,13 +344,13 @@ func TestRenderWrapped_WideGlyphsRowLayout(t *testing.T) {
 // placement on a wrapped row: a cursor in the third segment lands on
 // screen row 2 at the segment-local column.
 func TestRenderWrapped_CursorOnContinuationRow(t *testing.T) {
-	scr := newSimScreen(t, 16, 6)
+	scr := newSimScreen(t, wrapViewW, 6)
 	defer scr.Fini()
 
 	tab := wrapTestTab(t, "alpha beta gamma\nsecond")
 	tab.Cursor = Position{Line: 0, Col: 11} // start of "gamma"
 	tab.Anchor = tab.Cursor
-	tab.Render(scr, theme.Default(), 0, 0, 16, 6)
+	tab.Render(scr, theme.Default(), 0, 0, wrapViewW, 6)
 	scr.Show()
 
 	cx, cy, vis := scr.GetCursor()
@@ -363,13 +369,13 @@ func TestRenderWrapped_CursorOnContinuationRow(t *testing.T) {
 // cursor on a row that fills the pane exactly: it clamps onto the last
 // cell instead of landing in the scrollbar/border column.
 func TestRenderWrapped_CursorClampAtFullWidthRow(t *testing.T) {
-	scr := newSimScreen(t, 16, 4)
+	scr := newSimScreen(t, wrapViewW, 4)
 	defer scr.Fini()
 
 	tab := wrapTestTab(t, "abcdefghi") // exactly content width (9)
 	tab.Cursor = Position{Line: 0, Col: 9}
 	tab.Anchor = tab.Cursor
-	tab.Render(scr, theme.Default(), 0, 0, 16, 4)
+	tab.Render(scr, theme.Default(), 0, 0, wrapViewW, 4)
 	scr.Show()
 
 	cx, cy, vis := scr.GetCursor()
@@ -389,26 +395,26 @@ func TestRenderWrapped_CursorClampAtFullWidthRow(t *testing.T) {
 // segment's rune offsets, gutter clicks land at the row's first rune,
 // and clicks below the last row miss.
 func TestHitTestWrapped(t *testing.T) {
-	scr := newSimScreen(t, 16, 6)
+	scr := newSimScreen(t, wrapViewW, 6)
 	defer scr.Fini()
 
 	tab := wrapTestTab(t, "alpha beta gamma\nsecond")
-	tab.Render(scr, theme.Default(), 0, 0, 16, 6)
+	tab.Render(scr, theme.Default(), 0, 0, wrapViewW, 6)
 
 	contentX := defaultGutterWidth + 1
-	if pos, ok := tab.HitTest(contentX+2, 1, 16, 6); !ok || pos != (Position{Line: 0, Col: 8}) {
+	if pos, ok := tab.HitTest(contentX+2, 1, wrapViewW, 6); !ok || pos != (Position{Line: 0, Col: 8}) {
 		t.Errorf("continuation click = %+v ok=%v, want line 0 col 8", pos, ok)
 	}
-	if pos, ok := tab.HitTest(contentX, 2, 16, 6); !ok || pos != (Position{Line: 0, Col: 11}) {
+	if pos, ok := tab.HitTest(contentX, 2, wrapViewW, 6); !ok || pos != (Position{Line: 0, Col: 11}) {
 		t.Errorf("third-row click = %+v ok=%v, want line 0 col 11", pos, ok)
 	}
-	if pos, ok := tab.HitTest(2, 1, 16, 6); !ok || pos != (Position{Line: 0, Col: 6}) {
+	if pos, ok := tab.HitTest(2, 1, wrapViewW, 6); !ok || pos != (Position{Line: 0, Col: 6}) {
 		t.Errorf("gutter click = %+v ok=%v, want segment start col 6", pos, ok)
 	}
-	if pos, ok := tab.HitTest(contentX+1, 3, 16, 6); !ok || pos != (Position{Line: 1, Col: 1}) {
+	if pos, ok := tab.HitTest(contentX+1, 3, wrapViewW, 6); !ok || pos != (Position{Line: 1, Col: 1}) {
 		t.Errorf("second-line click = %+v ok=%v, want line 1 col 1", pos, ok)
 	}
-	if _, ok := tab.HitTest(contentX, 5, 16, 6); ok {
+	if _, ok := tab.HitTest(contentX, 5, wrapViewW, 6); ok {
 		t.Error("click below the last visual row should miss")
 	}
 }
