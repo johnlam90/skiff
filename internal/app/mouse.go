@@ -92,6 +92,33 @@ type mouseState struct {
 	// carry their own (overlay.Press); the menu's state lives on App,
 	// so its latch lives here.
 	menuPress overlay.Press
+	// autoScrollStep is how many lines each auto-scroll tick moves —
+	// set from how far past the edge zone the drag is (see
+	// autoScrollStepFor), so a drag parked on the status bar scrolls
+	// faster than one hovering the editor's last row without the
+	// ticker itself running any faster.
+	autoScrollStep int
+}
+
+// autoScrollEdgeRows is how many rows at the top and bottom of the
+// editor rect arm auto-scroll during a drag. The trigger used to be
+// leaving the rect — one row of tab bar or status bar — which a finger
+// cannot park on, and which a tmux pane border sits on top of, so
+// drags in a split never scrolled at all. The zone now starts inside
+// the rect.
+const autoScrollEdgeRows = 2
+
+// autoScrollMaxStep caps the per-tick step: ~16 ticks a second times
+// eight lines is fast enough to cross any file, and past it a drag
+// overshoots what the user can watch.
+const autoScrollMaxStep = 8
+
+// autoScrollStepFor maps how many rows past the zone's inner row the
+// pointer is to the lines each tick scrolls: one at the inner row, one
+// more per row beyond it, capped at autoScrollMaxStep. Distance drives
+// speed so a long drag scrolls fast without a faster ticker.
+func autoScrollStepFor(past int) int {
+	return min(1+max(past, 0), autoScrollMaxStep)
 }
 
 // fresh reports which buttons btn presses for the first time — set now
@@ -719,13 +746,16 @@ func (a *App) editorDrag(x, y int) {
 	a.lastDragX = x
 	a.lastDragY = y
 
-	// Edge detection: outside the editor's vertical bounds turns on
-	// auto-scroll; back inside turns it off.
+	// Edge detection: the autoScrollEdgeRows at either end of the rect
+	// and everything beyond them turn on auto-scroll, faster the
+	// further out the pointer is; the middle turns it off.
+	top := ey + autoScrollEdgeRows - 1
+	bottom := ey + eh - autoScrollEdgeRows
 	switch {
-	case y < ey:
-		a.startAutoScroll(-1)
-	case y >= ey+eh:
-		a.startAutoScroll(1)
+	case y <= top:
+		a.startAutoScroll(-1, autoScrollStepFor(top-y))
+	case y >= bottom:
+		a.startAutoScroll(1, autoScrollStepFor(y-bottom))
 	default:
 		a.stopAutoScroll()
 	}
@@ -754,10 +784,11 @@ func (a *App) editorDrag(x, y int) {
 
 // startAutoScroll begins a timer goroutine that posts autoScrollEvents at
 // autoScrollTick intervals so the editor keeps scrolling while the user
-// holds the mouse past an edge. dir is -1 (up) or +1 (down). Calling with
-// the same direction is a no-op so we don't restart the timer on every
-// drag motion event.
-func (a *App) startAutoScroll(dir int) {
+// holds the mouse past an edge. dir is -1 (up) or +1 (down); step is
+// the lines per tick. Calling with the same direction only updates the
+// step, so the timer is not restarted on every drag motion event.
+func (a *App) startAutoScroll(dir, step int) {
+	a.mouse.autoScrollStep = step
 	if a.autoScrollDir == dir {
 		return
 	}
@@ -789,11 +820,11 @@ func (a *App) stopAutoScroll() {
 	a.autoScrollDir = 0
 }
 
-// handleAutoScroll runs once per autoScrollEvent: nudge the viewport in the
-// armed direction and extend the selection to the edge row at the user's
-// last known mouse column. Bails out (and stops the timer) if anything
-// suggests the user is no longer drag-selecting (button released, menu
-// opened, no active tab).
+// handleAutoScroll runs once per autoScrollEvent: nudge the viewport in
+// the armed direction by the armed step and extend the selection to the
+// user's last known mouse cell, clamped into the rect. Bails out (and
+// stops the timer) if anything suggests the user is no longer
+// drag-selecting (button released, menu opened, no active tab).
 func (a *App) handleAutoScroll() {
 	if a.autoScrollDir == 0 || a.dragMode != dragEditor || a.anyModalOpen() {
 		a.stopAutoScroll()
@@ -804,20 +835,11 @@ func (a *App) handleAutoScroll() {
 		a.stopAutoScroll()
 		return
 	}
-	tab.Scroll(a.autoScrollDir)
+	tab.Scroll(a.autoScrollDir * max(a.mouse.autoScrollStep, 1))
 
-	ex, _, ew, eh := a.editorRect()
-	localX := a.lastDragX - ex
-	if localX < 0 {
-		localX = 0
-	}
-	if localX >= ew {
-		localX = ew - 1
-	}
-	localY := eh - 1
-	if a.autoScrollDir < 0 {
-		localY = 0
-	}
+	ex, ey, ew, eh := a.editorRect()
+	localX := min(max(a.lastDragX-ex, 0), ew-1)
+	localY := min(max(a.lastDragY-ey, 0), eh-1)
 	pos, ok := tab.HitTest(localX, localY, ew, eh)
 	if !ok {
 		return

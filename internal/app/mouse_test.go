@@ -404,10 +404,93 @@ func TestEditorDrag_AutoScroll(t *testing.T) {
 	if a.autoScrollDir != 1 {
 		t.Fatalf("expected autoScrollDir=1, got %d", a.autoScrollDir)
 	}
-	a.editorDrag(ex+1, ey+1) // inside → stops
+	a.editorDrag(ex+1, ey+eh/2) // the middle → stops
 	if a.autoScrollDir != 0 {
 		t.Fatalf("expected stopped autoScroll, got %d", a.autoScrollDir)
 	}
+}
+
+// TestAutoScrollStepFor pins the distance-to-speed map: one line at the
+// zone's inner row, one more per row beyond it, capped.
+func TestAutoScrollStepFor(t *testing.T) {
+	for past, want := range []int{1, 2, 3, 4} {
+		if got := autoScrollStepFor(past); got != want {
+			t.Fatalf("past=%d: step %d, want %d", past, got, want)
+		}
+	}
+	if got := autoScrollStepFor(100); got != autoScrollMaxStep {
+		t.Fatalf("far past: step %d, want the cap %d", got, autoScrollMaxStep)
+	}
+	if got := autoScrollStepFor(-3); got != 1 {
+		t.Fatalf("negative distance: step %d, want 1", got)
+	}
+}
+
+// TestEditorDrag_EdgeZoneIsInsideTheRect: auto-scroll arms on the last
+// autoScrollEdgeRows rows INSIDE the editor, not only past it — a tmux
+// pane border sits where "past it" used to be, and a finger cannot park
+// on one row — and the step grows with distance: one line on the inner
+// row, more on the status bar below it.
+func TestEditorDrag_EdgeZoneIsInsideTheRect(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "d.txt")
+	if err := os.WriteFile(target, []byte(strings.Repeat("line\n", 200)), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	ex, ey, _, eh := a.editorRect()
+
+	a.editorDrag(ex+8, ey+eh-autoScrollEdgeRows) // inner row of the bottom zone
+	if a.autoScrollDir != 1 || a.mouse.autoScrollStep != 1 {
+		t.Fatalf("inner zone row: dir %d step %d, want down by 1", a.autoScrollDir, a.mouse.autoScrollStep)
+	}
+	a.editorDrag(ex+8, ey+eh) // the status bar: two rows further
+	if a.autoScrollDir != 1 || a.mouse.autoScrollStep != 3 {
+		t.Fatalf("status bar: dir %d step %d, want down by 3", a.autoScrollDir, a.mouse.autoScrollStep)
+	}
+	a.editorDrag(ex+8, ey+eh-autoScrollEdgeRows-1) // just inside the middle
+	if a.autoScrollDir != 0 {
+		t.Fatal("the row above the zone must not scroll")
+	}
+	a.editorDrag(ex+8, ey+autoScrollEdgeRows-1) // inner row of the top zone
+	if a.autoScrollDir != -1 || a.mouse.autoScrollStep != 1 {
+		t.Fatalf("top zone: dir %d step %d, want up by 1", a.autoScrollDir, a.mouse.autoScrollStep)
+	}
+	a.editorDrag(ex+8, 0) // the tab bar: two rows above the inner row
+	if a.mouse.autoScrollStep != 3 {
+		t.Fatalf("tab bar: step %d, want 3", a.mouse.autoScrollStep)
+	}
+	a.stopAutoScroll()
+}
+
+// TestHandleAutoScroll_ScrollsByTheArmedStep: each tick moves the
+// viewport by the step the drag distance armed, and extends the
+// selection to the pointer's own row rather than the rect's edge.
+func TestHandleAutoScroll_ScrollsByTheArmedStep(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "d.txt")
+	if err := os.WriteFile(target, []byte(strings.Repeat("line\n", 200)), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	ex, ey, _, eh := a.editorRect()
+	a.handleMouse(tcell.NewEventMouse(ex+8, ey+1, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(ex+8, ey+eh+1, tcell.Button1, 0)) // 3 past the inner row
+	step := a.mouse.autoScrollStep
+	if step != 4 {
+		t.Fatalf("one row below the status bar: step %d, want 4", step)
+	}
+	a.handleAutoScroll()
+	if tab.ScrollY != step {
+		t.Fatalf("one tick scrolled to %d, want %d", tab.ScrollY, step)
+	}
+	if tab.Cursor.Line != tab.ScrollY+eh-1 {
+		t.Fatalf("the selection should reach the last visible row, cursor on %d with scroll %d", tab.Cursor.Line, tab.ScrollY)
+	}
+	a.handleMouse(tcell.NewEventMouse(ex+8, ey+eh+1, tcell.ButtonNone, 0))
 }
 
 // TestHandleMouse_AutoScrollDrivenThroughEventLoop exercises the full
