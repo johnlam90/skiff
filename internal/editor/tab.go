@@ -200,6 +200,9 @@ type Tab struct {
 	// for a lowercase query. Read by SetFindQuery on every re-scan, so
 	// flipping it and re-applying the query is the whole toggle.
 	FindMatchCase bool
+	// findSuspended is set by ClearFindHighlights: the query is kept
+	// for recall but no longer re-scanned on edits. See FindAgain.
+	findSuspended bool
 
 	// findRows indexes FindMatches by buffer line so the renderer's
 	// per-cell lookup stays sub-linear; findRowsFor is the match count

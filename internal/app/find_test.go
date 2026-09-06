@@ -46,9 +46,8 @@ func findBarOf(t *testing.T, a *App) *findStrip {
 }
 
 // TestOpenFind_OpensBarEmpty drops the user into a focused find bar
-// with an empty input. Pre-fill from a prior query is intentionally
-// not done — closing the bar already clears find state, so each Esc-f
-// is a fresh search.
+// with an empty input on a tab that has never been searched; a tab
+// that remembers a query gets it back (see TestOpenFind_SeedsKeptQuery).
 func TestOpenFind_OpensBarEmpty(t *testing.T) {
 	a := seedFindApp(t, "foo bar foo")
 	a.openFind()
@@ -84,8 +83,8 @@ func TestHandleFindKey_TypingLiveSearches(t *testing.T) {
 	if len(tab.FindMatches) != 2 {
 		t.Fatalf("expected 2 matches, got %d", len(tab.FindMatches))
 	}
-	if tab.Cursor != (editor.Position{Line: 0, Col: 0}) {
-		t.Fatalf("cursor should snap to first match, got %+v", tab.Cursor)
+	if tab.Anchor != (editor.Position{Line: 0, Col: 0}) || tab.Cursor != (editor.Position{Line: 0, Col: 3}) {
+		t.Fatalf("the first match should be selected, got anchor %+v cursor %+v", tab.Anchor, tab.Cursor)
 	}
 }
 
@@ -127,7 +126,8 @@ func TestHandleFindKey_ShiftEnterGoesBack(t *testing.T) {
 // TestHandleFindKey_EscClearsHighlights pins the close gesture: Esc
 // closes the bar AND wipes the tab's match list so the highlights
 // disappear with the UI. Leaving them painted after the bar closes is
-// the kind of "did anything happen?" surprise we want to avoid.
+// the kind of "did anything happen?" surprise we want to avoid. The
+// query itself survives for Esc f / Esc ; to recall.
 func TestHandleFindKey_EscClearsHighlights(t *testing.T) {
 	a := seedFindApp(t, "foo bar foo")
 	a.openFind()
@@ -139,8 +139,11 @@ func TestHandleFindKey_EscClearsHighlights(t *testing.T) {
 		t.Fatal("Esc should close the find bar")
 	}
 	tab := a.activeTabPtr()
-	if tab.FindQuery != "" || tab.FindMatches != nil || tab.FindIndex != -1 {
-		t.Fatalf("Esc should clear all find state, got %+v", tab)
+	if tab.FindMatches != nil || tab.FindIndex != -1 {
+		t.Fatalf("Esc should take the highlights down, got %d matches idx %d", len(tab.FindMatches), tab.FindIndex)
+	}
+	if tab.FindQuery != "foo" {
+		t.Fatalf("Esc should keep the query for recall, got %q", tab.FindQuery)
 	}
 }
 
@@ -505,9 +508,15 @@ func TestFindStrip_ClearsTheTabItOpenedOn(t *testing.T) {
 	if a.findBarOpen() {
 		t.Fatal("Esc should close the find bar")
 	}
-	if tabA.FindQuery != "" || tabA.FindMatches != nil || tabA.FindIndex != -1 {
-		t.Fatalf("Esc must clear the tab the bar opened on, got query=%q matches=%d idx=%d",
-			tabA.FindQuery, len(tabA.FindMatches), tabA.FindIndex)
+	if tabA.FindMatches != nil || tabA.FindIndex != -1 {
+		t.Fatalf("Esc must clear the tab the bar opened on, got matches=%d idx=%d",
+			len(tabA.FindMatches), tabA.FindIndex)
+	}
+	// The kept query is suspended: an edit to the orphaned buffer must
+	// not re-run FindAll and relight the highlights.
+	tabA.InsertRune('x')
+	if tabA.FindMatches != nil {
+		t.Fatalf("a suspended query re-scanned on edit: %d matches", len(tabA.FindMatches))
 	}
 	if tabB.FindQuery != "" || tabB.FindMatches != nil {
 		t.Fatalf("the tab the bar never searched must be untouched, got query=%q matches=%d",
@@ -605,5 +614,67 @@ func TestHandleFindKey_AltCTogglesMatchCase(t *testing.T) {
 	findBarOf(t, a).handleKey(tcell.NewEventKey(tcell.KeyRune, 'c', tcell.ModAlt))
 	if tab.FindMatchCase || len(tab.FindMatches) != 3 {
 		t.Fatalf("a second Alt+c should disarm: on=%v matches=%d", tab.FindMatchCase, len(tab.FindMatches))
+	}
+}
+
+// TestOpenFind_SeedsKeptQuery pins the recall half of the close
+// contract: reopening the bar on a tab that remembers a query seeds the
+// field with it and relights the highlights, caret on the nearest hit.
+func TestOpenFind_SeedsKeptQuery(t *testing.T) {
+	a := seedFindApp(t, "foo bar foo")
+	a.openFind()
+	for _, r := range "foo" {
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
+	}
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyEsc, 0))
+	tab := a.activeTabPtr()
+	tab.MoveCursorTo(editor.Position{Line: 0, Col: 5}, false)
+
+	a.openFind()
+	if got := findBarOf(t, a).query.Text(); got != "foo" {
+		t.Fatalf("the bar should reopen seeded with the kept query, got %q", got)
+	}
+	if len(tab.FindMatches) != 2 || tab.FindIndex != 1 {
+		t.Fatalf("reopening should relight the search at the nearest hit: %d matches idx %d", len(tab.FindMatches), tab.FindIndex)
+	}
+	if got := findBarOf(t, a).counterText(); got != "2 of 2" {
+		t.Fatalf("counter = %q", got)
+	}
+}
+
+// TestMenuFindNext_RepeatsWithoutTheBar drives Esc ; end to end: after
+// the bar closes the leader walks to the next hit and selects it, and
+// with nothing searched yet it flashes instead of doing nothing.
+func TestMenuFindNext_RepeatsWithoutTheBar(t *testing.T) {
+	a := seedFindApp(t, "foo foo foo")
+	a.menuFindNext()
+	if !strings.Contains(a.statusMsg, "No search to repeat") {
+		t.Fatalf("with no query the leader should say so, got %q", a.statusMsg)
+	}
+	if a.hasFindQuery() {
+		t.Fatal("hasFindQuery should be false before any search")
+	}
+
+	a.openFind()
+	for _, r := range "foo" {
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
+	}
+	findBarOf(t, a).handleKey(keyEv(tcell.KeyEsc, 0))
+	tab := a.activeTabPtr()
+	if !a.hasFindQuery() {
+		t.Fatal("the row should light once a query is remembered")
+	}
+
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	a.handleKey(keyEv(tcell.KeyRune, ';'))
+	if tab.FindIndex != 1 || tab.SelectionText() != "foo" || tab.Anchor.Col != 4 {
+		t.Fatalf("Esc ; should select the next hit: idx %d anchor %+v sel %q", tab.FindIndex, tab.Anchor, tab.SelectionText())
+	}
+	a.menuFindNext()
+	if tab.FindIndex != 2 {
+		t.Fatalf("the menu row should keep walking, got idx %d", tab.FindIndex)
+	}
+	if a.findBarOpen() {
+		t.Fatal("find next must not reopen the bar")
 	}
 }

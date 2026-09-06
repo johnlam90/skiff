@@ -76,6 +76,8 @@ var postRedesignMenuActions = []string{
 	"Select all", "Select line",
 	// Keyboard tab switching (Esc ] / Esc [) and the close-others row.
 	"Next tab", "Previous tab", "Close other tabs",
+	// Repeat the last in-file search without the bar (Esc ;).
+	"Find next",
 }
 
 // menuCatalog flattens every built-in row the ≡ menu can reach — the top

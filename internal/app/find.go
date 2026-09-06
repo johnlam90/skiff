@@ -98,17 +98,23 @@ func barLabelsThatFit(spare, counterCost, hintCost int) (counter, hint bool) {
 	return counter, hint
 }
 
-// openFind shows the find bar with an empty input. We don't pre-fill
-// the user's last query because closing the bar already clears find
-// state — Esc means "I'm done searching." Each Esc-f opens a fresh
-// search.
+// openFind shows the find bar, seeded with the tab's remembered query
+// when it has one: closing the bar keeps the query (see
+// ClearFindHighlights), so Esc f after an Esc picks the search back
+// up — highlights relit, caret on the nearest hit — instead of making
+// the user retype it. Typing replaces the seed as it would any text.
 func (a *App) openFind() {
 	tab := a.activeTabPtr()
 	if tab == nil || tab.IsImage() {
 		return
 	}
 	a.closeAllModals() // a modal (or the other strip) would eat our keystrokes
-	a.strip = &findStrip{a: a, tab: tab}
+	s := &findStrip{a: a, tab: tab}
+	a.strip = s
+	if tab.FindQuery != "" {
+		s.query.SetText(tab.FindQuery)
+		s.applyQuery()
+	}
 }
 
 // findBar returns the find bar when it is the strip that is up, else
@@ -124,12 +130,12 @@ func (a *App) findBarOpen() bool {
 	return a.findBar() != nil
 }
 
-// closeFind hides the find bar, and findStrip.close clears the find
-// state of the tab it opened on so the highlights disappear with it.
-// Leaving them
-// painted after close is surprising — users expect Esc to mean "I'm
-// done searching." It drops the slot only when the bar is the strip
-// that is up, so a stray call can't dismiss the project-find panel.
+// closeFind hides the find bar, and findStrip.close takes the
+// highlights of the tab it opened on down with it — leaving them
+// painted after close is surprising; users expect Esc to mean "I'm
+// done looking at hits." The query itself is kept for Esc f / Esc ;.
+// It drops the slot only when the bar is the strip that is up, so a
+// stray call can't dismiss the project-find panel.
 func (a *App) closeFind() {
 	if a.findBarOpen() {
 		a.dropStrip()
@@ -154,12 +160,13 @@ func (s *findStrip) boundTab() *editor.Tab {
 	return s.tab
 }
 
-// close clears the find state of the tab the bar opened on. The bar
-// owns no highlights itself; this is the one thing it leaves behind, so
-// dropping the slot has to take it too.
+// close takes down the highlights of the tab the bar opened on. The
+// bar owns no highlights itself; this is the one thing it leaves
+// behind, so dropping the slot has to take it too. The query stays on
+// the tab, suspended, for the next Esc f or Esc ;.
 func (s *findStrip) close() {
 	if tab := s.boundTab(); tab != nil {
-		tab.ClearFind()
+		tab.ClearFindHighlights()
 	}
 }
 
@@ -307,6 +314,31 @@ func (a *App) menuFind() {
 func (a *App) hasFindable() bool {
 	t := a.activeTabPtr()
 	return t != nil && !t.IsImage()
+}
+
+// menuFindNext repeats the active tab's last search without the bar —
+// Esc ; and the Go row "Find next". Nothing to repeat is said out loud:
+// a leader that silently does nothing teaches that it does nothing.
+func (a *App) menuFindNext() {
+	a.closeMenu()
+	t := a.activeTabPtr()
+	if t == nil || t.IsImage() {
+		return
+	}
+	if !t.HasFindQuery() {
+		a.flash("No search to repeat — Esc f to start one")
+		return
+	}
+	if !t.FindAgain() {
+		a.flash(fmt.Sprintf("No matches for %q", t.FindQuery))
+	}
+}
+
+// hasFindQuery gates the "Find next" row: enabled once the active tab
+// remembers a query, live or suspended.
+func (a *App) hasFindQuery() bool {
+	t := a.activeTabPtr()
+	return t != nil && t.HasFindQuery()
 }
 
 // draw renders the 1-row find bar into the rect layout reserved for it.

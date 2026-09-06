@@ -160,24 +160,32 @@ func MatchEndPosition(m Match) Position {
 
 // SetFindQuery installs a new search query on the tab, recomputes the
 // match list against the current buffer, and points FindIndex at the
-// first match at or after the cursor (so the user lands on the nearest
-// hit, not always the first hit in the file). An empty query clears all
-// find state — symmetrical with closing the bar via Esc.
+// first match at or after the selection start (so the user lands on
+// the nearest hit, not always the first hit in the file). An empty
+// query clears all find state, the same as ClearFind.
+//
+// The reference point is the START of the selection rather than the
+// caret because FocusCurrentMatch selects the current hit, leaving the
+// caret at its end: measured from the caret, extending "fo" to "foo"
+// would skip the hit being typed over and jump to the next one.
 //
 // The cursor is left where it is; SetFindQuery only updates state. It is
 // the caller's job to call FocusCurrentMatch when they want the cursor
 // to actually move (which is what happens on the first non-empty query
-// and on every Enter / Shift-Enter press).
+// and on every Enter / Shift-Enter press). Setting a query also ends a
+// ClearFindHighlights suspension: the search is live again.
 func (t *Tab) SetFindQuery(query string) {
 	t.FindQuery = query
 	t.findRows = nil // the per-line index belongs to the old match list
+	t.findSuspended = false
 	if query == "" {
 		t.FindMatches = nil
 		t.FindIndex = -1
 		return
 	}
 	t.FindMatches = FindAllWith(t.Buffer, query, t.findOptions())
-	t.FindIndex = FirstMatchAtOrAfter(t.FindMatches, t.Cursor)
+	from, _ := PosOrdered(t.Anchor, t.Cursor)
+	t.FindIndex = FirstMatchAtOrAfter(t.FindMatches, from)
 }
 
 // findOptions collects the tab's armed find toggles for a re-scan.
@@ -198,14 +206,16 @@ func (t *Tab) findOptions() FindOptions {
 // current match falls through to the hit nearest the caret — the answer
 // SetFindQuery already computed, which is -1 when nothing survived.
 //
-// An idle query costs nothing: closing the find bar calls ClearFind, so
-// a tab with no search running never re-scans on a keystroke. A live one
-// costs a full FindAll per edit, which is the same per-keystroke scan the
-// find bar's own input already pays (App.findApplyQuery re-queries on
-// every character typed into it) — a buffer keystroke is not the place to
-// start being cheaper than the query field.
+// An idle query costs nothing: closing the find bar calls
+// ClearFindHighlights, which keeps the query for Esc f / Esc ; to
+// recall but suspends it, so a tab with no search running never
+// re-scans on a keystroke. A live one costs a full FindAll per edit,
+// which is the same per-keystroke scan the find bar's own input
+// already pays (findStrip.applyQuery re-queries on every character
+// typed into it) — a buffer keystroke is not the place to start being
+// cheaper than the query field.
 func (t *Tab) refreshFindMatches() {
-	if t.FindQuery == "" {
+	if t.FindQuery == "" || t.findSuspended {
 		return
 	}
 	keep := t.FindIndex
@@ -218,23 +228,25 @@ func (t *Tab) refreshFindMatches() {
 	}
 }
 
-// FocusCurrentMatch moves the cursor (and anchor — we don't want a
-// dangling selection from an earlier action) to the start of the
-// currently-pointed match. No-op when FindIndex is out of range, so
-// callers don't have to re-check it themselves.
+// FocusCurrentMatch selects the currently-pointed match: anchor at its
+// start, caret at its end, so the hit is the selection — typing
+// replaces it, Esc c copies it, and the caret is where the next edit
+// naturally goes. No-op when FindIndex is out of range, so callers
+// don't have to re-check it themselves.
 func (t *Tab) FocusCurrentMatch() {
 	if t.FindIndex < 0 || t.FindIndex >= len(t.FindMatches) {
 		return
 	}
 	m := t.FindMatches[t.FindIndex]
-	t.Cursor = MatchPosition(m)
-	t.Anchor = t.Cursor
+	t.Anchor = MatchPosition(m)
+	t.Cursor = MatchEndPosition(m)
 	t.cursorMoved = true
 }
 
 // FindNext advances FindIndex by one (wrapping at the end) and moves
 // the cursor onto the new match. No-op when there are no matches. Used
-// by Enter inside the find bar and by the Esc-g "again" leader.
+// by Enter inside the find bar; FindAgain is the bar-less spelling
+// behind the Esc ; leader.
 func (t *Tab) FindNext() {
 	if len(t.FindMatches) == 0 {
 		return
@@ -319,14 +331,56 @@ func (t *Tab) matchAtRune(line, col int) int {
 	return -1
 }
 
-// ClearFind drops every piece of find state. The app calls this when the
-// buffer has been edited enough that the cached match list is stale and
-// can't safely be re-used; the user will re-type their query.
-func (t *Tab) ClearFind() {
-	t.FindQuery = ""
+// FindAgain jumps to the next hit of the remembered query without the
+// bar: with the search live it is FindNext; after ClearFindHighlights
+// it re-runs the query (relighting the highlights) and lands on the
+// first hit at or after the caret — which, with the last hit still
+// selected, is the one after it. Reports false when there is no query
+// or it matches nothing, so the caller can say so.
+func (t *Tab) FindAgain() bool {
+	if t.IsImage() || t.FindQuery == "" {
+		return false
+	}
+	if !t.findSuspended {
+		if len(t.FindMatches) == 0 {
+			return false
+		}
+		t.FindNext()
+		return true
+	}
+	t.SetFindQuery(t.FindQuery)
+	t.FindIndex = FirstMatchAtOrAfter(t.FindMatches, t.Cursor)
+	if t.FindIndex < 0 {
+		return false
+	}
+	t.FocusCurrentMatch()
+	return true
+}
+
+// HasFindQuery reports whether the tab remembers a query — live or
+// suspended — that FindAgain could repeat.
+func (t *Tab) HasFindQuery() bool {
+	return t.FindQuery != ""
+}
+
+// ClearFindHighlights takes the highlights down but keeps the query
+// (and the Aa toggle): closing the bar means "stop showing me hits",
+// not "forget what I searched for" — Esc f reopens seeded with it and
+// Esc ; repeats it. The query is suspended so an edit does not re-scan
+// a buffer nobody is looking at hits in; SetFindQuery lifts that.
+func (t *Tab) ClearFindHighlights() {
 	t.FindMatches = nil
 	t.FindIndex = -1
 	t.findRows = nil
+	t.findSuspended = t.FindQuery != ""
+}
+
+// ClearFind drops every piece of find state, the query included. The
+// full reset, for when the search is over rather than merely hidden.
+func (t *Tab) ClearFind() {
+	t.ClearFindHighlights()
+	t.FindQuery = ""
+	t.findSuspended = false
 }
 
 // ReplaceCurrentMatch swaps the current find match for repl and

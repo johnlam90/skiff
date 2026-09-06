@@ -99,6 +99,7 @@ func TestLeaderActionFor_BindingsFireIntendedMethods(t *testing.T) {
 		{'L', (*App).menuSelectLine, "select line", "Edit"},
 		{']', (*App).menuNextTab, "next tab", "File"},
 		{'[', (*App).menuPrevTab, "previous tab", "File"},
+		{';', (*App).menuFindNext, "find next", "Go"},
 	}
 
 	bound := make(map[rune]leaderBinding, len(want))

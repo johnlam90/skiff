@@ -178,6 +178,9 @@ func goMenuGroup() []menuItemDef {
 		{label: "Find file in project", shortcut: "Esc p", action: (*App).menuFindFile, enabled: (*App).hasFinder, visible: (*App).hasTree},
 		{label: "Go to start of file", shortcut: "Esc <", action: (*App).menuGoToDocStart, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 		{label: "Go to end of file", shortcut: "Esc >", action: (*App).menuGoToDocEnd, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		// Dims until the tab remembers a query — the row teaches that
+		// "find next" repeats a search rather than starting one.
+		{label: "Find next", shortcut: "Esc ;", action: (*App).menuFindNext, enabled: (*App).hasFindQuery, visible: (*App).hasEditableTab},
 	}
 }
 
