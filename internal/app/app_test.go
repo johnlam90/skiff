@@ -402,6 +402,62 @@ func TestFlash(t *testing.T) {
 	}
 }
 
+// TestFlashLifetime_ScalesWithLength pins the reading-time rule: a
+// short message gets the floor, a long one earns flashPerCell per cell
+// of text, and nothing lives past flashMaxFor — measured in cells, so a
+// CJK message is not charged for its byte or rune count.
+func TestFlashLifetime_ScalesWithLength(t *testing.T) {
+	if got := flashLifetime("Copied"); got != flashMinFor+6*flashPerCell {
+		t.Fatalf("short flash lifetime = %v, want floor + 6 cells", got)
+	}
+	long := strings.Repeat("x", 500)
+	if got := flashLifetime(long); got != flashMaxFor {
+		t.Fatalf("500-cell flash lifetime = %v, want the %v cap", got, flashMaxFor)
+	}
+	if ascii, cjk := flashLifetime("ab"), flashLifetime("日"); ascii != cjk {
+		t.Fatalf("two ASCII cells (%v) and one two-cell ideograph (%v) should cost the same", ascii, cjk)
+	}
+	if flashLifetime(long) <= flashLifetime("Copied") {
+		t.Fatal("a long message must outlive a short one")
+	}
+}
+
+// TestFlash_DeadlineFollowsTheMessage pins that flash() actually uses
+// the per-message lifetime rather than a constant: a long message's
+// deadline lands later than a short one's issued at the same moment.
+func TestFlash_DeadlineFollowsTheMessage(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.flash("Copied")
+	short := a.statusUntil
+	a.flash(strings.Repeat("formatter said something long ", 4))
+	if !a.statusUntil.After(short.Add(time.Second)) {
+		t.Fatalf("long flash deadline %v not meaningfully past the short one's %v", a.statusUntil, short)
+	}
+}
+
+// TestFlashError_OutranksInfoWhileLive pins the priority rule: an
+// informational flash that arrives while an error flash is still up is
+// dropped, so "Copied" can't wipe "save failed" off the bar before it
+// has been read — but once the error's window closes, info flashes
+// flow again, and a fresh error always replaces whatever is up.
+func TestFlashError_OutranksInfoWhileLive(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.flashError("save failed")
+	a.flash("Copied")
+	if a.statusMsg != "save failed" || !a.statusErr {
+		t.Fatalf("info flash replaced a live error: msg=%q err=%v", a.statusMsg, a.statusErr)
+	}
+	a.flashError("also failed")
+	if a.statusMsg != "also failed" {
+		t.Fatalf("a newer error must replace the older one, got %q", a.statusMsg)
+	}
+	a.statusUntil = time.Now().Add(-time.Millisecond) // the error expired
+	a.flash("Copied")
+	if a.statusMsg != "Copied" || a.statusErr {
+		t.Fatalf("info flash blocked by an expired error: msg=%q err=%v", a.statusMsg, a.statusErr)
+	}
+}
+
 // TestHandleEvent_Resize updates width/height.
 func TestHandleEvent_Resize(t *testing.T) {
 	a := newTestApp(t, t.TempDir())

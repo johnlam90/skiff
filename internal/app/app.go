@@ -31,6 +31,7 @@ import (
 	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/overlay"
+	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -82,9 +83,17 @@ const (
 	// constantly, and a 39-column editor behind an 18-column tree is
 	// worth less than no tree at all. See applyResponsiveSidebar.
 	autoHideSidebarWidth = minSidebarWidth + minEditorAfterDrag
-	statusFlashFor       = 3 * time.Second
-	doubleClickWindow    = 500 * time.Millisecond
-	doubleEscWindow      = 500 * time.Millisecond
+	// A flash lives for flashMinFor plus flashPerCell for every cell of
+	// its text, capped at flashMaxFor: "Copied" is gone in about two
+	// seconds, a formatter's stderr line gets the time it takes to read
+	// it. The old flat three seconds was right for the short messages
+	// and wrong for every long one — the flash strip exists precisely
+	// for the messages that need more than a glance.
+	flashMinFor       = 2 * time.Second
+	flashPerCell      = 40 * time.Millisecond
+	flashMaxFor       = 8 * time.Second
+	doubleClickWindow = 500 * time.Millisecond
+	doubleEscWindow   = 500 * time.Millisecond
 
 	// menuEscWindow is the double-Esc window for opening the menu — much
 	// wider than the leader's doubleEscWindow on purpose. Under tmux's
@@ -258,9 +267,15 @@ type App struct {
 	// drag the splitter to change it within [minSidebarWidth, width-minEditorAfterDrag].
 	sidebarWidth int
 
-	clipBuf      string
-	statusMsg    string
-	statusUntil  time.Time
+	clipBuf     string
+	statusMsg   string
+	statusUntil time.Time
+	// statusErr marks the live flash as a failure report. An error
+	// flash paints in the palette's Error colour and, for the rest of
+	// its window, outranks any informational flash that arrives after
+	// it — "Copied" must not wipe "save failed" off the bar before the
+	// user has read it.
+	statusErr    bool
 	dragMode     dragKind // dragEditor while a drag-select is active, etc.
 	lastClick    clickRecord
 	lastTabRects []tabRect
@@ -893,13 +908,44 @@ func (a *App) applyResponsiveSidebar() {
 	a.flash("File explorer restored")
 }
 
-// flash sets a transient status message that displays for statusFlashFor
-// before the status bar reverts to the active file's info. A message too
-// long for the bar moves onto its own strip and takes a row off the
-// editor, so its expiry gets a scheduled repaint rather than waiting for
-// whatever event happens to arrive next — see scheduleFlashStripExpiry.
+// flash sets a transient informational status message that displays for
+// flashLifetime(msg) before the status bar reverts to the active file's
+// info. A message too long for the bar moves onto its own strip and
+// takes a row off the editor, so its expiry gets a scheduled repaint
+// rather than waiting for whatever event happens to arrive next — see
+// scheduleFlashStripExpiry. While an error flash is still live the
+// informational one is dropped: the failure is the thing the user has
+// to see, and it was already on screen first.
 func (a *App) flash(msg string) {
+	if a.statusErr && a.flashActive() {
+		return
+	}
+	a.flashWith(msg, false)
+}
+
+// flashError is flash for failure reports: painted in the Error colour
+// and kept over any informational flash that arrives inside its window.
+func (a *App) flashError(msg string) {
+	a.flashWith(msg, true)
+}
+
+// flashWith is the one writer of the flash state: message, kind, and
+// the deadline derived from the message's own length.
+func (a *App) flashWith(msg string, isErr bool) {
 	a.statusMsg = msg
-	a.statusUntil = time.Now().Add(statusFlashFor)
+	a.statusErr = isErr
+	a.statusUntil = time.Now().Add(flashLifetime(msg))
 	a.scheduleFlashStripExpiry()
+}
+
+// flashLifetime is how long msg stays up: flashMinFor plus flashPerCell
+// per cell of text, capped at flashMaxFor. Measured in cells rather
+// than runes so a CJK message is not charged twice for glyphs the eye
+// reads once per cell.
+func flashLifetime(msg string) time.Duration {
+	d := flashMinFor + time.Duration(textdraw.Width(msg))*flashPerCell
+	if d > flashMaxFor {
+		d = flashMaxFor
+	}
+	return d
 }

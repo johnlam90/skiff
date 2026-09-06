@@ -509,6 +509,31 @@ func TestDrawStatusBar_LowColorUsesAttributes(t *testing.T) {
 	}
 }
 
+// TestDrawStatusBar_ErrorFlashPaintsInErrorColour pins the visual half
+// of flashError: a failure report on the bar takes the palette's Error
+// foreground (the disk-conflict marker's treatment), where a plain
+// flash keeps StatusFg — so the two kinds are told apart at a glance.
+func TestDrawStatusBar_ErrorFlashPaintsInErrorColour(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 80, 24)
+	scr := a.screen.(tcell.SimulationScreen)
+	cellFg := func() tcell.Color {
+		a.drawStatusBar()
+		scr.Show()
+		cells, w, _ := scr.GetContents()
+		fg, _, _ := cells[(a.height-1)*w+1].Style.Decompose()
+		return fg
+	}
+	a.flash("Copied")
+	if got := cellFg(); got != a.theme.StatusFg {
+		t.Fatalf("info flash fg = %v, want StatusFg %v", got, a.theme.StatusFg)
+	}
+	a.flashError("save failed")
+	if got := cellFg(); got != a.theme.Error {
+		t.Fatalf("error flash fg = %v, want Error %v", got, a.theme.Error)
+	}
+}
+
 // TestDrawTabBar_LowColorMarksActiveTabWithAttributes covers the tab
 // strip half of the same fallback: on a degraded palette the active
 // tab's background matches every other tab's, so Attrs.ActiveTab has to

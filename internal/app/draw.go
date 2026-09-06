@@ -568,7 +568,15 @@ func (a *App) drawStatusBar() {
 		drawAt(a.screen, rightX, sy, seg.text, st)
 	}
 
-	drawStatusText(a.screen, sx, sy, a.statusLeftMax(sw), a.statusLeftText(), style)
+	leftStyle := style
+	if a.flashActive() && a.statusErr && !a.flashStripVisible() {
+		// A failure report is painted the way the disk-conflict marker
+		// is: Error over the bar, with Attrs.Error carrying the signal on
+		// a palette whose red has been degraded away.
+		leftStyle = style.Foreground(a.theme.Error).
+			Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar | a.theme.Attrs.Error)
+	}
+	drawStatusText(a.screen, sx, sy, a.statusLeftMax(sw), a.statusLeftText(), leftStyle)
 }
 
 // statusRightSegment is one piece of the status bar's right-hand group.
@@ -766,13 +774,15 @@ func (e *flashExpiryEvent) When() time.Time { return e.when }
 // message living entirely inside the status bar costs no layout, so
 // letting its text go stale until the next event is free — the same
 // reasoning behind the Esc tag only getting a wake-up when an Esc was
-// armed.
+// armed. The delay is read off statusUntil rather than a constant, so
+// a long message's longer window (flashLifetime) gets a wake-up that
+// lands after it, not one that arrives while it is still due.
 func (a *App) scheduleFlashStripExpiry() {
 	if a.screen == nil || !a.flashStripVisible() {
 		return
 	}
 	scr := a.screen
-	time.AfterFunc(statusFlashFor+50*time.Millisecond, func() {
+	time.AfterFunc(time.Until(a.statusUntil)+50*time.Millisecond, func() {
 		_ = scr.PostEvent(&flashExpiryEvent{when: time.Now()})
 	})
 }
