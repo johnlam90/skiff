@@ -25,6 +25,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/session"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -794,4 +795,92 @@ func TestJobsBusy_SeesTheTreeSweep(t *testing.T) {
 		t.Fatal("the tree sweep must count as busy while its worker runs")
 	}
 	pumpUntil(t, a, "tree sweep", func() bool { return !a.jobsBusy() })
+}
+
+// TestWelcomeFlash_OnlyGreetsAnEmptySession pins the ordering New
+// relies on: the greeting runs after restoreSession and only when no
+// tab came back. A returning user with restored tabs used to be told
+// how to open a file over the five files already open, because the
+// flash fired before the restore.
+func TestWelcomeFlash_OnlyGreetsAnEmptySession(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	mkFile(t, root, "kept.go", "l1\n")
+	if err := session.Save(root, session.Project{
+		Tabs:         []session.TabState{{Path: "kept.go"}},
+		ActivePath:   "kept.go",
+		SidebarShown: true,
+		SavedAt:      time.Now(),
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	a := newTestApp(t, root)
+	a.restoreSession()
+	if a.tabs.Len() != 1 {
+		t.Fatalf("fixture: restore should reopen kept.go, got %d tabs", a.tabs.Len())
+	}
+	a.statusMsg = ""
+	a.welcomeFlash()
+	if a.statusMsg != "" {
+		t.Fatalf("a restored session must not be greeted, got %q", a.statusMsg)
+	}
+
+	fresh := newTestApp(t, t.TempDir())
+	fresh.restoreSession()
+	fresh.welcomeFlash()
+	if fresh.statusMsg != welcomeProject {
+		t.Fatalf("a fresh session should be greeted, got %q", fresh.statusMsg)
+	}
+}
+
+// TestWelcomeFlashes_NameBothInputsAndFitTheBar pins the copy: each
+// greeting names the keyboard route (Esc Esc) — a mouse-only greeting
+// is a dead end over SSH — and stays within 40 cells so it lands in
+// the status bar at minWidth instead of on a wrapped flash strip.
+func TestWelcomeFlashes_NameBothInputsAndFitTheBar(t *testing.T) {
+	for _, msg := range []string{welcomeProject, welcomeSingleFile} {
+		if !strings.Contains(msg, "Esc Esc") {
+			t.Errorf("%q never names the keyboard route to the menu", msg)
+		}
+		if n := runeLen(msg); n > minWidth {
+			t.Errorf("%q is %d cells; the status bar at minWidth holds %d", msg, n, minWidth)
+		}
+	}
+	if !strings.Contains(welcomeProject, "≡") {
+		t.Errorf("%q never names the ≡ button", welcomeProject)
+	}
+	if !strings.Contains(welcomeSingleFile, "Esc ?") {
+		t.Errorf("%q never points at the shortcut reference", welcomeSingleFile)
+	}
+}
+
+// TestNewSingleFileApp_GreetsWithTheKeys covers the single-file start,
+// which used to flash nothing but "Opened x": the greeting names the
+// menu and the shortcut reference, and it yields to the error flash
+// when the file could not be opened.
+func TestNewSingleFileApp_GreetsWithTheKeys(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "only.txt")
+	if err := os.WriteFile(target, []byte("one\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	t.Cleanup(func() { scr.Fini() })
+	scr.SetSize(120, 40)
+
+	a := newSingleFileApp(scr, target)
+	if a.statusMsg != welcomeSingleFile {
+		t.Fatalf("single-file start flashed %q, want %q", a.statusMsg, welcomeSingleFile)
+	}
+
+	// A missing path opens as a fresh buffer (that is `skiff new.txt`),
+	// so the open that fails is a directory.
+	unopenable := newSingleFileApp(scr, dir)
+	if unopenable.statusMsg == welcomeSingleFile || unopenable.statusMsg == "" {
+		t.Fatalf("a failed open must keep its error flash, got %q", unopenable.statusMsg)
+	}
 }
