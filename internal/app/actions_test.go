@@ -847,3 +847,28 @@ func TestHasMatchingBracket_GatesTheMenuRow(t *testing.T) {
 		t.Fatal("no tab should disable the row")
 	}
 }
+
+// TestMenuIndentOutdentLines pins the menu pair behind Tab / Shift+Tab:
+// each row shifts the caret line one unit, and an outdent with nothing
+// to remove says so instead of silently doing nothing.
+func TestMenuIndentOutdentLines(t *testing.T) {
+	a, tab := newNavTestApp(t, "x\n")
+	tab.IndentUnit = "  "
+
+	a.menuIndentLines()
+	if got := tab.Buffer.Lines[0]; got != "  x" {
+		t.Fatalf("Indent lines gave %q", got)
+	}
+	a.menuOutdentLines()
+	if got := tab.Buffer.Lines[0]; got != "x" {
+		t.Fatalf("Outdent lines gave %q", got)
+	}
+	a.menuOutdentLines()
+	if !strings.Contains(a.statusMsg, "Nothing to outdent") {
+		t.Fatalf("a no-op outdent should flash, got %q", a.statusMsg)
+	}
+
+	empty := newTestApp(t, t.TempDir())
+	empty.menuIndentLines() // must not panic with no tab
+	empty.menuOutdentLines()
+}

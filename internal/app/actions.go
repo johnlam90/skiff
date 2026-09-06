@@ -596,3 +596,29 @@ func (a *App) menuQuit() {
 		func(app *App) { app.quit = true },
 	)
 }
+
+// menuIndentLines shifts the cursor line / selected block one indent
+// unit right. The same gesture as Tab over a multi-line selection; the
+// menu row is the path for terminals that never deliver Backtab, so the
+// pair stays reachable.
+func (a *App) menuIndentLines() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.IndentLines()
+	}
+}
+
+// menuOutdentLines removes one level of indentation from the cursor
+// line / selected block. Same gesture as Shift+Tab. Flashes when there
+// was nothing to remove, because a silent no-op on a row the user
+// clicked reads as a broken menu item.
+func (a *App) menuOutdentLines() {
+	a.closeMenu()
+	t := a.activeTabPtr()
+	if t == nil {
+		return
+	}
+	if !t.OutdentLines() {
+		a.flash("Nothing to outdent")
+	}
+}

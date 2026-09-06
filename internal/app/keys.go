@@ -198,12 +198,21 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		tab.Delete()
 	case tcell.KeyTab:
 		// A Tab inside a paste is a literal \t from the source text;
-		// expanding it to IndentUnit would rewrite pasted code.
-		if a.pasting {
+		// expanding it to IndentUnit would rewrite pasted code. Over a
+		// selection that spans lines, Tab indents the block — inserting
+		// would replace forty selected lines with one indent unit.
+		switch {
+		case a.pasting:
 			tab.InsertString("\t")
-		} else {
+		case tab.SelectionSpansLines():
+			tab.IndentLines()
+		default:
 			tab.InsertString(tab.IndentUnit)
 		}
+	case tcell.KeyBacktab:
+		// Shift+Tab always outdents the line block — with no selection
+		// that is the caret's line — so the pair reads as a toggle.
+		tab.OutdentLines()
 	case tcell.KeyRune:
 		tab.InsertRune(ev.Rune())
 	}

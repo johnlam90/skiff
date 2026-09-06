@@ -546,6 +546,16 @@ func (t *Tab) HasSelection() bool {
 	return t.Cursor != t.Anchor
 }
 
+// SelectionSpansLines reports whether the selection starts and ends on
+// different buffer lines. It is the gate Tab uses to choose between
+// "indent the block" and "insert an indent unit": a selection inside
+// one line is text the user is about to replace, a selection across
+// lines is a block they mean to shift.
+func (t *Tab) SelectionSpansLines() bool {
+	start, end := PosOrdered(t.Anchor, t.Cursor)
+	return start.Line != end.Line
+}
+
 // SelectionText returns the currently selected text, or "" if nothing is
 // selected. The text is always returned in document order.
 func (t *Tab) SelectionText() string {

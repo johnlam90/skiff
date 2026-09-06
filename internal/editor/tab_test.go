@@ -2686,3 +2686,22 @@ func TestClampCursorToView_SelectionAndNoopGuards(t *testing.T) {
 		t.Fatal("noop clamp must not mark the cursor moved")
 	}
 }
+
+// TestTab_SelectionSpansLines pins the gate Tab uses to pick "indent the
+// block" over "insert an indent": only a selection whose ends sit on
+// different lines counts, and no selection at all never does.
+func TestTab_SelectionSpansLines(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("ab\ncd")}
+	tab.initUndo()
+	if tab.SelectionSpansLines() {
+		t.Fatal("no selection must not span lines")
+	}
+	tab.Anchor, tab.Cursor = Position{Line: 0, Col: 0}, Position{Line: 0, Col: 2}
+	if tab.SelectionSpansLines() {
+		t.Fatal("a selection inside one line must not span lines")
+	}
+	tab.Cursor = Position{Line: 1, Col: 0}
+	if !tab.SelectionSpansLines() {
+		t.Fatal("a selection reaching the next line spans lines")
+	}
+}

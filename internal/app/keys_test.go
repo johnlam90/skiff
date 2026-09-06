@@ -306,3 +306,55 @@ func TestHandleKey_AltArrowsMoveByWord(t *testing.T) {
 		t.Fatalf("Alt+Left: cursor = %v, want %v", tab.Cursor, want)
 	}
 }
+
+// TestHandleKey_TabOverMultiLineSelectionIndents is the regression for
+// Tab deleting a selection: InsertString replaces the selection, so a
+// forty-line selection used to become one indent unit. With the
+// selection spanning lines the key now indents the block and keeps it
+// selected; inside one line it still replaces the selected text.
+func TestHandleKey_TabOverMultiLineSelectionIndents(t *testing.T) {
+	a, tab := newNavTestApp(t, "a\nb\nc\n")
+	tab.IndentUnit = "  "
+	tab.Anchor = editor.Position{Line: 0}
+	tab.Cursor = editor.Position{Line: 1, Col: 1}
+
+	a.handleKey(keyEv(tcell.KeyTab, 0))
+	if got := tab.Buffer.Lines[0] + "|" + tab.Buffer.Lines[1] + "|" + tab.Buffer.Lines[2]; got != "  a|  b|c" {
+		t.Fatalf("Tab over a block gave %q, want the block indented", got)
+	}
+	if !tab.HasSelection() {
+		t.Fatal("the selection must survive the indent")
+	}
+
+	tab.Anchor = editor.Position{Line: 2, Col: 0}
+	tab.Cursor = editor.Position{Line: 2, Col: 1}
+	a.handleKey(keyEv(tcell.KeyTab, 0))
+	if got := tab.Buffer.Lines[2]; got != "  " {
+		t.Fatalf("Tab over a one-line selection should replace it, got %q", got)
+	}
+}
+
+// TestHandleKey_BacktabOutdents gives Shift+Tab an editor meaning: it
+// outdents the caret's line with no selection and the whole block with
+// one. Before this the key had no handler at all.
+func TestHandleKey_BacktabOutdents(t *testing.T) {
+	a, tab := newNavTestApp(t, "    a\n    b\n")
+	tab.IndentUnit = "    "
+	tab.Cursor = editor.Position{Line: 0, Col: 5}
+	tab.Anchor = tab.Cursor
+
+	a.handleKey(keyEv(tcell.KeyBacktab, 0))
+	if got := tab.Buffer.Lines[0]; got != "a" {
+		t.Fatalf("Backtab on a single line gave %q, want %q", got, "a")
+	}
+	if tab.Cursor.Col != 1 {
+		t.Fatalf("cursor should follow the text left, got col %d", tab.Cursor.Col)
+	}
+
+	tab.Anchor = editor.Position{Line: 0}
+	tab.Cursor = editor.Position{Line: 1, Col: 5}
+	a.handleKey(keyEv(tcell.KeyBacktab, 0))
+	if got := tab.Buffer.Lines[1]; got != "b" {
+		t.Fatalf("Backtab over a block left line 1 as %q", got)
+	}
+}

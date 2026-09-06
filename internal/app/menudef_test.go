@@ -65,6 +65,11 @@ var postRedesignMenuActions = []string{
 	// The markdown preview toggle (both label forms; the row itself is
 	// visibility-gated on a markdown tab being active).
 	"Preview Markdown", "Edit Markdown",
+	// The block indent / outdent pair behind Tab / Shift+Tab over a
+	// selection. Named "shift" rather than "indent" on purpose: an Edit
+	// row whose label starts with "in" would outrank "Find in file"
+	// for the filter query the palette test pins.
+	"Shift lines right", "Shift lines left",
 }
 
 // menuCatalog flattens every built-in row the ≡ menu can reach — the top

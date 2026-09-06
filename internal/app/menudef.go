@@ -144,6 +144,13 @@ func editMenuGroup() []menuItemDef {
 		{label: "Move line up", shortcut: "Esc k", action: (*App).menuMoveLineUp, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 		{label: "Move line down", shortcut: "Esc j", action: (*App).menuMoveLineDown, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 		{label: "Duplicate line", shortcut: "Esc d", action: (*App).menuDuplicateLine, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		// Tab / Shift+Tab run these from the keyboard; the rows exist
+		// because a terminal that swallows Shift+Tab (Backtab) leaves
+		// the menu as the only path to an outdent. "Shift", not
+		// "indent": a label starting with "in" would outrank "Find in
+		// file" in the type-to-filter for the query its test pins.
+		{label: "Shift lines right", action: (*App).menuIndentLines, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		{label: "Shift lines left", action: (*App).menuOutdentLines, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 	}
 }
 
