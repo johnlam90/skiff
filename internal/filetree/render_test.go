@@ -189,6 +189,50 @@ func TestRender_ActiveFileIsBold(t *testing.T) {
 	}
 }
 
+// TestRender_ActiveRowWearsSelectedRowAttrsWhenDegraded pins the tree's
+// low-colour channel: with Accent collapsed onto the terminal default,
+// bold alone cannot single out the active row among rows that are bold
+// for being dirty, so the active row also wears Attrs.SelectedRow
+// (reverse video) — and only the active row does.
+func TestRender_ActiveRowWearsSelectedRowAttrsWhenDegraded(t *testing.T) {
+	root := mkTree(t)
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	alpha := findChild(tr.Root, "alpha")
+	if err := tr.reload(alpha); err != nil {
+		t.Fatalf("reload alpha: %v", err)
+	}
+	alpha.Expanded = true
+	inner := findChild(alpha, "inner.go")
+	tr.ActiveFile = inner.Path
+	th := theme.Degrade(theme.Default(), 8)
+
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("scr.Init: %v", err)
+	}
+	t.Cleanup(scr.Fini)
+	scr.SetSize(40, 20)
+	tr.Render(scr, th, 0, 0, 40, 20)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	rowY := findRowY(cells, w, 20, "inner.go")
+	if rowY < 0 {
+		t.Fatal("could not find active file row")
+	}
+	x := strings.Index(rowText(cells, w, rowY), "inner.go")
+	if _, _, attrs := cells[rowY*w+x].Style.Decompose(); attrs&th.Attrs.SelectedRow != th.Attrs.SelectedRow {
+		t.Fatalf("active row attrs = %v, want %v set", attrs, th.Attrs.SelectedRow)
+	}
+	otherY := findRowY(cells, w, 20, "alpha")
+	ox := strings.Index(rowText(cells, w, otherY), "alpha")
+	if _, _, attrs := cells[otherY*w+ox].Style.Decompose(); attrs&tcell.AttrReverse != 0 {
+		t.Fatalf("an inactive row wears the selected-row attribute: %v", attrs)
+	}
+}
+
 // TestRender_TinyHeightDoesNotPanic guards against an off-by-one when the
 // caller hands Render a height smaller than the 2-row header — listH goes
 // to zero and we shouldn't blow up dividing or indexing.

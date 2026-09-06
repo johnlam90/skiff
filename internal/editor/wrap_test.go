@@ -695,3 +695,29 @@ func TestClampCursorWrapped(t *testing.T) {
 		t.Fatalf("anchor moved to (%d,%d) — yank-back is back", tab.ScrollY, tab.ScrollSeg)
 	}
 }
+
+// TestRenderWrapped_DegradedCursorLineUnderlined is the wrap-mode half
+// of the cursor-line channel: every segment of the caret's logical line
+// — continuation rows included — wears Attrs.CursorLine on a degraded
+// palette, so a wrapped current line still reads as one unit when the
+// LineHL tint is gone.
+func TestRenderWrapped_DegradedCursorLineUnderlined(t *testing.T) {
+	scr := newSimScreen(t, wrapViewW, 6)
+	defer scr.Fini()
+
+	tab := wrapTestTab(t, "alpha beta gamma\nsecond")
+	tab.Cursor = Position{Line: 0, Col: 0}
+	tab.Anchor = tab.Cursor
+	tab.Render(scr, theme.Degrade(theme.Default(), 8), 0, 0, wrapViewW, 6)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	contentX := defaultGutterWidth + 1
+	for _, y := range []int{0, 1, 2} {
+		if st := cells[y*w+contentX].Style; st.GetUnderlineStyle() == tcell.UnderlineStyleNone {
+			t.Fatalf("row %d of the wrapped cursor line lost its underline", y)
+		}
+	}
+	if st := cells[3*w+contentX].Style; st.GetUnderlineStyle() != tcell.UnderlineStyleNone {
+		t.Fatal("the next line must not be underlined")
+	}
+}

@@ -1066,11 +1066,15 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 
 		// Pick the row background — a hair lighter on the cursor's line so
 		// the eye can catch where the caret is from across the screen.
+		// Attrs.CursorLine carries the same cue once LineHL has degraded
+		// onto the terminal default (an underline, vim's monochrome
+		// cursorline); it is AttrNone on every truecolor palette.
 		lineBg := bg
+		lineBgStyle := tcell.StyleDefault.Background(lineBg).Foreground(th.Text)
 		if isCursorLine {
 			lineBg = th.LineHL
+			lineBgStyle = theme.WithAttrs(lineBgStyle.Background(lineBg), th.Attrs.CursorLine)
 		}
-		lineBgStyle := tcell.StyleDefault.Background(lineBg).Foreground(th.Text)
 
 		// Re-paint this row with its (possibly highlighted) bg.
 		for cx := x; cx < x+w; cx++ {
@@ -1190,6 +1194,9 @@ func (t *Tab) cellStyle(th theme.Theme, styles []tcell.Style, lineIdx, runeIdx i
 		st = styles[runeIdx]
 	}
 	st = st.Background(lineBg)
+	if lineIdx == t.Cursor.Line {
+		st = theme.WithAttrs(st, th.Attrs.CursorLine)
+	}
 	if hasSel {
 		p := Position{Line: lineIdx, Col: runeIdx}
 		if !PosLess(p, selStart) && PosLess(p, selEnd) {
@@ -1200,6 +1207,10 @@ func (t *Tab) cellStyle(th theme.Theme, styles []tcell.Style, lineIdx, runeIdx i
 			// keeps the ones that stay readable.
 			fg, _, _ := st.Decompose()
 			st = st.Foreground(th.SelectionFg(fg))
+			// On a degraded palette Selection has collapsed onto the
+			// terminal default, and the reverse video in Attrs.Selection
+			// is the only thing left that says "selected".
+			st = theme.WithAttrs(st, th.Attrs.Selection)
 		}
 	}
 	if t.bracket.Found {
@@ -1211,14 +1222,18 @@ func (t *Tab) cellStyle(th theme.Theme, styles []tcell.Style, lineIdx, runeIdx i
 		}
 	}
 	if mIdx := t.matchAtRune(lineIdx, runeIdx); mIdx >= 0 {
+		// Same story as the selection: the amber tints are gone on a
+		// degraded palette and Attrs.FindMatch / FindCurrent carry the
+		// hit — reverse for every match, reverse+bold+underline for the
+		// one Enter jumps past.
 		if mIdx == t.FindIndex {
-			st = st.Background(th.FindCurrent).Foreground(th.BG)
+			st = theme.WithAttrs(st.Background(th.FindCurrent).Foreground(th.BG), th.Attrs.FindCurrent)
 		} else {
 			// The match tint drops syntax coloring entirely: several
 			// syntax colors (comments worst, ~1.2:1) are illegible on the
 			// amber, and a find sweep should read as "here are your
 			// hits", not as code that happens to be tinted.
-			st = st.Background(th.FindMatch).Foreground(th.Text)
+			st = theme.WithAttrs(st.Background(th.FindMatch).Foreground(th.Text), th.Attrs.FindMatch)
 		}
 	}
 	return st

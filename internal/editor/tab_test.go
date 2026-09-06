@@ -1387,6 +1387,60 @@ func TestTab_Render_HidesCursorWhenOffscreen(t *testing.T) {
 	}
 }
 
+// TestRender_DegradedPaletteKeepsSelectionCursorLineAndFindVisible is
+// the end-to-end fence for the low-colour channels: with the palette
+// degraded to eight colours — every surface on the terminal default —
+// a selected cell still reads as selected (reverse video), the caret's
+// line still reads as current (underline style set, not just the bit),
+// and find hits still read as hits (reverse; the current one bold and
+// underlined too). Before, all three degraded to ColorDefault on
+// ColorDefault: no feedback at all.
+func TestRender_DegradedPaletteKeepsSelectionCursorLineAndFindVisible(t *testing.T) {
+	th := theme.Degrade(theme.Default(), 8)
+	tab, _ := NewTab("")
+	tab.Buffer = NewBuffer("hello world\nhello again\nplain")
+	tab.Cursor = Position{Line: 1, Col: 0}
+	tab.Anchor = Position{Line: 0, Col: 0} // selects all of line 0
+	tab.FindMatches = FindAll(tab.Buffer, "hello")
+	tab.FindIndex = 1
+
+	scr := newSimScreen(t, 40, 10)
+	defer scr.Fini()
+	tab.Render(scr, th, 0, 0, 40, 10)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	contentX := gutterWidthFor(tab.Buffer.LineCount()) + 1
+	styleAt := func(x, y int) tcell.Style { return cells[y*w+x].Style }
+
+	// Line 0, col 7 ("w" of world): selected, not a match.
+	if _, _, attrs := styleAt(contentX+7, 0).Decompose(); attrs&tcell.AttrReverse == 0 {
+		t.Fatalf("selected cell attrs = %v, want reverse video on a degraded palette", attrs)
+	}
+	// Line 2 is neither selected nor the cursor line: nothing set.
+	if st := styleAt(contentX, 2); st.GetUnderlineStyle() != tcell.UnderlineStyleNone {
+		t.Fatal("a plain line must not be underlined")
+	}
+	if _, _, attrs := styleAt(contentX, 2).Decompose(); attrs&tcell.AttrReverse != 0 {
+		t.Fatalf("a plain cell wears reverse video: %v", attrs)
+	}
+	// Line 1 is the cursor line: underlined across the row, blank cells
+	// included, and its "hello" is the CURRENT match — bold too.
+	if st := styleAt(contentX+8, 1); st.GetUnderlineStyle() == tcell.UnderlineStyleNone {
+		t.Fatal("cursor line blank cell lost its underline style")
+	}
+	cur := styleAt(contentX, 1)
+	if _, _, attrs := cur.Decompose(); attrs&tcell.AttrReverse == 0 || attrs&tcell.AttrBold == 0 {
+		t.Fatalf("current find match attrs = %v, want reverse and bold", attrs)
+	}
+	if cur.GetUnderlineStyle() == tcell.UnderlineStyleNone {
+		t.Fatal("current find match lost its underline style")
+	}
+	// Line 0's "hello" is a plain match under the selection: reverse, not bold.
+	if _, _, attrs := styleAt(contentX, 0).Decompose(); attrs&tcell.AttrReverse == 0 || attrs&tcell.AttrBold != 0 {
+		t.Fatalf("plain match attrs = %v, want reverse without bold", attrs)
+	}
+}
+
 // TestTab_HitTestTracksTheGutterWidth pins the seam the narrower gutter
 // depends on: the click inverse and the paint read the SAME width, so a
 // click on the first content cell lands on column 0 for a 5-line file

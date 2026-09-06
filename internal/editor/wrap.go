@@ -387,10 +387,13 @@ func (t *Tab) renderWrappedBody(scr tcell.Screen, th theme.Theme, x, y, w, h int
 		}
 		isCursorLine := line == t.Cursor.Line
 		lineBg := bg
-		if isCursorLine {
-			lineBg = th.LineHL
-		}
 		lineBgStyle := tcell.StyleDefault.Background(lineBg).Foreground(th.Text)
+		if isCursorLine {
+			// Attrs.CursorLine is the tint's stand-in on a degraded
+			// palette — same rule as the line path in Render.
+			lineBg = th.LineHL
+			lineBgStyle = theme.WithAttrs(lineBgStyle.Background(lineBg), th.Attrs.CursorLine)
+		}
 
 		for ; seg < len(segs) && row < h; seg++ {
 			cy := y + row

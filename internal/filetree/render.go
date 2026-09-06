@@ -238,7 +238,10 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 	}
 	rowStyle := tcell.StyleDefault.Background(bg).Foreground(fg)
 	if active {
-		rowStyle = rowStyle.Bold(true)
+		// Bold plus, on a degraded palette, Attrs.SelectedRow: the
+		// Accent hue is gone there and bold alone does not say "this is
+		// the row you are on" among rows that are bold for being dirty.
+		rowStyle = theme.WithAttrs(rowStyle.Bold(true), th.Attrs.SelectedRow)
 	}
 
 	// Build the left chunk (indent + chevron + space) and right chunk
