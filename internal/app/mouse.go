@@ -147,6 +147,14 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	// Drag continuation: while we're mid-drag in the editor, every event
 	// with the button held extends the selection — even if the cursor has
 	// wandered out of the editor pane.
+	if leftDown && a.dragMode == dragMdPreview {
+		if t := a.activeTabPtr(); t != nil {
+			if st := a.mdPreviewFor(t); st != nil {
+				a.mdPreviewDragTo(st, x, y)
+			}
+		}
+		return
+	}
 	if leftDown && a.dragMode == dragEditor {
 		a.editorDrag(x, y)
 		return
@@ -232,7 +240,9 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 			// it to the clipboard.
 			if t := a.activeTabPtr(); t != nil {
 				if st := a.mdPreviewFor(t); st != nil {
-					a.mdPreviewPress(st, x, y)
+					if a.mdPreviewPress(st, x, y) {
+						a.dragMode = dragMdPreview
+					}
 					return
 				}
 			}
@@ -252,6 +262,14 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	if a.dragMode == dragEditor {
 		if t := a.activeTabPtr(); t != nil && t.HasSelection() {
 			a.copySelection()
+		}
+	}
+	// The preview's select-to-copy: same convention, rendered text.
+	if a.dragMode == dragMdPreview {
+		if t := a.activeTabPtr(); t != nil {
+			if st := a.mdPreviewFor(t); st != nil {
+				a.copyMdPreviewSelection(st)
+			}
 		}
 	}
 	a.dragMode = dragNone

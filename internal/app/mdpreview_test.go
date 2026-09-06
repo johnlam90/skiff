@@ -319,3 +319,109 @@ func TestPreviewMarkdown_ThemeChangeRerenders(t *testing.T) {
 		t.Fatal("painted preview cell still on the old theme bg")
 	}
 }
+
+// previewLineAt locates a rendered line containing sub and returns its
+// index plus the screen y it draws at — the coordinate helper the
+// selection tests share.
+func previewLineAt(t *testing.T, a *App, tab *editor.Tab, sub string) (int, int) {
+	t.Helper()
+	st := a.mdPreview[tab]
+	if st == nil {
+		t.Fatal("no preview active")
+	}
+	li := findPreviewLine(a, tab, sub)
+	if li < 0 {
+		t.Fatalf("rendered line %q not found in %q", sub, st.lines)
+	}
+	_, ey, _, _ := a.editorRect()
+	return li, ey + li - st.scroll
+}
+
+// TestPreviewMarkdown_DragSelectCopiesRenderedText pins select-to-copy
+// inside the preview — skiff's identity gesture must work on rendered
+// text too: press, drag, release copies the RENDERED characters (no
+// markdown syntax) into the clipboard, exactly like the editor.
+func TestPreviewMarkdown_DragSelectCopiesRenderedText(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "# Title\n\nalpha **beta** gamma\n")
+	a.menuTogglePreviewMarkdown()
+	li, y := previewLineAt(t, a, tab, "alpha beta gamma")
+	st := a.mdPreview[tab]
+	ex, _, _, _ := a.editorRect()
+	x0 := ex + 1 + strings.Index(st.lines[li], "alpha")
+	x1 := ex + 1 + strings.Index(st.lines[li], "beta") + len("beta")
+
+	a.handleMouse(tcell.NewEventMouse(x0, y, tcell.Button1, tcell.ModNone))
+	a.handleMouse(tcell.NewEventMouse(x1, y, tcell.Button1, tcell.ModNone))
+	a.handleMouse(tcell.NewEventMouse(x1, y, 0, tcell.ModNone))
+
+	if a.clipBuf != "alpha beta" {
+		t.Fatalf("clipBuf = %q, want the rendered %q", a.clipBuf, "alpha beta")
+	}
+	if tab.HasSelection() {
+		t.Fatal("preview selection must not leak into the buffer's own selection")
+	}
+}
+
+// TestPreviewMarkdown_MultiLineDragJoins pins the multi-line shape: a
+// drag across rendered lines copies them newline-joined, partial ends
+// respected.
+func TestPreviewMarkdown_MultiLineDragJoins(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "first words here\n\nsecond words there\n")
+	a.menuTogglePreviewMarkdown()
+	l1, y1 := previewLineAt(t, a, tab, "first words")
+	_, y2 := previewLineAt(t, a, tab, "second words")
+	st := a.mdPreview[tab]
+	ex, _, _, _ := a.editorRect()
+	x0 := ex + 1 + strings.Index(st.lines[l1], "words")
+	x1 := ex + 1 + len("second")
+
+	a.handleMouse(tcell.NewEventMouse(x0, y1, tcell.Button1, tcell.ModNone))
+	a.handleMouse(tcell.NewEventMouse(x1, y2, tcell.Button1, tcell.ModNone))
+	a.handleMouse(tcell.NewEventMouse(x1, y2, 0, tcell.ModNone))
+
+	want := "words here\n\nsecond"
+	if a.clipBuf != want {
+		t.Fatalf("clipBuf = %q, want %q", a.clipBuf, want)
+	}
+}
+
+// TestPreviewMarkdown_SelectionHighlightAndClickClears pins the visual
+// half plus the collapse rule: a live drag paints the range on the
+// Selection background, and a plain click (no drag) selects nothing
+// and copies nothing.
+func TestPreviewMarkdown_SelectionHighlightAndClickClears(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "plain selectable words\n")
+	a.menuTogglePreviewMarkdown()
+	li, y := previewLineAt(t, a, tab, "selectable")
+	st := a.mdPreview[tab]
+	ex, _, _, _ := a.editorRect()
+	x0 := ex + 1 + strings.Index(st.lines[li], "selectable")
+
+	a.handleMouse(tcell.NewEventMouse(x0, y, tcell.Button1, tcell.ModNone))
+	a.handleMouse(tcell.NewEventMouse(x0+6, y, tcell.Button1, tcell.ModNone))
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	if _, bg, _ := cells[y*w+x0+2].Style.Decompose(); bg != a.theme.Selection {
+		t.Fatalf("dragged range bg = %v, want Selection", bg)
+	}
+	a.handleMouse(tcell.NewEventMouse(x0+6, y, 0, tcell.ModNone))
+
+	// Plain click elsewhere: collapses, copies nothing new.
+	before := a.clipBuf
+	a.handleMouse(tcell.NewEventMouse(x0, y, tcell.Button1, tcell.ModNone))
+	a.handleMouse(tcell.NewEventMouse(x0, y, 0, tcell.ModNone))
+	if a.clipBuf != before {
+		t.Fatalf("plain click must not copy: %q -> %q", before, a.clipBuf)
+	}
+	a.draw()
+	scr.Show()
+	cells, w, _ = scr.GetContents()
+	if _, bg, _ := cells[y*w+x0+2].Style.Decompose(); bg == a.theme.Selection {
+		t.Fatal("click should clear the highlight")
+	}
+}

@@ -158,6 +158,7 @@ const (
 	dragScrollbar
 	dragTreeScrollbar
 	dragGitPanelScrollbar
+	dragMdPreview
 )
 
 // App is the editor's top-level state holder and event-loop owner.
