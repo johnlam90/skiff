@@ -269,6 +269,13 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	// the strip must not close every tab in its path, and a held one
 	// is otherwise inert.
 	if pressed&tcell.Button2 != 0 {
+		// A middle press while a left drag is live is a slip, not a
+		// close: honouring it swapped the active tab under a drag
+		// that stayed armed, so the next motion extended a selection
+		// in a buffer the user never pressed in.
+		if leftDown && a.dragMode != dragNone {
+			return
+		}
 		if r, ok := a.tabRectAt(x, y); ok {
 			a.requestCloseTab(a.tabs.At(r.Index))
 		}

@@ -2132,3 +2132,34 @@ func TestHandleMouse_TooSmallEndsALiveDrag(t *testing.T) {
 		t.Fatal("the too-small gate left the auto-scroll ticker running")
 	}
 }
+
+// TestHandleMouse_MiddlePressMidDragIsIgnored pins the slip guard: a
+// middle press on the strip while a left drag is live used to close
+// that tab, and the drag — still armed — then extended a selection in
+// whichever tab became active. The press is inert while the drag
+// lasts; a plain middle press afterwards still closes.
+func TestHandleMouse_MiddlePressMidDragIsIgnored(t *testing.T) {
+	a, _, pb := twoTabApp(t)
+	ra := a.lastTabRects[0]
+	ex, ey, _, _ := a.editorRect()
+	a.handleMouse(tcell.NewEventMouse(ex+1, ey, tcell.Button1, 0))
+	if a.dragMode != dragEditor {
+		t.Fatalf("fixture: want an editor drag, got mode %d", a.dragMode)
+	}
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 0, tcell.Button1|tcell.Button2, 0))
+	if a.tabs.Len() != 2 {
+		t.Fatal("a middle press mid-drag closed a tab")
+	}
+	if got := a.activeTabPtr().Path; got != pb {
+		t.Fatalf("a middle press mid-drag switched the active tab to %q", got)
+	}
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 0, tcell.ButtonNone, 0))
+	if a.dragMode != dragNone {
+		t.Fatal("the release must still end the drag")
+	}
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 0, tcell.Button2, 0))
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 0, tcell.ButtonNone, 0))
+	if a.tabs.Len() != 1 {
+		t.Fatal("a plain middle press after the drag must still close the tab")
+	}
+}
