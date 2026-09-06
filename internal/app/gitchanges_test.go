@@ -1512,3 +1512,33 @@ func TestGitPanelScrollbar_ThumbBrightensWhileDragging(t *testing.T) {
 		t.Fatalf("thumb stayed lit after the drag ended, fg %v", fg)
 	}
 }
+
+// TestGitPanelScrollbar_TwoCellGrab: the change list's bar answers to
+// its painted column and the one to its left, the same grab the tree's
+// bar has — a press one cell in scrolls instead of selecting the row
+// whose last label cell it landed on.
+func TestGitPanelScrollbar_TwoCellGrab(t *testing.T) {
+	a := gitPanelApp(t, 80)
+	a.draw()
+	_, sy, sw, _ := a.sidebarRect()
+	listH, _ := a.gitPanelBody()
+	barX, ok := a.gitPanelBar(sw)
+	if !ok {
+		t.Fatal("fixture should draw a bar")
+	}
+	y := sy + gitPanelListTop + listH - 1
+	a.handleMouse(tcell.NewEventMouse(barX-1, y, tcell.Button1, 0))
+	if a.dragMode != dragGitPanelScrollbar {
+		t.Fatalf("press one cell left of the bar: dragMode = %d, want the panel bar", a.dragMode)
+	}
+	if a.gitPanel.Scroll() == 0 {
+		t.Fatal("the grab should have scrolled the list")
+	}
+	if a.gitPanel.Sel() != 0 {
+		t.Fatalf("the grab moved the selection to %d", a.gitPanel.Sel())
+	}
+	a.handleMouse(tcell.NewEventMouse(barX-1, y, tcell.ButtonNone, 0))
+	if a.gitPanelBarHit(barX-2, gitPanelListTop) {
+		t.Fatal("two cells in is a row, not the bar")
+	}
+}

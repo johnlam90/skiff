@@ -301,14 +301,14 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 			a.exitGitPanelKeys()
 		}
 		switch {
-		case splitX >= 0 && x == splitX:
+		case a.splitterHit(x, y):
 			a.dragMode = dragSidebar
 		case sw > 0 && x < splitX:
-			// The tree's bar and the Git panel's sit on the column
-			// just left of the splitter — whichever panel is up, that
-			// column has to be claimed before the row hit-test the
-			// rest of the sidebar falls through to. Only one of the
-			// two can hit: each opts out when its panel is hidden.
+			// The tree's bar and the Git panel's sit on the columns
+			// just left of the splitter — whichever panel is up, they
+			// have to be claimed before the row hit-test the rest of
+			// the sidebar falls through to. Only one of the two can
+			// hit: each opts out when its panel is hidden.
 			if a.treeScrollbarHit(x, y) {
 				a.treeScrollbarTo(y)
 				a.dragMode = dragTreeScrollbar
@@ -551,7 +551,12 @@ func (a *App) tabBarClick(x, _ int) {
 		return
 	}
 	if r, ok := a.tabRectAt(x, 0); ok {
-		if x == r.CloseX {
+		// The × is painted in one cell; the space before it is part of
+		// the target, because one cell is a coin toss on a phone and
+		// the miss — activating the tab you meant to close — is the
+		// gesture's own opposite. The same one-cell-wider rule the
+		// splitter and every scrollbar follow.
+		if x >= r.CloseX-1 && x <= r.CloseX {
 			a.requestCloseTab(a.tabs.At(r.Index))
 			return
 		}
@@ -774,23 +779,77 @@ func (a *App) handleAutoScroll() {
 	tab.MoveCursorTo(pos, true)
 }
 
+// scrollbarGrabWidth is how many editor columns answer to the bar
+// painted in the rightmost one: the bar and the cell to its left. The
+// same two-cell grab the sidebar's bars get, for the same reason — a
+// one-cell target is a miss on a touchscreen, and the cell it borrows
+// is the last text column, where a press otherwise just places the
+// caret at the end of a long line.
+const scrollbarGrabWidth = 2
+
 // scrollbarHit reports whether (x, y) lands on the active tab's
-// scrollbar column, returning the bar-local row when it does. The
-// geometry must mirror Render's: rightmost editor column, only when the
-// file is taller than the viewport.
+// scrollbar, returning the bar-local row when it does. The geometry
+// must mirror Render's: the bar is the rightmost editor column, only
+// when the file is taller than the viewport; the grab zone is
+// scrollbarGrabWidth columns ending there.
 func (a *App) scrollbarHit(x, y int) (int, bool) {
 	tab := a.activeTabPtr()
 	if tab == nil {
 		return 0, false
 	}
 	ex, ey, ew, eh := a.editorRect()
-	if ew <= 2 || !tab.ScrollbarVisible(eh) {
+	if ew <= scrollbarGrabWidth+1 || !tab.ScrollbarVisible(eh) {
 		return 0, false
 	}
-	if x != ex+ew-1 || y < ey || y >= ey+eh {
+	if x <= ex+ew-1-scrollbarGrabWidth || x > ex+ew-1 || y < ey || y >= ey+eh {
 		return 0, false
 	}
 	return y - ey, true
+}
+
+// splitterHit reports whether a press at (x, y) grabs the sidebar's
+// resize splitter. The splitter is painted in one column and answers
+// to three: itself and a neighbour on each side, because a one-cell
+// drag handle is the hardest target on the screen to hit from a phone.
+// Both neighbours have owners, and each overlap goes to whichever
+// target is PAINTED there: a cell that shows a scrollbar thumb or a git
+// change marker is a promise, and a press on it has to keep it. On the
+// left that is the sidebar bar's column while a bar is drawn (the bar's
+// own grab widens inward instead, see filetree.ScrollbarGrabWidth); on
+// the right it is the editor's gutter marker on that row, which opens a
+// hunk diff. A plain row cell or an unmarked gutter cell goes to the
+// splitter, whose miss is the cheapest — a grab released in place
+// changes nothing.
+func (a *App) splitterHit(x, y int) bool {
+	splitX := a.splitterX()
+	if splitX < 0 {
+		return false
+	}
+	switch x {
+	case splitX:
+		return true
+	case splitX - 1:
+		return !a.treeScrollbarHit(x, y) && !a.gitPanelScrollbarHit(x, y)
+	case splitX + 1:
+		return !a.gutterMarkerAt(y)
+	}
+	return false
+}
+
+// gutterMarkerAt reports whether the editor row at screen row y carries
+// a git change marker in its gutter column — the one cell of the
+// editor's first column that is a click target of its own (see
+// openGitHunkAt).
+func (a *App) gutterMarkerAt(y int) bool {
+	tab := a.activeTabPtr()
+	if tab == nil || tab.IsImage() || a.activeMdPreview() != nil {
+		return false
+	}
+	_, ey, _, eh := a.editorRect()
+	if y < ey || y >= ey+eh {
+		return false
+	}
+	return tab.GitLines[tab.ScrollY+(y-ey)] != editor.GitLineNone
 }
 
 // scrollbarTo scrolls the active tab so the thumb centers on the
@@ -810,11 +869,20 @@ func (a *App) scrollbarTo(localY int) {
 }
 
 // treeScrollbarHit reports whether (x, y) lands on the file tree's
-// scrollbar. The bar owns the tree rect's rightmost column, which is
+// scrollbar. The bar is painted in the tree rect's rightmost column,
 // the cell immediately LEFT of the resize splitter (sidebarRect is one
-// column narrower than the sidebar block) — so the splitter, the bar
-// and the tree rows occupy three distinct column ranges at any y and
-// each keeps its own clicks.
+// column narrower than the sidebar block), and answers to that column
+// and the one to its left (filetree.ScrollbarGrabWidth).
+//
+// The invariant is that the splitter, the bar and the tree rows occupy
+// three distinct column ranges at any y and each keeps its own clicks
+// — but the ranges are hit zones, wider than what is painted, and the
+// press dispatch resolves them in a fixed order: the splitter first
+// (its zone reaches one column into the bar's painted cell only while
+// no bar is drawn there, see splitterHit), then the bar (whose grab
+// reaches one column into the rows), then the rows. So at any y,
+// walking right to left: splitter zone, bar zone, row zone — never
+// interleaved, never a cell with two owners.
 //
 // The Git panel draws its own list over the same rect and has no tree
 // bar, so it opts out entirely.
@@ -880,11 +948,12 @@ func (a *App) activeMdPreview() *mdPreviewState {
 }
 
 // mdPreviewScrollbarHit reports whether (x, y) lands on the preview's
-// scrollbar: the editor rect's rightmost column, and only while
-// drawMdPreview paints a bar there (a document that fits has none).
+// scrollbar: the editor rect's rightmost column plus the editor bar's
+// scrollbarGrabWidth, and only while drawMdPreview paints a bar there
+// (a document that fits has none).
 func (a *App) mdPreviewScrollbarHit(st *mdPreviewState, x, y int) bool {
 	ex, ey, ew, eh := a.editorRect()
-	if x != ex+ew-1 || y < ey || y >= ey+eh {
+	if x <= ex+ew-1-scrollbarGrabWidth || x > ex+ew-1 || y < ey || y >= ey+eh {
 		return false
 	}
 	_, _, ok := scrollbar.Geom(len(st.lines), eh, st.scroll)

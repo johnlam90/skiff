@@ -1638,3 +1638,125 @@ func TestHandleMouse_MiddleClickClosesTheTabUnderIt(t *testing.T) {
 		t.Fatalf("the surviving tab is %q, want %q (closed %q)", got, pb, pa)
 	}
 }
+
+// TestTabBarClick_ClosesViaTheSpaceBeforeX: the × is one cell, and the
+// cell before it is the space that pads the label — a press there
+// used to ACTIVATE the tab, the exact opposite of what a near-miss on
+// the × meant. The close zone is two cells ending on the ×.
+func TestTabBarClick_ClosesViaTheSpaceBeforeX(t *testing.T) {
+	a, pa, pb := twoTabApp(t)
+	ra := a.lastTabRects[0]
+	if ra.CloseX-1 <= ra.X {
+		t.Fatalf("fixture: the × at %d must have a cell before it inside the tab (X=%d)", ra.CloseX, ra.X)
+	}
+	a.tabBarClick(ra.CloseX-1, 0)
+	if a.tabs.Len() != 1 || a.activeTabPtr().Path != pb {
+		t.Fatalf("press one cell before × should close %q, tabs now %d", pa, a.tabs.Len())
+	}
+	// Two cells before the × is still the label: activates.
+	a, pa, _ = twoTabApp(t)
+	ra = a.lastTabRects[0]
+	a.tabBarClick(ra.CloseX-2, 0)
+	if a.tabs.Len() != 2 || a.activeTabPtr().Path != pa {
+		t.Fatal("the label cell before the close zone must activate, not close")
+	}
+}
+
+// TestScrollbarHit_TwoCellGrab: the editor's bar is painted in the
+// rightmost column and answers to that column and the one to its left,
+// so a near-miss on a phone still grabs the thumb. One further left is
+// text again.
+func TestScrollbarHit_TwoCellGrab(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "long.txt")
+	if err := os.WriteFile(path, []byte(strings.Repeat("line\n", 300)), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(path)
+	ex, ey, ew, eh := a.editorRect()
+
+	a.handleMouse(tcell.NewEventMouse(ex+ew-2, ey+eh-1, tcell.Button1, 0))
+	if a.dragMode != dragScrollbar {
+		t.Fatalf("press one cell left of the bar: dragMode = %d, want the bar drag", a.dragMode)
+	}
+	if a.activeTabPtr().ScrollY == 0 {
+		t.Fatal("the grab should have scrolled")
+	}
+	a.handleMouse(tcell.NewEventMouse(ex+ew-2, ey+eh-1, tcell.ButtonNone, 0))
+	if _, ok := a.scrollbarHit(ex+ew-3, ey); ok {
+		t.Fatal("three cells in is text, not the bar")
+	}
+}
+
+// TestSplitterHit_GrabsItsNeighbours pins the splitter's three-cell
+// zone and who wins each overlap. With no sidebar bar painted, the
+// cell left of the splitter is the splitter; with a bar painted there
+// the bar keeps its column and its own grab widens one cell inward.
+// On the right, the editor's first column is the splitter unless that
+// row's gutter shows a git marker, whose click opens the hunk.
+func TestSplitterHit_GrabsItsNeighbours(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "p.txt")
+	if err := os.WriteFile(target, []byte("hello\nworld\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.draw()
+	splitX := a.splitterX()
+	_, sy, _, sh := a.sidebarRect()
+	y := sy + sh - 4
+
+	// No bar (a two-entry tree fits): the left neighbour is splitter.
+	a.handleMouse(tcell.NewEventMouse(splitX-1, y, tcell.Button1, 0))
+	if a.dragMode != dragSidebar {
+		t.Fatalf("left neighbour with no bar: dragMode = %d, want the splitter", a.dragMode)
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX-1, y, tcell.ButtonNone, 0))
+
+	// Right neighbour on an unmarked row: splitter too.
+	a.openFile(target)
+	_, ey, _, _ := a.editorRect()
+	a.handleMouse(tcell.NewEventMouse(splitX+1, ey+1, tcell.Button1, 0))
+	if a.dragMode != dragSidebar {
+		t.Fatalf("right neighbour on a clean row: dragMode = %d, want the splitter", a.dragMode)
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX+1, ey+1, tcell.ButtonNone, 0))
+
+	// Right neighbour on a row with a gutter marker: the marker's click.
+	tab := a.activeTabPtr()
+	tab.GitLines = map[int]editor.GitLineChange{0: editor.GitLineModified}
+	fake := &git.Fake{}
+	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target,
+		"@@ -1 +1 @@\n-hell\n+hello\n", nil)
+	a.gitRunner = fake
+	a.handleMouse(tcell.NewEventMouse(splitX+1, ey, tcell.Button1, 0))
+	if a.dragMode == dragSidebar {
+		t.Fatal("a gutter marker keeps its click; the splitter must not take it")
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX+1, ey, tcell.ButtonNone, 0))
+	pumpUntil(t, a, "diff load", idle(&a.diffLoad))
+	if !diffIsOpen(a) {
+		t.Fatal("the marker press should have opened the hunk diff")
+	}
+	a.closeAllModals()
+
+	// With a bar painted left of the splitter, the bar keeps its column
+	// and its grab reaches one more cell in.
+	seedTreeFiles(t, dir, 80)
+	a.refreshTree()
+	a.draw()
+	for _, x := range []int{splitX - 1, splitX - 2} {
+		a.tree.ScrollY = 0
+		a.handleMouse(tcell.NewEventMouse(x, y, tcell.Button1, 0))
+		if a.dragMode != dragTreeScrollbar {
+			t.Fatalf("x=%d with a bar painted: dragMode = %d, want the tree bar", x, a.dragMode)
+		}
+		a.handleMouse(tcell.NewEventMouse(x, y, tcell.ButtonNone, 0))
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX, y, tcell.Button1, 0))
+	if a.dragMode != dragSidebar {
+		t.Fatalf("the painted splitter column: dragMode = %d, want the splitter", a.dragMode)
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX, y, tcell.ButtonNone, 0))
+}

@@ -42,17 +42,27 @@ func (t *Tree) ScrollbarVisible(w, h int) bool {
 	return t.scrollbarVisible(w, listH)
 }
 
+// ScrollbarGrabWidth is how many columns answer to the bar: the one it
+// is painted in plus the one to its left. A one-cell grab is a miss on
+// a phone and a near-miss on a trackpad, and the row label's last cell
+// is the cheapest neighbour to give up — the row is still clickable
+// everywhere else.
+const ScrollbarGrabWidth = 2
+
 // ScrollbarHit reports whether a click at rect-local (localX, localY)
-// inside a w×h render rect landed on the scrollbar. The bar owns the
-// rect's rightmost column, which is one to the LEFT of the sidebar's
-// resize splitter — the splitter lives outside this rect entirely (see
-// App.sidebarRect), so the two can never contend for a cell.
+// inside a w×h render rect landed on the scrollbar. The bar is painted
+// in the rect's rightmost column and answers to ScrollbarGrabWidth
+// columns ending there. The sidebar's resize splitter lives outside
+// this rect (see App.sidebarRect); the app gives the splitter the
+// painted column when both want it, which is why the grab extends
+// leftward rather than right.
 func (t *Tree) ScrollbarHit(localX, localY, w, h int) bool {
 	listOff, listH := listArea(h)
 	if !t.scrollbarVisible(w, listH) {
 		return false
 	}
-	return localX == w-1 && localY >= listOff && localY < listOff+listH
+	return localX > w-1-ScrollbarGrabWidth && localX <= w-1 &&
+		localY >= listOff && localY < listOff+listH
 }
 
 // ScrollToBarRow scrolls the list so the thumb centers on the rect-local

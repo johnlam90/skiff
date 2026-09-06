@@ -512,11 +512,16 @@ func (a *App) gitPanelBar(sw int) (x int, ok bool) {
 // gitPanelBarHit reports whether a sidebar-local press at (x, y) landed
 // on the change list's scroll indicator. The span stops at the list's
 // last row, so the keyboard hint strip docked under it keeps its own
-// cells.
+// cells. Like the tree's bar it answers to the painted column and the
+// one to its left (filetree.ScrollbarGrabWidth): the splitter takes the
+// painted column when both want it, so the grab has to reach inward.
 func (a *App) gitPanelBarHit(x, y int) bool {
 	_, _, sw, _ := a.sidebarRect()
 	barX, ok := a.gitPanelBar(sw)
-	return ok && a.gitPanelList().Bar(barX, gitPanelListTop).Hit(x, y)
+	if !ok || x <= barX-filetree.ScrollbarGrabWidth || x > barX {
+		return false
+	}
+	return a.gitPanelList().Bar(barX, gitPanelListTop).Hit(barX, y)
 }
 
 // gitPanelScrollToBar scrolls the change list so its thumb centers on
