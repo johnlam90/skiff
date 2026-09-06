@@ -124,6 +124,17 @@ func TestRender_LinkAndImage(t *testing.T) {
 	if findLine(lines, "[image: diagram]") < 0 {
 		t.Fatalf("image placeholder missing in %q", lines)
 	}
+	// The URL and the placeholder are read, not glanced at: they sit on
+	// Muted (the 4.5:1 text tier), never on Subtle, which only clears
+	// the 3:1 graphics floor and is reserved for rules and borders.
+	u := strings.Index(lines[i], "x.dev")
+	if fg, _, _ := styles[i][u].Decompose(); fg != th.Muted {
+		t.Fatalf("link URL fg = %v, want Muted", fg)
+	}
+	k := findLine(lines, "[image: diagram]")
+	if fg, _, _ := styles[k][0].Decompose(); fg != th.Muted {
+		t.Fatalf("image placeholder fg = %v, want Muted", fg)
+	}
 }
 
 // TestRender_CJKWrapStaysInBudget pins cluster safety: wide glyphs

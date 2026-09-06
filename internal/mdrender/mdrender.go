@@ -91,9 +91,13 @@ func (r *renderer) base() tcell.Style {
 	return tcell.StyleDefault.Background(r.th.BG).Foreground(r.th.Text)
 }
 
-// dim returns the secondary style used for URLs, placeholders and rules.
+// dim returns the secondary style used for URLs, placeholders, raw
+// HTML and rules. Muted rather than Subtle on purpose: a link's
+// destination and an image's alt text are read, not glanced at, so
+// they sit on the palette's 4.5:1 text tier — Subtle only clears the
+// 3:1 graphics floor and is for lines and borders.
 func (r *renderer) dim() tcell.Style {
-	return tcell.StyleDefault.Background(r.th.BG).Foreground(r.th.Subtle)
+	return tcell.StyleDefault.Background(r.th.BG).Foreground(r.th.Muted)
 }
 
 // block renders one block node. indent is the continuation prefix the

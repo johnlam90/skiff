@@ -86,6 +86,51 @@ func TestEveryThemeReadable(t *testing.T) {
 	}
 }
 
+// TestEverySubtleClearsGraphicsFloor is the chrome counterpart of
+// TestEveryThemeReadable: Subtle paints every overlay border, scrollbar
+// track, the splitter and an inactive tab's ×, over three different
+// surfaces, and the registry accessors must hand back a palette on
+// which none of those disappears. As shipped, Offshore's borders
+// measured 2.58:1 on the editor and 2.31:1 on an overlay, Dracula's
+// 1.56:1 — under the 3:1 graphics bar on 21 of 27 palettes.
+func TestEverySubtleClearsGraphicsFloor(t *testing.T) {
+	for _, e := range List() {
+		th := e.Build()
+		if r := minContrastOver(th.Subtle, subtleSurfaces(th)); r < minGraphicsContrast {
+			t.Errorf("%s: Subtle contrast %.2f < %.1f on its worst surface", e.ID, r, minGraphicsContrast)
+		}
+	}
+}
+
+// TestSubtleIsCorrectedNotHandEdited pins the mechanism behind the
+// floor: at least one raw palette must still fail it before readable()
+// runs (otherwise the correction is dead code and the next dim port
+// ships unnoticed), and the correction must stay minimal — Subtle is
+// meant to recede, so a walk that snapped it to white would turn every
+// border into a text-weight line.
+func TestSubtleIsCorrectedNotHandEdited(t *testing.T) {
+	corrected := 0
+	for _, e := range registry { // raw registry: pre-correction values
+		raw := e.Build()
+		before := minContrastOver(raw.Subtle, subtleSurfaces(raw))
+		if before >= minGraphicsContrast {
+			continue
+		}
+		corrected++
+		fixed := readable(raw)
+		after := minContrastOver(fixed.Subtle, subtleSurfaces(fixed))
+		if after < minGraphicsContrast {
+			t.Errorf("%s: Subtle correction landed at %.2f, still under the floor", e.ID, after)
+		}
+		if after > minGraphicsContrast+1.5 {
+			t.Errorf("%s: Subtle correction overshot to %.2f — no longer subtle", e.ID, after)
+		}
+	}
+	if corrected == 0 {
+		t.Fatal("no palette needed a Subtle correction; the floor is no longer load-bearing")
+	}
+}
+
 // TestPortedPalettesAreCorrectedNotHandEdited pins the mechanism, not
 // just the outcome: at least one registry palette must actually be
 // failing the floor before correction, otherwise readable() has
