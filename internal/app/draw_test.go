@@ -23,24 +23,194 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/customactions"
+	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/icons"
 	"github.com/johnlam90/skiff/internal/theme"
 	"github.com/johnlam90/skiff/internal/version"
 )
 
-// TestDetectLangLabel covers the language label helper's three cases.
-func TestDetectLangLabel(t *testing.T) {
-	cases := map[string]string{
-		"":               "text",
-		"foo.go":         "go",
-		"foo":            "text",
-		"path/to/x.py":   "py",
-		"archive.tar.gz": "gz",
+// TestTabLocationLabel pins the readout's lead piece: a project file is
+// named by its repo-relative, slash-separated path (the part that tells
+// two draw.go tabs apart, where the old extension label said nothing
+// the tab name did not), a file outside the root by its base name, and
+// a pathless buffer as "untitled".
+func TestTabLocationLabel(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	inner := filepath.Join(dir, "internal", "app")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
 	}
-	for in, want := range cases {
-		if got := detectLangLabel(in); got != want {
-			t.Errorf("detectLangLabel(%q) = %q, want %q", in, got, want)
+	deep := openTestFile(t, a, inner, "draw.go", "package app\n")
+	if got := a.tabLocationLabel(a.activeTabPtr()); got != "internal/app/draw.go" {
+		t.Fatalf("label = %q, want the repo-relative path", got)
+	}
+	_ = deep
+	outside := openTestFile(t, a, t.TempDir(), "elsewhere.txt", "x\n")
+	if got := a.tabLocationLabel(a.activeTabPtr()); got != "elsewhere.txt" {
+		t.Fatalf("label for %s = %q, want the base name", outside, got)
+	}
+	untitled, _ := editor.NewTab("")
+	if got := a.tabLocationLabel(untitled); got != "untitled" {
+		t.Fatalf("label for a pathless buffer = %q, want untitled", got)
+	}
+}
+
+// TestLeftEllipsisPath pins the left-hand ellipsis: leading components
+// go first so the tail survives, and a path that cannot keep even its
+// last component is reported unfit rather than reduced to "…".
+func TestLeftEllipsisPath(t *testing.T) {
+	cases := []struct {
+		path string
+		maxW int
+		want string
+		ok   bool
+	}{
+		{"internal/app/draw.go", 30, "internal/app/draw.go", true},
+		{"internal/app/draw.go", 14, "…/app/draw.go", true},
+		{"internal/app/draw.go", 10, "…/draw.go", true},
+		{"internal/app/draw.go", 8, "", false},
+		{"draw.go", 7, "draw.go", true},
+		{"draw.go", 6, "", false},
+	}
+	for _, c := range cases {
+		got, ok := leftEllipsisPath(c.path, c.maxW)
+		if got != c.want || ok != c.ok {
+			t.Errorf("leftEllipsisPath(%q, %d) = (%q, %v), want (%q, %v)", c.path, c.maxW, got, ok, c.want, c.ok)
 		}
+	}
+}
+
+// statusReadoutApp opens internal/app/draw.go with a 281-line body and
+// a dirty buffer — the readout shape the narrow-bar bug was observed
+// with ("281 lines ·" and "997 " hard-cut at 48 columns).
+func statusReadoutApp(t *testing.T, w, h int) *App {
+	t.Helper()
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	inner := filepath.Join(dir, "internal", "app")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	openTestFile(t, a, inner, "draw.go", strings.Repeat("package app\n", 280)+"package app")
+	a.activeTabPtr().Dirty = true
+	a.gitSnap.Branch = "feature/status-bar"
+	a.tree.IconsEnabled = false
+	resizeTestApp(t, a, w, h)
+	a.statusMsg = ""
+	return a
+}
+
+// TestStatusLeftText_DropsWholePiecesAtEveryWidth is the ladder's
+// contract: at 80 columns the readout leads with the path, at 48 the
+// path is ellipsised or dropped but "Ln, Col" and the line count stay
+// whole, at 40 whatever remains is still a whole tier — and at NO width
+// does the bar hold a dangling "·" or a cut number.
+func TestStatusLeftText_DropsWholePiecesAtEveryWidth(t *testing.T) {
+	a := statusReadoutApp(t, 80, 24)
+	_, _, sw, _ := a.statusRect()
+	full := a.statusLeftText(a.statusLeftMax(sw))
+	if !strings.HasPrefix(full, " internal/app/draw.go · Ln 1, Col 1 · 281 lines · ●") {
+		t.Fatalf("80-column readout = %q, want the path-led tier", full)
+	}
+	tab := a.activeTabPtr()
+	for width := 4; width <= 80; width++ {
+		got := a.statusLeftText(width)
+		tiers := a.statusReadoutTiers(tab, width)
+		whole := false
+		for _, tier := range tiers {
+			if got == tier {
+				whole = true
+			}
+		}
+		if !whole {
+			t.Fatalf("width %d: readout %q is not a whole tier %q", width, got, tiers)
+		}
+		if runeLen(got) > width && got != tiers[len(tiers)-1] {
+			t.Fatalf("width %d: readout %q overruns while a shorter tier exists", width, got)
+		}
+		if strings.HasSuffix(strings.TrimSpace(got), "·") {
+			t.Fatalf("width %d: readout %q ends on a dangling separator", width, got)
+		}
+	}
+	// The observed failures: at 48 and 40 columns the painted bar must
+	// still read as whole pieces.
+	for _, width := range []int{48, 40} {
+		resizeTestApp(t, a, width, 16)
+		a.draw()
+		scr := a.screen.(tcell.SimulationScreen)
+		scr.Show()
+		bar := screenLine(scr, a.height-1)
+		if !strings.Contains(bar, "Ln 1, Col 1") {
+			t.Fatalf("%d columns: bar lost the caret position: %q", width, bar)
+		}
+		if strings.Contains(bar, "lines ·  ") || strings.Contains(bar, " 28 ") || strings.Contains(bar, "281 lines · ") && !strings.Contains(bar, "●") {
+			t.Fatalf("%d columns: bar shows a cut piece: %q", width, bar)
+		}
+	}
+}
+
+// TestStatusRightSegments_DropOrderFollowsImportance pins the admission
+// order the marker's own comment promised: on a bar too narrow for
+// everything, the disk-conflict marker and the Esc tag survive and the
+// git chip is what shortens — first to the branch's last component,
+// then to a bare glyph — before anything more important is lost. The
+// paint order (git rightmost, conflict left of the Esc tag) is
+// unchanged by the reordering.
+func TestStatusRightSegments_DropOrderFollowsImportance(t *testing.T) {
+	a := statusReadoutApp(t, 80, 24)
+	a.noteDiskConflict(a.activeTabPtr().Path, time.Now())
+	a.lastEscape = time.Now()
+	texts := func(sw int) []string {
+		var out []string
+		for _, seg := range a.statusRightSegments(sw) {
+			out = append(out, seg.text)
+		}
+		return out
+	}
+	wide := texts(80)
+	if len(wide) != 3 || wide[0] != " feature/status-bar " || wide[1] != "Esc… " || wide[2] != statusConflictTag {
+		t.Fatalf("80-column group = %q, want full git chip, Esc tag, conflict marker in paint order", wide)
+	}
+	// Room for the conflict tag and Esc tag with a few cells over: the
+	// chip must shorten rather than the marker vanishing.
+	narrow := texts(runeLen(statusConflictTag) + runeLen("Esc… ") + runeLen(" status-bar ") + 2)
+	if len(narrow) != 3 || narrow[0] != " status-bar " {
+		t.Fatalf("narrow group = %q, want the basename chip beside both tags", narrow)
+	}
+	tighter := texts(runeLen(statusConflictTag) + runeLen("Esc… ") + runeLen(" ⎇ ") + 2)
+	if len(tighter) != 3 || tighter[0] != " ⎇ " {
+		t.Fatalf("tighter group = %q, want the bare glyph chip beside both tags", tighter)
+	}
+	tightest := texts(runeLen(statusConflictTag) + 2)
+	if len(tightest) != 1 || tightest[0] != statusConflictTag {
+		t.Fatalf("tightest group = %q, want the conflict marker alone", tightest)
+	}
+}
+
+// TestStatusGitChipForms pins the chip's ladder, including the dirty
+// count riding every rung: the person who checked out
+// feature/widgets/tabs knows it as "tabs", and even the bare glyph
+// still says "repo, N changed, click here".
+func TestStatusGitChipForms(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.gitSnap.Branch = "feature/widgets/tabs"
+	a.gitSnap.Ahead = 2
+	a.tree.DirtyFiles = map[string]filetree.GitChangeKind{"a": filetree.GitChangeModified, "b": filetree.GitChangeAdded}
+	got := a.statusGitChipForms()
+	want := []string{" feature/widgets/tabs ↑2 · 2 ", " tabs · 2 ", " ⎇ 2 "}
+	if len(got) != len(want) {
+		t.Fatalf("forms = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("form %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	a.gitSnap.Branch = ""
+	if forms := a.statusGitChipForms(); forms != nil {
+		t.Fatalf("no repo should yield no forms, got %q", forms)
 	}
 }
 

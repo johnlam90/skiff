@@ -19,11 +19,13 @@ package app
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/icons"
 	"github.com/johnlam90/skiff/internal/textdraw"
 )
@@ -583,7 +585,8 @@ func (a *App) drawStatusBar() {
 		leftStyle = style.Foreground(a.theme.Error).
 			Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar | a.theme.Attrs.Error)
 	}
-	drawStatusText(a.screen, sx, sy, a.statusLeftMax(sw), a.statusLeftText(), leftStyle)
+	leftMax := a.statusLeftMax(sw)
+	drawStatusText(a.screen, sx, sy, leftMax, a.statusLeftText(leftMax), leftStyle)
 }
 
 // statusRightSegment is one piece of the status bar's right-hand group.
@@ -608,70 +611,74 @@ type statusRightSegment struct {
 }
 
 // statusRightSegments returns the right-hand pieces that fit in a status
-// bar sw cells wide, rightmost first: the git branch segment, the
-// pending-Esc tag, then the persistent disk-conflict marker. The order is
-// load-bearing — the transient tag sits between the two stable pieces so
-// the conflict marker never jumps around as the leader arms and expires.
+// bar sw cells wide, rightmost first: the git segment, the pending-Esc
+// tag, the persistent disk-conflict marker, then the markdown chip. The
+// paint order is load-bearing — the transient tag sits between the two
+// stable pieces so the conflict marker never jumps around as the leader
+// arms and expires — but it is NOT the drop order. Pieces are admitted
+// by importance: the conflict marker first (a dismissed conflict
+// overlay must not mean a forgotten conflict — it is a decision the
+// user still owes), then the Esc tag (the editor's only modifier must
+// not have invisible state), then the markdown chip, and the git chip
+// last. The git chip is also the one piece that shortens before it
+// goes: full text, then the branch's last path component, then a bare
+// glyph and count (statusGitChipForms). Before this the git chip was
+// admitted first and the conflict marker last, which on a narrow bar
+// dropped the one piece its own comment says must survive.
 //
-// Pure, and the single source of the group's width: drawStatusBar paints
-// from it and statusLeftMax measures from it, so the room the flash is
-// clipped to and the room it is tested against cannot disagree.
+// Pure, and the single source of the group's width: drawStatusBar
+// paints from it and statusLeftMax measures from it, so the room the
+// flash is clipped to and the room it is tested against cannot
+// disagree; statusBarClick walks the same list for its hit ranges.
 func (a *App) statusRightSegments(sw int) []statusRightSegment {
-	var segs []statusRightSegment
+	// Paint positions, rightmost first. Admission below runs in
+	// priority order and the result is sorted back into this order.
+	const (
+		posGit = iota
+		posArrow
+		posEsc
+		posConflict
+		posMd
+	)
+	type placed struct {
+		pos int
+		seg statusRightSegment
+	}
+	var out []placed
 	used := 0
-	add := func(text string, warn bool) {
-		w := runeLen(text)
-		// Pieces are dropped whole rather than clipped: half a branch
-		// name is worse than none, and a clipped piece would silently
-		// reclaim cells the left text was already measured against.
-		if w == 0 || used+w >= sw {
-			return
-		}
-		segs = append(segs, statusRightSegment{text: text, warn: warn})
-		used += w
-	}
-	addSeg := func(seg statusRightSegment) {
+	// fits reports whether w more cells still leave the left text at
+	// least one; pieces are dropped whole rather than clipped — half a
+	// branch name is worse than none, and a clipped piece would
+	// silently reclaim cells the left text was already measured
+	// against.
+	fits := func(w int) bool { return w > 0 && used+w < sw }
+	admit := func(pos int, seg statusRightSegment) bool {
 		w := runeLen(seg.text)
-		if w == 0 || used+w >= sw {
-			return
+		if !fits(w) {
+			return false
 		}
-		segs = append(segs, seg)
+		out = append(out, placed{pos, seg})
 		used += w
+		return true
 	}
-	// The git segment: a powerline chip when Nerd Font glyphs are on
-	// (branch glyph + name on the Selection block, joined to the bar by
-	// the  transition whose fg IS the chip background), today's
-	// plain text otherwise — private-use glyphs on a non-Nerd-Font
-	// terminal would render as boxes. Text on Selection is the one
-	// fg/bg pairing every palette already guarantees readable (it is
-	// the editor's own selection). Chip first, then the arrow: this
-	// list builds rightmost-first.
-	if gitText := a.statusGitSegment(); gitText != "" && a.iconsOn() {
-		addSeg(statusRightSegment{text: " " + gitText,
-			fg: a.theme.Text, bg: a.theme.Selection, click: (*App).toggleGitPanel})
-		addSeg(statusRightSegment{text: "",
-			fg: a.theme.Selection, click: (*App).toggleGitPanel})
-	} else {
-		addSeg(statusRightSegment{text: gitText, click: (*App).toggleGitPanel})
+
+	// 1. Persistent disk-conflict marker for the active tab: dismissing
+	// the conflict overlay must not mean forgetting the conflict, so
+	// this stays up until the tab is saved, reloaded or closed.
+	if a.tabDiskConflict(a.activeTabPtr()) {
+		admit(posConflict, statusRightSegment{text: statusConflictTag, warn: true})
 	}
-	// Pending-gesture tag: while an Esc is armed (leader or double-tap
-	// window still open) show "Esc…" beside the git segment — vim's
-	// showcmd idea sized for a status bar. The editor's only modifier
-	// must not have invisible state: without this, a slow second
-	// keystroke fails with no cue that the gesture died. A
+	// 2. Pending-gesture tag: while an Esc is armed (leader or
+	// double-tap window still open) show "Esc…" beside the git segment
+	// — vim's showcmd idea sized for a status bar. Without this, a slow
+	// second keystroke fails with no cue that the gesture died. A
 	// leaderExpiryEvent posted at arming time repaints the bar so the
 	// tag also clears when the user simply abandons the Esc.
 	if !a.lastEscape.IsZero() && time.Since(a.lastEscape) < menuEscWindow {
-		add("Esc… ", false)
+		admit(posEsc, statusRightSegment{text: "Esc… "})
 	}
-	// Persistent disk-conflict marker for the active tab: dismissing the
-	// conflict overlay must not mean forgetting the conflict, so this
-	// stays up until the tab is saved, reloaded or closed.
-	if a.tabDiskConflict(a.activeTabPtr()) {
-		add(statusConflictTag, true)
-	}
-	// Markdown preview chip: the subtle standing invitation the ≡ row
-	// alone can't provide. Dim "Preview" at rest, reversed "Edit"
+	// 3. Markdown preview chip: the subtle standing invitation the ≡
+	// row alone can't provide. Dim "Preview" at rest, reversed "Edit"
 	// while the rendered view is up — the active mode is loud, the
 	// invitation is quiet. Leftmost of the group so the stable git
 	// segment never jumps as tabs switch.
@@ -682,9 +689,75 @@ func (a *App) statusRightSegments(sw int) []statusRightSegment {
 			chip.text = " Edit "
 			chip.attrs = tcell.AttrReverse
 		}
-		addSeg(chip)
+		admit(posMd, chip)
+	}
+	// 4. The git segment, longest form that fits: a powerline chip when
+	// Nerd Font glyphs are on (branch glyph + name on the Selection
+	// block, joined to the bar by the  transition whose fg IS the chip
+	// background), plain text otherwise — private-use glyphs on a
+	// non-Nerd-Font terminal would render as boxes. Text on Selection
+	// is the one fg/bg pairing every palette already guarantees
+	// readable (it is the editor's own selection). The arrow is one
+	// more cell; a chip without it is still a chip, so it is tried with
+	// the arrow first and admitted alone if that is all that fits.
+	for _, gitText := range a.statusGitChipForms() {
+		if a.iconsOn() {
+			chip := statusRightSegment{text: " " + gitText,
+				fg: a.theme.Text, bg: a.theme.Selection, click: (*App).toggleGitPanel}
+			arrow := statusRightSegment{text: "",
+				fg: a.theme.Selection, click: (*App).toggleGitPanel}
+			if fits(runeLen(chip.text) + runeLen(arrow.text)) {
+				admit(posGit, chip)
+				admit(posArrow, arrow)
+				break
+			}
+			if admit(posGit, chip) {
+				break
+			}
+			continue
+		}
+		if admit(posGit, statusRightSegment{text: gitText, click: (*App).toggleGitPanel}) {
+			break
+		}
+	}
+
+	sort.SliceStable(out, func(i, j int) bool { return out[i].pos < out[j].pos })
+	segs := make([]statusRightSegment, len(out))
+	for i, p := range out {
+		segs[i] = p.seg
 	}
 	return segs
+}
+
+// statusGitChipForms returns the git segment's text at every length it
+// is willing to take, longest first: the full readout (branch, diff
+// base, ahead/behind, dirty count), then the branch's last path
+// component with the dirty count — "feature/widgets/tabs" is
+// "tabs" to the person who checked it out — then a bare branch glyph
+// with the dirty count, which still says "this is a repo, N files
+// changed, click here". Nothing when there is no repo.
+func (a *App) statusGitChipForms() []string {
+	full := a.statusGitSegment()
+	if full == "" {
+		return nil
+	}
+	dirty := ""
+	if a.tree != nil && len(a.tree.DirtyFiles) > 0 {
+		dirty = " · " + itoa(len(a.tree.DirtyFiles))
+	}
+	base := a.gitSnap.Branch
+	if i := strings.LastIndex(base, "/"); i >= 0 && i < len(base)-1 {
+		base = base[i+1:]
+	}
+	forms := []string{full}
+	if short := " " + base + dirty + " "; short != full {
+		forms = append(forms, short)
+	}
+	bare := " ⎇"
+	if dirty != "" {
+		bare += " " + itoa(len(a.tree.DirtyFiles))
+	}
+	return append(forms, bare+" ")
 }
 
 // statusRightWidth is how many cells the right-hand group occupies.
@@ -711,35 +784,110 @@ func (a *App) statusLeftMax(sw int) int {
 	return max
 }
 
-// statusLeftText is the status bar's left-hand text: the live flash, else
-// the active tab's readout, else the project root.
+// statusLeftText is the status bar's left-hand text for a region maxW
+// cells wide: the live flash, else the active tab's readout, else the
+// project root.
 //
 // A flash that moved onto its own strip is skipped here on purpose. The
 // bar then falls back to the readout the flash would have covered, so a
 // long message costs the user nothing — they read the whole sentence on
 // the strip AND keep Ln/Col — instead of trading one for the other.
-func (a *App) statusLeftText() string {
+//
+// The readout is a ladder of tiers (statusReadoutTiers) and the widest
+// tier that fits maxW is used whole: pieces are dropped, never cut,
+// because a bar reading "281 lines ·" or "997 " — which is what a
+// single Sprintf hard-clipped at 48 columns produced — is worse than a
+// shorter bar that is true. Only the flash and the last tier can still
+// be clipped by the paint, and the last tier is "Ln N, Col M".
+func (a *App) statusLeftText(maxW int) string {
 	if a.flashActive() && !a.flashStripVisible() {
 		return " " + a.statusMsg
 	}
-	if tab := a.activeTabPtr(); tab != nil {
-		if tab.IsImage() && tab.Image != nil {
-			b := tab.Image.Bounds()
-			return fmt.Sprintf(" %s · %d×%d · %s",
-				strings.ToUpper(tab.ImageFmt), b.Dx(), b.Dy(), filepath.Base(tab.Path))
-		}
-		// Same "needs attention" gate as the tab-strip dot: DiskGone
-		// alone (a deleted-but-not-yet-recreated file) shows the marker
-		// too, not just Dirty.
-		dirty := ""
-		if tab.Dirty || tab.DiskGone {
-			dirty = " · ●"
-		}
-		return fmt.Sprintf(" %s · Ln %d, Col %d · %d lines%s",
-			detectLangLabel(tab.Path), tab.Cursor.Line+1, tab.Cursor.Col+1,
-			tab.Buffer.LineCount(), dirty)
+	tab := a.activeTabPtr()
+	if tab == nil {
+		return " " + filepath.Base(a.rootDir)
 	}
-	return " " + filepath.Base(a.rootDir)
+	if tab.IsImage() && tab.Image != nil {
+		b := tab.Image.Bounds()
+		return fmt.Sprintf(" %s · %d×%d · %s",
+			strings.ToUpper(tab.ImageFmt), b.Dx(), b.Dy(), filepath.Base(tab.Path))
+	}
+	tiers := a.statusReadoutTiers(tab, maxW)
+	for _, tier := range tiers {
+		if textdraw.Width(tier) <= maxW {
+			return tier
+		}
+	}
+	return tiers[len(tiers)-1]
+}
+
+// statusReadoutTiers builds the active tab's readout at every width it
+// is willing to take, widest first, for a region maxW wide:
+//
+//	" where · Ln 12, Col 4 · 281 lines · ●"
+//	" Ln 12, Col 4 · 281 lines · ●"
+//	" Ln 12, Col 4 · ●"
+//	" Ln 12, Col 4"
+//
+// The lead piece is the tab's repo-relative path (tabLocationLabel),
+// ellipsised from the LEFT to whatever the first tier has room for —
+// "…/app/draw.go" keeps the part that tells two draw.go tabs apart,
+// where the old extension label ("go") said nothing the tab name did
+// not. The dirty dot uses the same "needs attention" gate as the
+// tab-strip dot: DiskGone alone (a deleted-but-not-yet-recreated file)
+// shows it too, not just Dirty.
+func (a *App) statusReadoutTiers(tab *editor.Tab, maxW int) []string {
+	dirty := ""
+	if tab.Dirty || tab.DiskGone {
+		dirty = " · ●"
+	}
+	pos := fmt.Sprintf("Ln %d, Col %d", tab.Cursor.Line+1, tab.Cursor.Col+1)
+	lines := fmt.Sprintf(" · %d lines", tab.Buffer.LineCount())
+	full := " " + pos + lines + dirty
+	tiers := make([]string, 0, 4)
+	// The location gets whatever the full readout leaves it; a path
+	// that cannot keep even its base name inside that is not shown at
+	// all rather than shown as "…".
+	if where, ok := leftEllipsisPath(a.tabLocationLabel(tab), maxW-textdraw.Width(full)-textdraw.Width(" · ")); ok {
+		tiers = append(tiers, " "+where+" · "+pos+lines+dirty)
+	}
+	return append(tiers, full, " "+pos+dirty, " "+pos)
+}
+
+// tabLocationLabel is the status bar's name for a tab: its path
+// relative to the project root ("internal/app/draw.go"), the base name
+// in single-file mode or for a file outside the root, "untitled" for a
+// buffer with no path. Slash-separated whatever the OS uses, because
+// it is read, not opened.
+func (a *App) tabLocationLabel(tab *editor.Tab) string {
+	if tab.Path == "" {
+		return tab.DisplayName()
+	}
+	if a.tree != nil {
+		if rel, ok := relFromRoot(tab.Path, a.tree.Root.Path); ok && rel != "." {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return filepath.Base(tab.Path)
+}
+
+// leftEllipsisPath fits a slash-separated path into maxW cells by
+// dropping leading components — "internal/app/draw.go" becomes
+// "…/app/draw.go", then "…/draw.go" — so the tail, which is the part
+// that distinguishes one file from another, is what survives. ok is
+// false when even the last component alone would not fit; a location
+// reduced to "…" says nothing and should be dropped instead.
+func leftEllipsisPath(path string, maxW int) (string, bool) {
+	if textdraw.Width(path) <= maxW {
+		return path, true
+	}
+	parts := strings.Split(path, "/")
+	for i := 1; i < len(parts); i++ {
+		if cand := "…/" + strings.Join(parts[i:], "/"); textdraw.Width(cand) <= maxW {
+			return cand, true
+		}
+	}
+	return "", false
 }
 
 // statusFlashRoom is how many cells the status bar can give the flash
@@ -977,16 +1125,10 @@ func (a *App) drawTooSmall() {
 }
 
 // drawStatusText writes s left-aligned into the status bar at (x, y) with a
-// max width of maxW cells. Truncates rather than wraps.
+// max width of maxW cells. Truncates rather than wraps, cluster-aware,
+// so a wide glyph never straddles the boundary with the right group.
 func drawStatusText(scr tcell.Screen, x, y, maxW int, s string, st tcell.Style) {
-	col := 0
-	for _, r := range s {
-		if col >= maxW {
-			return
-		}
-		scr.SetContent(x+col, y, r, nil, st)
-		col++
-	}
+	textdraw.DrawClipped(scr, x, y, maxW, s, st)
 }
 
 // drawAt writes s starting at (x, y) without bounds checking. Callers are
@@ -1013,17 +1155,4 @@ func trimRunes(s string, max int) string {
 	}
 	rs := []rune(s)
 	return string(rs[:max-1]) + "…"
-}
-
-// detectLangLabel returns a short label for the active file's language —
-// just the file extension, or "text" when there is no path or extension.
-func detectLangLabel(path string) string {
-	if path == "" {
-		return "text"
-	}
-	ext := strings.TrimPrefix(filepath.Ext(path), ".")
-	if ext == "" {
-		return "text"
-	}
-	return ext
 }
