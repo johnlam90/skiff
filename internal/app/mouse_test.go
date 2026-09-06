@@ -1557,3 +1557,33 @@ func TestHandleMouse_TooSmallRoutesNothing(t *testing.T) {
 		t.Fatal("after the window grows back the × must work again")
 	}
 }
+
+// TestHandleMouse_MenuWheelStepsLikeEveryOtherSurface pins the menu's
+// wheel step to wheelLines: it used to scroll one row per notch while
+// the editor, the tree and every picker moved three, so the menu was
+// the one list that crawled. The hover is recomputed after the step so
+// the highlight tracks the row now under the pointer.
+func TestHandleMouse_MenuWheelStepsLikeEveryOtherSurface(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	stuffMenu(a, 20)
+	resizeTestApp(t, a, 80, 24)
+	a.openMenu()
+	a.draw()
+	if a.menuMaxScroll() < 2*wheelLines {
+		t.Fatalf("test setup: menu must overflow by 2 notches, maxScroll %d", a.menuMaxScroll())
+	}
+	mx, my, _, _ := a.menuModalRect()
+	x, y := mx+5, my+menuContentY+2
+
+	a.handleMouse(tcell.NewEventMouse(x, y, tcell.WheelDown, 0))
+	if got := a.menuList.Scroll(); got != wheelLines {
+		t.Fatalf("one notch down: scroll %d, want %d", got, wheelLines)
+	}
+	if idx := a.menuRowAt(x, y); idx >= 0 && idx != a.hoveredMenuRow {
+		t.Fatalf("hover %d should track the row now under the pointer (%d)", a.hoveredMenuRow, idx)
+	}
+	a.handleMouse(tcell.NewEventMouse(x, y, tcell.WheelUp, 0))
+	if got := a.menuList.Scroll(); got != 0 {
+		t.Fatalf("one notch back up: scroll %d, want 0", got)
+	}
+}

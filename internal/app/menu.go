@@ -141,8 +141,10 @@ func (a *App) ensureMenuRowVisible(idx int) {
 // whatever action it crosses (see overlay.Press).
 func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
 	fresh := a.mouse.menuPress.Fresh(btn)
+	// The wheel steps by wheelLines like every other surface; a
+	// one-row step here made the menu the only list that crawled.
 	if btn&tcell.WheelUp != 0 {
-		a.syncMenuList().ScrollBy(-1)
+		a.syncMenuList().ScrollBy(-wheelLines)
 		// The rows just moved under the stationary pointer — recompute
 		// the hover so the highlight tracks what a click would now hit
 		// instead of going one row stale until the next mouse motion.
@@ -150,7 +152,7 @@ func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
 		return
 	}
 	if btn&tcell.WheelDown != 0 {
-		a.syncMenuList().ScrollBy(1)
+		a.syncMenuList().ScrollBy(wheelLines)
 		a.updateMenuHover(x, y)
 		return
 	}
