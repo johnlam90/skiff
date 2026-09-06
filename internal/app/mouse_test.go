@@ -1445,3 +1445,74 @@ func TestHandleMouse_MdPreviewScrollbarPressAndDrag(t *testing.T) {
 		t.Fatalf("release should clear dragMode, got %d", a.dragMode)
 	}
 }
+
+// menuRowY returns the screen row of the menu item whose label is label,
+// or fails the test — the geometry the drag tests need to aim at.
+func menuRowY(t *testing.T, a *App, label string) int {
+	t.Helper()
+	items, _, _ := a.menuLayout()
+	_, my, _, _ := a.menuModalRect()
+	for _, it := range items {
+		if a.menuLabel(it) == label {
+			return my + it.relY
+		}
+	}
+	t.Fatalf("menu row %q not found", label)
+	return -1
+}
+
+// TestHandleMouse_PressOnMenuButtonThenDragIntoMenuRunsNothing pins the
+// "a press that opened you is not your press" rule: the ≡ press opens
+// the menu, and the drag that follows — the same held button — reaches
+// the menu as motion. It hovers rows; it runs none of them.
+func TestHandleMouse_PressOnMenuButtonThenDragIntoMenuRunsNothing(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.width, a.height = 120, 60
+	a.handleMouse(tcell.NewEventMouse(a.sidebarW()+1, 0, tcell.Button1, 0))
+	if !a.menuOpen {
+		t.Fatal("the ≡ press should open the menu")
+	}
+	mx, _, _, _ := a.menuModalRect()
+	y := menuRowY(t, a, "Hide file explorer")
+	before := a.sidebarShown
+	a.handleMouse(tcell.NewEventMouse(mx+5, y, tcell.Button1, 0))
+	if a.sidebarShown != before {
+		t.Fatal("dragging from ≡ onto a row ran the row")
+	}
+	if !a.menuOpen {
+		t.Fatal("the drag must not close the menu either")
+	}
+	// Release, then a real click on the same row runs it.
+	a.handleMouse(tcell.NewEventMouse(mx+5, y, tcell.ButtonNone, 0))
+	a.handleMouse(tcell.NewEventMouse(mx+5, y, tcell.Button1, 0))
+	if a.sidebarShown == before {
+		t.Fatal("a fresh press on the row after the release should run it")
+	}
+}
+
+// TestHandleMouse_DragAcrossMenuRowsRunsOnlyThePressedRow: inside the
+// menu, a press runs its row and the motion that follows runs nothing
+// more, however many rows it crosses — the same once-per-press rule
+// the tab strip and the tree follow.
+func TestHandleMouse_DragAcrossMenuRowsRunsOnlyThePressedRow(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.width, a.height = 120, 60
+	a.openMenu()
+	mx, _, _, _ := a.menuModalRect()
+	toggleY := menuRowY(t, a, "Hide file explorer")
+	quitY := menuRowY(t, a, "Quit editor")
+	before := a.sidebarShown
+	a.handleMouse(tcell.NewEventMouse(mx+5, toggleY, tcell.Button1, 0))
+	if a.sidebarShown == before {
+		t.Fatal("the press should run the toggle row")
+	}
+	a.openMenu() // the toggle closed the menu; put it back under the held button
+	a.handleMouse(tcell.NewEventMouse(mx+5, quitY, tcell.Button1, 0))
+	if a.quit {
+		t.Fatal("dragging onto Quit ran it")
+	}
+	a.handleMouse(tcell.NewEventMouse(0, 0, tcell.Button1, 0))
+	if !a.menuOpen {
+		t.Fatal("dragging out of the frame closed the menu")
+	}
+}

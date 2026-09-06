@@ -26,6 +26,7 @@ import (
 	"github.com/johnlam90/skiff/internal/diff"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/git"
+	"github.com/johnlam90/skiff/internal/overlay"
 	"github.com/johnlam90/skiff/internal/scrollbar"
 )
 
@@ -53,6 +54,16 @@ type clickRecord struct {
 // else with the button set is the same gesture continuing.
 type mouseState struct {
 	held tcell.ButtonMask
+	// pressTop is what sat on the overlay stack when Button1 last went
+	// down: nil for the base UI. A press that OPENS an overlay (the ≡
+	// button, a menu row that opens a confirm) is not that overlay's
+	// press, so the motion of the same held button is delivered to it
+	// with Button1 masked off — hover only, nothing to activate.
+	pressTop overlay.Overlay
+	// menuPress is the action menu's click latch. The prefab overlays
+	// carry their own (overlay.Press); the menu's state lives on App,
+	// so its latch lives here.
+	menuPress overlay.Press
 }
 
 // fresh reports which buttons btn presses for the first time — set now
@@ -74,6 +85,11 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	x, y := ev.Position()
 	btn := ev.Buttons()
 	pressed := a.mouse.fresh(btn)
+	leftDown := btn&tcell.Button1 != 0
+	leftPress := pressed&tcell.Button1 != 0
+	if leftPress {
+		a.mouse.pressTop = a.overlays.Top()
+	}
 
 	// Remember when we last saw Shift held down on ANY mouse event.
 	// Zellij + macOS Terminal split shift+wheel into two events: a
@@ -101,6 +117,16 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		// swallows.
 		a.dragMode = dragNone
 		a.stopAutoScroll()
+		// A press that opened this overlay is not its press: the ≡
+		// button, a tree context row or a menu row that opens a confirm
+		// all fire on the press, and the drag that follows used to reach
+		// the new surface as a Button1 event over its own targets. The
+		// overlays compare by identity, which is safe because every
+		// opener hands the stack a pointer (or the one-word menu
+		// adapter).
+		if leftDown && !leftPress && ov != a.mouse.pressTop {
+			btn &^= tcell.Button1
+		}
 		ov.HandleMouse(x, y, btn)
 		return
 	}
@@ -169,9 +195,6 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		a.scrollAtH(x, y, wheelCols)
 		return
 	}
-
-	leftDown := btn&tcell.Button1 != 0
-	leftPress := pressed&tcell.Button1 != 0
 
 	// Drag continuation: while we're mid-drag in the editor, every event
 	// with the button held extends the selection — even if the cursor has
