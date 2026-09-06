@@ -28,6 +28,7 @@ import (
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/icons"
 	"github.com/johnlam90/skiff/internal/textdraw"
+	"github.com/rivo/uniseg"
 )
 
 // tabRect remembers where each tab was drawn so click handling can hit-test
@@ -35,7 +36,11 @@ import (
 type tabRect struct {
 	Index    int
 	X, Width int
-	CloseX   int // Cell column of the × close button.
+	CloseX   int // Cell column of the × close button; -1 when scrolled out of the window.
+	// Label is the text the tab was laid out with (tabLabels): the paint
+	// reads it back from here rather than re-deriving it, so the cells
+	// measured and the cells painted are the same string.
+	Label string
 }
 
 // draw paints the entire screen. Called once per event in the main loop.
@@ -130,17 +135,140 @@ func (a *App) tabStripRegion() (x, w int) {
 	return
 }
 
+// tabBadgeCells is the width of one overflow-badge slot when the strip
+// can afford it: a chevron and up to two digits ("‹12", "12›").
+const tabBadgeCells = 3
+
+// tabBadgeWidth is how many cells each end of the strip reserves for an
+// overflow badge: none when every tab fits, tabBadgeCells when the strip
+// can hold both slots and a minimal tab, one bare chevron cell
+// otherwise. The slots are reserved whenever the strip overflows at
+// all — not only when a badge is showing — so scrolling never moves the
+// tab origin: a badge that appeared at scroll > 0 used to be painted
+// over the first visible tab's leading cells, which fused "‹2" with the
+// name beside it ("‹2.go ×"). The width depends on the labels and the
+// strip, never on the scroll, so the window and the scroll range are
+// stable under scrolling.
+func (a *App) tabBadgeWidth() int {
+	_, stripW := a.tabStripRegion()
+	if stripW <= 0 || a.tabsTotalWidth() <= stripW {
+		return 0
+	}
+	if stripW >= 2*tabBadgeCells+minVisibleTabCells {
+		return tabBadgeCells
+	}
+	return 1
+}
+
+// tabWindow returns the screen x and width of the cells tabs may paint
+// into: the strip minus a badge slot at each end. Every tab-strip
+// computation — layout origin, scroll range, overflow counts, clipping,
+// hit rects — works against this window, so the badges own their cells
+// outright.
+func (a *App) tabWindow() (x, w int) {
+	stripX, stripW := a.tabStripRegion()
+	bw := a.tabBadgeWidth()
+	x = stripX + bw
+	w = stripW - 2*bw
+	if w < 0 {
+		w = 0
+	}
+	return
+}
+
+// tabsTotalWidth is the laid-out width of every tab end to end — the
+// number the badge reservation is decided from, so it is computed from
+// the labels alone rather than through layoutTabs, whose origin depends
+// on that decision.
+func (a *App) tabsTotalWidth() int {
+	total := 0
+	for _, label := range a.tabLabels() {
+		total += a.tabCellWidth(label)
+	}
+	return total
+}
+
+// tabCellWidth is one tab's width for a given label: pad, dirty slot,
+// optional glyph and its separator, the label, a space, the × and a
+// trailing pad — measured in cells, so a CJK or emoji filename gets the
+// room it paints in.
+func (a *App) tabCellWidth(label string) int {
+	iconW := 0
+	if a.iconsOn() {
+		iconW = 2 // glyph + space
+	}
+	return 1 + 2 + iconW + textdraw.Width(label) + 1 + 1 + 1
+}
+
+// maxTabLabelCells caps a tab's label. Twenty cells fits every ordinary
+// name whole (this repo's longest, gitchanges_test.go, is eighteen) and
+// keeps a generated or hashed file name from taking the strip on its
+// own; longer names are ellipsised, and the status bar's readout
+// carries the full path.
+const maxTabLabelCells = 20
+
+// tabLabels returns the strip's label for every open tab in tab order.
+// A label is the tab's display name, prefixed with as many trailing
+// path components as it takes to tell it apart from another open tab
+// with the same name — three open index.ts files used to render as
+// three identical tabs — and clipped to maxTabLabelCells with an
+// ellipsis. Done here, in the strip's layout, rather than in
+// Tab.DisplayName: the name is a property of the file, the
+// disambiguation is a property of what else is open beside it.
+func (a *App) tabLabels() []string {
+	tabs := a.tabs.Tabs()
+	labels := make([]string, len(tabs))
+	for i, t := range tabs {
+		labels[i] = t.DisplayName()
+	}
+	// Deepen only the colliding labels, one component at a time, until
+	// they differ or the paths run out of components to add.
+	for depth := 1; depth <= 3; depth++ {
+		seen := map[string]int{}
+		for _, l := range labels {
+			seen[l]++
+		}
+		changed := false
+		for i, t := range tabs {
+			if seen[labels[i]] < 2 || t.Path == "" {
+				continue
+			}
+			if deeper := trailingPathComponents(t.Path, depth+1); deeper != labels[i] {
+				labels[i] = deeper
+				changed = true
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	for i, l := range labels {
+		labels[i] = textdraw.ClipEllipsis(l, maxTabLabelCells)
+	}
+	return labels
+}
+
+// trailingPathComponents returns the last n slash-separated components
+// of path ("app/draw.go" for n=2), or the whole path when it has fewer.
+func trailingPathComponents(path string, n int) string {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(path)), "/")
+	if n > len(parts) {
+		n = len(parts)
+	}
+	return strings.Join(parts[len(parts)-n:], "/")
+}
+
 // maxTabScroll returns how far the tab strip can scroll: the overflow
-// between the laid-out tab widths and the strip. Zero when every tab
-// fits.
+// between the laid-out tab widths and the tab window. Zero when every
+// tab fits.
 func (a *App) maxTabScroll() int {
 	rects := a.layoutTabs()
 	if len(rects) == 0 {
 		return 0
 	}
-	stripX, stripW := a.tabStripRegion()
+	winX, winW := a.tabWindow()
 	last := rects[len(rects)-1]
-	over := (last.X + last.Width) - (stripX + stripW)
+	over := (last.X + last.Width) - (winX + winW)
 	if over < 0 {
 		return 0
 	}
@@ -169,16 +297,16 @@ func (a *App) ensureActiveTabVisible() {
 		a.tabScroll = 0
 		return
 	}
-	stripX, stripW := a.tabStripRegion()
-	if stripW <= 0 {
+	winX, winW := a.tabWindow()
+	if winW <= 0 {
 		return
 	}
 	r := rects[a.tabs.ActiveIndex()]
-	left := stripX + a.tabScroll
+	left := winX + a.tabScroll
 	if r.X < left {
-		a.tabScroll = r.X - stripX
-	} else if r.X+r.Width > left+stripW {
-		a.tabScroll = r.X + r.Width - stripX - stripW
+		a.tabScroll = r.X - winX
+	} else if r.X+r.Width > left+winW {
+		a.tabScroll = r.X + r.Width - winX - winW
 	}
 	a.clampTabScroll()
 }
@@ -196,32 +324,35 @@ func (a *App) scrollTabStrip(delta int) {
 // disorienting jumps.
 const tabScrollStep = 8
 
-// layoutTabs computes the tabRect geometry for every tab. Tabs are rendered
-// to the right of the menu button, in the format:
+// layoutTabs computes the tabRect geometry for every tab. Tabs are laid
+// out from the tab window's origin (right of the ≡ button and the left
+// badge slot), in the format:
 //
-//	" <dirty><icon? ><name> × " — a single space pad, two-cell dirty slot
-//	(dot+space, or two spaces), an optional Nerd Font glyph + 1-space
-//	separator (only when icons are enabled), the file name, a separator
-//	space, the close ×, and a trailing space.
+//	" <dirty><icon? ><label> × " — a single space pad, two-cell dirty
+//	slot (dot+space, or two spaces), an optional Nerd Font glyph +
+//	1-space separator (only when icons are enabled), the label
+//	(tabLabels), a separator space, the close ×, and a trailing space.
 //
-// The X coordinates are virtual (as if the strip never scrolled);
-// drawTabBar subtracts tabScroll before painting and stores the
-// shifted rects, so click hit-testing always works in screen space.
+// Widths are cells (textdraw.Width), not rune counts. The X coordinates
+// are virtual (as if the strip never scrolled); drawTabBar subtracts
+// tabScroll before painting and stores the shifted, window-clipped
+// rects, so click hit-testing always works in screen space.
 func (a *App) layoutTabs() []tabRect {
-	out := make([]tabRect, 0, a.tabs.Len())
-	cursor := a.sidebarW() + menuButtonWidth
+	labels := a.tabLabels()
+	out := make([]tabRect, 0, len(labels))
+	cursor, _ := a.tabWindow()
 	iconW := 0
 	if a.iconsOn() {
 		iconW = 2 // glyph + space
 	}
-	for i, t := range a.tabs.Tabs() {
-		nameLen := len([]rune(t.DisplayName()))
-		w := 1 + 2 + iconW + nameLen + 1 + 1 + 1 // pad+dirty+icon?+name+space+×+pad
+	for i, label := range labels {
+		w := a.tabCellWidth(label)
 		out = append(out, tabRect{
 			Index:  i,
 			X:      cursor,
 			Width:  w,
-			CloseX: cursor + 1 + 2 + iconW + nameLen + 1,
+			CloseX: cursor + 1 + 2 + iconW + textdraw.Width(label) + 1,
+			Label:  label,
 		})
 		cursor += w
 	}
@@ -240,14 +371,32 @@ func (a *App) drawTabBar() {
 	a.drawMenuButton()
 
 	// Shift the virtual layout by the strip scroll and remember the
-	// shifted rects — hit-testing then stays in screen coordinates.
-	stripX, _ := a.tabStripRegion()
+	// shifted rects — hit-testing then stays in screen coordinates. The
+	// painted cells are clipped to the tab window, and so are the
+	// remembered rects: a tab half under a badge slot is clickable only
+	// where it is visible, and its × is inert once it has scrolled out.
+	winX, winW := a.tabWindow()
+	winEnd := winX + winW
 	rects := a.layoutTabs()
 	for i := range rects {
 		rects[i].X -= a.tabScroll
 		rects[i].CloseX -= a.tabScroll
 	}
-	a.lastTabRects = rects
+	visible := make([]tabRect, 0, len(rects))
+	for _, r := range rects {
+		end := min(r.X+r.Width, winEnd)
+		start := max(r.X, winX)
+		if start >= end {
+			continue
+		}
+		clipped := r
+		clipped.X, clipped.Width = start, end-start
+		if r.CloseX < winX || r.CloseX >= winEnd {
+			clipped.CloseX = -1
+		}
+		visible = append(visible, clipped)
+	}
+	a.lastTabRects = visible
 	for _, r := range rects {
 		active := r.Index == a.tabs.ActiveIndex()
 		bg := a.theme.SidebarBG
@@ -282,20 +431,15 @@ func (a *App) drawTabBar() {
 		if a.tabs.At(r.Index).IsPreview() {
 			st = st.Italic(true)
 		}
-		// Background. Cells scrolled off either edge of the strip are
-		// skipped; the chevrons painted below mark what's hidden.
-		for cx := r.X; cx < r.X+r.Width; cx++ {
-			if cx < stripX {
-				continue
-			}
-			if cx >= tx+tw {
-				break
-			}
+		// Background. Cells scrolled off either edge of the window are
+		// skipped; the badges painted in their own slots mark what's
+		// hidden.
+		for cx := max(r.X, winX); cx < min(r.X+r.Width, winEnd); cx++ {
 			a.screen.SetContent(cx, ty, ' ', nil, st)
 		}
 		tab := a.tabs.At(r.Index)
 		col := r.X + 1
-		if (tab.Dirty || tab.DiskGone) && col >= stripX && col < tx+tw {
+		if (tab.Dirty || tab.DiskGone) && col >= winX && col < winEnd {
 			// The dot means "needs attention", not just "has edits" — a
 			// DiskGone tab (its file deleted, not yet recreated or
 			// re-saved) shows it too, same as Dirty. Modified is
@@ -321,28 +465,14 @@ func (a *App) drawTabBar() {
 			if active {
 				gst = gst.Bold(true).Underline(true)
 			}
-			for _, gr := range glyph {
-				if col >= tx+tw {
-					break
-				}
-				if col >= stripX {
-					a.screen.SetContent(col, ty, gr, nil, gst)
-				}
-				col++
-			}
+			col = drawTabText(a.screen, col, ty, winX, winEnd, glyph, gst)
 			col++ // separator space after glyph
 		}
-		for _, ru := range tab.DisplayName() {
-			if col >= tx+tw {
-				break
-			}
-			if col >= stripX {
-				a.screen.SetContent(col, ty, ru, nil, st)
-			}
-			col++
-		}
+		// The label is the one layoutTabs measured (r.Label), painted
+		// cluster by cluster so a two-cell glyph advances two cells.
+		col = drawTabText(a.screen, col, ty, winX, winEnd, r.Label, st)
 		col++ // separator space before ×
-		if col >= stripX && col < tx+tw {
+		if col >= winX && col < winEnd {
 			// Emphasis tracks likelihood of use: the active tab's × is
 			// the likeliest close target, so it gets the brighter Muted;
 			// inactive tabs recede to Subtle so their × can't outshine
@@ -359,7 +489,8 @@ func (a *App) drawTabBar() {
 	// clipped lines, now carrying how many tabs are hidden on each side
 	// and painted in reverse video so the marker is unmistakable on a
 	// monochrome terminal too. Each badge is also the click target that
-	// scrolls the strip (tabBarClick hit-tests the same geometry).
+	// scrolls the strip (tabBarClick hit-tests the same geometry). They
+	// paint into their reserved slots, never over a tab.
 	chevStyle := tcell.StyleDefault.Background(a.theme.SidebarBG).
 		Foreground(a.theme.Accent).Attributes(tcell.AttrBold | tcell.AttrReverse)
 	left, right := a.tabChevrons()
@@ -367,8 +498,31 @@ func (a *App) drawTabBar() {
 		if c.Label == "" {
 			continue
 		}
-		drawAt(a.screen, c.X, ty, c.Label, chevStyle)
+		textdraw.DrawClipped(a.screen, c.X, ty, textdraw.Width(c.Label), c.Label, chevStyle)
 	}
+}
+
+// drawTabText paints s cluster by cluster from col on row y, skipping
+// the cells left of winX and stopping at winEnd, and returns the column
+// just past where the whole string WOULD have ended — clipped or not —
+// so the caller's cursor keeps tracking the layout through a tab that
+// is only partly on screen.
+func drawTabText(scr tcell.Screen, col, y, winX, winEnd int, s string, st tcell.Style) int {
+	state := -1
+	for len(s) > 0 {
+		var cluster string
+		var cw int
+		cluster, s, cw, state = uniseg.FirstGraphemeClusterInString(s, state)
+		if cw == 0 {
+			continue
+		}
+		if col >= winX && col+cw <= winEnd {
+			rs := []rune(cluster)
+			scr.SetContent(col, y, rs[0], rs[1:], st)
+		}
+		col += cw
+	}
+	return col
 }
 
 // minVisibleTabCells is one minimal tab's worth of columns — pad, dirty
@@ -388,24 +542,24 @@ type tabChevron struct {
 
 // hit reports whether screen column x lands on the badge.
 func (c tabChevron) hit(x int) bool {
-	return c.Label != "" && x >= c.X && x < c.X+runeLen(c.Label)
+	return c.Label != "" && x >= c.X && x < c.X+textdraw.Width(c.Label)
 }
 
-// tabOverflow counts the tabs scrolled entirely out of the strip on each
-// side. A partially visible tab is not counted: its name is on screen and
-// clicking it works, so counting it would overstate what the badge is
-// promising to reveal.
+// tabOverflow counts the tabs scrolled entirely out of the tab window
+// on each side. A partially visible tab is not counted: its name is on
+// screen and clicking it works, so counting it would overstate what the
+// badge is promising to reveal.
 func (a *App) tabOverflow() (left, right int) {
-	stripX, stripW := a.tabStripRegion()
-	if stripW <= 0 {
+	winX, winW := a.tabWindow()
+	if winW <= 0 {
 		return 0, 0
 	}
 	for _, r := range a.layoutTabs() {
 		x0 := r.X - a.tabScroll
 		switch {
-		case x0+r.Width <= stripX:
+		case x0+r.Width <= winX:
 			left++
-		case x0 >= stripX+stripW:
+		case x0 >= winX+winW:
 			right++
 		}
 	}
@@ -413,46 +567,42 @@ func (a *App) tabOverflow() (left, right int) {
 }
 
 // tabChevrons returns the two overflow badges for the current scroll
-// position. The chevron alone says "there is more"; the count says how
-// much, which is the difference between a marker the eye skips and one
-// that tells the user whether it is worth scrolling. The counts are the
-// first thing dropped when the strip is too cramped to hold them and a
-// readable tab at the same time — the chevrons themselves never are,
-// because they are the click targets.
+// position, each in its reserved slot (tabBadgeWidth): the left one at
+// the strip's first cell, the right one ending on its last. The chevron
+// alone says "there is more"; the count says how much, which is the
+// difference between a marker the eye skips and one that tells the
+// user whether it is worth scrolling. A count is dropped when it does
+// not fit the slot — a one-cell slot on a cramped strip, or a hundred
+// hidden tabs — the chevron itself never is, because it is the click
+// target.
 func (a *App) tabChevrons() (left, right tabChevron) {
 	stripX, stripW := a.tabStripRegion()
-	if stripW <= 0 {
-		return
-	}
-	showLeft := a.tabScroll > 0
-	showRight := a.tabScroll < a.maxTabScroll()
-	if !showLeft && !showRight {
+	bw := a.tabBadgeWidth()
+	if stripW <= 0 || bw == 0 {
 		return
 	}
 	nl, nr := a.tabOverflow()
-	leftLabel, rightLabel := "", ""
-	if showLeft {
-		leftLabel = "‹"
-		if nl > 0 {
-			leftLabel += itoa(nl)
+	badge := func(chev string, n int, countFirst bool) string {
+		label := chev
+		if n > 0 {
+			if countFirst {
+				label = itoa(n) + chev
+			} else {
+				label = chev + itoa(n)
+			}
 		}
+		if textdraw.Width(label) > bw {
+			return chev
+		}
+		return label
 	}
-	if showRight {
-		rightLabel = "›"
-		if nr > 0 {
-			rightLabel = itoa(nr) + "›"
-		}
+	if a.tabScroll > 0 {
+		left = tabChevron{X: stripX, Label: badge("‹", nl, false)}
 	}
-	if runeLen(leftLabel)+runeLen(rightLabel)+minVisibleTabCells > stripW {
-		if showLeft {
-			leftLabel = "‹"
-		}
-		if showRight {
-			rightLabel = "›"
-		}
+	if a.tabScroll < a.maxTabScroll() {
+		label := badge("›", nr, true)
+		right = tabChevron{X: stripX + stripW - textdraw.Width(label), Label: label}
 	}
-	left = tabChevron{X: stripX, Label: leftLabel}
-	right = tabChevron{X: stripX + stripW - runeLen(rightLabel), Label: rightLabel}
 	return
 }
 

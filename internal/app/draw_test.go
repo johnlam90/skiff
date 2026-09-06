@@ -26,6 +26,7 @@ import (
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/icons"
+	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 	"github.com/johnlam90/skiff/internal/version"
 )
@@ -414,6 +415,131 @@ func TestLayoutTabs_IconsExpandWidth(t *testing.T) {
 	if on[0].CloseX != off[0].CloseX+2 {
 		t.Fatalf("CloseX should shift by 2 when icons on: off=%d on=%d",
 			off[0].CloseX, on[0].CloseX)
+	}
+}
+
+// TestTabLabels_DisambiguateSharedBasenames pins the strip's answer to
+// three open index.ts files rendering identically: a label that
+// collides with another open tab's grows a trailing path component
+// until the two differ, while a name nothing else shares stays bare.
+// The disambiguation lives in the strip, not in Tab.DisplayName — it
+// is a property of what else is open, not of the file.
+func TestTabLabels_DisambiguateSharedBasenames(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	for _, sub := range []string{"web", "api", "web/admin"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		openTestFile(t, a, filepath.Join(dir, sub), "index.ts", "export {}\n")
+	}
+	openTestFile(t, a, dir, "README.md", "# r\n")
+	got := a.tabLabels()
+	want := []string{"web/index.ts", "api/index.ts", "admin/index.ts", "README.md"}
+	if len(got) != len(want) {
+		t.Fatalf("labels = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("label %d = %q, want %q (all %q)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestTabLabels_ClipLongNamesInCells pins the cap and its unit: a name
+// past maxTabLabelCells is ellipsised, and the measure is cells — a
+// CJK name of eight ideographs is sixteen cells, not eight runes, and
+// lays out (and closes) at the cell it paints in.
+func TestTabLabels_ClipLongNamesInCells(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	a.tree.IconsEnabled = false
+	long := strings.Repeat("x", maxTabLabelCells+5) + ".go"
+	openTestFile(t, a, dir, long, "package x\n")
+	cjk := "日本語日本語日本.md"
+	openTestFile(t, a, dir, cjk, "# j\n")
+	labels := a.tabLabels()
+	if textdraw.Width(labels[0]) != maxTabLabelCells || !strings.HasSuffix(labels[0], "…") {
+		t.Fatalf("long label = %q (%d cells), want %d cells ending in …", labels[0], textdraw.Width(labels[0]), maxTabLabelCells)
+	}
+	if labels[1] != cjk {
+		t.Fatalf("CJK label = %q, want it whole at %d cells", labels[1], textdraw.Width(cjk))
+	}
+	rects := a.layoutTabs()
+	if want := 1 + 2 + textdraw.Width(cjk) + 3; rects[1].Width != want {
+		t.Fatalf("CJK tab width = %d, want %d cells (not %d runes)", rects[1].Width, want, len([]rune(cjk)))
+	}
+	a.drawTabBar()
+	a.screen.Show()
+	cells, _, _ := a.screen.(tcell.SimulationScreen).GetContents()
+	for _, r := range a.lastTabRects {
+		if c := cells[r.CloseX]; len(c.Runes) == 0 || c.Runes[0] != '×' {
+			t.Fatalf("tab %d: CloseX %d holds %q, want × (layout and paint disagree)", r.Index, r.CloseX, c.Runes)
+		}
+	}
+}
+
+// TestTabStrip_BadgeOwnsItsCells is the regression test for "‹2.go ×":
+// with eight tabs open and the strip scrolled, the left badge paints in
+// its own reserved slot and the first visible tab's label is intact
+// right after it — and every remembered hit rect lies inside the tab
+// window, so a click on the badge's cells never reaches a tab.
+func TestTabStrip_BadgeOwnsItsCells(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	openManyTabs(t, a, dir, 8)
+	a.tabScroll = a.maxTabScroll() / 2
+	if nl, nr := a.tabOverflow(); nl == 0 || nr == 0 {
+		t.Fatalf("precondition: want tabs hidden both ways, got %d/%d", nl, nr)
+	}
+	a.drawTabBar()
+	a.screen.Show()
+	row := []rune(screenLine(a.screen.(tcell.SimulationScreen), 0))
+
+	stripX, stripW := a.tabStripRegion()
+	winX, winW := a.tabWindow()
+	left, right := a.tabChevrons()
+	if left.X != stripX || !strings.HasPrefix(left.Label, "‹") {
+		t.Fatalf("left badge = %+v, want it at the strip's first cell", left)
+	}
+	if right.X+textdraw.Width(right.Label) != stripX+stripW || !strings.HasSuffix(right.Label, "›") {
+		t.Fatalf("right badge = %+v, want it ending on the strip's last cell", right)
+	}
+	// The badge slot holds the badge and then blank cells — never a
+	// tab's glyphs.
+	for x := stripX + textdraw.Width(left.Label); x < winX; x++ {
+		if row[x] != ' ' {
+			t.Fatalf("cell %d in the badge slot holds %q: %q", x, row[x], string(row))
+		}
+	}
+	// The first visible tab: its label appears whole, starting after
+	// the slot.
+	var first *tabRect
+	for i := range a.lastTabRects {
+		r := a.lastTabRects[i]
+		if r.CloseX >= 0 && r.X >= winX {
+			first = &r
+			break
+		}
+	}
+	if first == nil {
+		t.Fatal("no fully visible tab after the badge")
+	}
+	painted := string(row[first.X : first.X+first.Width])
+	if !strings.Contains(painted, first.Label) || strings.ContainsRune(painted, '‹') {
+		t.Fatalf("first visible tab painted as %q, want %q intact after the badge", painted, first.Label)
+	}
+	for _, r := range a.lastTabRects {
+		if r.X < winX || r.X+r.Width > winX+winW {
+			t.Fatalf("hit rect %+v escapes the tab window [%d,%d)", r, winX, winX+winW)
+		}
+		if r.CloseX >= 0 && (r.CloseX < r.X || r.CloseX >= r.X+r.Width) {
+			t.Fatalf("hit rect %+v has a CloseX outside itself", r)
+		}
+	}
+	if left.hit(winX) || right.hit(winX+winW-1) {
+		t.Fatal("badge hit ranges must not reach into the tab window")
 	}
 }
 
