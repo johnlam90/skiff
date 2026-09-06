@@ -67,8 +67,14 @@ func (a *App) draw() {
 
 	a.drawTabBar()
 
-	if tab := a.activeTabPtr(); tab != nil {
-		ex, ey, ew, eh := a.editorRect()
+	ex, ey, ew, eh := a.editorRect()
+	if a.gitPanelFillsWidth() {
+		// The four columns under the ≡ button are not an editor: a
+		// Tab.Render into them would clamp its content to one cell and
+		// paint a scrollbar, and drawEmptyEditor would centre a clipped
+		// "No …". They are blank on purpose — see gitPanelFillsWidth.
+		fillRect(a.screen, ex, ey, ew, eh, tcell.StyleDefault.Background(a.theme.BG))
+	} else if tab := a.activeTabPtr(); tab != nil {
 		tab.ScrollbarActive = a.dragMode == dragScrollbar
 		if st := a.mdPreviewFor(tab); st != nil {
 			a.drawMdPreview(tab, st, ex, ey, ew, eh)
