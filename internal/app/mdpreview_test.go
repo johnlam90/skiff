@@ -475,3 +475,46 @@ func TestPreviewMarkdown_ClampsMeasureAndCentres(t *testing.T) {
 		t.Fatalf("clipBuf = %q, want the two words under the drag", a.clipBuf)
 	}
 }
+
+// TestPreviewMarkdown_HitAtCentredOriginIsColumnZero pins the hit-test
+// against the paint on a centred document, row by row: a press on the
+// first content cell maps to column 0 of the rendered line, whether
+// that cell is prose, a code row's rail or an H1 rule — the rows the
+// heading scheme and the code rectangle added — and the glyph painted
+// there is that column's rune. A press in the centring margin left of
+// the origin clamps to column 0 rather than going negative, and one
+// three cells in lands on column 3, so select-to-copy addresses the
+// text under the pointer and not the text shifted by the margin.
+func TestPreviewMarkdown_HitAtCentredOriginIsColumnZero(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 200, 40)
+	a.sidebarShown = false
+	tab := seedMarkdownTab(t, a, "notes.md", "# Title\n\nprose line here\n\n```go\nx := 1\n```\n")
+	a.menuTogglePreviewMarkdown()
+	st := a.mdPreview[tab]
+	ex, _, _, _ := a.editorRect()
+	contentX, _ := a.mdPreviewGeom()
+	if contentX <= ex+1 {
+		t.Fatalf("content origin %d is not centred past the editor edge %d", contentX, ex)
+	}
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	for _, sub := range []string{"Title", "━━━", "prose line", "▏x := 1"} {
+		li, y := previewLineAt(t, a, tab, sub)
+		first := []rune(st.lines[li])[0]
+		if got := cells[y*w+contentX].Runes[0]; got != first {
+			t.Fatalf("%q: cell at the origin paints %q, want the line's first rune %q", sub, got, first)
+		}
+		if hit := a.mdPreviewHit(st, contentX, y); hit.line != li || hit.col != 0 {
+			t.Fatalf("%q: hit at the origin = %+v, want line %d col 0", sub, hit, li)
+		}
+		if hit := a.mdPreviewHit(st, ex, y); hit.line != li || hit.col != 0 {
+			t.Fatalf("%q: hit in the centring margin = %+v, want it clamped to col 0", sub, hit)
+		}
+		if hit := a.mdPreviewHit(st, contentX+3, y); hit.col != 3 {
+			t.Fatalf("%q: hit three cells in = col %d, want 3", sub, hit.col)
+		}
+	}
+}
