@@ -643,8 +643,10 @@ func TestOpenFind_SeedsKeptQuery(t *testing.T) {
 }
 
 // TestMenuFindNext_RepeatsWithoutTheBar drives Esc ; end to end: after
-// the bar closes the leader walks to the next hit and selects it, and
-// with nothing searched yet it flashes instead of doing nothing.
+// the bar closes the leader walks to the next hit and selects it
+// without relighting the highlights (there is no bar to take them down
+// again), and with nothing searched yet it flashes instead of doing
+// nothing.
 func TestMenuFindNext_RepeatsWithoutTheBar(t *testing.T) {
 	a := seedFindApp(t, "foo foo foo")
 	a.menuFindNext()
@@ -667,12 +669,15 @@ func TestMenuFindNext_RepeatsWithoutTheBar(t *testing.T) {
 
 	a.handleKey(keyEv(tcell.KeyEsc, 0))
 	a.handleKey(keyEv(tcell.KeyRune, ';'))
-	if tab.FindIndex != 1 || tab.SelectionText() != "foo" || tab.Anchor.Col != 4 {
-		t.Fatalf("Esc ; should select the next hit: idx %d anchor %+v sel %q", tab.FindIndex, tab.Anchor, tab.SelectionText())
+	if tab.SelectionText() != "foo" || tab.Anchor.Col != 4 {
+		t.Fatalf("Esc ; should select the next hit: anchor %+v sel %q", tab.Anchor, tab.SelectionText())
+	}
+	if len(tab.FindMatches) != 0 {
+		t.Fatalf("Esc ; must not relight the highlights, %d matches painted", len(tab.FindMatches))
 	}
 	a.menuFindNext()
-	if tab.FindIndex != 2 {
-		t.Fatalf("the menu row should keep walking, got idx %d", tab.FindIndex)
+	if tab.Anchor.Col != 8 {
+		t.Fatalf("the menu row should keep walking, got anchor %+v", tab.Anchor)
 	}
 	if a.findBarOpen() {
 		t.Fatal("find next must not reopen the bar")

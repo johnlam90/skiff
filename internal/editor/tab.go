@@ -615,6 +615,13 @@ func (t *Tab) edit(group undoGroup, mutate func()) {
 	t.Dirty = true
 	t.StyleStale = true
 	t.cursorMoved = true
+	// The sticky column belongs to a run of vertical moves; an edit ends
+	// the run the same way a horizontal motion does. Left valid, an
+	// undo that restores the caret to the exact position the column was
+	// recorded at would hand the next Down a column from before the
+	// typing. MoveCursorRows checks stickyFor == Cursor, which is a
+	// position test, not a history test.
+	t.stickyValid = false
 	t.refreshFindMatches()
 }
 

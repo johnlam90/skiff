@@ -403,6 +403,56 @@ func TestReplaceAllMatches(t *testing.T) {
 	}
 }
 
+// TestTab_FindAgain_StaysSuspendedUnderTyping is the regression fence
+// for the bar-less repeat: Esc ; after the bar closed used to route
+// through SetFindQuery, which lifted the suspension, so the match tint
+// stayed painted with no bar to dismiss it and every later keystroke
+// paid a full FindAll. After a suspended FindAgain the tab paints no
+// matches, and typing leaves FindMatches empty — no rescan happened.
+func TestTab_FindAgain_StaysSuspendedUnderTyping(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("foo foo foo")}
+	tab.initUndo()
+	tab.SetFindQuery("foo")
+	tab.ClearFindHighlights()
+	if !tab.FindAgain() {
+		t.Fatal("FindAgain should find a hit")
+	}
+	if len(tab.FindMatches) != 0 {
+		t.Fatalf("a suspended find-again must paint nothing, got %d matches", len(tab.FindMatches))
+	}
+	tab.InsertRune('x') // replaces the selected hit; a live query would rescan here
+	if !tab.findSuspended || len(tab.FindMatches) != 0 {
+		t.Fatalf("typing after find-again rescanned: suspended %v, %d matches", tab.findSuspended, len(tab.FindMatches))
+	}
+	if tab.Buffer.Lines[0] != "x foo foo" {
+		t.Fatalf("the hit should have been the selection typing replaced, got %q", tab.Buffer.Lines[0])
+	}
+}
+
+// TestReplaceAllMatches_PreservesCase: replace-all follows each hit's
+// case the way ReplaceCurrentMatch does, so "FOO Foo foo" → "BAR Bar
+// bar" whether the user pressed Enter three times or Shift+Enter once.
+// Inserting repl verbatim used to flatten it to "bar bar bar".
+func TestReplaceAllMatches_PreservesCase(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("FOO Foo foo")}
+	tab.initUndo()
+	tab.SetFindQuery("foo")
+	if got := tab.ReplaceAllMatches("bar"); got != 3 {
+		t.Fatalf("replaced %d, want 3", got)
+	}
+	if got := tab.Buffer.Lines[0]; got != "BAR Bar bar" {
+		t.Fatalf("smart-case replace-all gave %q", got)
+	}
+
+	exact := &Tab{Buffer: NewBuffer("FOO FOO")}
+	exact.initUndo()
+	exact.SetFindQuery("FOO")
+	exact.ReplaceAllMatches("bar")
+	if got := exact.Buffer.Lines[0]; got != "bar bar" {
+		t.Fatalf("an exact query must replace as typed, got %q", got)
+	}
+}
+
 // TestReplaceLines pins the open-buffer path of project replace: whole
 // lines swap in one undo step, out-of-range indexes are ignored, and
 // the tab reports dirty.
@@ -728,8 +778,8 @@ func TestTab_ClearFindHighlights_KeepsTheQuerySuspended(t *testing.T) {
 }
 
 // TestTab_FindAgain pins the bar-less repeat: live, it is FindNext;
-// suspended, it relights the query and lands on the hit after the one
-// still selected; with no query, or none that matches, it says so.
+// suspended, it selects the hit after the one still selected without
+// relighting anything; with no query, or none that matches, it says so.
 func TestTab_FindAgain(t *testing.T) {
 	tab := &Tab{Buffer: NewBuffer("foo foo foo")}
 	tab.initUndo()
@@ -742,11 +792,12 @@ func TestTab_FindAgain(t *testing.T) {
 		t.Fatalf("live FindAgain should advance, got index %d", tab.FindIndex)
 	}
 	tab.ClearFindHighlights()
-	if !tab.FindAgain() || tab.FindIndex != 2 {
-		t.Fatalf("suspended FindAgain should relight and land after the selected hit, got index %d", tab.FindIndex)
+	if !tab.FindAgain() || tab.Anchor != (Position{Line: 0, Col: 8}) || tab.Cursor != (Position{Line: 0, Col: 11}) {
+		t.Fatalf("suspended FindAgain should select the hit after the selected one, got %v-%v", tab.Anchor, tab.Cursor)
 	}
-	if tab.SelectionText() != "foo" || tab.findSuspended {
-		t.Fatalf("the hit should be selected and the search live again: %q suspended %v", tab.SelectionText(), tab.findSuspended)
+	if tab.SelectionText() != "foo" || !tab.findSuspended || tab.FindMatches != nil || tab.FindIndex != -1 {
+		t.Fatalf("the hit should be selected with the search still suspended: %q suspended %v, %d matches, index %d",
+			tab.SelectionText(), tab.findSuspended, len(tab.FindMatches), tab.FindIndex)
 	}
 
 	gone := &Tab{Buffer: NewBuffer("bar")}

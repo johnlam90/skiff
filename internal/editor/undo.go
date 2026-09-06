@@ -138,6 +138,9 @@ func (t *Tab) applySnapshot(s snapshot) {
 	t.Anchor = s.Anchor
 	t.cursorMoved = true
 	t.StyleStale = true
+	// A restored caret is a new position, not a continuation of the
+	// vertical run the sticky column was measured in — see Tab.edit.
+	t.stickyValid = false
 }
 
 // initUndo seeds the original-state snapshot used by RevertFile and the

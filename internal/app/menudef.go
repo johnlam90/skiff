@@ -166,8 +166,8 @@ func fileMenuGroup() []menuItemDef {
 		{label: "File clipboard…", action: (*App).menuFileClipboard, enabled: (*App).hasFileClipActions, visible: (*App).hasFileClipActions},
 		// Tab switching needs a second tab to switch to, so the trio
 		// hides rather than dims on a single tab.
-		{label: "Next tab", shortcut: "Esc ]", action: (*App).menuNextTab, enabled: (*App).hasOtherTabs, visible: (*App).hasOtherTabs},
-		{label: "Previous tab", shortcut: "Esc [", action: (*App).menuPrevTab, enabled: (*App).hasOtherTabs, visible: (*App).hasOtherTabs},
+		{label: "Next tab", shortcut: "Esc .", action: (*App).menuNextTab, enabled: (*App).hasOtherTabs, visible: (*App).hasOtherTabs},
+		{label: "Previous tab", shortcut: "Esc ,", action: (*App).menuPrevTab, enabled: (*App).hasOtherTabs, visible: (*App).hasOtherTabs},
 		{label: "Close other tabs", action: (*App).menuCloseOtherTabs, enabled: (*App).hasOtherTabs, visible: (*App).hasOtherTabs},
 	}
 }

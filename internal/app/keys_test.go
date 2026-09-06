@@ -335,6 +335,29 @@ func TestHandleKey_TabOverMultiLineSelectionIndents(t *testing.T) {
 	}
 }
 
+// TestHandleKey_ShiftTabAsModifierOutdents pins the other spelling of
+// Shift+Tab: a terminal with no kcbt entry, or one speaking the kitty
+// keyboard protocol, reports it as Tab with the shift modifier rather
+// than as KeyBacktab. handleKey has no KeyTab|ModShift branch and
+// needs none — tcell's NewEventKey, the only EventKey constructor,
+// rewrites that pair into KeyBacktab before any event is posted — but
+// that is tcell's promise, not ours, so this fence fails the day a
+// tcell upgrade stops keeping it and a shifted Tab starts indenting.
+func TestHandleKey_ShiftTabAsModifierOutdents(t *testing.T) {
+	a, tab := newNavTestApp(t, "    a\n")
+	tab.IndentUnit = "    "
+	tab.Cursor = editor.Position{Line: 0, Col: 5}
+	tab.Anchor = tab.Cursor
+
+	a.handleKey(tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModShift))
+	if got := tab.Buffer.Lines[0]; got != "a" {
+		t.Fatalf("Shift+Tab as KeyTab|ModShift gave %q, want %q", got, "a")
+	}
+	if tab.Cursor.Col != 1 {
+		t.Fatalf("cursor should follow the text left, got col %d", tab.Cursor.Col)
+	}
+}
+
 // TestHandleKey_BacktabOutdents gives Shift+Tab an editor meaning: it
 // outdents the caret's line with no selection and the whole block with
 // one. Before this the key had no handler at all.

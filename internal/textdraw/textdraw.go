@@ -154,8 +154,17 @@ func WrapWords(s string, maxW int) []string {
 		for ww > maxW-lineW {
 			head, hw := Clip(tok, maxW-lineW)
 			if hw == 0 {
-				flush()
-				continue
+				if lineW > 0 {
+					flush()
+					continue
+				}
+				// The next cluster is wider than the whole budget (a
+				// two-cell ideograph at maxW == 1). Nothing narrower can
+				// ever fit, so it goes out on a line of its own — one
+				// cell over, which the caller's clip decides — rather
+				// than flushing an empty line and re-trying forever.
+				_, tail, cw, _ := uniseg.FirstGraphemeClusterInString(tok, -1)
+				head, hw = tok[:len(tok)-len(tail)], cw
 			}
 			line += head
 			lineW += hw

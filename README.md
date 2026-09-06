@@ -404,8 +404,8 @@ within half a second tap one of the keys below.
 | `Esc n`     | New file               | File  |
 | `Esc w`     | Close tab              | File  |
 | `Esc o`     | Reopen closed tab      | File  |
-| `Esc ]`     | Next tab               | File  |
-| `Esc [`     | Previous tab           | File  |
+| `Esc .`     | Next tab               | File  |
+| `Esc ,`     | Previous tab           | File  |
 | `Esc u`     | Undo                   | Edit  |
 | `Esc r`     | Redo                   | Edit  |
 | `Esc c`     | Copy selection         | Edit  |

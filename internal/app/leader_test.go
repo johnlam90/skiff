@@ -72,8 +72,8 @@ func TestLeaderActionFor_BindingsFireIntendedMethods(t *testing.T) {
 		{'n', (*App).menuNewFile, "new file", "File"},
 		{'w', (*App).menuClose, "close tab", "File"},
 		{'o', (*App).menuReopenTab, "reopen closed tab", "File"},
-		{']', (*App).menuNextTab, "next tab", "File"},
-		{'[', (*App).menuPrevTab, "previous tab", "File"},
+		{'.', (*App).menuNextTab, "next tab", "File"},
+		{',', (*App).menuPrevTab, "previous tab", "File"},
 		{'u', (*App).menuUndo, "undo", "Edit"},
 		{'r', (*App).menuRedo, "redo", "Edit"},
 		{'c', (*App).menuCopy, "copy", "Edit"},
@@ -144,6 +144,25 @@ func TestLeaderActionFor_BindingsFireIntendedMethods(t *testing.T) {
 func TestLeaderActionFor_UnboundReturnsNil(t *testing.T) {
 	if leaderActionFor('y') != nil {
 		t.Fatal("'y' should not be a leader binding (no editor action mapped)")
+	}
+}
+
+// TestLeaderBindings_NoSequenceIntroducers fences the one class of rune
+// a leader key can never be: a byte that, right after ESC, opens a
+// terminal control sequence. A leader gesture IS "ESC then a byte", and
+// when the byte lands inside tcell's escape window (or tmux forwards
+// the pair as one write) the parser sees a sequence, not two keys: ESC ]
+// enters OSC and eats every keystroke until BEL, ESC [ makes the next
+// key a CSI final byte. The set is esctty.go's sequenceIntroducers (CSI,
+// SS3, OSC, DCS, APC, PM, SOS) plus 'N' for SS2, which esctty leaves
+// out because the double-Esc rewrite there has no reason to special-case
+// it while this fence does.
+func TestLeaderBindings_NoSequenceIntroducers(t *testing.T) {
+	const introducers = sequenceIntroducers + "N"
+	for _, b := range leaderBindings() {
+		if b.key < 0x80 && strings.ContainsRune(introducers, b.key) {
+			t.Errorf("leader key %q (%s) is a control-sequence introducer after ESC; pick another rune", b.key, b.desc)
+		}
 	}
 }
 

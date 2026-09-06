@@ -173,6 +173,25 @@ func TestIndentLines_ShiftsBlockAndKeepsSelection(t *testing.T) {
 	}
 }
 
+// TestIndentLines_BareCaretAtColumnZeroFollowsTheIndent pins the
+// no-selection case: a caret at column 0 ends up after the inserted
+// indent, not before it, so "Shift lines right" from the menu and a
+// second press keep typing at the new indentation. Column 0 is pinned
+// only for a selection, where it marks the whole first line.
+func TestIndentLines_BareCaretAtColumnZeroFollowsTheIndent(t *testing.T) {
+	tab := linesTab("a")
+	tab.IndentUnit = "  "
+	if !tab.IndentLines() {
+		t.Fatal("IndentLines reported no change")
+	}
+	if tab.Buffer.Lines[0] != "  a" {
+		t.Fatalf("line: %q", tab.Buffer.Lines[0])
+	}
+	if tab.Cursor != (Position{Line: 0, Col: 2}) || tab.Anchor != tab.Cursor {
+		t.Fatalf("a bare caret should land past the indent, got cursor %+v anchor %+v", tab.Cursor, tab.Anchor)
+	}
+}
+
 // TestIndentLines_SkipsBlankLinesInsideABlock keeps a block indent from
 // manufacturing whitespace-only lines, while a lone blank line — the
 // only thing the gesture could mean there — is still indented.
