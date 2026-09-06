@@ -143,6 +143,21 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		return
 	}
 
+	// Middle-click closes the tab under it — the browser and VS Code
+	// convention, and a second path to × that needs no aim at one cell.
+	// A fresh press only: the motion of a held middle button crossing
+	// the strip must not close every tab in its path, and a held one
+	// is otherwise inert.
+	if pressed&tcell.Button2 != 0 {
+		if r, ok := a.tabRectAt(x, y); ok {
+			a.requestCloseTab(a.tabs.At(r.Index))
+		}
+		return
+	}
+	if btn&tcell.Button2 != 0 {
+		return
+	}
+
 	// Right-click handling. Over a file-tree row it opens a small context
 	// menu with file-management actions for that node; everywhere else
 	// it falls through to the main action menu so users have a redundant
@@ -535,18 +550,30 @@ func (a *App) tabBarClick(x, _ int) {
 		a.scrollTabStrip(tabScrollStep)
 		return
 	}
-	for _, r := range a.lastTabRects {
-		if x >= r.X && x < r.X+r.Width {
-			if x == r.CloseX {
-				a.requestCloseTab(a.tabs.At(r.Index))
-				return
-			}
-			a.tabs.ActivateAt(r.Index)
-			a.ensureActiveTabVisible()
-			a.syncActiveTreeFile()
+	if r, ok := a.tabRectAt(x, 0); ok {
+		if x == r.CloseX {
+			a.requestCloseTab(a.tabs.At(r.Index))
 			return
 		}
+		a.tabs.ActivateAt(r.Index)
+		a.ensureActiveTabVisible()
+		a.syncActiveTreeFile()
 	}
+}
+
+// tabRectAt returns the tab rect under screen cell (x, y), reading the
+// geometry the last frame painted — the one hit-test every tab-strip
+// gesture (activate, ×, middle-click) shares.
+func (a *App) tabRectAt(x, y int) (tabRect, bool) {
+	if y != 0 {
+		return tabRect{}, false
+	}
+	for _, r := range a.lastTabRects {
+		if x >= r.X && x < r.X+r.Width {
+			return r, true
+		}
+	}
+	return tabRect{}, false
 }
 
 // syncActiveTreeFile mirrors the active tab path into the file tree.

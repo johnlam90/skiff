@@ -1587,3 +1587,54 @@ func TestHandleMouse_MenuWheelStepsLikeEveryOtherSurface(t *testing.T) {
 		t.Fatalf("one notch back up: scroll %d, want 0", got)
 	}
 }
+
+// twoTabApp opens a.txt and b.txt, paints once so the tab rects are
+// live, and returns the app with both paths.
+func twoTabApp(t *testing.T) (*App, string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	pa := filepath.Join(dir, "a.txt")
+	pb := filepath.Join(dir, "b.txt")
+	for _, p := range []string{pa, pb} {
+		if err := os.WriteFile(p, []byte("x"), 0644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	a := newTestApp(t, dir)
+	a.openFile(pa)
+	a.openFile(pb)
+	a.draw()
+	if len(a.lastTabRects) != 2 {
+		t.Fatalf("fixture: want 2 tab rects, got %d", len(a.lastTabRects))
+	}
+	return a, pa, pb
+}
+
+// TestHandleMouse_MiddleClickClosesTheTabUnderIt pins the browser
+// convention: a middle press anywhere on a tab closes it, without
+// aiming at the × cell. A middle press off the strip does nothing, and
+// a held middle button dragged across the strip closes only the tab
+// the press landed on.
+func TestHandleMouse_MiddleClickClosesTheTabUnderIt(t *testing.T) {
+	a, pa, pb := twoTabApp(t)
+	ra, rb := a.lastTabRects[0], a.lastTabRects[1]
+
+	// Off the strip: inert.
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 5, tcell.Button2, 0))
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 5, tcell.ButtonNone, 0))
+	if a.tabs.Len() != 2 {
+		t.Fatal("a middle press in the editor closed a tab")
+	}
+
+	// Press on a's label cell, drag over b, release: only a closes.
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 0, tcell.Button2, 0))
+	a.draw()
+	a.handleMouse(tcell.NewEventMouse(rb.X+1, 0, tcell.Button2, 0))
+	a.handleMouse(tcell.NewEventMouse(rb.X+1, 0, tcell.ButtonNone, 0))
+	if a.tabs.Len() != 1 {
+		t.Fatalf("middle-click left %d tabs, want 1", a.tabs.Len())
+	}
+	if got := a.activeTabPtr().Path; got != pb {
+		t.Fatalf("the surviving tab is %q, want %q (closed %q)", got, pb, pa)
+	}
+}
