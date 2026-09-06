@@ -46,6 +46,11 @@ features, make sure they're reachable from the main menu first.
 main.go                       Entry — one optional rootDir / file[:line] arg;
                               extra arguments are refused, never dropped
 internal/app/app.go           App struct + New/NewSingleFile, Run, handleEvent, flash
+internal/app/esctty.go        The /dev/tty read filter under tcell: rewrites a
+                              fast "Esc Esc" (which tcell would fold into ONE
+                              plain Esc) into the CSI-u form of Alt+Esc so the
+                              menu opens; holds a lone ESC ≤60ms to catch a
+                              pair split across writes (tmux, SSH)
 internal/app/layout.go        All screen geometry: panel rects + splitter clamping
 internal/app/draw.go          The render pass + tab-strip layout
 internal/app/refresh.go       10s tick: off-thread scan, on-loop apply, tab reconcile
@@ -406,7 +411,10 @@ mutations, closing the project-find panel). Don't add a per-job event
 struct or a loose `xBusy` bool back — add a `Job` field and a line in
 `wireJobs`, and pick the policy in its field comment. `safeGo` stays
 the only goroutine spawner: the job's `Spawn` seam is `a.safeGo`, so a
-panic in a worker still reaches the crash guard. Tests drain with the
+panic in a worker still reaches the crash guard. The one exception sits
+below the App: `escTty.readLoop` (esctty.go) is spawned before an App
+exists, recovers its own panic into a Read error, and tcell turns that
+into an EventError — never add a second exception. Tests drain with the
 one `pumpUntil(t, a, what, done)` and the `idle(&a.job)` adapter.
 
 ### Identity-preserving tree refresh (filetree.go)
