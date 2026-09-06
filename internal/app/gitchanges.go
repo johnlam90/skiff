@@ -1077,6 +1077,10 @@ func (a *App) drawGitPanelRow(sx, ry, sw int, row gitChangeRow, selected, keyFoc
 	}
 	drawAt(a.screen, sx+3, ry, gitKindLetter(row.Kind), letterStyle)
 	x := sx + 5
+	// A name wider than the panel ends in … so it reads as cut, not as
+	// a file that happens to be called that; a plain clip left
+	// "very-long-component-na" looking like the whole name.
+	name = textdraw.ClipEllipsis(name, sx+sw-x)
 	x = drawClipped(a.screen, x, ry, sx+sw-x, name, nameStyle)
 	if dir != "" {
 		drawClipped(a.screen, x+2, ry, sx+sw-(x+2), dir, mutedStyle)

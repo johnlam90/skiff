@@ -1616,3 +1616,24 @@ func TestGitPanelClick_GlyphButtonFlashesItsVerb(t *testing.T) {
 		t.Fatal("a label that spells its verb needs no echo")
 	}
 }
+
+// TestDrawGitPanelRow_LongNameEndsInEllipsis: a basename wider than
+// the panel is cut with … so it reads as truncated instead of as a
+// shorter file that happens to exist.
+func TestDrawGitPanelRow_LongNameEndsInEllipsis(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	row := gitChangeRow{Rel: "pkg/" + strings.Repeat("component", 6) + ".go", Abs: "/p/x.go"}
+	const sw = 24
+	a.screen.Clear()
+	a.drawGitPanelRow(0, 3, sw, row, false, false)
+	a.screen.Show()
+	cells, w, _ := a.screen.(tcell.SimulationScreen).GetContents()
+	last := cells[3*w+sw-1]
+	if len(last.Runes) == 0 || last.Runes[0] != '…' {
+		t.Fatalf("last cell of the row = %q, want …", string(last.Runes))
+	}
+	past := cells[3*w+sw]
+	if len(past.Runes) > 0 && past.Runes[0] != ' ' {
+		t.Fatalf("the name bled past the panel: %q", string(past.Runes))
+	}
+}
