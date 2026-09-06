@@ -232,32 +232,6 @@ func fillRect(scr tcell.Screen, x, y, w, h int, st tcell.Style) {
 	}
 }
 
-// drawBorder draws a single-line box border around the rectangle.
-func drawBorder(scr tcell.Screen, x, y, w, h int, st tcell.Style) {
-	scr.SetContent(x, y, '┌', nil, st)
-	scr.SetContent(x+w-1, y, '┐', nil, st)
-	scr.SetContent(x, y+h-1, '└', nil, st)
-	scr.SetContent(x+w-1, y+h-1, '┘', nil, st)
-	for cx := x + 1; cx < x+w-1; cx++ {
-		scr.SetContent(cx, y, '─', nil, st)
-		scr.SetContent(cx, y+h-1, '─', nil, st)
-	}
-	for cy := y + 1; cy < y+h-1; cy++ {
-		scr.SetContent(x, cy, '│', nil, st)
-		scr.SetContent(x+w-1, cy, '│', nil, st)
-	}
-}
-
-// drawHDivider draws a horizontal divider with ├ ┤ end caps inside an
-// existing border.
-func drawHDivider(scr tcell.Screen, x, y, w int, st tcell.Style) {
-	scr.SetContent(x, y, '├', nil, st)
-	scr.SetContent(x+w-1, y, '┤', nil, st)
-	for cx := x + 1; cx < x+w-1; cx++ {
-		scr.SetContent(cx, y, '─', nil, st)
-	}
-}
-
 // drawButton renders a "button" — really just bracketed label — at (x, y).
 // Active buttons get a tinted background so they read as the focused option.
 func drawButton(scr tcell.Screen, x, y int, label string, modalBG tcell.Color, fg tcell.Color, focused bool) {
