@@ -426,7 +426,7 @@ func (a *App) menuNewFile() {
 func (a *App) newFileLabel() string {
 	folder := a.activeFolder
 	if folder == "" || a.isProjectRoot(folder) {
-		return "New file…"
+		return labelNewFile + "…"
 	}
 	rel := a.relativeFolderLabel(folder)
 	// Truncate so the row never overflows the modal width — see
@@ -446,7 +446,7 @@ func (a *App) newFileLabel() string {
 		}
 		suffix = " (in " + rel + ")"
 	}
-	return "New file" + suffix + "…"
+	return labelNewFile + suffix + "…"
 }
 
 // relativeFolderLabel returns folder rendered relative to the project root,

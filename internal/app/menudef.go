@@ -52,6 +52,24 @@ const (
 	menuContentY = 4 // first scrollable content row
 )
 
+// The file-action labels both surfaces share. The ≡ rows and the tree's
+// right-click popup used to spell the same actions two ways ("Rename
+// file" / "Rename", "Copy relative path" / "Copy rel path", "New file" /
+// "New File"), which reads as two features. One constant per action;
+// the popup derives its folder wording from the same string
+// (treeContextLabel), so a rename here renames both surfaces.
+const (
+	labelNewFile          = "New file"
+	labelRenameFile       = "Rename file…"
+	labelDeleteFile       = "Delete file…"
+	labelCutFile          = "Cut file"
+	labelCopyFile         = "Copy file"
+	labelDuplicateFile    = "Duplicate file"
+	labelPasteInto        = "Paste into "
+	labelCopyRelativePath = "Copy relative path"
+	labelCopyAbsolutePath = "Copy absolute path"
+)
+
 // menuItemDef describes one row in the action modal: the label shown to
 // the user, the y-offset it lives at inside the modal, the action it runs
 // when clicked, and a predicate that returns true when the action is
@@ -140,8 +158,8 @@ func fileMenuGroup() []menuItemDef {
 		// "⚠ disk conflict" marker has been dismissed — hidden the rest
 		// of the time, which is nearly always.
 		{label: "Resolve disk conflict…", action: (*App).menuResolveDiskConflict, enabled: (*App).hasDiskConflict, visible: (*App).hasDiskConflict},
-		{label: "Rename file…", action: (*App).menuRename, enabled: (*App).hasFileTab, visible: (*App).hasTab},
-		{label: "Delete file…", action: (*App).menuDelete, enabled: (*App).hasFileTab, visible: (*App).hasTab},
+		{label: labelRenameFile, action: (*App).menuRename, enabled: (*App).hasFileTab, visible: (*App).hasTab},
+		{label: labelDeleteFile, action: (*App).menuDelete, enabled: (*App).hasFileTab, visible: (*App).hasTab},
 		{action: (*App).menuRenameFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).renameFolderLabel, visible: (*App).hasActiveSubfolder},
 		{action: (*App).menuDeleteFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).deleteFolderLabel, visible: (*App).hasActiveSubfolder},
 		{action: (*App).menuUndoDelete, enabled: (*App).hasTrashedEntry, labelFor: (*App).undoDeleteLabel, visible: (*App).hasTrashedEntry},
@@ -295,12 +313,12 @@ func gitExtrasDrillIn() menuDrillIn {
 // clipboard") and were the other half of the twelve-row File group.
 func fileClipDrillIn() menuDrillIn {
 	return menuDrillIn{title: "File clipboard", visible: (*App).hasFileClipActions, items: []menuItemDef{
-		{label: "Cut file", action: (*App).menuCutFile, enabled: (*App).hasFileTab},
-		{label: "Copy file", action: (*App).menuCopyFile, enabled: (*App).hasFileTab},
-		{label: "Duplicate file", action: (*App).menuDuplicateFile, enabled: (*App).hasFileTab},
+		{label: labelCutFile, action: (*App).menuCutFile, enabled: (*App).hasFileTab},
+		{label: labelCopyFile, action: (*App).menuCopyFile, enabled: (*App).hasFileTab},
+		{label: labelDuplicateFile, action: (*App).menuDuplicateFile, enabled: (*App).hasFileTab},
 		{action: (*App).menuPasteEntry, enabled: (*App).hasFileClip, labelFor: (*App).pasteEntryLabel},
-		{label: "Copy relative path", action: (*App).menuCopyRelativePath, enabled: (*App).hasFileTab},
-		{label: "Copy absolute path", action: (*App).menuCopyAbsolutePath, enabled: (*App).hasFileTab},
+		{label: labelCopyRelativePath, action: (*App).menuCopyRelativePath, enabled: (*App).hasFileTab},
+		{label: labelCopyAbsolutePath, action: (*App).menuCopyAbsolutePath, enabled: (*App).hasFileTab},
 	}}
 }
 

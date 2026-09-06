@@ -127,7 +127,7 @@ func TestDraw_AllPanels(t *testing.T) {
 
 	a.openTreeContext(a.tree.Root, 5, 5)
 	a.draw()
-	paints("tree context", "Copy rel path")
+	paints("tree context", "Copy relative path")
 	a.closeAllModals()
 
 	a.flash("hello")
@@ -1155,7 +1155,7 @@ func TestDraw_EveryPrefabFitsAtTheMinimumSize(t *testing.T) {
 		}, []string{"first choice"}},
 		{"menu", func(a *App) { a.openMenu() }, []string{"Menu", "New file", "v" + version.Version}},
 		{"cheat sheet", func(a *App) { a.menuKeyboardShortcuts() }, []string{"Esc is the", "[  OK  ]"}},
-		{"tree context", func(a *App) { a.openTreeContext(a.tree.Root, 2, 2) }, []string{"Copy rel path"}},
+		{"tree context", func(a *App) { a.openTreeContext(a.tree.Root, 2, 2) }, []string{"Copy relative path"}},
 		{"git extras", func(a *App) {
 			a.gitSnap.IsRepo, a.gitSnap.Branch = true, "main"
 			a.openGitExtras(2, 2)
