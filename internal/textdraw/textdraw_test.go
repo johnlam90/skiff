@@ -8,7 +8,9 @@
 package textdraw
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 )
@@ -235,6 +237,25 @@ func TestDrawClipped_NonPositiveBudgetIsNoop(t *testing.T) {
 	scr.Show()
 	if got := cellRunes(scr, 4, 0); len(got) != 0 {
 		t.Errorf("cell painted despite non-positive budget: %q", got)
+	}
+}
+
+// TestWrapWords_ClusterWiderThanTheBudget pins the one case a wrap
+// cannot honour: a two-cell cluster at maxW == 1. Clip hands back
+// nothing, and the loop used to flush an empty line and retry the same
+// cluster forever. Each cluster now goes out on its own line, one cell
+// over budget, and the call returns.
+func TestWrapWords_ClusterWiderThanTheBudget(t *testing.T) {
+	done := make(chan []string, 1)
+	go func() { done <- WrapWords("日本 x語", 1) }()
+	select {
+	case got := <-done:
+		want := []string{"日", "本", "x", "語"}
+		if strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Fatalf("WrapWords = %q, want %q", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WrapWords spun on a cluster wider than the budget")
 	}
 }
 
