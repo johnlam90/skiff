@@ -72,6 +72,8 @@ var postRedesignMenuActions = []string{
 	"Shift lines right", "Shift lines left",
 	// The document-end jumps behind Ctrl+Home / Ctrl+End and Esc < / >.
 	"Go to start of file", "Go to end of file",
+	// The selection gestures behind Esc a / Esc L.
+	"Select all", "Select line",
 }
 
 // menuCatalog flattens every built-in row the ≡ menu can reach — the top

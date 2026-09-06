@@ -86,6 +86,8 @@ func leaderBindings() []leaderBinding {
 		{'q', (*App).menuQuit, "quit", "Quit"},
 		{'<', (*App).menuGoToDocStart, "file start", "Go"},
 		{'>', (*App).menuGoToDocEnd, "file end", "Go"},
+		{'a', (*App).menuSelectAll, "select all", "Edit"},
+		{'L', (*App).menuSelectLine, "select line", "Edit"},
 	}
 }
 

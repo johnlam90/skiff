@@ -640,3 +640,21 @@ func (a *App) menuGoToDocEnd() {
 		t.MoveDocEnd(false)
 	}
 }
+
+// menuSelectAll selects the whole buffer of the active tab. Esc a is
+// the keyboard spelling; the row is where the gesture is discovered.
+func (a *App) menuSelectAll() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.SelectAll()
+	}
+}
+
+// menuSelectLine selects the caret's whole line, newline included, so
+// a following Cut removes the line. Esc L on the keyboard.
+func (a *App) menuSelectLine() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.SelectLine()
+	}
+}

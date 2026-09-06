@@ -151,6 +151,8 @@ func editMenuGroup() []menuItemDef {
 		// file" in the type-to-filter for the query its test pins.
 		{label: "Shift lines right", action: (*App).menuIndentLines, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 		{label: "Shift lines left", action: (*App).menuOutdentLines, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		{label: "Select all", shortcut: "Esc a", action: (*App).menuSelectAll, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		{label: "Select line", shortcut: "Esc L", action: (*App).menuSelectLine, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 	}
 }
 

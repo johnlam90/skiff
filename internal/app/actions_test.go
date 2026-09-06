@@ -889,3 +889,22 @@ func TestMenuGoToDocStartEnd(t *testing.T) {
 	empty.menuGoToDocStart()
 	empty.menuGoToDocEnd()
 }
+
+// TestMenuSelectAllAndLine pins the two selection rows: select-all
+// covers the buffer, select-line covers the caret's line with its
+// newline, and both are safe with no tab open.
+func TestMenuSelectAllAndLine(t *testing.T) {
+	a, tab := newNavTestApp(t, "ab\ncd\n")
+	a.menuSelectAll()
+	if got := tab.SelectionText(); got != "ab\ncd\n" {
+		t.Fatalf("Select all selected %q", got)
+	}
+	tab.MoveCursorTo(editor.Position{Line: 1, Col: 1}, false)
+	a.menuSelectLine()
+	if got := tab.SelectionText(); got != "cd\n" {
+		t.Fatalf("Select line selected %q", got)
+	}
+	empty := newTestApp(t, t.TempDir())
+	empty.menuSelectAll()
+	empty.menuSelectLine()
+}
