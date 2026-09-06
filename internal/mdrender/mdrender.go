@@ -91,9 +91,13 @@ func (r *renderer) base() tcell.Style {
 	return tcell.StyleDefault.Background(r.th.BG).Foreground(r.th.Text)
 }
 
-// dim returns the secondary style used for URLs, placeholders and rules.
+// dim returns the secondary style used for URLs, placeholders, raw
+// HTML and rules. Muted rather than Subtle on purpose: a link's
+// destination and an image's alt text are read, not glanced at, so
+// they sit on the palette's 4.5:1 text tier — Subtle only clears the
+// 3:1 graphics floor and is for lines and borders.
 func (r *renderer) dim() tcell.Style {
-	return tcell.StyleDefault.Background(r.th.BG).Foreground(r.th.Subtle)
+	return tcell.StyleDefault.Background(r.th.BG).Foreground(r.th.Muted)
 }
 
 // block renders one block node. indent is the continuation prefix the
@@ -102,13 +106,7 @@ func (r *renderer) dim() tcell.Style {
 func (r *renderer) block(n ast.Node, hang string, st tcell.Style) {
 	switch b := n.(type) {
 	case *ast.Heading:
-		fg := r.th.Accent
-		if b.Level > 2 {
-			fg = r.th.AccentSoft
-		}
-		hst := tcell.StyleDefault.Background(r.th.BG).Foreground(fg).Bold(true)
-		r.inlines(b, hst)
-		r.flush()
+		r.heading(b)
 	case *ast.Paragraph, *ast.TextBlock:
 		r.inlines(n, st)
 		r.flush()
@@ -135,9 +133,7 @@ func (r *renderer) block(n ast.Node, hang string, st tcell.Style) {
 	case *ast.CodeBlock:
 		r.codeLines(rawLines(r.src, n), nil)
 	case *ast.ThematicBreak:
-		r.flush()
-		w := min(r.width, 40)
-		r.emitLine(strings.Repeat("─", w), r.dim())
+		r.emitLine(strings.Repeat("─", min(r.contentWidth(), 40)), r.dim())
 	case *ast.HTMLBlock:
 		// Raw HTML has no terminal rendering; show it dimmed verbatim
 		// rather than silently dropping content.
@@ -152,6 +148,43 @@ func (r *renderer) block(n ast.Node, hang string, st tcell.Style) {
 	}
 }
 
+// heading renders one heading with a level cue that survives a
+// monochrome terminal — six levels used to collapse onto two colours,
+// Accent for 1-2 and AccentSoft for 3-6. The scheme, top to bottom:
+//
+//	H1  Accent bold, then a heavy full-width rule (━) in Accent
+//	H2  Accent bold, then a light full-width rule (─) in Muted
+//	H3+ AccentSoft bold, prefixed by one › per level past two
+//	    ("› " for H3, "›› " for H4, …)
+//
+// Rules are rows of their own, the full content width, so an H1 reads
+// as a title bar and an H2 as a section break even when every colour
+// has degraded to the terminal default; the chevron prefix keeps H3–H6
+// apart from body text and from each other the same way.
+//
+// The opening flush is flushBlock, not flush: `- # Title` arrives with
+// the list marker already on the accumulating row, and flushing that
+// painted a lone • above the heading (a bare │ for `> # Title`).
+func (r *renderer) heading(b *ast.Heading) {
+	r.flushBlock()
+	fg := r.th.Accent
+	if b.Level > 2 {
+		fg = r.th.AccentSoft
+	}
+	hst := tcell.StyleDefault.Background(r.th.BG).Foreground(fg).Bold(true)
+	if b.Level > 2 {
+		r.append(strings.Repeat("›", b.Level-2)+" ", hst)
+	}
+	r.inlines(b, hst)
+	r.flush()
+	switch b.Level {
+	case 1:
+		r.emitLine(strings.Repeat("━", r.contentWidth()), tcell.StyleDefault.Background(r.th.BG).Foreground(r.th.Accent))
+	case 2:
+		r.emitLine(strings.Repeat("─", r.contentWidth()), tcell.StyleDefault.Background(r.th.BG).Foreground(r.th.Muted))
+	}
+}
+
 // item renders one list item: the marker on its first line, hanging
 // indent for everything after, and a blank-line-free join between the
 // item's own blocks (tight lists read as single lines).
@@ -161,14 +194,19 @@ func (r *renderer) item(it ast.Node, marker string, st tcell.Style) {
 	r.pushIndent(hang, st)
 	// The first line carries the marker where continuations carry the
 	// hang spaces — same width by construction, so wrap math is shared.
+	// Only this item's hang is swapped for the marker: the outer levels'
+	// prefix pushIndent seeded stays, which is what indents a nested
+	// item under its parent instead of flattening every level onto
+	// column 0.
 	mst := st.Foreground(r.th.AccentSoft)
-	r.cur = r.cur[:0]
-	r.curSt = r.curSt[:0]
+	keep := len(r.cur) - len([]rune(hang))
+	r.cur = r.cur[:keep]
+	r.curSt = r.curSt[:keep]
 	for _, ru := range marker {
 		r.cur = append(r.cur, ru)
 		r.curSt = append(r.curSt, mst)
 	}
-	r.curW = uniseg.StringWidth(marker)
+	r.curW = uniseg.StringWidth(string(r.cur))
 	first := true
 	for c := it.FirstChild(); c != nil; c = c.NextSibling() {
 		if !first {
@@ -251,26 +289,95 @@ func (r *renderer) codeBlock(b *ast.FencedCodeBlock) {
 	r.codeLines(lines, grid)
 }
 
+// codeRail is the one-cell left edge every code row starts with — the
+// block's margin, painted in Subtle on the code surface, so a block
+// reads as a block even where its first line is blank.
+const codeRail = '▏'
+
+// codeTabStop is the cell width a tab expands to inside a code block.
+// Four, matching the editor's own default for Go's gofmt-tabbed source
+// — the block is read, not edited, so the exact stop only has to look
+// like indentation.
+const codeTabStop = 4
+
 // codeLines emits pre-split code lines with an optional per-rune syntax
-// grid, hard-wrapped at the width (code must not reflow at word
-// boundaries — indentation is meaning).
+// grid as one rectangular block: every row starts with codeRail, is
+// hard-wrapped at the width (code must not reflow at word boundaries —
+// indentation is meaning), and is right-padded to the block's widest
+// row so the LineHL surface forms a rectangle rather than a ragged
+// right edge. A blank line inside the block is a blank ROW, rail and
+// padding included — the accumulate/flush path dropped it, because
+// flush treats an empty line as nothing to emit and trimmed trailing
+// spaces off the rest. Rows go out through emitRow so a block inside a
+// list item or a blockquote sits under the item's hang / behind the
+// quote gutter like every other block row. Tabs expand to codeTabStop
+// on the way in: uniseg measures a tab at zero cells, so left alone a
+// tab-indented Go block painted flush against the rail.
 func (r *renderer) codeLines(lines []string, grid [][]tcell.Style) {
-	r.flush()
-	plain := tcell.StyleDefault.Background(r.th.LineHL).Foreground(r.th.Text)
+	r.flushBlock()
+	surface := r.th.LineHL
+	plain := tcell.StyleDefault.Background(surface).Foreground(r.th.Text)
+	rail := tcell.StyleDefault.Background(surface).Foreground(r.th.Subtle)
+	textW := r.contentWidth() - 1 // the rail's cell
+	if textW < 1 {
+		textW = 1
+	}
+	// Split every line into rows of at most textW cells, whole clusters
+	// only, carrying each rune's grid index for its style.
+	type codeRow struct {
+		runes []rune
+		sts   []tcell.Style
+		width int
+	}
+	var rows []codeRow
+	blockW := 0
 	for i, l := range lines {
-		runes := []rune(l)
 		var sts []tcell.Style
 		if grid != nil && i < len(grid) {
 			sts = grid[i]
 		}
-		for j, ru := range runes {
+		row := codeRow{}
+		j := 0 // rune index into l, for the grid lookup
+		for rest := l; rest != ""; {
+			cluster, tail, cw, _ := uniseg.FirstGraphemeClusterInString(rest, -1)
+			// One source rune per grid entry, however many cells the
+			// cluster (or the expanded tab) paints.
+			consumed := len([]rune(cluster))
+			if cluster == "\t" {
+				cw = codeTabStop - row.width%codeTabStop
+				cluster = strings.Repeat(" ", cw)
+			}
+			if row.width+cw > textW && row.width > 0 {
+				rows = append(rows, row)
+				blockW = max(blockW, row.width)
+				row = codeRow{}
+			}
 			st := plain
 			if sts != nil && j < len(sts) {
-				st = sts[j].Background(r.th.LineHL)
+				st = sts[j].Background(surface)
 			}
-			r.appendRune(ru, st, false)
+			for _, ru := range cluster {
+				row.runes = append(row.runes, ru)
+				row.sts = append(row.sts, st)
+			}
+			row.width += cw
+			j += consumed
+			rest = tail
 		}
-		r.flush()
+		rows = append(rows, row)
+		blockW = max(blockW, row.width)
+	}
+	if blockW > textW {
+		blockW = textW
+	}
+	for _, row := range rows {
+		runes := append([]rune{codeRail}, row.runes...)
+		sts := append([]tcell.Style{rail}, row.sts...)
+		for w := row.width; w < blockW; w++ {
+			runes = append(runes, ' ')
+			sts = append(sts, plain)
+		}
+		r.emitRow(runes, sts)
 	}
 }
 
@@ -307,7 +414,7 @@ func (r *renderer) captureInlines(n ast.Node, st tcell.Style) styledCell {
 // widest columns shrink first and their cells truncate with an
 // ellipsis — a readable narrow table beats a correct overflowing one.
 func (r *renderer) table(t *extast.Table, st tcell.Style) {
-	r.flush()
+	r.flushBlock()
 	var rows [][]styledCell
 	header := -1
 	for tr := t.FirstChild(); tr != nil; tr = tr.NextSibling() {
@@ -347,7 +454,7 @@ func (r *renderer) table(t *extast.Table, st tcell.Style) {
 		}
 		return s
 	}
-	for total() > r.width {
+	for total() > r.contentWidth() {
 		wi, ww := -1, floor
 		for i, w := range widths {
 			if w > ww {
@@ -378,10 +485,9 @@ func (r *renderer) table(t *extast.Table, st tcell.Style) {
 				}
 			}
 		}
-		r.lines = append(r.lines, string(runes))
-		r.styles = append(r.styles, sts)
+		r.emitRow(runes, sts)
 		if ri == header {
-			r.emitLine(strings.Repeat("─", min(total(), r.width)), r.dim())
+			r.emitLine(strings.Repeat("─", min(total(), r.contentWidth())), r.dim())
 		}
 	}
 }
@@ -523,15 +629,61 @@ func (r *renderer) flush() {
 	r.cur, r.curSt, r.curW = nil, nil, 0
 }
 
-// emitLine appends one whole pre-built line in a single style.
+// emitLine appends one whole pre-built line in a single style, behind
+// the active block prefix.
 func (r *renderer) emitLine(s string, st tcell.Style) {
-	r.flush()
 	sts := make([]tcell.Style, len([]rune(s)))
 	for i := range sts {
 		sts[i] = st
 	}
-	r.lines = append(r.lines, s)
-	r.styles = append(r.styles, sts)
+	r.emitRow([]rune(s), sts)
+}
+
+// emitRow is the one door for a pre-built block row (code, table,
+// rule): it lands behind the block prefix the flowing text would have
+// carried — the accumulating row when that holds only a list marker
+// or the indent, so `- ` followed by a fence keeps its bullet, the
+// indent alone otherwise. Appending straight to r.lines is what
+// dropped a fenced block inside a list item onto column 0.
+func (r *renderer) emitRow(runes []rune, sts []tcell.Style) {
+	r.flushBlock()
+	prefix, prefixSt := r.indent, r.indentSt
+	if len(r.cur) > 0 {
+		prefix, prefixSt = r.cur, r.curSt
+		r.cur, r.curSt, r.curW = nil, nil, 0
+	}
+	line := append(append([]rune(nil), prefix...), runes...)
+	styles := append(append([]tcell.Style(nil), prefixSt...), sts...)
+	r.lines = append(r.lines, string(line))
+	r.styles = append(r.styles, styles)
+}
+
+// prefixOnly reports whether the accumulating row holds nothing but
+// the block prefix — the indent startLine seeded, or a list marker in
+// its place — so the next block should join it rather than flush it
+// out as a row of its own.
+func (r *renderer) prefixOnly() bool {
+	return len(r.cur) > 0 && r.curW <= uniseg.StringWidth(string(r.indent))
+}
+
+// flushBlock is the flush a block start wants: commit any real text on
+// the accumulating row, but leave a prefix-only row open for the block
+// to land on.
+func (r *renderer) flushBlock() {
+	if !r.prefixOnly() {
+		r.flush()
+	}
+}
+
+// contentWidth is the cells left of the budget after the active block
+// prefix — what a rule or a code row may span so it ends where the
+// wrapped text does.
+func (r *renderer) contentWidth() int {
+	w := r.width - uniseg.StringWidth(string(r.indent))
+	if w < 1 {
+		w = 1
+	}
+	return w
 }
 
 // rawLines returns a block node's source lines without trailing

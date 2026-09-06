@@ -74,7 +74,9 @@ func (a *App) openFileMode(path string, preview bool) {
 	}
 	t, err := a.newTab(path)
 	if err != nil {
-		a.flash(fmt.Sprintf("Error: %v", err))
+		// Name the file and the verb: a bare "Error: is a directory"
+		// left the user guessing which click it was about.
+		a.flash(fmt.Sprintf("Couldn't open %s: %v", filepath.Base(path), err))
 		return
 	}
 	t.Preview = preview

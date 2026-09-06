@@ -553,3 +553,153 @@ func TestConfirm_ShortScreenKeepsButtonRowVisible(t *testing.T) {
 		t.Fatalf("modal covers the status bar row: %+v on %d rows", r, scrH)
 	}
 }
+
+// TestConfirm_DragFromBodyOntoYesDoesNotConfirm is the drag-activation
+// regression. Every Yes in the editor is destructive, and a press in
+// the scrollable body followed by a downward drag delivered a Button1
+// event on the Yes cells — which used to answer the prompt. Only a
+// fresh press on the button may; the drag's motion must not, and the
+// bar must still follow that same drag.
+func TestConfirm_DragFromBodyOntoYesDoesNotConfirm(t *testing.T) {
+	c, _ := wideBodyConfirm(t, 30)
+	var log []string
+	c.Close = func() { log = append(log, "close") }
+	c.OnYes = func() { log = append(log, "yes") }
+	c.OnCancel = func() { log = append(log, "cancel") }
+	r := c.rect()
+	_, yesX := c.buttonCols()
+	btnY := r.Y + c.buttonRow()
+
+	c.HandleMouse(r.X+2, r.Y+4, tcell.Button1) // press in the body
+	c.HandleMouse(r.X+yesX+1, btnY, tcell.Button1)
+	if len(log) != 0 {
+		t.Fatalf("a drag onto Yes answered the prompt: %v", log)
+	}
+	if c.Hover != 1 {
+		t.Fatal("the drag should still move the hover onto Yes")
+	}
+	// Dragging out of the frame is not an outside click either.
+	c.HandleMouse(r.X-1, r.Y, tcell.Button1)
+	if len(log) != 0 {
+		t.Fatalf("a drag out of the frame cancelled: %v", log)
+	}
+	// The bar keeps following a held drag: it is the one target that
+	// wants motion.
+	b := c.bar(r)
+	c.HandleMouse(b.x, b.top+b.viewH-1, tcell.Button1)
+	if c.Scroll() == 0 {
+		t.Fatal("a drag onto the bar should still scroll")
+	}
+	c.HandleMouse(r.X+yesX+1, btnY, tcell.ButtonNone)
+	c.HandleMouse(r.X+yesX+1, btnY, tcell.Button1)
+	if len(log) != 2 || log[1] != "yes" {
+		t.Fatalf("a fresh press on Yes after the release must confirm, got %v", log)
+	}
+}
+
+// TestConfirm_LabelsDrawAndHitTestTogether pins the optional captions:
+// a caller naming its verb gets "[ Cancel ] [ Delete branch ]" painted
+// on the button row, the stock geometry is left alone only for the
+// stock pair, and the click zones follow the painted widths — the
+// last cell of a 17-cell caption must still press it, which the fixed
+// 7-cell Yes zone used to miss.
+func TestConfirm_LabelsDrawAndHitTestTogether(t *testing.T) {
+	scr := simScreen(t)
+	c, log := testConfirm()
+	c.Labels = [2]string{"[ Cancel ]", "[ Delete branch ]"}
+	c.Draw(scr)
+	scr.Show()
+
+	r := c.rect()
+	btnY := r.Y + c.buttonRow()
+	noX, yesX := c.buttonCols()
+	row := ""
+	for x := r.X + 1; x < r.X+r.W-1; x++ {
+		row += string(cellAt(scr, x, btnY))
+	}
+	for _, want := range []string{"[ Cancel ]", "[ Delete branch ]"} {
+		if !strings.Contains(row, want) {
+			t.Errorf("button row %q never painted %q", row, want)
+		}
+	}
+	if noX == confirmBtnNoX && yesX == confirmBtnYesX {
+		t.Fatal("custom captions must be laid out by width, not the pinned No/Yes columns")
+	}
+	if noW, _ := c.buttonWidths(); noX+noW >= yesX {
+		t.Fatalf("captions overlap: cancel ends at %d, action starts at %d", noX+noW, yesX)
+	}
+
+	_, yesW := c.buttonWidths()
+	c.HandleMouse(r.X+yesX+yesW-1, btnY, tcell.Button1)
+	if len(*log) != 2 || (*log)[1] != "yes" {
+		t.Fatalf("click on the caption's last cell should press it, got %v", *log)
+	}
+
+	// The stock pair keeps the pinned columns a hundred hit-zone tests
+	// spell out.
+	d, _ := testConfirm()
+	if noX, yesX := d.buttonCols(); noX != confirmBtnNoX || yesX != confirmBtnYesX {
+		t.Fatalf("default captions drifted off the pinned columns: %d/%d", noX, yesX)
+	}
+}
+
+// TestConfirm_LabelsFitAtMinWidth is the floor check for the longest
+// pair the app uses: at 40 columns the frame is 38 cells and both
+// captions must still sit inside it without overlapping, because a
+// button painted over the border is a control the user cannot read.
+func TestConfirm_LabelsFitAtMinWidth(t *testing.T) {
+	scr := simScreen(t)
+	scr.SetSize(40, 10)
+	c, _ := testConfirm()
+	c.Size = func() (int, int) { return 40, 10 }
+	c.Labels = [2]string{"[ Cancel ]", "[ Pull, then push ]"}
+	c.Draw(scr)
+	scr.Show()
+
+	r := c.rect()
+	noX, yesX := c.buttonCols()
+	noW, yesW := c.buttonWidths()
+	if noX < 1 || yesX+yesW > r.W-1 {
+		t.Fatalf("captions outside the %d-cell frame: cancel=%d action=%d..%d", r.W, noX, yesX, yesX+yesW)
+	}
+	if noX+noW >= yesX {
+		t.Fatalf("captions overlap at minWidth: %d..%d and %d", noX, noX+noW, yesX)
+	}
+	btnY := r.Y + c.buttonRow()
+	for i, want := range "[ Pull, then push ]" {
+		if got := cellAt(scr, r.X+yesX+i, btnY); got != want {
+			t.Fatalf("action caption cell %d = %q, want %q", i, got, want)
+		}
+	}
+}
+
+// TestConfirm_HintNamesTheFocusedButton pins that the title-row hint
+// tracks focus: Enter presses whichever button is highlighted, so the
+// frame says "⏎ no · esc" at rest and "⏎ delete · esc" once the user
+// has moved onto a relabelled action — the user learns what Enter does
+// before pressing it.
+func TestConfirm_HintNamesTheFocusedButton(t *testing.T) {
+	scr := simScreen(t)
+	c, _ := testConfirm()
+	c.Labels = [2]string{"[ Cancel ]", "[ Delete ]"}
+	titleRow := func() string {
+		r := c.rect()
+		row := ""
+		for x := r.X + 1; x < r.X+r.W-1; x++ {
+			row += string(cellAt(scr, x, r.Y+1))
+		}
+		return row
+	}
+
+	c.Draw(scr)
+	scr.Show()
+	if row := titleRow(); !strings.Contains(row, "⏎ cancel · esc") {
+		t.Fatalf("at rest the hint should name Cancel, got %q", row)
+	}
+	c.HandleKey(tcell.NewEventKey(tcell.KeyRight, 0, 0))
+	c.Draw(scr)
+	scr.Show()
+	if row := titleRow(); !strings.Contains(row, "⏎ delete · esc") {
+		t.Fatalf("focused on the action the hint should name it, got %q", row)
+	}
+}

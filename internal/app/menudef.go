@@ -17,7 +17,12 @@
 // current session (git verbs with no repo, edit verbs with no tab) are
 // dropped by their `visible` predicate instead of rendered greyed-out,
 // because a dimmed row a user can never light up is pure scroll cost.
-// And two clusters that used to spend nine and twelve rows — the git
+// A row whose click opens a prompt, a pick or a confirm — anything that
+// asks before acting — ends in "…" (Rename file…, Go to line…, Undo
+// last commit…), and a row that acts on the click does not (Save,
+// Push, Fetch): the ellipsis is the one-glyph promise that clicking is
+// safe to explore, so a row that prompts without it is a bug, not a
+// style choice. And two clusters that used to spend nine and twelve rows — the git
 // verbs and the file-clipboard actions — collapse into one "Git…" /
 // "File clipboard…" row each that opens an overlay.Pick of the demoted
 // actions. CLAUDE.md's rule is that every action stays reachable from
@@ -31,7 +36,10 @@
 
 package app
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // Modal chrome rows, as offsets from the modal's top border. The title
 // and the filter field are fixed chrome; only rows at menuContentY and
@@ -42,6 +50,24 @@ const (
 	menuFilterY  = 2 // type-to-filter input
 	menuDividerY = 3 // fixed divider under the filter
 	menuContentY = 4 // first scrollable content row
+)
+
+// The file-action labels both surfaces share. The ≡ rows and the tree's
+// right-click popup used to spell the same actions two ways ("Rename
+// file" / "Rename", "Copy relative path" / "Copy rel path", "New file" /
+// "New File"), which reads as two features. One constant per action;
+// the popup derives its folder wording from the same string
+// (treeContextLabel), so a rename here renames both surfaces.
+const (
+	labelNewFile          = "New file"
+	labelRenameFile       = "Rename file…"
+	labelDeleteFile       = "Delete file…"
+	labelCutFile          = "Cut file"
+	labelCopyFile         = "Copy file"
+	labelDuplicateFile    = "Duplicate file"
+	labelPasteInto        = "Paste into "
+	labelCopyRelativePath = "Copy relative path"
+	labelCopyAbsolutePath = "Copy absolute path"
 )
 
 // menuItemDef describes one row in the action modal: the label shown to
@@ -71,14 +97,27 @@ type menuItemDef struct {
 	// buffer, Undo with an empty history). The first is noise and gets
 	// dropped; the second is a dimmed row that teaches.
 	visible func(*App) bool
+	// via names the drill-in a flattened filter match came out of ("Git",
+	// "File clipboard"); empty for a top-level row. Only the copies
+	// matchMenuGroups hands the layout carry it, so the tables stay
+	// oblivious. drawMenu paints it in the tag column as "Git ›" so
+	// "Push" in a match list does not read as a top-level row.
+	via string
 }
 
 // menuDrillIn is one demoted cluster: the title of the pick it opens
 // and the rows that live inside it. Kept as a value (not a closure) so
 // tests can walk the rows without opening an overlay.
+//
+// visible is the door's own predicate — the same one the top-level row
+// that opens the pick carries — so a flattened filter can ask "would
+// this cluster be reachable right now" without hunting for the door
+// row: no repo means no git verbs in the match list, however well
+// "push" matches.
 type menuDrillIn struct {
-	title string
-	items []menuItemDef
+	title   string
+	items   []menuItemDef
+	visible func(*App) bool
 }
 
 // builtinMenuGroups returns the editor's built-in action groups in
@@ -119,12 +158,17 @@ func fileMenuGroup() []menuItemDef {
 		// "⚠ disk conflict" marker has been dismissed — hidden the rest
 		// of the time, which is nearly always.
 		{label: "Resolve disk conflict…", action: (*App).menuResolveDiskConflict, enabled: (*App).hasDiskConflict, visible: (*App).hasDiskConflict},
-		{label: "Rename file", action: (*App).menuRename, enabled: (*App).hasFileTab, visible: (*App).hasTab},
-		{label: "Delete file", action: (*App).menuDelete, enabled: (*App).hasFileTab, visible: (*App).hasTab},
+		{label: labelRenameFile, action: (*App).menuRename, enabled: (*App).hasFileTab, visible: (*App).hasTab},
+		{label: labelDeleteFile, action: (*App).menuDelete, enabled: (*App).hasFileTab, visible: (*App).hasTab},
 		{action: (*App).menuRenameFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).renameFolderLabel, visible: (*App).hasActiveSubfolder},
 		{action: (*App).menuDeleteFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).deleteFolderLabel, visible: (*App).hasActiveSubfolder},
 		{action: (*App).menuUndoDelete, enabled: (*App).hasTrashedEntry, labelFor: (*App).undoDeleteLabel, visible: (*App).hasTrashedEntry},
 		{label: "File clipboard…", action: (*App).menuFileClipboard, enabled: (*App).hasFileClipActions, visible: (*App).hasFileClipActions},
+		// Tab switching needs a second tab to switch to, so the trio
+		// hides rather than dims on a single tab.
+		{label: "Next tab", shortcut: "Esc .", action: (*App).menuNextTab, enabled: (*App).hasOtherTabs, visible: (*App).hasOtherTabs},
+		{label: "Previous tab", shortcut: "Esc ,", action: (*App).menuPrevTab, enabled: (*App).hasOtherTabs, visible: (*App).hasOtherTabs},
+		{label: "Close other tabs", action: (*App).menuCloseOtherTabs, enabled: (*App).hasOtherTabs, visible: (*App).hasOtherTabs},
 	}
 }
 
@@ -144,6 +188,15 @@ func editMenuGroup() []menuItemDef {
 		{label: "Move line up", shortcut: "Esc k", action: (*App).menuMoveLineUp, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 		{label: "Move line down", shortcut: "Esc j", action: (*App).menuMoveLineDown, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 		{label: "Duplicate line", shortcut: "Esc d", action: (*App).menuDuplicateLine, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		// Tab / Shift+Tab run these from the keyboard; the rows exist
+		// because a terminal that swallows Shift+Tab (Backtab) leaves
+		// the menu as the only path to an outdent. "Shift", not
+		// "indent": a label starting with "in" would outrank "Find in
+		// file" in the type-to-filter for the query its test pins.
+		{label: "Shift lines right", action: (*App).menuIndentLines, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		{label: "Shift lines left", action: (*App).menuOutdentLines, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		{label: "Select all", shortcut: "Esc a", action: (*App).menuSelectAll, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		{label: "Select line", shortcut: "Esc L", action: (*App).menuSelectLine, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 	}
 }
 
@@ -157,11 +210,16 @@ func goMenuGroup() []menuItemDef {
 	return []menuItemDef{
 		{label: "Find in file", shortcut: "Esc f", action: (*App).menuFind, enabled: (*App).hasFindable, visible: (*App).hasTab},
 		{label: "Find in project", shortcut: "Esc F", action: (*App).menuFindInProject, enabled: (*App).hasFinder, visible: (*App).hasTree},
-		{label: "Go to line", shortcut: "Esc l", action: (*App).menuGoToLine, enabled: (*App).hasFindable, visible: (*App).hasTab},
+		{label: "Go to line…", shortcut: "Esc l", action: (*App).menuGoToLine, enabled: (*App).hasFindable, visible: (*App).hasTab},
 		{label: "Go to matching bracket", shortcut: "Esc %", action: (*App).menuGoToMatchingBracket, enabled: (*App).hasMatchingBracket, visible: (*App).hasEditableTab},
 		{label: "Move to previous word", shortcut: "Esc b", action: (*App).menuMoveWordLeft, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 		{label: "Move to next word", shortcut: "Esc e", action: (*App).menuMoveWordRight, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 		{label: "Find file in project", shortcut: "Esc p", action: (*App).menuFindFile, enabled: (*App).hasFinder, visible: (*App).hasTree},
+		{label: "Go to start of file", shortcut: "Esc <", action: (*App).menuGoToDocStart, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		{label: "Go to end of file", shortcut: "Esc >", action: (*App).menuGoToDocEnd, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		// Dims until the tab remembers a query — the row teaches that
+		// "find next" repeats a search rather than starting one.
+		{label: "Find next", shortcut: "Esc ;", action: (*App).menuFindNext, enabled: (*App).hasFindQuery, visible: (*App).hasEditableTab},
 	}
 }
 
@@ -205,6 +263,10 @@ func viewMenuGroup() []menuItemDef {
 		// beats waiting.
 		{label: "Refresh file tree", action: (*App).menuRefreshTree, enabled: alwaysTrue, visible: (*App).hasTree},
 		{label: "Theme…", action: (*App).menuTheme, enabled: alwaysTrue},
+		// Beside Theme… because it is the other appearance picker, and
+		// visible only with a tree because the resolved answer lives on
+		// it (iconsOn) — single-file mode has nothing to stamp.
+		{label: "Icons…", action: (*App).menuIcons, enabled: alwaysTrue, visible: (*App).hasTree},
 		// Last row of the group on purpose: it is the one row that
 		// teaches the other rows. Sourced from leaderBindings(), so it
 		// can never advertise a gesture the dispatch dropped.
@@ -226,7 +288,7 @@ func quitMenuGroup() []menuItemDef {
 // keeps the exact label, action and predicate it had as a top-level
 // row so muscle memory and the Esc-g hint survive the demotion.
 func gitDrillIn() menuDrillIn {
-	return menuDrillIn{title: "Git", items: []menuItemDef{
+	return menuDrillIn{title: "Git", visible: (*App).hasGitActions, items: []menuItemDef{
 		{label: "Git changes", shortcut: "Esc g", action: (*App).menuGitChanges, enabled: (*App).hasGitRepo},
 		{label: "Commit changes…", action: (*App).menuGitCommit, enabled: (*App).hasGitChanges},
 		{label: "Push", action: (*App).menuGitPush, enabled: (*App).hasGitRepo},
@@ -239,18 +301,47 @@ func gitDrillIn() menuDrillIn {
 	}}
 }
 
+// gitExtrasDrillIn is the pick behind "More git actions…" — and behind
+// the git panel's ⋯ button, which opens the same list. It used to be an
+// anchored overlay.Popup with no filter and no registration, so the
+// reachability test could not see Fetch, the branch verbs, the
+// worktree verbs or the stashes, and the menu's type-to-filter could
+// not find them either. As a drill-in it is one more entry in
+// menuDrillIns and rides the same openMenuDrillIn path as Git…: rows
+// that cannot apply are omitted, the pick filters, and every verb is
+// reachable from the top-level filter by name.
+//
+// Commit history lives in gitDrillIn only: a row listed twice would
+// show twice in a flattened match list.
+func gitExtrasDrillIn() menuDrillIn {
+	return menuDrillIn{title: "More git actions", visible: (*App).hasGitRepo, items: []menuItemDef{
+		{label: "Fetch", action: (*App).menuGitFetch, enabled: (*App).hasGitRepo},
+		{label: "Compare against…", action: (*App).menuGitCompareAgainst, enabled: (*App).hasGitRepo},
+		{label: "New branch…", action: (*App).menuGitNewBranch, enabled: (*App).hasGitRepo},
+		{label: "Merge branch…", action: (*App).menuGitMergeBranch, enabled: (*App).hasGitRepo},
+		{label: "Rename branch…", action: (*App).menuGitRenameBranch, enabled: (*App).hasGitRepo},
+		{label: "Delete branch…", action: (*App).menuGitDeleteBranch, enabled: (*App).hasGitRepo},
+		{label: "New worktree…", action: (*App).menuGitNewWorktree, enabled: (*App).hasGitRepo},
+		{label: "List worktrees", action: (*App).menuGitListWorktrees, enabled: (*App).hasGitRepo},
+		{label: "Remove worktree…", action: (*App).menuGitRemoveWorktree, enabled: (*App).hasGitRepo},
+		{label: "Stash changes", action: (*App).menuGitStash, enabled: (*App).hasGitRepo},
+		{label: "Pop stash", action: (*App).menuGitStashPop, enabled: (*App).hasGitRepo},
+		{label: "Undo last commit…", action: (*App).menuGitUndoCommit, enabled: (*App).hasGitRepo},
+	}}
+}
+
 // fileClipDrillIn is the pick behind the "File clipboard…" row: the
 // cut / copy / duplicate / paste quartet plus the two copy-path rows,
 // which are the same gesture ("put something about this file on a
 // clipboard") and were the other half of the twelve-row File group.
 func fileClipDrillIn() menuDrillIn {
-	return menuDrillIn{title: "File clipboard", items: []menuItemDef{
-		{label: "Cut file", action: (*App).menuCutFile, enabled: (*App).hasFileTab},
-		{label: "Copy file", action: (*App).menuCopyFile, enabled: (*App).hasFileTab},
-		{label: "Duplicate file", action: (*App).menuDuplicateFile, enabled: (*App).hasFileTab},
+	return menuDrillIn{title: "File clipboard", visible: (*App).hasFileClipActions, items: []menuItemDef{
+		{label: labelCutFile, action: (*App).menuCutFile, enabled: (*App).hasFileTab},
+		{label: labelCopyFile, action: (*App).menuCopyFile, enabled: (*App).hasFileTab},
+		{label: labelDuplicateFile, action: (*App).menuDuplicateFile, enabled: (*App).hasFileTab},
 		{action: (*App).menuPasteEntry, enabled: (*App).hasFileClip, labelFor: (*App).pasteEntryLabel},
-		{label: "Copy relative path", action: (*App).menuCopyRelativePath, enabled: (*App).hasFileTab},
-		{label: "Copy absolute path", action: (*App).menuCopyAbsolutePath, enabled: (*App).hasFileTab},
+		{label: labelCopyRelativePath, action: (*App).menuCopyRelativePath, enabled: (*App).hasFileTab},
+		{label: labelCopyAbsolutePath, action: (*App).menuCopyAbsolutePath, enabled: (*App).hasFileTab},
 	}}
 }
 
@@ -259,7 +350,7 @@ func fileClipDrillIn() menuDrillIn {
 // drill-in" generically: a future drill-in is covered the moment it is
 // registered here, and an action can never quietly leave the ≡ menu.
 func menuDrillIns() []menuDrillIn {
-	return []menuDrillIn{gitDrillIn(), fileClipDrillIn()}
+	return []menuDrillIn{gitDrillIn(), gitExtrasDrillIn(), fileClipDrillIn()}
 }
 
 // alwaysTrue is the default predicate for actions with no preconditions
@@ -289,6 +380,22 @@ func (a *App) hasGitActions() bool {
 // unsaved buffer.
 func (a *App) hasFileClipActions() bool {
 	return a.hasFileTab() || a.hasFileClip()
+}
+
+// menuTag is the text a row paints in its right-hand column: the Esc
+// hint, the drill-in it was matched out of ("Git ›"), or both ("Git ›
+// Esc g") — the cheat-sheet hint must survive flattening, and the
+// parent must be named or a demoted verb reads as a top-level row.
+// Every reader of the column — the width the row asks for, the budget
+// its label gets, the draw — goes through here so they cannot disagree.
+func menuTag(it menuItemDef) string {
+	switch {
+	case it.via != "" && it.shortcut != "":
+		return it.via + " › " + it.shortcut
+	case it.via != "":
+		return it.via + " ›"
+	}
+	return it.shortcut
 }
 
 // menuLabel resolves a row's display label, preferring the dynamic
@@ -396,8 +503,8 @@ func (a *App) menuNaturalHeight() int {
 // refused the columns.
 func (a *App) menuRowWidth(it menuItemDef) int {
 	w := 5 + runeLen(a.menuLabel(it))
-	if it.shortcut != "" {
-		w += 3 + runeLen(it.shortcut)
+	if tag := menuTag(it); tag != "" {
+		w += 3 + runeLen(tag)
 	}
 	return w
 }
@@ -406,8 +513,8 @@ func (a *App) menuRowWidth(it menuItemDef) int {
 // a modal mw cells wide. The inverse of menuRowWidth.
 func menuLabelBudget(mw int, it menuItemDef) int {
 	b := mw - 5
-	if it.shortcut != "" {
-		b -= 3 + runeLen(it.shortcut)
+	if tag := menuTag(it); tag != "" {
+		b -= 3 + runeLen(tag)
 	}
 	return b
 }
@@ -432,24 +539,59 @@ func (a *App) menuNaturalWidth() int {
 	return w
 }
 
-// matchMenuGroups narrows every group down to the rows matching q and
+// matchMenuGroups narrows the menu down to the rows matching q and
 // returns them as a single flat group (nil when nothing matched).
-// Matching runs across all groups at once — that's the point of the
-// filter: "branch" should find Switch branch without the user knowing
-// it lives behind Git.
+// Matching runs across every group AND every registered drill-in at
+// once — that is the point of the filter: "branch" finds Switch
+// branch… and the four branch verbs behind More git actions… without
+// the user knowing where any of them lives. It used to walk only the
+// groups it was handed, so every demoted verb was unreachable by name
+// while cheatsheet.go promised the opposite.
+//
+// A drill-in row is a candidate when its door is open (the drill-in's
+// own visible predicate) and its own visible predicate agrees; its
+// enabled predicate is left to dim the row exactly as a top-level row
+// dims, so "commit" on a clean tree still teaches that the verb exists.
+// Hits are ordered by rank (menuMatchRank) and then by table order, so
+// Enter and the top of the list agree on the row the user meant; the
+// rank used to be computed and thrown away.
 func (a *App) matchMenuGroups(groups [][]menuItemDef, q string) [][]menuItemDef {
-	var hits []menuItemDef
+	type hit struct {
+		it   menuItemDef
+		rank int
+	}
+	var hits []hit
+	consider := func(it menuItemDef, via string) {
+		if rank := menuMatchRank(strings.ToLower(a.menuLabel(it)), q); rank >= 0 {
+			it.via = via
+			hits = append(hits, hit{it, rank})
+		}
+	}
 	for _, g := range groups {
 		for _, it := range g {
-			if menuMatchRank(strings.ToLower(a.menuLabel(it)), q) >= 0 {
-				hits = append(hits, it)
+			consider(it, "")
+		}
+	}
+	for _, d := range menuDrillIns() {
+		if d.visible != nil && !d.visible(a) {
+			continue
+		}
+		for _, it := range d.items {
+			if it.visible != nil && !it.visible(a) {
+				continue
 			}
+			consider(it, d.title)
 		}
 	}
 	if len(hits) == 0 {
 		return nil
 	}
-	return [][]menuItemDef{hits}
+	sort.SliceStable(hits, func(i, j int) bool { return hits[i].rank < hits[j].rank })
+	flat := make([]menuItemDef, len(hits))
+	for i, h := range hits {
+		flat[i] = h.it
+	}
+	return [][]menuItemDef{flat}
 }
 
 // layoutMenuGroups stamps relY onto every row of groups and reports the

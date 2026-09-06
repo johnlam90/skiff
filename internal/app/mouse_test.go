@@ -25,6 +25,7 @@ import (
 
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/git"
+	"github.com/johnlam90/skiff/internal/overlay"
 )
 
 // TestSelectWordAt_UsesSharedWordPredicate pins the contract that matters
@@ -404,10 +405,93 @@ func TestEditorDrag_AutoScroll(t *testing.T) {
 	if a.autoScrollDir != 1 {
 		t.Fatalf("expected autoScrollDir=1, got %d", a.autoScrollDir)
 	}
-	a.editorDrag(ex+1, ey+1) // inside → stops
+	a.editorDrag(ex+1, ey+eh/2) // the middle → stops
 	if a.autoScrollDir != 0 {
 		t.Fatalf("expected stopped autoScroll, got %d", a.autoScrollDir)
 	}
+}
+
+// TestAutoScrollStepFor pins the distance-to-speed map: one line at the
+// zone's inner row, one more per row beyond it, capped.
+func TestAutoScrollStepFor(t *testing.T) {
+	for past, want := range []int{1, 2, 3, 4} {
+		if got := autoScrollStepFor(past); got != want {
+			t.Fatalf("past=%d: step %d, want %d", past, got, want)
+		}
+	}
+	if got := autoScrollStepFor(100); got != autoScrollMaxStep {
+		t.Fatalf("far past: step %d, want the cap %d", got, autoScrollMaxStep)
+	}
+	if got := autoScrollStepFor(-3); got != 1 {
+		t.Fatalf("negative distance: step %d, want 1", got)
+	}
+}
+
+// TestEditorDrag_EdgeZoneIsInsideTheRect: auto-scroll arms on the last
+// autoScrollEdgeRows rows INSIDE the editor, not only past it — a tmux
+// pane border sits where "past it" used to be, and a finger cannot park
+// on one row — and the step grows with distance: one line on the inner
+// row, more on the status bar below it.
+func TestEditorDrag_EdgeZoneIsInsideTheRect(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "d.txt")
+	if err := os.WriteFile(target, []byte(strings.Repeat("line\n", 200)), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	ex, ey, _, eh := a.editorRect()
+
+	a.editorDrag(ex+8, ey+eh-autoScrollEdgeRows) // inner row of the bottom zone
+	if a.autoScrollDir != 1 || a.mouse.autoScrollStep != 1 {
+		t.Fatalf("inner zone row: dir %d step %d, want down by 1", a.autoScrollDir, a.mouse.autoScrollStep)
+	}
+	a.editorDrag(ex+8, ey+eh) // the status bar: two rows further
+	if a.autoScrollDir != 1 || a.mouse.autoScrollStep != 3 {
+		t.Fatalf("status bar: dir %d step %d, want down by 3", a.autoScrollDir, a.mouse.autoScrollStep)
+	}
+	a.editorDrag(ex+8, ey+eh-autoScrollEdgeRows-1) // just inside the middle
+	if a.autoScrollDir != 0 {
+		t.Fatal("the row above the zone must not scroll")
+	}
+	a.editorDrag(ex+8, ey+autoScrollEdgeRows-1) // inner row of the top zone
+	if a.autoScrollDir != -1 || a.mouse.autoScrollStep != 1 {
+		t.Fatalf("top zone: dir %d step %d, want up by 1", a.autoScrollDir, a.mouse.autoScrollStep)
+	}
+	a.editorDrag(ex+8, 0) // the tab bar: two rows above the inner row
+	if a.mouse.autoScrollStep != 3 {
+		t.Fatalf("tab bar: step %d, want 3", a.mouse.autoScrollStep)
+	}
+	a.stopAutoScroll()
+}
+
+// TestHandleAutoScroll_ScrollsByTheArmedStep: each tick moves the
+// viewport by the step the drag distance armed, and extends the
+// selection to the pointer's own row rather than the rect's edge.
+func TestHandleAutoScroll_ScrollsByTheArmedStep(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "d.txt")
+	if err := os.WriteFile(target, []byte(strings.Repeat("line\n", 200)), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	ex, ey, _, eh := a.editorRect()
+	a.handleMouse(tcell.NewEventMouse(ex+8, ey+1, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(ex+8, ey+eh+1, tcell.Button1, 0)) // 3 past the inner row
+	step := a.mouse.autoScrollStep
+	if step != 4 {
+		t.Fatalf("one row below the status bar: step %d, want 4", step)
+	}
+	a.handleAutoScroll()
+	if tab.ScrollY != step {
+		t.Fatalf("one tick scrolled to %d, want %d", tab.ScrollY, step)
+	}
+	if tab.Cursor.Line != tab.ScrollY+eh-1 {
+		t.Fatalf("the selection should reach the last visible row, cursor on %d with scroll %d", tab.Cursor.Line, tab.ScrollY)
+	}
+	a.handleMouse(tcell.NewEventMouse(ex+8, ey+eh+1, tcell.ButtonNone, 0))
 }
 
 // TestHandleMouse_AutoScrollDrivenThroughEventLoop exercises the full
@@ -735,19 +819,21 @@ func TestTabBar_ClickMapsThroughScroll(t *testing.T) {
 	a.drawTabBar()
 	a.screen.Show()
 
-	// Click inside the second-to-last tab's visible rect.
-	target := a.tabs.Len() - 2
-	var rect tabRect
-	found := false
+	// Click inside a visible tab other than the active one when the
+	// window holds two; the strip snaps to whole tabs, so which
+	// neighbour is painted depends on the widths, not on the index.
+	active := a.tabs.ActiveIndex()
+	if len(a.lastTabRects) == 0 {
+		t.Fatal("the scrolled strip should store the visible rects")
+	}
+	rect := a.lastTabRects[0]
 	for _, r := range a.lastTabRects {
-		if r.Index == target {
-			rect, found = r, true
+		if r.Index != active {
+			rect = r
 			break
 		}
 	}
-	if !found {
-		t.Fatal("second-to-last tab should have a stored rect")
-	}
+	target := rect.Index
 	a.tabBarClick(rect.X+3, 0)
 	if a.tabs.ActiveIndex() != target {
 		t.Fatalf("click on scrolled tab selected %d, want %d", a.tabs.ActiveIndex(), target)
@@ -1288,5 +1374,908 @@ func TestScrollbarTo_CaretFollowsWhenEnabled(t *testing.T) {
 	}
 	if tab.Cursor.Line < tab.ScrollY || tab.Cursor.Line >= tab.ScrollY+eh {
 		t.Fatalf("caret at line %d not inside viewport [%d,%d)", tab.Cursor.Line, tab.ScrollY, tab.ScrollY+eh)
+	}
+}
+
+// TestMouseState_Fresh pins the press-vs-motion split every dispatcher
+// branch reads: a button is fresh on the first event that carries it
+// and not on the ones that follow, and releasing it re-arms the next
+// press. Two buttons are tracked independently.
+func TestMouseState_Fresh(t *testing.T) {
+	var m mouseState
+	if got := m.fresh(tcell.Button1); got != tcell.Button1 {
+		t.Fatalf("first Button1 event: fresh = %v, want Button1", got)
+	}
+	if got := m.fresh(tcell.Button1); got != 0 {
+		t.Fatalf("held Button1: fresh = %v, want none", got)
+	}
+	if got := m.fresh(tcell.Button1 | tcell.Button2); got != tcell.Button2 {
+		t.Fatalf("Button2 added while Button1 held: fresh = %v, want Button2", got)
+	}
+	if got := m.fresh(tcell.ButtonNone); got != 0 {
+		t.Fatalf("release: fresh = %v, want none", got)
+	}
+	if got := m.fresh(tcell.Button1); got != tcell.Button1 {
+		t.Fatalf("press after release: fresh = %v, want Button1", got)
+	}
+	// Wheel bits are not buttons: they never latch and never count.
+	if got := m.fresh(tcell.WheelDown); got != 0 {
+		t.Fatalf("wheel: fresh = %v, want none", got)
+	}
+}
+
+// TestHandleMouse_DragAcrossTabStripClosesOnlyThePressedTab is the
+// re-fire regression: with the button held, a sideways drag delivers a
+// motion event over every cell it crosses, and each one used to
+// re-enter the press dispatch — so crossing a second tab's × closed
+// that tab too. Only the tab under the PRESS may close.
+func TestHandleMouse_DragAcrossTabStripClosesOnlyThePressedTab(t *testing.T) {
+	dir := t.TempDir()
+	pa := filepath.Join(dir, "a.txt")
+	pb := filepath.Join(dir, "b.txt")
+	for _, p := range []string{pa, pb} {
+		if err := os.WriteFile(p, []byte("x"), 0644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	a := newTestApp(t, dir)
+	a.openFile(pa)
+	a.openFile(pb)
+	a.draw()
+	if len(a.lastTabRects) != 2 {
+		t.Fatalf("fixture: want 2 tab rects, got %d", len(a.lastTabRects))
+	}
+	closeA, closeB := a.lastTabRects[0].CloseX, a.lastTabRects[1].CloseX
+
+	a.handleMouse(tcell.NewEventMouse(closeA, 0, tcell.Button1, 0))
+	a.draw() // the loop repaints between events, so the rects are fresh
+	a.handleMouse(tcell.NewEventMouse(closeB, 0, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(closeB, 0, tcell.ButtonNone, 0))
+
+	if a.tabs.Len() != 1 {
+		t.Fatalf("drag across the strip left %d tabs, want 1", a.tabs.Len())
+	}
+	if got := a.activeTabPtr().Path; got != pb {
+		t.Fatalf("the surviving tab is %q, want %q", got, pb)
+	}
+}
+
+// treeRowY returns the screen row of the tree entry named name, walking
+// the sidebar's rows through the same hit-test a click uses.
+func treeRowY(t *testing.T, a *App, name string) int {
+	t.Helper()
+	sx, sy, _, sh := a.sidebarRect()
+	for ly := 0; ly < sh; ly++ {
+		if n, ok := a.tree.HitTest(sx, ly); ok && n.Name == name {
+			return sy + ly
+		}
+	}
+	t.Fatalf("tree row %q not on screen", name)
+	return -1
+}
+
+// TestHandleMouse_DragDownTreeTogglesOnlyThePressedRow is the vertical
+// twin: a press on one folder followed by motion over another must
+// toggle the first and leave the second alone. Before the fresh-press
+// gate, the drag opened every folder (and every file) it passed over.
+func TestHandleMouse_DragDownTreeTogglesOnlyThePressedRow(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"alpha", "beta"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0755); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, d, "f.txt"), []byte("x"), 0644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	a := newTestApp(t, dir)
+	a.draw()
+	yA := treeRowY(t, a, "alpha")
+	yB := treeRowY(t, a, "beta")
+
+	a.handleMouse(tcell.NewEventMouse(4, yA, tcell.Button1, 0))
+	a.draw()
+	a.handleMouse(tcell.NewEventMouse(4, yB, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(4, yB, tcell.ButtonNone, 0))
+
+	nodeA, _ := a.tree.HitTest(0, yA)
+	if !nodeA.Expanded {
+		t.Fatal("the pressed folder should have toggled open")
+	}
+	yB = treeRowY(t, a, "beta")
+	nodeB, _ := a.tree.HitTest(0, yB)
+	if nodeB.Expanded {
+		t.Fatal("dragging over a second folder must not toggle it")
+	}
+	if a.tabs.Len() != 0 {
+		t.Fatalf("the drag opened %d files", a.tabs.Len())
+	}
+}
+
+// TestHandleMouse_MdPreviewScrollbarPressAndDrag: the preview's bar
+// used to work by accident — its press returned "not mine", so every
+// motion event re-entered the dispatch and re-pressed the bar. With
+// the dispatch running once per press, the bar needs its own drag
+// latch, and this pins that it has one: press jumps, drag follows the
+// row, release ends it, and none of it starts a text selection.
+func TestHandleMouse_MdPreviewScrollbarPressAndDrag(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	body := strings.Repeat("paragraph line\n\n", 200)
+	tab := seedMarkdownTab(t, a, "long.md", "# Title\n\n"+body)
+	a.menuTogglePreviewMarkdown()
+	a.draw()
+	st := a.mdPreview[tab]
+	if st == nil {
+		t.Fatal("fixture: preview not active")
+	}
+	ex, ey, ew, eh := a.editorRect()
+	barX := ex + ew - 1
+
+	a.handleMouse(tcell.NewEventMouse(barX, ey+eh-1, tcell.Button1, 0))
+	if a.dragMode != dragMdPreviewScrollbar {
+		t.Fatalf("dragMode = %d, want the preview bar drag", a.dragMode)
+	}
+	bottom := st.scroll
+	if bottom == 0 {
+		t.Fatal("pressing the foot of the bar should scroll the preview")
+	}
+	a.handleMouse(tcell.NewEventMouse(barX-10, ey, tcell.Button1, 0))
+	if st.scroll != 0 {
+		t.Fatalf("dragging to the top row should return to 0, got %d", st.scroll)
+	}
+	if st.selA != st.selB {
+		t.Fatal("a bar drag must not select rendered text")
+	}
+	a.handleMouse(tcell.NewEventMouse(barX, ey, tcell.ButtonNone, 0))
+	if a.dragMode != dragNone {
+		t.Fatalf("release should clear dragMode, got %d", a.dragMode)
+	}
+}
+
+// menuRowY returns the screen row of the menu item whose label is label,
+// or fails the test — the geometry the drag tests need to aim at.
+func menuRowY(t *testing.T, a *App, label string) int {
+	t.Helper()
+	items, _, _ := a.menuLayout()
+	_, my, _, _ := a.menuModalRect()
+	for _, it := range items {
+		if a.menuLabel(it) == label {
+			return my + it.relY
+		}
+	}
+	t.Fatalf("menu row %q not found", label)
+	return -1
+}
+
+// TestHandleMouse_PressOnMenuButtonThenDragIntoMenuRunsNothing pins the
+// "a press that opened you is not your press" rule: the ≡ press opens
+// the menu, and the drag that follows — the same held button — reaches
+// the menu as motion. It hovers rows; it runs none of them.
+func TestHandleMouse_PressOnMenuButtonThenDragIntoMenuRunsNothing(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.width, a.height = 120, 60
+	a.handleMouse(tcell.NewEventMouse(a.sidebarW()+1, 0, tcell.Button1, 0))
+	if !a.menuOpen {
+		t.Fatal("the ≡ press should open the menu")
+	}
+	mx, _, _, _ := a.menuModalRect()
+	y := menuRowY(t, a, "Hide file explorer")
+	before := a.sidebarShown
+	a.handleMouse(tcell.NewEventMouse(mx+5, y, tcell.Button1, 0))
+	if a.sidebarShown != before {
+		t.Fatal("dragging from ≡ onto a row ran the row")
+	}
+	if !a.menuOpen {
+		t.Fatal("the drag must not close the menu either")
+	}
+	// Release, then a real click on the same row runs it.
+	a.handleMouse(tcell.NewEventMouse(mx+5, y, tcell.ButtonNone, 0))
+	a.handleMouse(tcell.NewEventMouse(mx+5, y, tcell.Button1, 0))
+	if a.sidebarShown == before {
+		t.Fatal("a fresh press on the row after the release should run it")
+	}
+}
+
+// TestHandleMouse_DragAcrossMenuRowsRunsOnlyThePressedRow: inside the
+// menu, a press runs its row and the motion that follows runs nothing
+// more, however many rows it crosses — the same once-per-press rule
+// the tab strip and the tree follow.
+func TestHandleMouse_DragAcrossMenuRowsRunsOnlyThePressedRow(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.width, a.height = 120, 60
+	a.openMenu()
+	mx, _, _, _ := a.menuModalRect()
+	toggleY := menuRowY(t, a, "Hide file explorer")
+	quitY := menuRowY(t, a, "Quit editor")
+	before := a.sidebarShown
+	a.handleMouse(tcell.NewEventMouse(mx+5, toggleY, tcell.Button1, 0))
+	if a.sidebarShown == before {
+		t.Fatal("the press should run the toggle row")
+	}
+	a.openMenu() // the toggle closed the menu; put it back under the held button
+	a.handleMouse(tcell.NewEventMouse(mx+5, quitY, tcell.Button1, 0))
+	if a.quit {
+		t.Fatal("dragging onto Quit ran it")
+	}
+	a.handleMouse(tcell.NewEventMouse(0, 0, tcell.Button1, 0))
+	if !a.menuOpen {
+		t.Fatal("dragging out of the frame closed the menu")
+	}
+}
+
+// TestHandleMouse_TooSmallRoutesNothing pins the too-small gate: below
+// minWidth/minHeight the frame shows only the resize notice, so a press
+// where a tab's × used to be must not close that tab — draw() never
+// repainted the strip, but the stale rects were still there to hit.
+func TestHandleMouse_TooSmallRoutesNothing(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("x"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	a.draw()
+	closeX := a.lastTabRects[0].CloseX
+
+	resizeTestApp(t, a, minWidth-1, minHeight)
+	a.draw() // bails to drawTooSmall, leaving the rects alone
+	a.handleMouse(tcell.NewEventMouse(closeX, 0, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(closeX, 0, tcell.ButtonNone, 0))
+	if a.tabs.Len() != 1 {
+		t.Fatal("a press on the too-small notice closed a tab")
+	}
+	if a.lastTabRects != nil {
+		t.Fatal("the gate must drop the stale tab rects")
+	}
+	// The wheel and the menu are gated too: nothing is painted to
+	// scroll or open.
+	a.handleMouse(tcell.NewEventMouse(5, 5, tcell.Button3, 0))
+	if a.menuOpen {
+		t.Fatal("right-click on the too-small notice opened the menu")
+	}
+
+	// Growing back restores routing.
+	resizeTestApp(t, a, 120, 40)
+	a.draw()
+	a.handleMouse(tcell.NewEventMouse(a.lastTabRects[0].CloseX, 0, tcell.Button1, 0))
+	if a.tabs.Len() != 0 {
+		t.Fatal("after the window grows back the × must work again")
+	}
+}
+
+// TestHandleMouse_MenuWheelStepsLikeEveryOtherSurface pins the menu's
+// wheel step to wheelLines: it used to scroll one row per notch while
+// the editor, the tree and every picker moved three, so the menu was
+// the one list that crawled. The hover is recomputed after the step so
+// the highlight tracks the row now under the pointer.
+func TestHandleMouse_MenuWheelStepsLikeEveryOtherSurface(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	stuffMenu(a, 20)
+	resizeTestApp(t, a, 80, 24)
+	a.openMenu()
+	a.draw()
+	if a.menuMaxScroll() < 2*wheelLines {
+		t.Fatalf("test setup: menu must overflow by 2 notches, maxScroll %d", a.menuMaxScroll())
+	}
+	mx, my, _, _ := a.menuModalRect()
+	x, y := mx+5, my+menuContentY+2
+
+	a.handleMouse(tcell.NewEventMouse(x, y, tcell.WheelDown, 0))
+	if got := a.menuList.Scroll(); got != wheelLines {
+		t.Fatalf("one notch down: scroll %d, want %d", got, wheelLines)
+	}
+	if idx := a.menuRowAt(x, y); idx >= 0 && idx != a.hoveredMenuRow {
+		t.Fatalf("hover %d should track the row now under the pointer (%d)", a.hoveredMenuRow, idx)
+	}
+	a.handleMouse(tcell.NewEventMouse(x, y, tcell.WheelUp, 0))
+	if got := a.menuList.Scroll(); got != 0 {
+		t.Fatalf("one notch back up: scroll %d, want 0", got)
+	}
+}
+
+// twoTabApp opens a.txt and b.txt, paints once so the tab rects are
+// live, and returns the app with both paths.
+func twoTabApp(t *testing.T) (*App, string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	pa := filepath.Join(dir, "a.txt")
+	pb := filepath.Join(dir, "b.txt")
+	for _, p := range []string{pa, pb} {
+		if err := os.WriteFile(p, []byte("x"), 0644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	a := newTestApp(t, dir)
+	a.openFile(pa)
+	a.openFile(pb)
+	a.draw()
+	if len(a.lastTabRects) != 2 {
+		t.Fatalf("fixture: want 2 tab rects, got %d", len(a.lastTabRects))
+	}
+	return a, pa, pb
+}
+
+// TestHandleMouse_MiddleClickClosesTheTabUnderIt pins the browser
+// convention: a middle press anywhere on a tab closes it, without
+// aiming at the × cell. A middle press off the strip does nothing, and
+// a held middle button dragged across the strip closes only the tab
+// the press landed on.
+func TestHandleMouse_MiddleClickClosesTheTabUnderIt(t *testing.T) {
+	a, pa, pb := twoTabApp(t)
+	ra, rb := a.lastTabRects[0], a.lastTabRects[1]
+
+	// Off the strip: inert.
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 5, tcell.Button2, 0))
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 5, tcell.ButtonNone, 0))
+	if a.tabs.Len() != 2 {
+		t.Fatal("a middle press in the editor closed a tab")
+	}
+
+	// Press on a's label cell, drag over b, release: only a closes.
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 0, tcell.Button2, 0))
+	a.draw()
+	a.handleMouse(tcell.NewEventMouse(rb.X+1, 0, tcell.Button2, 0))
+	a.handleMouse(tcell.NewEventMouse(rb.X+1, 0, tcell.ButtonNone, 0))
+	if a.tabs.Len() != 1 {
+		t.Fatalf("middle-click left %d tabs, want 1", a.tabs.Len())
+	}
+	if got := a.activeTabPtr().Path; got != pb {
+		t.Fatalf("the surviving tab is %q, want %q (closed %q)", got, pb, pa)
+	}
+}
+
+// TestTabBarClick_ClosesViaTheSpaceBeforeX: the × is one cell, and the
+// cell before it is the space that pads the label — a press there
+// used to ACTIVATE the tab, the exact opposite of what a near-miss on
+// the × meant. The close zone is two cells ending on the ×.
+func TestTabBarClick_ClosesViaTheSpaceBeforeX(t *testing.T) {
+	a, pa, pb := twoTabApp(t)
+	ra := a.lastTabRects[0]
+	if ra.CloseX-1 <= ra.X {
+		t.Fatalf("fixture: the × at %d must have a cell before it inside the tab (X=%d)", ra.CloseX, ra.X)
+	}
+	a.tabBarClick(ra.CloseX-1, 0)
+	if a.tabs.Len() != 1 || a.activeTabPtr().Path != pb {
+		t.Fatalf("press one cell before × should close %q, tabs now %d", pa, a.tabs.Len())
+	}
+	// Two cells before the × is still the label: activates.
+	a, pa, _ = twoTabApp(t)
+	ra = a.lastTabRects[0]
+	a.tabBarClick(ra.CloseX-2, 0)
+	if a.tabs.Len() != 2 || a.activeTabPtr().Path != pa {
+		t.Fatal("the label cell before the close zone must activate, not close")
+	}
+}
+
+// TestScrollbarHit_TwoCellGrab: the editor's bar is painted in the
+// rightmost column and answers to that column and the one to its left,
+// so a near-miss on a phone still grabs the thumb. One further left is
+// text again.
+func TestScrollbarHit_TwoCellGrab(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "long.txt")
+	if err := os.WriteFile(path, []byte(strings.Repeat("line\n", 300)), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(path)
+	ex, ey, ew, eh := a.editorRect()
+
+	a.handleMouse(tcell.NewEventMouse(ex+ew-2, ey+eh-1, tcell.Button1, 0))
+	if a.dragMode != dragScrollbar {
+		t.Fatalf("press one cell left of the bar: dragMode = %d, want the bar drag", a.dragMode)
+	}
+	if a.activeTabPtr().ScrollY == 0 {
+		t.Fatal("the grab should have scrolled")
+	}
+	a.handleMouse(tcell.NewEventMouse(ex+ew-2, ey+eh-1, tcell.ButtonNone, 0))
+	if _, ok := a.scrollbarHit(ex+ew-3, ey); ok {
+		t.Fatal("three cells in is text, not the bar")
+	}
+}
+
+// TestSplitterHit_GrabsItsNeighbours pins the splitter's three-cell
+// zone and who wins each overlap. With no sidebar bar painted, the
+// cell left of the splitter is the splitter; with a bar painted there
+// the bar keeps its column and its own grab widens one cell inward.
+// On the right, the editor's first column is the splitter unless that
+// row's gutter shows a git marker, whose click opens the hunk.
+func TestSplitterHit_GrabsItsNeighbours(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "p.txt")
+	if err := os.WriteFile(target, []byte("hello\nworld\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.draw()
+	splitX := a.splitterX()
+	_, sy, _, sh := a.sidebarRect()
+	y := sy + sh - 4
+
+	// No bar (a two-entry tree fits): the left neighbour is splitter.
+	a.handleMouse(tcell.NewEventMouse(splitX-1, y, tcell.Button1, 0))
+	if a.dragMode != dragSidebar {
+		t.Fatalf("left neighbour with no bar: dragMode = %d, want the splitter", a.dragMode)
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX-1, y, tcell.ButtonNone, 0))
+
+	// Right neighbour on an unmarked row: splitter too.
+	a.openFile(target)
+	_, ey, _, _ := a.editorRect()
+	a.handleMouse(tcell.NewEventMouse(splitX+1, ey+1, tcell.Button1, 0))
+	if a.dragMode != dragSidebar {
+		t.Fatalf("right neighbour on a clean row: dragMode = %d, want the splitter", a.dragMode)
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX+1, ey+1, tcell.ButtonNone, 0))
+
+	// Right neighbour on a row with a gutter marker: the marker's click.
+	tab := a.activeTabPtr()
+	tab.GitLines = map[int]editor.GitLineChange{0: editor.GitLineModified}
+	fake := &git.Fake{}
+	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target,
+		"@@ -1 +1 @@\n-hell\n+hello\n", nil)
+	a.gitRunner = fake
+	a.handleMouse(tcell.NewEventMouse(splitX+1, ey, tcell.Button1, 0))
+	if a.dragMode == dragSidebar {
+		t.Fatal("a gutter marker keeps its click; the splitter must not take it")
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX+1, ey, tcell.ButtonNone, 0))
+	pumpUntil(t, a, "diff load", idle(&a.diffLoad))
+	if !diffIsOpen(a) {
+		t.Fatal("the marker press should have opened the hunk diff")
+	}
+	a.closeAllModals()
+
+	// With a bar painted left of the splitter, the bar keeps its column
+	// and its grab reaches one more cell in.
+	seedTreeFiles(t, dir, 80)
+	a.refreshTree()
+	a.draw()
+	for _, x := range []int{splitX - 1, splitX - 2} {
+		a.tree.ScrollY = 0
+		a.handleMouse(tcell.NewEventMouse(x, y, tcell.Button1, 0))
+		if a.dragMode != dragTreeScrollbar {
+			t.Fatalf("x=%d with a bar painted: dragMode = %d, want the tree bar", x, a.dragMode)
+		}
+		a.handleMouse(tcell.NewEventMouse(x, y, tcell.ButtonNone, 0))
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX, y, tcell.Button1, 0))
+	if a.dragMode != dragSidebar {
+		t.Fatalf("the painted splitter column: dragMode = %d, want the splitter", a.dragMode)
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX, y, tcell.ButtonNone, 0))
+}
+
+// TestClickRun pins the multi-click arithmetic on its own: same row
+// within the slop and the window continues the run, anything else
+// starts over, and the run wraps after three so a fourth click is a
+// plain click again.
+func TestClickRun(t *testing.T) {
+	now := time.Now()
+	last := clickRecord{x: 10, y: 5, when: now, count: 1}
+	if got := clickRun(last, 10, 5, now); got != 2 {
+		t.Fatalf("same cell: run %d, want 2", got)
+	}
+	if got := clickRun(last, 11, 5, now); got != 2 {
+		t.Fatalf("one column off: run %d, want 2", got)
+	}
+	if got := clickRun(last, 9, 5, now); got != 2 {
+		t.Fatalf("one column back: run %d, want 2", got)
+	}
+	if got := clickRun(last, 12, 5, now); got != 1 {
+		t.Fatalf("two columns off: run %d, want 1", got)
+	}
+	if got := clickRun(last, 10, 6, now); got != 1 {
+		t.Fatalf("next row: run %d, want 1", got)
+	}
+	if got := clickRun(last, 10, 5, now.Add(doubleClickWindow)); got != 1 {
+		t.Fatalf("past the window: run %d, want 1", got)
+	}
+	if got := clickRun(clickRecord{}, 10, 5, now); got != 1 {
+		t.Fatalf("no previous click: run %d, want 1", got)
+	}
+	last.count = 3
+	if got := clickRun(last, 10, 5, now); got != 1 {
+		t.Fatalf("after a triple: run %d, want 1", got)
+	}
+}
+
+// TestEditorPress_DoubleClickToleratesOneColumnOfDrift: a finger or a
+// trackpad tap wobbles by a cell between clicks, and requiring the
+// exact cell made double-click a real-mouse-only gesture.
+func TestEditorPress_DoubleClickToleratesOneColumnOfDrift(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "p.txt")
+	if err := os.WriteFile(target, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	ex, ey, _, _ := a.editorRect()
+	gw := ex + 6 // the line-number gutter; text starts after it
+	a.editorPress(gw+1, ey)
+	a.editorPress(gw+2, ey)
+	tab := a.activeTabPtr()
+	if tab.SelectionText() != "hello" {
+		t.Fatalf("double-click one column over selected %q, want hello", tab.SelectionText())
+	}
+}
+
+// TestEditorPress_TripleClickSelectsTheLine: the third click of a run
+// selects the whole line including its line break (anchor at column 0,
+// caret at the start of the next line), the last line to its end, and
+// a fourth click is a plain caret placement again.
+func TestEditorPress_TripleClickSelectsTheLine(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "p.txt")
+	if err := os.WriteFile(target, []byte("alpha beta\ngamma\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	ex, ey, _, _ := a.editorRect()
+	x := ex + 6 + 2
+	tab := a.activeTabPtr()
+
+	for range 3 {
+		a.editorPress(x, ey)
+	}
+	if tab.Anchor != (editor.Position{Line: 0, Col: 0}) || tab.Cursor != (editor.Position{Line: 1, Col: 0}) {
+		t.Fatalf("triple-click selected %v..%v, want the whole first line and its break", tab.Anchor, tab.Cursor)
+	}
+	if tab.SelectionText() != "alpha beta\n" {
+		t.Fatalf("selection text %q", tab.SelectionText())
+	}
+	a.editorPress(x, ey) // fourth: back to a single click
+	if tab.HasSelection() {
+		t.Fatal("a fourth click must place the caret, not keep the line selected")
+	}
+
+	// The last line has no break to take: the selection ends at its end.
+	a.lastClick = clickRecord{}
+	for range 3 {
+		a.editorPress(x, ey+2)
+	}
+	if want := (editor.Position{Line: 2, Col: 0}); tab.Anchor != want || tab.Cursor != want {
+		// Line 2 is the empty line after the trailing newline; three
+		// clicks on it select nothing but must not panic or overshoot.
+		t.Fatalf("triple-click on the empty last line: %v..%v", tab.Anchor, tab.Cursor)
+	}
+	a.lastClick = clickRecord{}
+	for range 3 {
+		a.editorPress(x, ey+1)
+	}
+	if tab.SelectionText() != "gamma\n" {
+		t.Fatalf("second line selection %q, want gamma + break", tab.SelectionText())
+	}
+}
+
+// TestNoteMouseProbe_FlashesOnceOnlyWhenNoEventsArrived pins the hint's
+// gate: it flashes when no mouse event has arrived, never when one has,
+// and never twice — the probe is a one-time nudge, not a nag.
+func TestNoteMouseProbe_FlashesOnceOnlyWhenNoEventsArrived(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.handleMouse(tcell.NewEventMouse(5, 5, tcell.ButtonNone, 0))
+	a.noteMouseProbe()
+	if a.statusMsg == mouseHintMsg {
+		t.Fatal("a session that has seen a mouse event must not be told to enable the mouse")
+	}
+	if a.mouse.hintShown {
+		t.Fatal("no hint was shown, so the once-flag must stay clear")
+	}
+
+	b := newTestApp(t, t.TempDir())
+	b.noteMouseProbe()
+	if b.statusMsg != mouseHintMsg {
+		t.Fatalf("no events by the probe: status %q, want the tmux hint", b.statusMsg)
+	}
+	b.statusMsg = ""
+	b.noteMouseProbe()
+	if b.statusMsg == mouseHintMsg {
+		t.Fatal("the hint must never flash twice")
+	}
+	// Events that arrive later count too: the hint is about "none
+	// yet", so a late first click keeps a second probe quiet even if
+	// the once-flag were reset.
+	b.mouse.hintShown = false
+	b.handleMouse(tcell.NewEventMouse(5, 5, tcell.WheelDown, 0))
+	b.noteMouseProbe()
+	if b.statusMsg == mouseHintMsg {
+		t.Fatal("a mouse event seen before the probe silences it")
+	}
+}
+
+// TestStartMouseProbe_LandsOnTheLoopOnlyUnderTmux drives the timer with
+// a zero delay: outside tmux nothing is scheduled, and inside it the
+// hint arrives as an asyncjob.Notify event the loop lands — the flash
+// happens on the loop, never in the timer's goroutine.
+func TestStartMouseProbe_LandsOnTheLoopOnlyUnderTmux(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.startMouseProbe(false, 0)
+	deadline := time.Now().Add(50 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if a.screen.HasPendingEvent() {
+			t.Fatal("outside tmux the probe must schedule nothing")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	a.startMouseProbe(true, 0)
+	pumpUntil(t, a, "mouse probe", func() bool { return a.mouse.hintShown })
+	if a.statusMsg != mouseHintMsg {
+		t.Fatalf("status %q, want the tmux hint", a.statusMsg)
+	}
+}
+
+// TestHandleMouse_GitPanelClickableWhenItFillsTheWindow pins the
+// narrow-window press path. At 48 columns an open Git panel takes the
+// whole window and splitterX is -1; the press dispatch used to measure
+// the sidebar band against the splitter, so `x < -1` was never true and
+// every press on the panel — a change row, a button — fell through
+// while the wheel and right-click (measured against sidebarW) kept
+// working. A row press must open the diff and a button press must
+// fire, exactly as they do beside an editor.
+func TestHandleMouse_GitPanelClickableWhenItFillsTheWindow(t *testing.T) {
+	a, _, _ := dirtyRepoApp(t)
+	resizeTestApp(t, a, 48, 16)
+	a.toggleGitPanel()
+	if !a.gitPanelFillsWidth() {
+		t.Fatal("fixture: the panel should fill a 48-column window")
+	}
+	a.draw()
+
+	// A row: the first change opens its diff.
+	a.handleMouse(tcell.NewEventMouse(5, gitPanelListTop, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(5, gitPanelListTop, tcell.ButtonNone, 0))
+	if !diffIsOpen(a) {
+		t.Fatal("a press on a change row must open the diff when the panel fills the window")
+	}
+	a.closeAllModals()
+
+	// A button: the ⋯ extras open their pick on the press itself.
+	_, _, sw, _ := a.sidebarRect()
+	btns := a.gitPanelButtons(sw)
+	extras := btns[len(btns)-1]
+	if extras.verb != "More actions" {
+		t.Fatalf("fixture: last button is %q, want the extras", extras.verb)
+	}
+	a.handleMouse(tcell.NewEventMouse(extras.x0+1, 2, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(extras.x0+1, 2, tcell.ButtonNone, 0))
+	if _, ok := a.overlays.Top().(*overlay.Pick); !ok {
+		t.Fatalf("a press on the extras button must open its pick, top = %T", a.overlays.Top())
+	}
+	a.closeAllModals()
+
+	// Keyboard mode survives a press inside the panel: the capture is
+	// dropped only for presses OUTSIDE the sidebar band.
+	a.enterGitPanelKeys()
+	a.handleMouse(tcell.NewEventMouse(5, gitPanelListTop, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(5, gitPanelListTop, tcell.ButtonNone, 0))
+	if !a.gitPanelKeysOn() {
+		t.Fatal("a press inside the filling panel must not drop its keyboard capture")
+	}
+}
+
+// TestSplitterHit_NeighboursYieldOnTheTabAndStatusRows pins the widened
+// grab to the body rows. The ≡ button's first cell is x = sidebarW,
+// which is exactly the splitter's right neighbour, and a press there
+// used to arm a sidebar drag instead of opening the menu; the status
+// row's cells and the sidebar header's last cell are targets of their
+// own for the same reason.
+func TestSplitterHit_NeighboursYieldOnTheTabAndStatusRows(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.draw()
+	splitX := a.splitterX()
+	mx, _, _, _ := a.menuButtonRect()
+	if mx != splitX+1 {
+		t.Fatalf("fixture: ≡ starts at %d, want the splitter's right neighbour %d", mx, splitX+1)
+	}
+
+	a.handleMouse(tcell.NewEventMouse(splitX+1, 0, tcell.Button1, 0))
+	if a.dragMode == dragSidebar {
+		t.Fatal("a press on the ≡ button's first cell armed a sidebar drag")
+	}
+	if !a.menuOpen {
+		t.Fatal("a press on the ≡ button's first cell must open the menu")
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX+1, 0, tcell.ButtonNone, 0))
+	a.closeAllModals()
+
+	for _, x := range []int{splitX - 1, splitX + 1} {
+		a.handleMouse(tcell.NewEventMouse(x, a.height-1, tcell.Button1, 0))
+		if a.dragMode == dragSidebar {
+			t.Fatalf("x=%d on the status row armed a sidebar drag", x)
+		}
+		a.handleMouse(tcell.NewEventMouse(x, a.height-1, tcell.ButtonNone, 0))
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX-1, 0, tcell.Button1, 0))
+	if a.dragMode == dragSidebar {
+		t.Fatal("the sidebar header's last cell armed a sidebar drag")
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX-1, 0, tcell.ButtonNone, 0))
+
+	// The painted column itself still grabs on every row.
+	a.handleMouse(tcell.NewEventMouse(splitX, 0, tcell.Button1, 0))
+	if a.dragMode != dragSidebar {
+		t.Fatal("the splitter column on the tab row must still grab")
+	}
+	a.handleMouse(tcell.NewEventMouse(splitX, 0, tcell.ButtonNone, 0))
+}
+
+// TestHandleMouse_TooSmallEndsALiveDrag pins the gate's second duty:
+// a drag that was live when the window shrank under the floor must be
+// ended there, because the release that would end it is dropped with
+// every other event. Left latched, the auto-scroll ticker kept moving
+// the buffer behind the resize notice until the next press.
+func TestHandleMouse_TooSmallEndsALiveDrag(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "d.txt")
+	if err := os.WriteFile(target, []byte(strings.Repeat("line\n", 200)), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	ex, ey, _, eh := a.editorRect()
+	a.handleMouse(tcell.NewEventMouse(ex+2, ey+1, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(ex+2, ey+eh+1, tcell.Button1, 0)) // below: auto-scroll
+	if a.dragMode != dragEditor || a.autoScrollStop == nil {
+		t.Fatalf("fixture: want a live editor drag with auto-scroll, mode %d stop %v", a.dragMode, a.autoScrollStop)
+	}
+
+	resizeTestApp(t, a, minWidth-1, minHeight)
+	a.handleMouse(tcell.NewEventMouse(ex+2, ey+eh+1, tcell.ButtonNone, 0))
+	if a.dragMode != dragNone {
+		t.Fatalf("the too-small gate left dragMode = %d latched", a.dragMode)
+	}
+	if a.autoScrollStop != nil {
+		t.Fatal("the too-small gate left the auto-scroll ticker running")
+	}
+}
+
+// TestHandleMouse_MiddlePressMidDragIsIgnored pins the slip guard: a
+// middle press on the strip while a left drag is live used to close
+// that tab, and the drag — still armed — then extended a selection in
+// whichever tab became active. The press is inert while the drag
+// lasts; a plain middle press afterwards still closes.
+func TestHandleMouse_MiddlePressMidDragIsIgnored(t *testing.T) {
+	a, _, pb := twoTabApp(t)
+	ra := a.lastTabRects[0]
+	ex, ey, _, _ := a.editorRect()
+	a.handleMouse(tcell.NewEventMouse(ex+1, ey, tcell.Button1, 0))
+	if a.dragMode != dragEditor {
+		t.Fatalf("fixture: want an editor drag, got mode %d", a.dragMode)
+	}
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 0, tcell.Button1|tcell.Button2, 0))
+	if a.tabs.Len() != 2 {
+		t.Fatal("a middle press mid-drag closed a tab")
+	}
+	if got := a.activeTabPtr().Path; got != pb {
+		t.Fatalf("a middle press mid-drag switched the active tab to %q", got)
+	}
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 0, tcell.ButtonNone, 0))
+	if a.dragMode != dragNone {
+		t.Fatal("the release must still end the drag")
+	}
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 0, tcell.Button2, 0))
+	a.handleMouse(tcell.NewEventMouse(ra.X+1, 0, tcell.ButtonNone, 0))
+	if a.tabs.Len() != 1 {
+		t.Fatal("a plain middle press after the drag must still close the tab")
+	}
+}
+
+// TestTabBarClick_WholeBadgeSlotIsTheChevron pins the badge's click
+// target to the slot the strip reserves, not just the painted label. A
+// "‹2" badge paints two of its three cells; the third used to be a dead
+// cell that activated the tab clipped beneath it, one column from the
+// chevron the user was aiming at. The left slot's unpainted cell is
+// its last, the right slot's is its first.
+func TestTabBarClick_WholeBadgeSlotIsTheChevron(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	openManyTabs(t, a, dir, 6)
+	if bw := a.tabBadgeWidth(); bw != tabBadgeCells {
+		t.Fatalf("precondition: want a %d-cell slot, got %d", tabBadgeCells, bw)
+	}
+	stripX, stripW := a.tabStripRegion()
+
+	// Scrolled to the end: the left badge paints "‹N" from the slot's
+	// first cell, so the slot's last cell is the unpainted one.
+	a.tabScroll = a.maxTabScroll()
+	left, _ := a.tabChevrons()
+	if runeLen(left.Label) >= tabBadgeCells {
+		t.Fatalf("precondition: want a label narrower than the slot, got %q", left.Label)
+	}
+	slotEnd := stripX + tabBadgeCells - 1
+	before, wasActive := a.tabScroll, a.tabs.ActiveIndex()
+	a.drawTabBar()
+	a.tabBarClick(slotEnd, 0)
+	if a.tabScroll >= before {
+		t.Fatalf("the left slot's unpainted cell should scroll (%d -> %d)", before, a.tabScroll)
+	}
+	if a.tabs.ActiveIndex() != wasActive {
+		t.Fatalf("the left slot's unpainted cell activated tab %d", a.tabs.ActiveIndex())
+	}
+
+	// Scrolled to the start: the right badge paints "N›" ending on the
+	// slot's last cell, so the slot's first cell is the unpainted one.
+	a.tabScroll = 0
+	_, right := a.tabChevrons()
+	if runeLen(right.Label) >= tabBadgeCells {
+		t.Fatalf("precondition: want a label narrower than the slot, got %q", right.Label)
+	}
+	slotStart := stripX + stripW - tabBadgeCells
+	if slotStart >= right.X {
+		t.Fatalf("precondition: slot start %d should sit left of the label at %d", slotStart, right.X)
+	}
+	a.drawTabBar()
+	a.tabBarClick(slotStart, 0)
+	if a.tabScroll <= 0 {
+		t.Fatal("the right slot's unpainted cell should scroll")
+	}
+	if a.tabs.ActiveIndex() != wasActive {
+		t.Fatalf("the right slot's unpainted cell activated tab %d", a.tabs.ActiveIndex())
+	}
+}
+
+// TestGutterMarkerAt_IsWrapAware pins the gutter's row-to-line map in
+// wrap mode. With line 0 wrapped over k rows and line 1 modified, the
+// marker is painted on row k — the first row of line 1 — and nowhere
+// else; ScrollY+row named line k instead, so the splitter's neighbour
+// took the marker's press and a press on a continuation row of line 0
+// opened line 1's hunk. Both the splitter guard and the hunk opener
+// go through the same wrap-aware map.
+func TestGutterMarkerAt_IsWrapAware(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "w.txt")
+	long := strings.Repeat("wrap ", 40)
+	if err := os.WriteFile(target, []byte(long+"\nchanged\nplain\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 70, 24)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	tab.Wrap = true
+	tab.GitLines = map[int]editor.GitLineChange{1: editor.GitLineModified}
+	a.draw()
+
+	// Find line 1's first row through the editor's own contract.
+	_, ey, ew, eh := a.editorRect()
+	k := -1
+	for row := 0; row < eh; row++ {
+		if pos, ok := tab.HitTest(0, row, ew, eh); ok && pos.Line == 1 {
+			k = row
+			break
+		}
+	}
+	if k < 2 {
+		t.Fatalf("precondition: line 0 should wrap over at least two rows, line 1 starts on row %d", k)
+	}
+
+	if !a.gutterMarkerAt(ey + k) {
+		t.Fatalf("row %d is line 1's first row and carries the marker", k)
+	}
+	if a.gutterMarkerAt(ey + 1) {
+		t.Fatal("row 1 is a continuation of line 0: its gutter is blank")
+	}
+	if a.gutterMarkerAt(ey + k + 1) {
+		t.Fatal("row k+1 is the clean line 2")
+	}
+
+	fake := &git.Fake{}
+	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target,
+		"@@ -2 +2 @@\n-change\n+changed\n", nil)
+	a.gitRunner = fake
+	if a.openGitHunkAt(tab, 0, 1) {
+		t.Fatal("a press on a continuation row must not open a hunk")
+	}
+	if !a.openGitHunkAt(tab, 0, k) {
+		t.Fatal("a press on the marker's row must open its hunk")
+	}
+	pumpUntil(t, a, "diff load", idle(&a.diffLoad))
+	if !diffIsOpen(a) {
+		t.Fatal("the marker press should have opened the hunk diff")
 	}
 }

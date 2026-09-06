@@ -138,9 +138,10 @@ func TestTreeScrollbar_ReservesTheLabelColumn(t *testing.T) {
 	}
 }
 
-// TestTreeScrollbar_HitTestSeparatesColumns: only the rect's last column
-// and only the scrollable rows belong to the bar. The pinned header and
-// root rows, and every label column, stay tree.
+// TestTreeScrollbar_HitTestSeparatesColumns: only the rect's last
+// ScrollbarGrabWidth columns and only the scrollable rows belong to the
+// bar. The pinned header and root rows, and every label column further
+// left, stay tree.
 func TestTreeScrollbar_HitTestSeparatesColumns(t *testing.T) {
 	tr := mkFlatTree(t, 60)
 	const w, h = 24, 12
@@ -152,8 +153,11 @@ func TestTreeScrollbar_HitTestSeparatesColumns(t *testing.T) {
 	if !tr.ScrollbarHit(w-1, h-1, w, h) {
 		t.Fatal("last list row of the last column is the bar")
 	}
-	if tr.ScrollbarHit(w-2, listHeaderRows, w, h) {
-		t.Fatal("the column left of the bar belongs to the tree row")
+	if !tr.ScrollbarHit(w-2, listHeaderRows, w, h) {
+		t.Fatal("the column left of the bar is part of the grab (ScrollbarGrabWidth)")
+	}
+	if tr.ScrollbarHit(w-ScrollbarGrabWidth-1, listHeaderRows, w, h) {
+		t.Fatal("past the grab width the columns belong to the tree row")
 	}
 	for row := 0; row < listHeaderRows; row++ {
 		if tr.ScrollbarHit(w-1, row, w, h) {

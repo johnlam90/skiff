@@ -42,6 +42,28 @@ type Attrs struct {
 	Modified    tcell.AttrMask // Dirty-buffer markers in the tab strip and tree.
 	Error       tcell.AttrMask // Flash messages that report a failure.
 	Comment     tcell.AttrMask // Comments, the one syntax class worth keeping apart.
+	CursorLine  tcell.AttrMask // The caret's line, when the LineHL tint is gone.
+	SelectedRow tcell.AttrMask // The highlighted row of a list (the tree's active file).
+}
+
+// WithAttrs ORs mask into st's attributes — the one way a renderer
+// applies an Attrs field, because tcell's Style.Attributes REPLACES
+// the mask and, on its own, never turns the underline on: the terminal
+// driver emits underline from the style's underline STYLE, which only
+// Style.Underline sets. So a mask carrying AttrUnderline is applied
+// through Underline(true) as well; every other bit is a plain OR. A
+// zero mask (every truecolor palette) returns st unchanged, so a draw
+// site pays nothing on the common path.
+func WithAttrs(st tcell.Style, mask tcell.AttrMask) tcell.Style {
+	if mask == tcell.AttrNone {
+		return st
+	}
+	_, _, have := st.Decompose()
+	st = st.Attributes(have | mask)
+	if mask&tcell.AttrUnderline != 0 {
+		st = st.Underline(true)
+	}
+	return st
 }
 
 // MinTrueColorPalette is the color count at or above which a palette
@@ -151,9 +173,11 @@ func Degrade(t Theme, colors int) Theme {
 // degradedAttrs is the attribute vocabulary a low-color palette
 // speaks. Chosen so no two adjacent surfaces wear the same mask:
 // reverse marks "this region is special" (selection, status bar,
-// current match), bold marks "this item is active or changed", and
-// underline is reserved for the single current find match so it stands
-// out from the other reversed matches around it.
+// current match, a list's highlighted row), bold marks "this item is
+// active or changed", underline marks "this is where you are" — the
+// caret's line, vim's own monochrome cursorline, and the active tab —
+// and the single current find match wears all three so it stands out
+// from the reversed matches around it.
 func degradedAttrs() Attrs {
 	return Attrs{
 		ActiveTab:   tcell.AttrBold | tcell.AttrUnderline,
@@ -164,5 +188,7 @@ func degradedAttrs() Attrs {
 		Modified:    tcell.AttrBold,
 		Error:       tcell.AttrBold,
 		Comment:     tcell.AttrDim,
+		CursorLine:  tcell.AttrUnderline,
+		SelectedRow: tcell.AttrReverse | tcell.AttrBold,
 	}
 }

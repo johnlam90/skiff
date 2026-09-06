@@ -17,7 +17,10 @@
 
 package editor
 
-import "unicode"
+import (
+	"strings"
+	"unicode"
+)
 
 // Match describes one find hit. Line and Col follow the same rune-indexed
 // convention as Position; Width is the rune count of the query so the
@@ -29,19 +32,34 @@ type Match struct {
 	Width int
 }
 
+// FindOptions are the toggles a find surface can arm on top of the
+// query. MatchCase makes every query exact, where the default is
+// smart-case (exact only once the query holds an uppercase letter).
+// Whole-word and regex stay out of scope for the in-file bar — the
+// project panel has them because internal/search does.
+type FindOptions struct {
+	MatchCase bool
+}
+
 // FindAll returns every substring match of query inside buf, in document
-// order. Matching is smart-case: an all-lowercase query matches any
-// case, any uppercase letter in the query makes the match exact — so
-// "id" finds ID and id, while "ID" finds only ID. An empty query returns
-// nil — the caller is expected to clear its UI rather than show "0 of 0"
-// results. Matches do not overlap: after a hit the scanner advances past
-// the matched run, so "aaaa" with query "aa" yields two matches at
-// columns 0 and 2.
+// order, with the default options. Matching is smart-case: an
+// all-lowercase query matches any case, any uppercase letter in the
+// query makes the match exact — so "id" finds ID and id, while "ID"
+// finds only ID. An empty query returns nil — the caller is expected to
+// clear its UI rather than show "0 of 0" results. Matches do not
+// overlap: after a hit the scanner advances past the matched run, so
+// "aaaa" with query "aa" yields two matches at columns 0 and 2.
 func FindAll(buf *Buffer, query string) []Match {
+	return FindAllWith(buf, query, FindOptions{})
+}
+
+// FindAllWith is FindAll with the toggles applied: MatchCase forces an
+// exact match whatever the query's own case says.
+func FindAllWith(buf *Buffer, query string, opts FindOptions) []Match {
 	if query == "" || buf == nil {
 		return nil
 	}
-	caseSensitive := hasUpper(query)
+	caseSensitive := opts.MatchCase || hasUpper(query)
 	needle := []rune(query)
 	if len(needle) == 0 {
 		return nil
@@ -142,24 +160,37 @@ func MatchEndPosition(m Match) Position {
 
 // SetFindQuery installs a new search query on the tab, recomputes the
 // match list against the current buffer, and points FindIndex at the
-// first match at or after the cursor (so the user lands on the nearest
-// hit, not always the first hit in the file). An empty query clears all
-// find state — symmetrical with closing the bar via Esc.
+// first match at or after the selection start (so the user lands on
+// the nearest hit, not always the first hit in the file). An empty
+// query clears all find state, the same as ClearFind.
+//
+// The reference point is the START of the selection rather than the
+// caret because FocusCurrentMatch selects the current hit, leaving the
+// caret at its end: measured from the caret, extending "fo" to "foo"
+// would skip the hit being typed over and jump to the next one.
 //
 // The cursor is left where it is; SetFindQuery only updates state. It is
 // the caller's job to call FocusCurrentMatch when they want the cursor
 // to actually move (which is what happens on the first non-empty query
-// and on every Enter / Shift-Enter press).
+// and on every Enter / Shift-Enter press). Setting a query also ends a
+// ClearFindHighlights suspension: the search is live again.
 func (t *Tab) SetFindQuery(query string) {
 	t.FindQuery = query
 	t.findRows = nil // the per-line index belongs to the old match list
+	t.findSuspended = false
 	if query == "" {
 		t.FindMatches = nil
 		t.FindIndex = -1
 		return
 	}
-	t.FindMatches = FindAll(t.Buffer, query)
-	t.FindIndex = FirstMatchAtOrAfter(t.FindMatches, t.Cursor)
+	t.FindMatches = FindAllWith(t.Buffer, query, t.findOptions())
+	from, _ := PosOrdered(t.Anchor, t.Cursor)
+	t.FindIndex = FirstMatchAtOrAfter(t.FindMatches, from)
+}
+
+// findOptions collects the tab's armed find toggles for a re-scan.
+func (t *Tab) findOptions() FindOptions {
+	return FindOptions{MatchCase: t.FindMatchCase}
 }
 
 // refreshFindMatches re-runs the active query after the buffer changed,
@@ -175,14 +206,16 @@ func (t *Tab) SetFindQuery(query string) {
 // current match falls through to the hit nearest the caret — the answer
 // SetFindQuery already computed, which is -1 when nothing survived.
 //
-// An idle query costs nothing: closing the find bar calls ClearFind, so
-// a tab with no search running never re-scans on a keystroke. A live one
-// costs a full FindAll per edit, which is the same per-keystroke scan the
-// find bar's own input already pays (App.findApplyQuery re-queries on
-// every character typed into it) — a buffer keystroke is not the place to
-// start being cheaper than the query field.
+// An idle query costs nothing: closing the find bar calls
+// ClearFindHighlights, which keeps the query for Esc f / Esc ; to
+// recall but suspends it, so a tab with no search running never
+// re-scans on a keystroke. A live one costs a full FindAll per edit,
+// which is the same per-keystroke scan the find bar's own input
+// already pays (findStrip.applyQuery re-queries on every character
+// typed into it) — a buffer keystroke is not the place to start being
+// cheaper than the query field.
 func (t *Tab) refreshFindMatches() {
-	if t.FindQuery == "" {
+	if t.FindQuery == "" || t.findSuspended {
 		return
 	}
 	keep := t.FindIndex
@@ -195,23 +228,32 @@ func (t *Tab) refreshFindMatches() {
 	}
 }
 
-// FocusCurrentMatch moves the cursor (and anchor — we don't want a
-// dangling selection from an earlier action) to the start of the
-// currently-pointed match. No-op when FindIndex is out of range, so
-// callers don't have to re-check it themselves.
+// FocusCurrentMatch selects the currently-pointed match: anchor at its
+// start, caret at its end, so the hit is the selection — typing
+// replaces it, Esc c copies it, and the caret is where the next edit
+// naturally goes. No-op when FindIndex is out of range, so callers
+// don't have to re-check it themselves.
 func (t *Tab) FocusCurrentMatch() {
 	if t.FindIndex < 0 || t.FindIndex >= len(t.FindMatches) {
 		return
 	}
-	m := t.FindMatches[t.FindIndex]
-	t.Cursor = MatchPosition(m)
-	t.Anchor = t.Cursor
+	t.selectMatch(t.FindMatches[t.FindIndex])
+}
+
+// selectMatch is the one way a find hit becomes the selection: anchor
+// at its start, caret at its end. FocusCurrentMatch and the suspended
+// half of FindAgain both land here so a hit reached with the bar up
+// and one reached bar-less are selected identically.
+func (t *Tab) selectMatch(m Match) {
+	t.Anchor = MatchPosition(m)
+	t.Cursor = MatchEndPosition(m)
 	t.cursorMoved = true
 }
 
 // FindNext advances FindIndex by one (wrapping at the end) and moves
 // the cursor onto the new match. No-op when there are no matches. Used
-// by Enter inside the find bar and by the Esc-g "again" leader.
+// by Enter inside the find bar; FindAgain is the bar-less spelling
+// behind the Esc ; leader.
 func (t *Tab) FindNext() {
 	if len(t.FindMatches) == 0 {
 		return
@@ -296,41 +338,151 @@ func (t *Tab) matchAtRune(line, col int) int {
 	return -1
 }
 
-// ClearFind drops every piece of find state. The app calls this when the
-// buffer has been edited enough that the cached match list is stale and
-// can't safely be re-used; the user will re-type their query.
-func (t *Tab) ClearFind() {
-	t.FindQuery = ""
+// FindAgain jumps to the next hit of the remembered query without the
+// bar: with the search live it is FindNext; after ClearFindHighlights
+// it runs the query once, transiently, and selects the first hit at or
+// after the caret — which, with the last hit still selected, is the one
+// after it. The search stays suspended: nothing is painted, FindMatches
+// stays empty and the next keystroke does not re-scan. Going through
+// SetFindQuery here used to lift the suspension, which left the match
+// tint up with no bar to take it down again and put a full FindAll
+// back on every keystroke — Esc ; is "jump", not "reopen the search".
+// Reports false when there is no query or it matches nothing, so the
+// caller can say so.
+func (t *Tab) FindAgain() bool {
+	if t.IsImage() || t.FindQuery == "" {
+		return false
+	}
+	if !t.findSuspended {
+		if len(t.FindMatches) == 0 {
+			return false
+		}
+		t.FindNext()
+		return true
+	}
+	matches := FindAllWith(t.Buffer, t.FindQuery, t.findOptions())
+	i := FirstMatchAtOrAfter(matches, t.Cursor)
+	if i < 0 {
+		return false
+	}
+	t.selectMatch(matches[i])
+	return true
+}
+
+// HasFindQuery reports whether the tab remembers a query — live or
+// suspended — that FindAgain could repeat.
+func (t *Tab) HasFindQuery() bool {
+	return t.FindQuery != ""
+}
+
+// ClearFindHighlights takes the highlights down but keeps the query
+// (and the Aa toggle): closing the bar means "stop showing me hits",
+// not "forget what I searched for" — Esc f reopens seeded with it and
+// Esc ; repeats it. The query is suspended so an edit does not re-scan
+// a buffer nobody is looking at hits in; SetFindQuery lifts that.
+func (t *Tab) ClearFindHighlights() {
 	t.FindMatches = nil
 	t.FindIndex = -1
 	t.findRows = nil
+	t.findSuspended = t.FindQuery != ""
+}
+
+// ClearFind drops every piece of find state, the query included. The
+// full reset, for when the search is over rather than merely hidden.
+func (t *Tab) ClearFind() {
+	t.ClearFindHighlights()
+	t.FindQuery = ""
+	t.findSuspended = false
 }
 
 // ReplaceCurrentMatch swaps the current find match for repl and
 // re-runs the query so the highlights (and the match count) stay
 // truthful. The cursor lands just after the replacement and the
-// current index stays put, so "replace, replace, replace" walks the
-// file forward naturally. Returns false when there is nothing to
-// replace.
+// current index moves to the first match at or after it, so "replace,
+// replace, replace" walks the file forward — including when the
+// replacement contains the query ("foo" → "foo_bar"), where keeping
+// the index would point it at the text just written and the next
+// Enter would immediately rewrite that into "foo_bar_bar". The walk
+// is forward-only, not a guarantee of termination: once the caret
+// passes the last original hit the index wraps to the top of the file,
+// and a replacement that still contains the query is a hit there like
+// any other, so holding Enter past the end starts a second pass over
+// the text this pass wrote. The user sees the caret jump back to the
+// top and the count stay put, which is the cue to stop.
+//
+// The replacement follows the case of the text it replaces when the
+// query is smart-case (no uppercase): a match spelled FOO takes REPL,
+// one spelled Foo takes Repl, anything else takes repl as typed. A
+// query with an uppercase letter is an exact search and its
+// replacement is exact too. See preserveCase.
+//
+// Returns false when there is nothing to replace.
 func (t *Tab) ReplaceCurrentMatch(repl string) bool {
 	if t.IsImage() || t.FindIndex < 0 || t.FindIndex >= len(t.FindMatches) {
 		return false
 	}
 	m := t.FindMatches[t.FindIndex]
+	start := Position{Line: m.Line, Col: m.Col}
+	end := Position{Line: m.Line, Col: m.Col + m.Width}
+	repl = preserveCase(t.FindQuery, t.Buffer.Substring(start, end), repl, t.findOptions())
 	t.edit(undoGroupStructural, func() {
-		start := Position{Line: m.Line, Col: m.Col}
-		end := Position{Line: m.Line, Col: m.Col + m.Width}
 		t.Buffer.DeleteRange(start, end)
 		after := t.Buffer.InsertString(start, repl)
 		t.Cursor = after
 		t.Anchor = after
 	})
+	// The edit trailer re-ran the query and kept the old index, which
+	// is only right when the replacement holds no match of its own.
+	t.FindIndex = FirstMatchAtOrAfter(t.FindMatches, t.Cursor)
 	return true
+}
+
+// preserveCase adapts repl to the letter case of matched, the text a
+// smart-case query hit: all capitals give an all-capital replacement,
+// a capitalised match gives a capitalised one, and anything else — or
+// a case-sensitive query, which already spells the case it wants (an
+// uppercase letter in it, or the MatchCase toggle) — leaves repl as
+// typed. A single-letter match counts as capitalised rather than
+// all-capital, so "A" → "foo" gives "Foo", not "FOO".
+func preserveCase(query, matched, repl string, opts FindOptions) string {
+	if opts.MatchCase || hasUpper(query) || repl == "" {
+		return repl
+	}
+	letters, uppers := 0, 0
+	firstUpper := false
+	for i, r := range matched {
+		if !unicode.IsLetter(r) {
+			continue
+		}
+		if unicode.IsUpper(r) {
+			uppers++
+			if i == 0 {
+				firstUpper = true
+			}
+		}
+		letters++
+	}
+	if letters == 0 || uppers == 0 {
+		return repl
+	}
+	if uppers == letters && letters > 1 {
+		return strings.ToUpper(repl)
+	}
+	if firstUpper && uppers == 1 {
+		rs := []rune(repl)
+		rs[0] = unicode.ToUpper(rs[0])
+		return string(rs)
+	}
+	return repl
 }
 
 // ReplaceAllMatches swaps every match for repl as ONE undo step and
 // returns how many were replaced. Matches are applied last-to-first so
-// earlier spans stay valid while later ones are rewritten.
+// earlier spans stay valid while later ones are rewritten. Each hit
+// takes the same case-following replacement ReplaceCurrentMatch would
+// give it (see preserveCase), so replace-all and Enter-until-done
+// leave the same text — "FOO Foo foo" → "BAR Bar bar" either way,
+// where inserting repl verbatim used to flatten it to "bar bar bar".
 func (t *Tab) ReplaceAllMatches(repl string) int {
 	if t.IsImage() || len(t.FindMatches) == 0 {
 		return 0
@@ -338,13 +490,15 @@ func (t *Tab) ReplaceAllMatches(repl string) int {
 	// Hold the list being replaced: the edit trailer re-runs the query,
 	// so t.FindMatches stops describing the spans this call swapped.
 	matches := t.FindMatches
+	opts := t.findOptions()
 	t.edit(undoGroupStructural, func() {
 		for i := len(matches) - 1; i >= 0; i-- {
 			m := matches[i]
 			start := Position{Line: m.Line, Col: m.Col}
 			end := Position{Line: m.Line, Col: m.Col + m.Width}
+			cased := preserveCase(t.FindQuery, t.Buffer.Substring(start, end), repl, opts)
 			t.Buffer.DeleteRange(start, end)
-			t.Buffer.InsertString(start, repl)
+			t.Buffer.InsertString(start, cased)
 		}
 	})
 	return len(matches)

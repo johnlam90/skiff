@@ -8,6 +8,7 @@
 package overlay
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
@@ -122,15 +123,19 @@ func TestForm_MouseButtonsChevronsAndFocus(t *testing.T) {
 	f, log := testForm()
 	r := f.rect()
 
-	// Click the select's right chevron (row 1's input row).
+	// Click the select's right chevron (row 1's input row). Every click
+	// is a press and a release, as a terminal delivers it — a second
+	// Button1 event with no release between is a drag, not a click.
 	inputRow := r.Y + 3 + 1*formRowHeight + 1
 	f.HandleMouse(r.X+r.W-3-1, inputRow, tcell.Button1)
+	f.HandleMouse(r.X+r.W-3-1, inputRow, tcell.ButtonNone)
 	if f.Focus != 1 || f.Rows[1].Sel != 1 {
 		t.Fatalf("chevron click: focus=%d sel=%d", f.Focus, f.Rows[1].Sel)
 	}
 
 	// Click the first row's label to move focus back.
 	f.HandleMouse(r.X+2, r.Y+3, tcell.Button1)
+	f.HandleMouse(r.X+2, r.Y+3, tcell.ButtonNone)
 	if f.Focus != 0 {
 		t.Fatal("row click must move focus")
 	}
@@ -283,4 +288,72 @@ func rowRunes(scr tcell.SimulationScreen, x, y, n int) string {
 		out = append(out, cellAt(scr, x+i, y))
 	}
 	return string(out)
+}
+
+// TestForm_DragOntoSubmitDoesNotSubmit pins the press latch: a press on
+// a row followed by held-button motion over the Submit button is a
+// drag, and a drag never resolves the form.
+func TestForm_DragOntoSubmitDoesNotSubmit(t *testing.T) {
+	f, log := testForm()
+	r := f.rect()
+	f.HandleMouse(r.X+2, r.Y+3, tcell.Button1)
+	f.HandleMouse(r.X+r.W-formBtnW-4+1, r.Y+r.H-3, tcell.Button1)
+	if len(*log) != 0 {
+		t.Fatalf("a drag onto Submit resolved the form: %v", *log)
+	}
+	// The release re-arms the latch: the next press on Submit submits.
+	f.HandleMouse(r.X+r.W-formBtnW-4+1, r.Y+r.H-3, tcell.ButtonNone)
+	f.HandleMouse(r.X+r.W-formBtnW-4+1, r.Y+r.H-3, tcell.Button1)
+	if len(*log) != 2 || !strings.HasPrefix((*log)[1], "submit:") {
+		t.Fatalf("a fresh press after the release must submit, got %v", *log)
+	}
+}
+
+// formStyleAt returns the style painted at (x, y) after a Show — the
+// companion of cellAt for the assertions that care about the surface
+// rather than the glyph.
+func formStyleAt(scr tcell.SimulationScreen, x, y int) tcell.Style {
+	cells, w, _ := scr.GetContents()
+	return cells[y*w+x].Style
+}
+
+// TestForm_FocusedFieldIsReadableOnEveryPalette pins the surface the
+// focused input paints on: the theme's FieldBG under Text, on the
+// palettes where the old Subtle background failed worst — Offshore
+// (3.55:1 through readable()) and Solarized Light (1.11:1). The
+// unfocused row stays on the editor BG so the focus cue survives, and
+// the ratio the user types under must clear the palette's floor: 4.5,
+// or the body's own Text/BG where the palette ships under it.
+func TestForm_FocusedFieldIsReadableOnEveryPalette(t *testing.T) {
+	for _, id := range []string{"offshore", "solarized-light", "nord", "one-dark"} {
+		th, ok := theme.ByID(id)
+		if !ok {
+			t.Fatalf("%s: not in the registry", id)
+		}
+		scr := simScreen(t)
+		f, _ := testForm()
+		f.Theme = th
+		f.Draw(scr)
+		scr.Show()
+		r := f.rect()
+		focused := formStyleAt(scr, r.X+3, r.Y+4)
+		fg, bg, _ := focused.Decompose()
+		if bg != th.FieldBG() || fg != th.Text {
+			t.Fatalf("%s: focused field = %v on %v, want Text on FieldBG %v", id, fg, bg, th.FieldBG())
+		}
+		if bg == th.Subtle {
+			t.Fatalf("%s: focused field still on Subtle", id)
+		}
+		floor := 4.5
+		if body := theme.ContrastRatio(th.Text, th.BG); body < floor {
+			floor = body
+		}
+		if ratio := theme.ContrastRatio(fg, bg); ratio < floor {
+			t.Fatalf("%s: focused field reads at %.2f:1, need >= %.2f", id, ratio, floor)
+		}
+		_, idle, _ := formStyleAt(scr, r.X+3, r.Y+6).Decompose()
+		if idle != th.BG {
+			t.Fatalf("%s: unfocused field bg = %v, want BG so focus stays visible", id, idle)
+		}
+	}
 }

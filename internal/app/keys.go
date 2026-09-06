@@ -51,6 +51,16 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		a.strip.handleKey(ev)
 		return
 	}
+	// Pasted text bound for the editor is buffered, not typed: one
+	// InsertString on the end marker is one undo entry and one find
+	// re-scan, where per-key insertion snapshotted the whole buffer on
+	// every pasted line. Overlays and strips above still take pasted
+	// keys one at a time — a prompt's field has no batch seam and
+	// needs none.
+	if a.pasting {
+		a.bufferPasteKey(ev)
+		return
+	}
 
 	// tmux (and other multiplexers) with a non-zero escape-time coalesce
 	// a fast Esc-then-key into one Alt-modified event: Esc,s arrives as
@@ -62,7 +72,7 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 	// handled with the other arrows further down so the Git panel and
 	// the image-tab guard get their say first. They fall through here
 	// having only disarmed the leader, which is correct either way.
-	if !a.pasting && ev.Modifiers()&tcell.ModAlt != 0 {
+	if ev.Modifiers()&tcell.ModAlt != 0 {
 		a.lastEscape = time.Time{}
 		switch ev.Key() {
 		case tcell.KeyEsc:
@@ -150,17 +160,25 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		return
 	}
 	extend := ev.Modifiers()&tcell.ModShift != 0
-	// Alt turns the horizontal arrows into word motion. Alt is safe where
-	// Ctrl is not: no multiplexer prefix and no terminal flow control
-	// claims it, and every terminal already sends Alt+arrow for exactly
-	// this. See leader.go for the Esc-b / Esc-e equivalents.
-	byWord := ev.Modifiers()&tcell.ModAlt != 0
+	// Alt or Ctrl turns the horizontal arrows (and Backspace / Delete)
+	// into word motion. A modified ARROW is a motion, not a command: no
+	// multiplexer prefix and no flow-control key is Ctrl+Left, so the
+	// "no Ctrl shortcuts" rule is about letters, and Ctrl+arrow is what
+	// most terminals send for word motion by default. Alt stays because
+	// macOS Terminal sends it. See leader.go for Esc-b / Esc-e.
+	byWord := ev.Modifiers()&(tcell.ModAlt|tcell.ModCtrl) != 0
+	// Ctrl+Home / Ctrl+End reach the ends of the document; the leader
+	// pair Esc < / Esc > is the tmux-safe spelling of the same jumps.
+	byDoc := ev.Modifiers()&tcell.ModCtrl != 0
 
 	switch ev.Key() {
 	case tcell.KeyUp:
-		tab.MoveCursor(-1, 0, extend)
+		// Vertical motion is by VISUAL row: with soft wrap on, Down
+		// steps to a wrapped paragraph's next row rather than over it,
+		// and a page is a screen of rows. Unwrapped, a row is a line.
+		tab.MoveCursorRows(-1, extend)
 	case tcell.KeyDown:
-		tab.MoveCursor(1, 0, extend)
+		tab.MoveCursorRows(1, extend)
 	case tcell.KeyLeft:
 		if byWord {
 			tab.MoveWordLeft(extend)
@@ -174,36 +192,54 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 			tab.MoveCursor(0, 1, extend)
 		}
 	case tcell.KeyHome:
-		tab.MoveLineHome(extend)
+		if byDoc {
+			tab.MoveDocHome(extend)
+		} else {
+			tab.MoveLineHome(extend)
+		}
 	case tcell.KeyEnd:
-		tab.MoveLineEnd(extend)
+		if byDoc {
+			tab.MoveDocEnd(extend)
+		} else {
+			tab.MoveLineEnd(extend)
+		}
 	case tcell.KeyPgUp:
 		_, h := a.editorSize()
-		tab.MoveCursor(-h, 0, extend)
+		tab.MoveCursorRows(-h, extend)
 	case tcell.KeyPgDn:
 		_, h := a.editorSize()
-		tab.MoveCursor(h, 0, extend)
-	case tcell.KeyEnter:
-		// Inside a bracketed paste the source text's own indentation is
-		// already in the stream; adding the current line's on top would
-		// double every level of pasted code.
-		if a.pasting {
-			tab.InsertString("\n")
-		} else {
-			tab.InsertNewline()
-		}
+		tab.MoveCursorRows(h, extend)
+	case tcell.KeyEnter, tcell.KeyLF:
+		// A bare LF reaches tcell as KeyLF (Ctrl+J); outside a paste
+		// it is Enter by another name. Pasted newlines never get here —
+		// they are buffered above, with the source's own indentation.
+		tab.InsertNewline()
 	case tcell.KeyBackspace, tcell.KeyBackspace2:
-		tab.Backspace()
+		if byWord {
+			tab.DeleteWordLeft()
+		} else {
+			tab.Backspace()
+		}
 	case tcell.KeyDelete:
-		tab.Delete()
+		if byWord {
+			tab.DeleteWordRight()
+		} else {
+			tab.Delete()
+		}
 	case tcell.KeyTab:
-		// A Tab inside a paste is a literal \t from the source text;
-		// expanding it to IndentUnit would rewrite pasted code.
-		if a.pasting {
-			tab.InsertString("\t")
+		// Over a selection that spans lines, Tab indents the block —
+		// inserting would replace forty selected lines with one indent
+		// unit. A pasted Tab never gets here: it is buffered as a
+		// literal \t, since expanding it would rewrite pasted code.
+		if tab.SelectionSpansLines() {
+			tab.IndentLines()
 		} else {
 			tab.InsertString(tab.IndentUnit)
 		}
+	case tcell.KeyBacktab:
+		// Shift+Tab always outdents the line block — with no selection
+		// that is the caret's line — so the pair reads as a toggle.
+		tab.OutdentLines()
 	case tcell.KeyRune:
 		tab.InsertRune(ev.Rune())
 	}
@@ -234,4 +270,48 @@ func (a *App) leaderWindowIntercept(ev *tcell.EventKey) bool {
 		}
 	}
 	return false
+}
+
+// bufferPasteKey appends one pasted key to the paste buffer as the text
+// it stands for: a rune verbatim (an Alt rune is a tmux-mangled ESC
+// byte plus the rune, and the rune is content), Enter and LF as "\n",
+// Tab as a literal tab. The LF of a CRLF pair is folded into the CR so
+// a Windows clipboard does not paste with doubled newlines. Everything
+// else — arrows, function keys — has no text form and is dropped.
+func (a *App) bufferPasteKey(ev *tcell.EventKey) {
+	wasCR := a.pasteLastCR
+	a.pasteLastCR = false
+	switch ev.Key() {
+	case tcell.KeyRune:
+		a.pasteBuf = append(a.pasteBuf, ev.Rune())
+	case tcell.KeyEnter:
+		a.pasteBuf = append(a.pasteBuf, '\n')
+		a.pasteLastCR = true
+	case tcell.KeyLF:
+		if !wasCR {
+			a.pasteBuf = append(a.pasteBuf, '\n')
+		}
+	case tcell.KeyTab:
+		a.pasteBuf = append(a.pasteBuf, '\t')
+	}
+}
+
+// applyPaste lands the buffered paste in the active tab as one
+// InsertString — one undo step, one find re-scan — and empties the
+// buffer. A paste with no tab to land in, or onto a markdown preview
+// (read-only by construction), is discarded rather than held for the
+// next tab: the user pasted into what was on screen, and delivering it
+// somewhere else later would be a surprise.
+func (a *App) applyPaste() {
+	text := string(a.pasteBuf)
+	a.pasteBuf = a.pasteBuf[:0]
+	a.pasteLastCR = false
+	if text == "" {
+		return
+	}
+	tab := a.activeTabPtr()
+	if tab == nil || a.mdPreviewFor(tab) != nil {
+		return
+	}
+	tab.InsertString(text)
 }

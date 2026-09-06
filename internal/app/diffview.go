@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/johnlam90/skiff/internal/diff"
@@ -38,7 +39,9 @@ import (
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/overlay"
+	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
+	"github.com/rivo/uniseg"
 )
 
 const (
@@ -550,28 +553,31 @@ func (d *diffOverlay) buttonRects() (open, closeBtn btnRect) {
 // Rows (relY):
 //
 //	0     top border
-//	1     title — " Diff · path             esc"
+//	1     title — " Diff · path      ⏎ open file · esc"
 //	2     divider
 //	3..N  diff body (side-by-side or unified)
 //	N+1   blank
 //	N+2   buttons — [ Open file ]    [ Close ]
 //	N+3   bottom border
+//
+// The frame — fill, border, title row with its hint, divider — is
+// overlay.DrawFrameHint's, the same chrome every prefab paints, so the
+// title is budgeted against the frame like theirs: a long repo-relative
+// path used to be written with an unbounded drawAt and ran straight
+// through the ┐ on a 40-column terminal (and a title that crowds the
+// hint drops it back to the bare esc, as every prefab's does).
 func (d *diffOverlay) Draw(scr tcell.Screen) {
 	a := d.app
 	mx, my, mw, mh := d.modalRect()
 	bg := a.theme.LineHL
-	bgStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
-	borderStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Subtle)
-	titleStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true)
-	mutedStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
-
-	fillRect(scr, mx, my, mw, mh, bgStyle)
-	drawBorder(scr, mx, my, mw, mh, borderStyle)
-	drawHDivider(scr, mx, my+2, mw, borderStyle)
-
-	drawAt(scr, mx+1, my+1, " "+d.title, titleStyle)
-	hint := "esc "
-	drawAt(scr, mx+mw-1-runeLen(hint), my+1, hint, mutedStyle)
+	// The hint names what Enter would press right now — the focused
+	// button — the same contract Confirm's frame follows, so the
+	// keyboard user reads "open file" or "close" before committing.
+	hint := overlay.EnterHint("[ Close ]")
+	if d.openPath != "" && d.hover == 1 {
+		hint = overlay.EnterHint("[ Open file ]")
+	}
+	overlay.DrawFrameHint(scr, overlay.Rect{X: mx, Y: my, W: mw, H: mh}, d.title, hint, a.theme)
 
 	d.scrollBy(0)
 	bodyX, bodyW := mx+2, mw-4
@@ -595,16 +601,16 @@ func (d *diffOverlay) Draw(scr tcell.Screen) {
 			// a line's color.
 			line := d.unified[idx]
 			st := overlay.DiffLineStyle(a.theme, bg, line)
-			drawAt(scr, bodyX, my+3+i, sliceRunes(line, d.scrollX, bodyW), st)
+			textdraw.DrawClipped(scr, bodyX, my+3+i, bodyW, skipCells(line, d.scrollX), st)
 		}
 	}
 
 	openRect, closeRect := d.buttonRects()
 	if d.openPath != "" {
-		drawButton(scr, openRect.x, openRect.y, "[ Open file ]", bg, a.theme.Accent, d.hover == 1)
-		drawButton(scr, closeRect.x, closeRect.y, "[ Close ]", bg, a.theme.Text, d.hover == 0)
+		overlay.DrawButton(scr, openRect.x, openRect.y, "[ Open file ]", bg, a.theme.Accent, d.hover == 1)
+		overlay.DrawButton(scr, closeRect.x, closeRect.y, "[ Close ]", bg, a.theme.Text, d.hover == 0)
 	} else {
-		drawButton(scr, closeRect.x, closeRect.y, "[ Close ]", bg, a.theme.Accent, true)
+		overlay.DrawButton(scr, closeRect.x, closeRect.y, "[ Close ]", bg, a.theme.Accent, true)
 	}
 	scr.HideCursor()
 }
@@ -621,12 +627,12 @@ func (d *diffOverlay) drawRowSideBySide(scr tcell.Screen, x, y, w, idx int) {
 	bg := a.theme.LineHL
 	if row.Kind == diff.RowFile {
 		fileStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true)
-		drawAt(scr, x, y, sliceRunes("▸ "+row.Left, 0, w), fileStyle)
+		textdraw.DrawClipped(scr, x, y, w, "▸ "+row.Left, fileStyle)
 		return
 	}
 	if row.Kind == diff.RowHunk {
 		hunkStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.AccentSoft).Bold(true)
-		drawAt(scr, x, y, sliceRunes(row.Left, 0, w), hunkStyle)
+		textdraw.DrawClipped(scr, x, y, w, row.Left, hunkStyle)
 		return
 	}
 
@@ -651,14 +657,20 @@ func (d *diffOverlay) drawRowSideBySide(scr tcell.Screen, x, y, w, idx int) {
 }
 
 // drawDiffSide paints one half of a side-by-side row: a muted line
-// number (blank when the side has none), then the text rune by rune.
-// A changed side gets the full-width row tint — gutter, text, and
-// trailing pad — with Chroma syntax colors on top and the louder
+// number (blank when the side has none), then the text cluster by
+// cluster. A changed side gets the full-width row tint — gutter, text,
+// and trailing pad — with Chroma syntax colors on top and the louder
 // emphasis tint under the intra-line span that actually differs, so
 // the diff reads like highlighted code on a wash. On low-color
 // palettes (no tints) the legacy painting stands: the Git change color
 // as foreground, reverse video over the emphasis span. The horizontal
-// scroll offset slides the text only; gutters stay put.
+// scroll offset slides the text only, in cells; gutters stay put.
+//
+// Styles and the emphasis span are indexed by RUNE (the Chroma grid and
+// the diff model both are), while the paint advances by CELL: each
+// cluster takes its base rune's style and its real width, so a CJK
+// line stays inside the column instead of overrunning it by one cell
+// per ideograph, and a combining mark rides its base cell.
 func (d *diffOverlay) drawSide(scr tcell.Screen, x, y, w, lineNo int, text string, changed bool, changeColor, rowTint, emphTint tcell.Color, emph diff.Span, ctx []tcell.Style) {
 	a := d.app
 	if lineNo == 0 {
@@ -681,10 +693,22 @@ func (d *diffOverlay) drawSide(scr tcell.Screen, x, y, w, lineNo int, text strin
 	if tw <= 0 {
 		return
 	}
-	runes := []rune(text)
-	for col := 0; col < tw; col++ {
-		i := d.scrollX + col
-		if i >= len(runes) {
+	col, runeIdx, skipped := 0, 0, 0
+	state := -1
+	for rest := text; len(rest) > 0; {
+		var cluster string
+		var cw int
+		cluster, rest, cw, state = uniseg.FirstGraphemeClusterInString(rest, state)
+		i := runeIdx
+		runeIdx += utf8.RuneCountInString(cluster)
+		if skipped < d.scrollX {
+			skipped += cw
+			continue
+		}
+		if cw == 0 {
+			continue // a bare combining mark with no base cell to ride
+		}
+		if col+cw > tw {
 			break
 		}
 		st := base
@@ -698,22 +722,31 @@ func (d *diffOverlay) drawSide(scr tcell.Screen, x, y, w, lineNo int, text strin
 				st = st.Reverse(true)
 			}
 		}
-		scr.SetContent(x+diffNoGutter+col, y, runes[i], nil, st)
+		rs := []rune(cluster)
+		scr.SetContent(x+diffNoGutter+col, y, rs[0], rs[1:], st)
+		col += cw
 	}
 }
 
-// sliceRunes returns at most w runes of s starting at offset — the
-// shared clipping rule for horizontally scrolled diff text.
-func sliceRunes(s string, offset, w int) string {
-	runes := []rune(s)
-	if offset >= len(runes) || w <= 0 {
-		return ""
+// skipCells drops the first offset CELLS of s, whole clusters at a
+// time — the horizontal-scroll rule for the unified body, whose clip
+// to the column is then textdraw.DrawClipped's. Cells rather than
+// runes so a scrolled CJK line slides by the same distance an ASCII one
+// does.
+func skipCells(s string, offset int) string {
+	if offset <= 0 {
+		return s
 	}
-	runes = runes[offset:]
-	if len(runes) > w {
-		runes = runes[:w]
+	skipped, end := 0, 0
+	state := -1
+	for rest := s; len(rest) > 0 && skipped < offset; {
+		var cluster string
+		var cw int
+		cluster, rest, cw, state = uniseg.FirstGraphemeClusterInString(rest, state)
+		skipped += cw
+		end += len(cluster)
 	}
-	return string(runes)
+	return s[end:]
 }
 
 // diffBodyLines writes a patch back out as unified-diff text — the body

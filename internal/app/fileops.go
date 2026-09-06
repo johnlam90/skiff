@@ -426,7 +426,7 @@ func (a *App) menuNewFile() {
 func (a *App) newFileLabel() string {
 	folder := a.activeFolder
 	if folder == "" || a.isProjectRoot(folder) {
-		return "New file"
+		return labelNewFile + "…"
 	}
 	rel := a.relativeFolderLabel(folder)
 	// Truncate so the row never overflows the modal width — see
@@ -446,7 +446,7 @@ func (a *App) newFileLabel() string {
 		}
 		suffix = " (in " + rel + ")"
 	}
-	return "New file" + suffix
+	return labelNewFile + suffix + "…"
 }
 
 // relativeFolderLabel returns folder rendered relative to the project root,
@@ -483,8 +483,8 @@ func (a *App) menuRename() {
 	)
 }
 
-// menuDelete opens a Yes/No confirm modal; on Yes, removes the active tab's
-// file from disk and closes the tab.
+// menuDelete confirms, then moves the active tab's file to the session
+// trash and closes the tab.
 func (a *App) menuDelete() {
 	a.closeMenu()
 	tab := a.activeTabPtr()
@@ -492,13 +492,27 @@ func (a *App) menuDelete() {
 		return
 	}
 	target := tab.Path
-	a.openConfirm(
-		"Delete file",
-		"Permanently delete "+filepath.Base(target)+"?",
-		func(app *App) {
-			app.doDeletePath(target)
-		},
-	)
+	a.openDeleteConfirm(filepath.Base(target), false, func(app *App) {
+		app.doDeletePath(target)
+	})
+}
+
+// openDeleteConfirm is the one delete prompt — the ≡ rows and the
+// tree's right-click share it so the copy cannot drift. It used to say
+// "Permanently delete x?", which was false: doDeletePath moves the
+// entry to the session trash and the next flash offers ≡ Undo delete.
+// The message says so, and the action button is named Delete rather
+// than Yes. A folder's title carries the "and contents" warning
+// because the recursive case is the one that deserves it; the message
+// itself stays one line so it fits the 50-cell body of the classic
+// confirm frame.
+func (a *App) openDeleteConfirm(name string, isDir bool, onYes func(*App)) {
+	title := "Delete file"
+	if isDir {
+		title = "Delete folder and contents"
+	}
+	c := a.openConfirm(title, "Delete "+name+"? ≡ Undo delete brings it back.", onYes)
+	c.Labels = confirmButtons("Delete")
 }
 
 // menuRenameFolder opens a prompt pre-filled with the active
@@ -533,10 +547,12 @@ func (a *App) menuRenameFolder() {
 func (a *App) renameFolderLabel() string {
 	folder := a.activeFolder
 	if folder == "" || a.isProjectRoot(folder) {
-		return "Rename folder"
+		return "Rename folder…"
 	}
 	rel := a.relativeFolderLabel(folder)
-	const maxLen = maxLabelSuffix
+	// The trailing "…" spends one cell of the suffix budget, so the whole
+	// label still fits the modalWidth interior the budget was sized for.
+	const maxLen = maxLabelSuffix - 1
 	suffix := " (" + rel + ")"
 	if runeLen(suffix) > maxLen {
 		keep := maxLen - len(" (…)")
@@ -548,7 +564,7 @@ func (a *App) renameFolderLabel() string {
 		}
 		suffix = " (" + rel + ")"
 	}
-	return "Rename folder" + suffix
+	return "Rename folder" + suffix + "…"
 }
 
 // menuDeleteFolder removes the editor's active folder (the same folder
@@ -572,17 +588,13 @@ func (a *App) menuDeleteFolder() {
 		return
 	}
 	target := folder
-	a.openConfirm(
-		"Delete folder",
-		"Permanently delete "+filepath.Base(target)+" and everything inside?",
-		func(app *App) {
-			app.doDeletePath(target)
-			// After the directory is gone we can't keep activeFolder
-			// pointing at it — fall back to the project root so the
-			// next New File doesn't try to write into a deleted dir.
-			app.setActiveFolder(app.rootDir)
-		},
-	)
+	a.openDeleteConfirm(filepath.Base(target), true, func(app *App) {
+		app.doDeletePath(target)
+		// After the directory is gone we can't keep activeFolder
+		// pointing at it — fall back to the project root so the
+		// next New File doesn't try to write into a deleted dir.
+		app.setActiveFolder(app.rootDir)
+	})
 }
 
 // deleteFolderLabel is the dynamic label hook for the Delete Folder
@@ -593,10 +605,11 @@ func (a *App) menuDeleteFolder() {
 func (a *App) deleteFolderLabel() string {
 	folder := a.activeFolder
 	if folder == "" || a.isProjectRoot(folder) {
-		return "Delete folder"
+		return "Delete folder…"
 	}
 	rel := a.relativeFolderLabel(folder)
-	const maxLen = maxLabelSuffix
+	// Same one-cell allowance for the "…" as renameFolderLabel.
+	const maxLen = maxLabelSuffix - 1
 	suffix := " (" + rel + ")"
 	if runeLen(suffix) > maxLen {
 		keep := maxLen - len(" (…)")
@@ -608,7 +621,7 @@ func (a *App) deleteFolderLabel() string {
 		}
 		suffix = " (" + rel + ")"
 	}
-	return "Delete folder" + suffix
+	return "Delete folder" + suffix + "…"
 }
 
 // hasActiveSubfolder is the menu predicate shared by every "act on
@@ -755,24 +768,18 @@ func ctxCopyAbsolutePath(a *App, n *filetree.Node) {
 	a.copyPathToSystemClipboard(absolutePathFor(n.Path), "absolute path")
 }
 
-// ctxDelete confirms and removes the file or folder the user clicked.
-// Folder deletion is recursive (the whole subtree goes to the trash as
-// a unit) so the confirm copy spells out "and everything inside" — the
-// stakes are much higher than a single-file delete and the user should
-// see that before clicking Yes. The project root itself is never
-// deletable.
+// ctxDelete confirms and removes the file or folder the user clicked,
+// through the same openDeleteConfirm the ≡ rows use. Folder deletion is
+// recursive (the whole subtree goes to the trash as a unit), which is
+// what the folder title warns about — the stakes are higher than a
+// single-file delete and the user should see that before clicking
+// Delete. The project root itself is never deletable.
 func ctxDelete(a *App, n *filetree.Node) {
 	if n == a.tree.Root {
 		return
 	}
 	target := n.Path
-	title := "Delete file"
-	msg := "Permanently delete " + n.Name + "?"
-	if n.IsDir {
-		title = "Delete folder"
-		msg = "Permanently delete " + n.Name + " and everything inside?"
-	}
-	a.openConfirm(title, msg, func(app *App) {
+	a.openDeleteConfirm(n.Name, n.IsDir, func(app *App) {
 		app.doDeletePath(target)
 	})
 }

@@ -14,6 +14,11 @@
 package theme
 
 import (
+	"io/fs"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
@@ -112,6 +117,15 @@ func TestDegradeMovesSemanticsIntoAttributes(t *testing.T) {
 	if a.Comment == tcell.AttrNone {
 		t.Error("comments lose their only remaining distinction")
 	}
+	if a.CursorLine == tcell.AttrNone {
+		t.Error("the caret's line has no tint and no attribute: it would be invisible")
+	}
+	if a.SelectedRow == tcell.AttrNone {
+		t.Error("a list's highlighted row has no hue and no attribute")
+	}
+	if a.CursorLine == a.Selection {
+		t.Error("the cursor line must not look like a selection on that line")
+	}
 	// Every mask must be built from attributes a VT100-era terminal
 	// understands — anything else defeats the point of degrading.
 	allowed := tcell.AttrBold | tcell.AttrDim | tcell.AttrUnderline | tcell.AttrReverse
@@ -120,6 +134,7 @@ func TestDegradeMovesSemanticsIntoAttributes(t *testing.T) {
 		"FindMatch": a.FindMatch, "FindCurrent": a.FindCurrent,
 		"StatusBar": a.StatusBar, "Modified": a.Modified,
 		"Error": a.Error, "Comment": a.Comment,
+		"CursorLine": a.CursorLine, "SelectedRow": a.SelectedRow,
 	} {
 		if mask&^allowed != 0 {
 			t.Errorf("%s uses an attribute outside bold/dim/underline/reverse: %v", name, mask)
@@ -209,6 +224,72 @@ func TestDegradeAppliesToEveryRegistryPalette(t *testing.T) {
 		}
 		if d.BG != tcell.ColorDefault || d.Text != tcell.ColorDefault {
 			t.Errorf("%s: surfaces survived degradation (BG=%v Text=%v)", e.ID, d.BG, d.Text)
+		}
+	}
+}
+
+// TestWithAttrs pins the one way a renderer applies an Attrs field: the
+// mask is OR'd into the style's existing attributes rather than
+// replacing them, an underline bit also turns the underline STYLE on
+// (which is what the terminal driver actually emits from), and a zero
+// mask — every truecolor palette — hands the style back untouched.
+func TestWithAttrs(t *testing.T) {
+	base := tcell.StyleDefault.Bold(true)
+	if got := WithAttrs(base, tcell.AttrNone); got != base {
+		t.Fatal("an empty mask must not change the style")
+	}
+	got := WithAttrs(base, tcell.AttrReverse)
+	if _, _, attrs := got.Decompose(); attrs&tcell.AttrBold == 0 || attrs&tcell.AttrReverse == 0 {
+		t.Fatalf("attrs = %v, want bold kept and reverse added", attrs)
+	}
+	ul := WithAttrs(base, tcell.AttrUnderline)
+	if ul.GetUnderlineStyle() == tcell.UnderlineStyleNone {
+		t.Fatal("an underline mask must set the underline style, or the driver paints nothing")
+	}
+	if _, _, attrs := ul.Decompose(); attrs&tcell.AttrUnderline == 0 {
+		t.Fatal("the underline attribute bit must be set too")
+	}
+}
+
+// TestEveryAttrHasAConsumer is the fence against a half-wired channel:
+// every field of Attrs must be read by at least one renderer outside
+// this package. Four of the eight original fields — Selection,
+// FindMatch, FindCurrent, Comment — were declared and degraded but
+// never applied, so on a 16-colour terminal a selection gave no
+// feedback and find highlights vanished. A grep over the source tree
+// is a blunt instrument, but a field nobody names is a field nobody
+// uses, and that is exactly the bug.
+func TestEveryAttrHasAConsumer(t *testing.T) {
+	root := filepath.Join("..", "..", "internal")
+	var sources []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if filepath.Base(path) == "theme" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			sources = append(sources, string(b))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	all := strings.Join(sources, "\n")
+	rt := reflect.TypeOf(Attrs{})
+	for i := 0; i < rt.NumField(); i++ {
+		name := rt.Field(i).Name
+		if !strings.Contains(all, "Attrs."+name) {
+			t.Errorf("Attrs.%s is degraded but no renderer outside internal/theme reads it", name)
 		}
 	}
 }

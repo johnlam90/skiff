@@ -135,10 +135,16 @@ func (a *App) ensureMenuRowVisible(idx int) {
 // row's action (if it is currently enabled). Wheel events — and the
 // scroll indicator's own column — scroll the content when the layout is
 // taller than the terminal. The filter never changes what a click does;
-// it only changes which rows are on screen.
+// it only changes which rows are on screen. A click is a FRESH press:
+// held-button motion still drags the bar's thumb but runs no row and
+// closes nothing, so a drag that wanders across the menu cannot fire
+// whatever action it crosses (see overlay.Press).
 func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
+	fresh := a.mouse.menuPress.Fresh(btn)
+	// The wheel steps by wheelLines like every other surface; a
+	// one-row step here made the menu the only list that crawled.
 	if btn&tcell.WheelUp != 0 {
-		a.syncMenuList().ScrollBy(-1)
+		a.syncMenuList().ScrollBy(-wheelLines)
 		// The rows just moved under the stationary pointer — recompute
 		// the hover so the highlight tracks what a click would now hit
 		// instead of going one row stale until the next mouse motion.
@@ -146,7 +152,7 @@ func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
 		return
 	}
 	if btn&tcell.WheelDown != 0 {
-		a.syncMenuList().ScrollBy(1)
+		a.syncMenuList().ScrollBy(wheelLines)
 		a.updateMenuHover(x, y)
 		return
 	}
@@ -161,7 +167,7 @@ func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
 		}
 		return
 	}
-	if btn&tcell.Button1 == 0 {
+	if !fresh {
 		return
 	}
 	if x < mx || x >= mx+mw || y < my || y >= my+mh {
@@ -190,6 +196,16 @@ func (a *App) openMenu() {
 	a.overlays.Open(menuOverlay{a})
 	a.menuList = overlay.List{}
 	a.menuFilter = overlay.Field{}
+	// The click latch is seeded from the button state the dispatcher
+	// is tracking, not left over from the last menu: a press on a row
+	// or outside the frame closes the menu on the press, so the release
+	// that would have reset the latch lands on the base UI, and the
+	// latch stayed "down" into the next keyboard-opened menu — whose
+	// first click was then read as held motion and ignored. Seeding
+	// (rather than clearing) keeps the other case honest: a menu
+	// re-opened under a still-held button treats the motion that
+	// follows as the drag it is.
+	a.mouse.menuPress.Sync(a.mouse.held)
 	a.menuFilterChanged()
 }
 
@@ -234,9 +250,12 @@ func (a *App) menuMoveSelection(dir int) {
 // menuFilterChanged re-selects after the query moved: scroll back to the
 // top and highlight the best-ranked enabled match (ties break toward
 // menu order), so Enter runs the row the user was aiming at rather than
-// whichever match happens to sit highest in the table. With an empty
-// query every row ranks 0 and this degenerates to "select the first
-// enabled row" — the pre-filter open behaviour.
+// whichever match happens to sit highest in the table. matchMenuGroups
+// already sorts the list by rank, so this is normally the first enabled
+// row; the rank walk stays because a dimmed better match must not steal
+// the selection from an enabled one. With an empty query every row
+// ranks 0 and this degenerates to "select the first enabled row" — the
+// pre-filter open behaviour.
 func (a *App) menuFilterChanged() {
 	a.menuList = overlay.List{}
 	items, _, _ := a.menuLayout()
@@ -408,7 +427,7 @@ func (a *App) openMenuDrillIn(d menuDrillIn) {
 		// The row's own visibility predicate should have hidden it, but
 		// predicates and contents can drift — say so instead of opening
 		// an empty frame.
-		a.flash("No " + strings.ToLower(d.title) + " actions available right now")
+		a.flash("Nothing under " + d.title + "… applies right now")
 		return
 	}
 	a.openListPick(d.title, items, func(app *App, i int) { rows[i].action(app) }, nil, nil)
@@ -577,9 +596,10 @@ func (a *App) drawMenu() {
 		}
 	}
 
-	// Title row: " Menu" on the left, "esc " on the right.
+	// Title row: " Menu" on the left, the key hint on the right — Enter
+	// runs the highlighted row, so say so, the way the prefab frames do.
 	drawAt(a.screen, mx+1, my+menuTitleY, " Menu", titleStyle)
-	hint := "esc "
+	hint := "⏎ run · esc "
 	drawAt(a.screen, mx+mw-1-len([]rune(hint)), my+menuTitleY, hint, mutedStyle)
 
 	// Filter field, on the darker editor background so it reads as an
@@ -668,8 +688,10 @@ func (a *App) drawMenu() {
 		label := trimRunes(a.menuLabel(item), menuLabelBudget(mw-barReserve, item))
 		drawAt(a.screen, mx+2, cy, "▸", chevStyle)
 		drawAt(a.screen, mx+4, cy, label, labelStyle)
-		if item.shortcut != "" {
-			drawAt(a.screen, mx+mw-2-barReserve-runeLen(item.shortcut), cy, item.shortcut, shortcutStyle)
+		// The tag column: the Esc hint, or the drill-in a flattened
+		// match came out of ("Git ›"), or both — see menuTag.
+		if tag := menuTag(item); tag != "" {
+			drawAt(a.screen, mx+mw-2-barReserve-runeLen(tag), cy, tag, shortcutStyle)
 		}
 	}
 	if len(items) == 0 {

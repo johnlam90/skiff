@@ -156,3 +156,34 @@ func TestTabList_ActivateAtClamps(t *testing.T) {
 		t.Fatal("below-zero activates the first tab")
 	}
 }
+
+// TestTabList_NextPrevWrap pins keyboard tab switching: Next and Prev
+// walk the strip in order, wrap at both ends, activate by identity, and
+// are nil-safe on an empty list.
+func TestTabList_NextPrevWrap(t *testing.T) {
+	var l TabList
+	if l.Next() != nil || l.Prev() != nil {
+		t.Fatal("an empty list has no neighbour to switch to")
+	}
+	a, b, c := memTab("a", false), memTab("b", false), memTab("c", false)
+	l.Append(a)
+	l.Append(b)
+	l.Append(c)
+	if got := l.Next(); got != a || l.Active() != a {
+		t.Fatalf("Next from the last tab should wrap to the first, got %v", got)
+	}
+	if got := l.Next(); got != b {
+		t.Fatalf("Next should walk right, got %v", got)
+	}
+	if got := l.Prev(); got != a {
+		t.Fatalf("Prev should walk left, got %v", got)
+	}
+	if got := l.Prev(); got != c || l.Active() != c {
+		t.Fatalf("Prev from the first tab should wrap to the last, got %v", got)
+	}
+	single := TabList{}
+	single.Append(a)
+	if single.Next() != a || single.Prev() != a {
+		t.Fatal("a one-tab list switches to itself")
+	}
+}

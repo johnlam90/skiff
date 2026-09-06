@@ -237,7 +237,7 @@ func TestRenameFolderLabel_DynamicSuffix(t *testing.T) {
 	a := newTestApp(t, root)
 
 	a.setActiveFolder(root)
-	if got := a.renameFolderLabel(); got != "Rename folder" {
+	if got := a.renameFolderLabel(); got != "Rename folder…" {
 		t.Fatalf("root label = %q", got)
 	}
 
@@ -346,8 +346,8 @@ func TestDeleteFolderLabel_DynamicSuffix(t *testing.T) {
 	a := newTestApp(t, root)
 
 	a.setActiveFolder(root)
-	if got := a.deleteFolderLabel(); got != "Delete folder" {
-		t.Fatalf("root label = %q, want bare 'Delete folder'", got)
+	if got := a.deleteFolderLabel(); got != "Delete folder…" {
+		t.Fatalf("root label = %q, want bare 'Delete folder…'", got)
 	}
 
 	a.setActiveFolder(sub)
@@ -1070,5 +1070,67 @@ func TestDoRename_FailureRunsTheTail(t *testing.T) {
 	}
 	if _, err := os.Stat(src); err != nil {
 		t.Fatalf("refused rename must leave the source: %v", err)
+	}
+}
+
+// TestOpenDeleteConfirm_TellsTheTruthAboutTheTrash pins the delete
+// prompt's copy on both entry points: deletion goes to the session
+// trash and the next flash offers Undo delete, so the confirm must not
+// say "Permanently"; it names the undo route instead, names its verb on
+// the action button, and a folder's title carries the recursive
+// warning. The ≡ row and the tree's right-click share openDeleteConfirm
+// so the two surfaces cannot drift apart.
+func TestOpenDeleteConfirm_TellsTheTruthAboutTheTrash(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0755); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	openTestFile(t, a, dir, "victim.go", "package main\n")
+
+	a.menuDelete()
+	c := confirmPrefab(t, a)
+	if strings.Contains(c.Message, "Permanently") {
+		t.Fatalf("delete goes to the session trash; message %q claims otherwise", c.Message)
+	}
+	for _, want := range []string{"Delete victim.go?", "Undo delete"} {
+		if !strings.Contains(c.Message, want) {
+			t.Errorf("message %q should say %q", c.Message, want)
+		}
+	}
+	if c.Title != "Delete file" {
+		t.Errorf("title = %q, want Delete file", c.Title)
+	}
+	if c.Labels != confirmButtons("Delete") {
+		t.Errorf("buttons = %v, want [ Cancel ] [ Delete ]", c.Labels)
+	}
+	if n := runeLen(c.Message); n > overlay.ConfirmBodyTextWidth-30 {
+		t.Errorf("message is %d cells; the classic 54-cell frame shows 50", n)
+	}
+
+	a.closeAllModals()
+	a.setActiveFolder(filepath.Join(dir, "sub"))
+	a.menuDeleteFolder()
+	c = confirmPrefab(t, a)
+	if c.Title != "Delete folder and contents" {
+		t.Errorf("folder title = %q, want the recursive warning", c.Title)
+	}
+	if !strings.Contains(c.Message, "Delete sub?") || !strings.Contains(c.Message, "Undo delete") {
+		t.Errorf("folder message = %q", c.Message)
+	}
+
+	a.closeAllModals()
+	var node *filetree.Node
+	for _, ch := range a.tree.Root.Children {
+		if ch.Name == "sub" {
+			node = ch
+		}
+	}
+	if node == nil {
+		t.Fatal("sub not in tree")
+	}
+	ctxDelete(a, node)
+	if got := confirmPrefab(t, a); got.Message != c.Message || got.Title != c.Title || got.Labels != c.Labels {
+		t.Fatalf("right-click delete drifted from the menu's: %+v vs %+v", got.Title+got.Message, c.Title+c.Message)
 	}
 }

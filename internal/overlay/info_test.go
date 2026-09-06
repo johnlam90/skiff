@@ -96,12 +96,12 @@ func TestInfo_OKButtonAndOutsideClick(t *testing.T) {
 	}
 }
 
-// TestInfo_DrawTruncatesWithEllipsis pins the truncation marker. The
-// body used to be hard-cut with a rune slice, so a clipped stderr path
-// read as a complete-but-wrong path — the one failure mode where the
-// user is reading the text character by character. Every line now goes
-// through trimRunes, which spends the last cell on "…".
-func TestInfo_DrawTruncatesWithEllipsis(t *testing.T) {
+// TestInfo_DrawWrapsLongLines pins the body's reflow: a 200-cell line
+// on an 80-cell body is read whole on three rows, the neighbour that
+// fits follows on the row after them, and no row overruns the body.
+// Info used to truncate to an ellipsis, which for a stderr path or a
+// formatter's argv meant losing exactly the part that mattered.
+func TestInfo_DrawWrapsLongLines(t *testing.T) {
 	scr := tcell.NewSimulationScreen("UTF-8")
 	if err := scr.Init(); err != nil {
 		t.Fatalf("init: %v", err)
@@ -116,29 +116,35 @@ func TestInfo_DrawTruncatesWithEllipsis(t *testing.T) {
 	scr.Show()
 
 	r := n.rect()
+	body := n.BodyTextWidth()
+	if body != r.W-4 {
+		t.Fatalf("BodyTextWidth = %d, want frame minus chrome %d", body, r.W-4)
+	}
+	if got, want := n.RowCount(), 3+1; got != want {
+		t.Fatalf("wrapped row count = %d, want %d (200 cells over %d, plus the short line)", got, want, body)
+	}
 	cells, w, _ := scr.GetContents()
-	body := r.W - 4
-	row := make([]rune, 0, body)
-	for i := range body {
-		row = append(row, cells[(r.Y+3)*w+r.X+2+i].Runes[0])
+	rowText := func(y int) string {
+		row := make([]rune, 0, body)
+		for i := range body {
+			row = append(row, cells[(r.Y+3+y)*w+r.X+2+i].Runes[0])
+		}
+		return string(row)
 	}
-	if got := string(row); !strings.HasSuffix(got, "…") {
-		t.Fatalf("truncated body line = %q, want a trailing ellipsis", got)
+	joined := strings.TrimSpace(rowText(0)) + strings.TrimSpace(rowText(1)) + strings.TrimSpace(rowText(2))
+	if joined != long {
+		t.Fatalf("the three wrapped rows do not reassemble the line: %d cells, want 200", len(joined))
 	}
-	// The untruncated neighbour must be left exactly as it came in.
-	next := make([]rune, 0, 5)
-	for i := range 5 {
-		next = append(next, cells[(r.Y+4)*w+r.X+2+i].Runes[0])
-	}
-	if string(next) != "short" {
-		t.Fatalf("short line = %q, want %q", string(next), "short")
+	if got := strings.TrimSpace(rowText(3)); got != "short" {
+		t.Fatalf("row after the wrapped line = %q, want %q", got, "short")
 	}
 }
 
-// TestInfo_DrawKeepsDiffColorAfterTruncation guards the style pick:
-// truncation must not repaint a clipped diff line, so the color is
-// chosen from the original text and not from the ellipsised copy.
-func TestInfo_DrawKeepsDiffColorAfterTruncation(t *testing.T) {
+// TestInfo_DrawKeepsDiffColorOnContinuationRows guards the style pick:
+// a wrapped continuation row carries no +/- marker of its own, so the
+// color must come from the SOURCE line, not from the row's own text —
+// otherwise the tail of a long addition would paint as plain context.
+func TestInfo_DrawKeepsDiffColorOnContinuationRows(t *testing.T) {
 	scr := tcell.NewSimulationScreen("UTF-8")
 	if err := scr.Init(); err != nil {
 		t.Fatalf("init: %v", err)
@@ -153,9 +159,53 @@ func TestInfo_DrawKeepsDiffColorAfterTruncation(t *testing.T) {
 
 	r := n.rect()
 	cells, w, _ := scr.GetContents()
-	fg, _, _ := cells[(r.Y+3)*w+r.X+2+r.W-5].Style.Decompose()
-	if fg != n.Theme.GitAdded {
-		t.Fatalf("ellipsis cell fg = %v, want the addition color %v", fg, n.Theme.GitAdded)
+	for y := 0; y < 3; y++ {
+		fg, _, _ := cells[(r.Y+3+y)*w+r.X+2].Style.Decompose()
+		if fg != n.Theme.GitAdded {
+			t.Fatalf("row %d fg = %v, want the addition color %v", y, fg, n.Theme.GitAdded)
+		}
+	}
+}
+
+// TestInfo_WrapsToThePhoneWidth is the case the wrap exists for: a
+// 120-cell error line on a 40-column terminal wraps onto as many rows
+// as its body width needs (here four of 36), the scroll clamp and the
+// indicator count those rows — not the one authored line — and every
+// painted row stays inside the frame.
+func TestInfo_WrapsToThePhoneWidth(t *testing.T) {
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	defer scr.Fini()
+	scr.SetSize(40, 10)
+
+	n, _ := testInfo(1)
+	n.Size = func() (int, int) { return 40, 10 }
+	n.Lines = []string{strings.Repeat("e", 120)}
+	body := n.BodyTextWidth()
+	if body != 36 {
+		t.Fatalf("BodyTextWidth at 40 columns = %d, want 36", body)
+	}
+	want := (120 + body - 1) / body
+	if got := n.RowCount(); got != want {
+		t.Fatalf("row count = %d, want %d", got, want)
+	}
+	n.Draw(scr)
+	scr.Show()
+	r := n.rect()
+	if b := n.bar(r); b.total != want || b.viewH != n.bodyRows() {
+		t.Fatalf("indicator total/view = %d/%d, want %d/%d", b.total, b.viewH, want, n.bodyRows())
+	}
+	n.ScrollBy(100)
+	if n.Scroll() != want-n.bodyRows() {
+		t.Fatalf("scroll clamped to %d, want %d rows minus %d visible", n.Scroll(), want, n.bodyRows())
+	}
+	cells, w, _ := scr.GetContents()
+	for y := r.Y + 3; y < r.Y+3+n.bodyRows(); y++ {
+		if c := cells[y*w+r.X+r.W-1]; len(c.Runes) == 0 || c.Runes[0] != '│' {
+			t.Fatalf("row %d lost its right border to the text: %q", y, c.Runes)
+		}
 	}
 }
 
@@ -359,5 +409,41 @@ func TestDiffLineStyle_TintsChangedRows(t *testing.T) {
 	low.LowColor = true
 	if _, bg, _ := DiffLineStyle(low, low.LineHL, "+added").Decompose(); bg != low.LineHL {
 		t.Fatalf("low-color bg = %v, must keep the passed surface", bg)
+	}
+}
+
+// TestInfo_DragFromBodyDoesNotDismiss is the drag-dismissal regression
+// for the report surface. A 300-line stderr dump is read by scrolling,
+// and a press in the body followed by a drag that left the frame — or
+// crossed the OK button — delivered a Button1 event on a dismissal
+// target and closed the report mid-read. Only a fresh press may
+// dismiss; the bar still follows the same drag.
+func TestInfo_DragFromBodyDoesNotDismiss(t *testing.T) {
+	scr := infoScreen(t)
+	n, closed := testInfo(300)
+	for i := range n.Lines {
+		n.Lines[i] = "stderr line"
+	}
+	infoBarColumn(t, scr, n)
+	r := n.rect()
+
+	n.HandleMouse(r.X+2, r.Y+4, tcell.Button1) // press in the body
+	n.HandleMouse(r.X-1, r.Y-1, tcell.Button1) // drag out of the frame
+	if *closed != 0 {
+		t.Fatal("a drag out of the frame dismissed the report")
+	}
+	n.HandleMouse(r.X+(r.W-10)/2+1, r.Y+r.H-3, tcell.Button1) // drag over OK
+	if *closed != 0 {
+		t.Fatal("a drag over OK dismissed the report")
+	}
+	b := n.bar(r)
+	n.HandleMouse(b.x, b.top+b.viewH-1, tcell.Button1)
+	if n.Scroll() == 0 {
+		t.Fatal("a drag onto the bar should still scroll")
+	}
+	n.HandleMouse(r.X-1, r.Y-1, tcell.ButtonNone)
+	n.HandleMouse(r.X-1, r.Y-1, tcell.Button1)
+	if *closed != 1 {
+		t.Fatalf("a fresh outside press after the release must dismiss, closed %d times", *closed)
 	}
 }

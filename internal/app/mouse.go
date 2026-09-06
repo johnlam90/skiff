@@ -18,14 +18,18 @@
 package app
 
 import (
+	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/asyncjob"
 	"github.com/johnlam90/skiff/internal/diff"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/git"
+	"github.com/johnlam90/skiff/internal/overlay"
+	"github.com/johnlam90/skiff/internal/scrollbar"
 )
 
 // autoScrollEvent is the custom tcell event our auto-scroll goroutine
@@ -38,11 +42,152 @@ type autoScrollEvent struct {
 // When satisfies the tcell.Event interface.
 func (e *autoScrollEvent) When() time.Time { return e.when }
 
-// clickRecord tracks the last mouse-press location and time so we can
-// detect double-clicks (and select the word under the cursor).
+// clickRecord tracks the last mouse press so the next one can be read
+// as the second or third of a multi-click: where it landed, when, and
+// how many clicks the run is at. A click a row away, more than
+// doubleClickSlop columns off, or past doubleClickWindow starts a new
+// run at one.
 type clickRecord struct {
-	x, y int
-	when time.Time
+	x, y  int
+	when  time.Time
+	count int
+}
+
+// doubleClickSlop is how many columns a repeat click may drift from
+// the previous one and still count as the same spot. A finger on a
+// phone and a trackpad tap both wobble by a cell; requiring the exact
+// cell made double-click a gesture that only worked with a real mouse.
+const doubleClickSlop = 1
+
+// clickRun returns the multi-click count a press at (x, y) at time now
+// continues: last.count+1 when it lands on the same row within slop and
+// window, and 1 otherwise. The run wraps back to a single click after
+// the third, so a fourth click places the caret instead of
+// re-selecting the line.
+func clickRun(last clickRecord, x, y int, now time.Time) int {
+	if last.count == 0 || y != last.y || now.Sub(last.when) >= doubleClickWindow {
+		return 1
+	}
+	if dx := x - last.x; dx > doubleClickSlop || dx < -doubleClickSlop {
+		return 1
+	}
+	if last.count >= 3 {
+		return 1
+	}
+	return last.count + 1
+}
+
+// mouseState is the dispatcher's memory between events. held is the
+// button mask the previous event carried, which is what turns a stream
+// of Button1 reports into one press followed by motion: a fresh press is
+// a button in the mask now that was not in it last time, and everything
+// else with the button set is the same gesture continuing.
+type mouseState struct {
+	held tcell.ButtonMask
+	// pressTop is what sat on the overlay stack when Button1 last went
+	// down: nil for the base UI. A press that OPENS an overlay (the ≡
+	// button, a menu row that opens a confirm) is not that overlay's
+	// press, so the motion of the same held button is delivered to it
+	// with Button1 masked off — hover only, nothing to activate.
+	pressTop overlay.Overlay
+	// menuPress is the action menu's click latch. The prefab overlays
+	// carry their own (overlay.Press); the menu's state lives on App,
+	// so its latch lives here.
+	menuPress overlay.Press
+	// autoScrollStep is how many lines each auto-scroll tick moves —
+	// set from how far past the edge zone the drag is (see
+	// autoScrollStepFor), so a drag parked on the status bar scrolls
+	// faster than one hovering the editor's last row without the
+	// ticker itself running any faster.
+	autoScrollStep int
+	// events counts every mouse event the terminal has delivered.
+	// Zero after mouseProbeDelay under tmux is the one symptom of
+	// `set -g mouse` being off that the editor can observe — see
+	// noteMouseProbe.
+	events int
+	// hintShown records that the tmux mouse hint has flashed once
+	// this session; it never flashes twice.
+	hintShown bool
+}
+
+// mouseProbeDelay is how long after startup the tmux mouse hint waits
+// for a first mouse event before concluding none are coming. Ten
+// seconds is long enough that a keyboard-first user who has not
+// touched the mouse yet is not nagged the moment the editor opens.
+const mouseProbeDelay = 10 * time.Second
+
+// mouseHintMsg is the one-time flash when skiff runs under tmux and no
+// mouse event has arrived by mouseProbeDelay. tmux swallows mouse
+// reporting unless `set -g mouse on` is in its config, and from inside
+// the editor that looks exactly like a mouse-first UI ignoring every
+// click; the hint names the fix and the keyboard fallback.
+const mouseHintMsg = "No mouse events yet — tmux may need `set -g mouse on` (Esc ? for keyboard)"
+
+// tmuxActive reports whether the editor is running inside tmux, the
+// one multiplexer whose default config drops mouse reporting.
+func tmuxActive() bool {
+	return os.Getenv("TMUX") != ""
+}
+
+// startMouseProbe schedules the tmux mouse hint: after `after`, a
+// one-shot timer posts a Notify event that runs noteMouseProbe on the
+// loop. Nothing is scheduled outside tmux — a bare terminal with mouse
+// reporting off is a choice, not a misconfiguration. The timer's
+// callback goes through runGuarded so a panic there still reaches the
+// crash guard, and the mutation itself happens on the loop, never in
+// the timer goroutine.
+func (a *App) startMouseProbe(inTmux bool, after time.Duration) {
+	if !inTmux {
+		return
+	}
+	scr := a.screen
+	time.AfterFunc(after, func() {
+		a.runGuarded("mouse-probe", func() {
+			_ = scr.PostEvent(asyncjob.Notify(a.noteMouseProbe))
+		})
+	})
+}
+
+// noteMouseProbe is the probe's on-loop half: flash the tmux hint if no
+// mouse event has arrived, and only once per session.
+func (a *App) noteMouseProbe() {
+	if a.mouse.events > 0 || a.mouse.hintShown {
+		return
+	}
+	a.mouse.hintShown = true
+	a.flash(mouseHintMsg)
+}
+
+// autoScrollEdgeRows is how many rows at the top and bottom of the
+// editor rect arm auto-scroll during a drag. The trigger used to be
+// leaving the rect — one row of tab bar or status bar — which a finger
+// cannot park on, and which a tmux pane border sits on top of, so
+// drags in a split never scrolled at all. The zone now starts inside
+// the rect.
+const autoScrollEdgeRows = 2
+
+// autoScrollMaxStep caps the per-tick step: ~16 ticks a second times
+// eight lines is fast enough to cross any file, and past it a drag
+// overshoots what the user can watch.
+const autoScrollMaxStep = 8
+
+// autoScrollStepFor maps how many rows past the zone's inner row the
+// pointer is to the lines each tick scrolls: one at the inner row, one
+// more per row beyond it, capped at autoScrollMaxStep. Distance drives
+// speed so a long drag scrolls fast without a faster ticker.
+func autoScrollStepFor(past int) int {
+	return min(1+max(past, 0), autoScrollMaxStep)
+}
+
+// fresh reports which buttons btn presses for the first time — set now
+// and not on the previous event — and records btn as the new baseline.
+// Called exactly once per event, at the top of handleMouse, so every
+// branch below reads the same answer.
+func (m *mouseState) fresh(btn tcell.ButtonMask) tcell.ButtonMask {
+	const buttons = tcell.Button1 | tcell.Button2 | tcell.Button3
+	pressed := btn & buttons &^ m.held
+	m.held = btn & buttons
+	return pressed
 }
 
 // handleMouse routes a mouse event to whichever panel the cursor is over,
@@ -52,6 +197,28 @@ type clickRecord struct {
 func (a *App) handleMouse(ev *tcell.EventMouse) {
 	x, y := ev.Position()
 	btn := ev.Buttons()
+	a.mouse.events++
+	pressed := a.mouse.fresh(btn)
+	// Under minWidth/minHeight draw() paints only the "too small"
+	// notice, so there is nothing on screen to hit — but the tab rects
+	// from the last real frame were still there to hit-test against,
+	// and a tap on the notice could close a tab it never showed. Drop
+	// them and route nothing until the window grows back.
+	if a.width < minWidth || a.height < minHeight {
+		a.lastTabRects = nil
+		// The release is dropped with everything else, so a drag that
+		// was live when the window shrank has to be ended here — left
+		// latched, its auto-scroll ticker kept moving the buffer under
+		// a notice the user could not see past, until the next press.
+		a.dragMode = dragNone
+		a.stopAutoScroll()
+		return
+	}
+	leftDown := btn&tcell.Button1 != 0
+	leftPress := pressed&tcell.Button1 != 0
+	if leftPress {
+		a.mouse.pressTop = a.overlays.Top()
+	}
 
 	// Remember when we last saw Shift held down on ANY mouse event.
 	// Zellij + macOS Terminal split shift+wheel into two events: a
@@ -73,10 +240,48 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	// (ADR-0001's pass-through, now the adapter's answer rather than an
 	// absent branch here).
 	if ov := a.overlays.Top(); ov != nil {
+		// The overlay owns the pointer now, so whatever base-UI drag
+		// was in progress is over — an overlay opened mid-drag would
+		// otherwise leave the mode latched until a release the overlay
+		// swallows.
+		a.dragMode = dragNone
+		a.stopAutoScroll()
+		// A press that opened this overlay is not its press: the ≡
+		// button, a tree context row or a menu row that opens a confirm
+		// all fire on the press, and the drag that follows used to reach
+		// the new surface as a Button1 event over its own targets. The
+		// overlays compare by identity, which is safe because every
+		// opener hands the stack a pointer (or the one-word menu
+		// adapter).
+		if leftDown && !leftPress && ov != a.mouse.pressTop {
+			btn &^= tcell.Button1
+		}
 		ov.HandleMouse(x, y, btn)
 		return
 	}
 	if a.strip != nil && a.strip.handleMouse(x, y, btn) {
+		return
+	}
+
+	// Middle-click closes the tab under it — the browser and VS Code
+	// convention, and a second path to × that needs no aim at one cell.
+	// A fresh press only: the motion of a held middle button crossing
+	// the strip must not close every tab in its path, and a held one
+	// is otherwise inert.
+	if pressed&tcell.Button2 != 0 {
+		// A middle press while a left drag is live is a slip, not a
+		// close: honouring it swapped the active tab under a drag
+		// that stayed armed, so the next motion extended a selection
+		// in a buffer the user never pressed in.
+		if leftDown && a.dragMode != dragNone {
+			return
+		}
+		if r, ok := a.tabRectAt(x, y); ok {
+			a.requestCloseTab(a.tabs.At(r.Index))
+		}
+		return
+	}
+	if btn&tcell.Button2 != 0 {
 		return
 	}
 
@@ -142,8 +347,6 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		return
 	}
 
-	leftDown := btn&tcell.Button1 != 0
-
 	// Drag continuation: while we're mid-drag in the editor, every event
 	// with the button held extends the selection — even if the cursor has
 	// wandered out of the editor pane.
@@ -191,25 +394,54 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		return
 	}
 
-	// Initial press dispatch.
-	if leftDown && a.dragMode == dragNone {
+	// The preview's thumb drag: the bar is painted by drawMdPreview,
+	// so the grab contract is the editor bar's, applied to the rendered
+	// view's own scroll offset.
+	if leftDown && a.dragMode == dragMdPreviewScrollbar {
+		if st := a.activeMdPreview(); st != nil {
+			a.mdPreviewScrollbarTo(st, y)
+		}
+		return
+	}
+
+	// Motion with the button still held and no drag claimed above is
+	// nothing: the press already ran its handler, and running it again
+	// at every cell the pointer crosses is how a sideways drag used to
+	// close every tab in its path and a downward one toggled every
+	// folder. Only a FRESH press — Button1 set now, clear on the
+	// previous event — reaches the dispatch, so it runs once per press.
+	if leftDown && !leftPress {
+		return
+	}
+
+	// Initial press dispatch. A drag mode still set here is a stale
+	// latch (the release never reached us), and a new press ends it.
+	if leftPress {
+		a.dragMode = dragNone
+		a.stopAutoScroll()
 		sw := a.sidebarW()
-		splitX := a.splitterX()
 		// A press anywhere but the sidebar means the user has moved on
 		// from the Git panel's keyboard mode — drop the key capture so
 		// Enter/Space go back to the editor. No-op when unarmed.
-		if !(sw > 0 && x <= splitX) {
+		if !(sw > 0 && x < sw) {
 			a.exitGitPanelKeys()
 		}
+		// The sidebar's band is measured against sidebarW, not the
+		// splitter: when the Git panel fills a narrow window splitterX
+		// is -1 (there is no editor to resize against), and a test
+		// against it dropped every press on the panel — rows, the
+		// branch line, the buttons — while the wheel and right-click,
+		// which already measured against sw, kept working. The splitter
+		// column itself is claimed by the case above.
 		switch {
-		case splitX >= 0 && x == splitX:
+		case a.splitterHit(x, y):
 			a.dragMode = dragSidebar
-		case sw > 0 && x < splitX:
-			// The tree's bar and the Git panel's sit on the column
-			// just left of the splitter — whichever panel is up, that
-			// column has to be claimed before the row hit-test the
-			// rest of the sidebar falls through to. Only one of the
-			// two can hit: each opts out when its panel is hidden.
+		case sw > 0 && x < sw:
+			// The tree's bar and the Git panel's sit on the columns
+			// just left of the splitter — whichever panel is up, they
+			// have to be claimed before the row hit-test the rest of
+			// the sidebar falls through to. Only one of the two can
+			// hit: each opts out when its panel is hidden.
 			if a.treeScrollbarHit(x, y) {
 				a.treeScrollbarTo(y)
 				a.dragMode = dragTreeScrollbar
@@ -226,6 +458,21 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		case y == a.height-1:
 			a.statusBarClick(x)
 		case y > 0 && y < a.height-1:
+			// The preview replaces the editor's surface wholesale, bar
+			// included: its bar has to be tested before the editor's,
+			// or a long markdown file's own scrollbar (still "visible"
+			// on the tab) claims the column the preview painted.
+			if st := a.activeMdPreview(); st != nil {
+				if a.mdPreviewScrollbarHit(st, x, y) {
+					a.mdPreviewScrollbarTo(st, y)
+					a.dragMode = dragMdPreviewScrollbar
+					return
+				}
+				if a.mdPreviewPress(st, x, y) {
+					a.dragMode = dragMdPreview
+				}
+				return
+			}
 			if localY, ok := a.scrollbarHit(x, y); ok {
 				a.scrollbarTo(localY)
 				a.dragMode = dragScrollbar
@@ -238,14 +485,6 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 			// arming unconditionally let the next motion event drag out
 			// a selection the user never started — and the release copy
 			// it to the clipboard.
-			if t := a.activeTabPtr(); t != nil {
-				if st := a.mdPreviewFor(t); st != nil {
-					if a.mdPreviewPress(st, x, y) {
-						a.dragMode = dragMdPreview
-					}
-					return
-				}
-			}
 			if a.editorPress(x, y) {
 				a.dragMode = dragEditor
 			}
@@ -436,26 +675,44 @@ func (a *App) tabBarClick(x, _ int) {
 	// from — so the count cell beside the chevron is part of the button
 	// rather than a dead cell that activates the tab underneath it.
 	leftChev, rightChev := a.tabChevrons()
-	if leftChev.hit(x) {
+	bw := a.tabBadgeWidth()
+	if leftChev.hit(x, bw) {
 		a.scrollTabStrip(-tabScrollStep)
 		return
 	}
-	if rightChev.hit(x) {
+	if rightChev.hit(x, bw) {
 		a.scrollTabStrip(tabScrollStep)
 		return
 	}
-	for _, r := range a.lastTabRects {
-		if x >= r.X && x < r.X+r.Width {
-			if x == r.CloseX {
-				a.requestCloseTab(a.tabs.At(r.Index))
-				return
-			}
-			a.tabs.ActivateAt(r.Index)
-			a.ensureActiveTabVisible()
-			a.syncActiveTreeFile()
+	if r, ok := a.tabRectAt(x, 0); ok {
+		// The × is painted in one cell; the space before it is part of
+		// the target, because one cell is a coin toss on a phone and
+		// the miss — activating the tab you meant to close — is the
+		// gesture's own opposite. The same one-cell-wider rule the
+		// splitter and every scrollbar follow.
+		if x >= r.CloseX-1 && x <= r.CloseX {
+			a.requestCloseTab(a.tabs.At(r.Index))
 			return
 		}
+		a.tabs.ActivateAt(r.Index)
+		a.ensureActiveTabVisible()
+		a.syncActiveTreeFile()
 	}
+}
+
+// tabRectAt returns the tab rect under screen cell (x, y), reading the
+// geometry the last frame painted — the one hit-test every tab-strip
+// gesture (activate, ×, middle-click) shares.
+func (a *App) tabRectAt(x, y int) (tabRect, bool) {
+	if y != 0 {
+		return tabRect{}, false
+	}
+	for _, r := range a.lastTabRects {
+		if x >= r.X && x < r.X+r.Width {
+			return r, true
+		}
+	}
+	return tabRect{}, false
 }
 
 // syncActiveTreeFile mirrors the active tab path into the file tree.
@@ -503,14 +760,32 @@ func (a *App) editorPress(x, y int) bool {
 	}
 
 	now := time.Now()
-	if a.lastClick.x == x && a.lastClick.y == y && now.Sub(a.lastClick.when) < doubleClickWindow {
+	count := clickRun(a.lastClick, x, y, now)
+	a.lastClick = clickRecord{x: x, y: y, when: now, count: count}
+	switch count {
+	case 2:
 		a.selectWordAt(tab, pos)
-		a.lastClick = clickRecord{} // prevent triple-click from selecting nothing.
-		return true
+	case 3:
+		a.selectLineAt(tab, pos.Line)
+	default:
+		tab.MoveCursorTo(pos, false)
 	}
-	a.lastClick = clickRecord{x: x, y: y, when: now}
-	tab.MoveCursorTo(pos, false)
 	return true
+}
+
+// selectLineAt selects the whole of buffer line `line` including its
+// line break — the triple-click gesture, so a copy or delete of the
+// selection takes the line out cleanly rather than leaving an empty
+// one. The last line has no break to take, so the selection ends at
+// its end. Built from MoveCursorTo so the caret-moved flag and the
+// undo-group break come for free.
+func (a *App) selectLineAt(tab *editor.Tab, line int) {
+	tab.MoveCursorTo(editor.Position{Line: line, Col: 0}, false)
+	end := editor.Position{Line: line + 1, Col: 0}
+	if line+1 >= tab.Buffer.LineCount() {
+		end = editor.Position{Line: line, Col: len(tab.Buffer.LineRunes(line))}
+	}
+	tab.MoveCursorTo(end, true)
 }
 
 // openGitHunkAt kicks a diff preview when the user clicks a gutter
@@ -522,8 +797,8 @@ func (a *App) openGitHunkAt(tab *editor.Tab, localX, localY int) bool {
 	if localX != 0 || localY < 0 {
 		return false
 	}
-	line := tab.ScrollY + localY
-	if tab.GitLines[line] == editor.GitLineNone {
+	line, ok := a.gutterLineAt(tab, localY)
+	if !ok {
 		return false
 	}
 	path := tab.Path
@@ -550,13 +825,16 @@ func (a *App) editorDrag(x, y int) {
 	a.lastDragX = x
 	a.lastDragY = y
 
-	// Edge detection: outside the editor's vertical bounds turns on
-	// auto-scroll; back inside turns it off.
+	// Edge detection: the autoScrollEdgeRows at either end of the rect
+	// and everything beyond them turn on auto-scroll, faster the
+	// further out the pointer is; the middle turns it off.
+	top := ey + autoScrollEdgeRows - 1
+	bottom := ey + eh - autoScrollEdgeRows
 	switch {
-	case y < ey:
-		a.startAutoScroll(-1)
-	case y >= ey+eh:
-		a.startAutoScroll(1)
+	case y <= top:
+		a.startAutoScroll(-1, autoScrollStepFor(top-y))
+	case y >= bottom:
+		a.startAutoScroll(1, autoScrollStepFor(y-bottom))
 	default:
 		a.stopAutoScroll()
 	}
@@ -585,10 +863,11 @@ func (a *App) editorDrag(x, y int) {
 
 // startAutoScroll begins a timer goroutine that posts autoScrollEvents at
 // autoScrollTick intervals so the editor keeps scrolling while the user
-// holds the mouse past an edge. dir is -1 (up) or +1 (down). Calling with
-// the same direction is a no-op so we don't restart the timer on every
-// drag motion event.
-func (a *App) startAutoScroll(dir int) {
+// holds the mouse past an edge. dir is -1 (up) or +1 (down); step is
+// the lines per tick. Calling with the same direction only updates the
+// step, so the timer is not restarted on every drag motion event.
+func (a *App) startAutoScroll(dir, step int) {
+	a.mouse.autoScrollStep = step
 	if a.autoScrollDir == dir {
 		return
 	}
@@ -620,11 +899,11 @@ func (a *App) stopAutoScroll() {
 	a.autoScrollDir = 0
 }
 
-// handleAutoScroll runs once per autoScrollEvent: nudge the viewport in the
-// armed direction and extend the selection to the edge row at the user's
-// last known mouse column. Bails out (and stops the timer) if anything
-// suggests the user is no longer drag-selecting (button released, menu
-// opened, no active tab).
+// handleAutoScroll runs once per autoScrollEvent: nudge the viewport in
+// the armed direction by the armed step and extend the selection to the
+// user's last known mouse cell, clamped into the rect. Bails out (and
+// stops the timer) if anything suggests the user is no longer
+// drag-selecting (button released, menu opened, no active tab).
 func (a *App) handleAutoScroll() {
 	if a.autoScrollDir == 0 || a.dragMode != dragEditor || a.anyModalOpen() {
 		a.stopAutoScroll()
@@ -635,20 +914,11 @@ func (a *App) handleAutoScroll() {
 		a.stopAutoScroll()
 		return
 	}
-	tab.Scroll(a.autoScrollDir)
+	tab.Scroll(a.autoScrollDir * max(a.mouse.autoScrollStep, 1))
 
-	ex, _, ew, eh := a.editorRect()
-	localX := a.lastDragX - ex
-	if localX < 0 {
-		localX = 0
-	}
-	if localX >= ew {
-		localX = ew - 1
-	}
-	localY := eh - 1
-	if a.autoScrollDir < 0 {
-		localY = 0
-	}
+	ex, ey, ew, eh := a.editorRect()
+	localX := min(max(a.lastDragX-ex, 0), ew-1)
+	localY := min(max(a.lastDragY-ey, 0), eh-1)
 	pos, ok := tab.HitTest(localX, localY, ew, eh)
 	if !ok {
 		return
@@ -656,23 +926,111 @@ func (a *App) handleAutoScroll() {
 	tab.MoveCursorTo(pos, true)
 }
 
+// scrollbarGrabWidth is how many editor columns answer to the bar
+// painted in the rightmost one: the bar and the cell to its left. The
+// same two-cell grab the sidebar's bars get, for the same reason — a
+// one-cell target is a miss on a touchscreen, and the cell it borrows
+// is the last text column, where a press otherwise just places the
+// caret at the end of a long line.
+const scrollbarGrabWidth = 2
+
 // scrollbarHit reports whether (x, y) lands on the active tab's
-// scrollbar column, returning the bar-local row when it does. The
-// geometry must mirror Render's: rightmost editor column, only when the
-// file is taller than the viewport.
+// scrollbar, returning the bar-local row when it does. The geometry
+// must mirror Render's: the bar is the rightmost editor column, only
+// when the file is taller than the viewport; the grab zone is
+// scrollbarGrabWidth columns ending there.
 func (a *App) scrollbarHit(x, y int) (int, bool) {
 	tab := a.activeTabPtr()
 	if tab == nil {
 		return 0, false
 	}
 	ex, ey, ew, eh := a.editorRect()
-	if ew <= 2 || !tab.ScrollbarVisible(eh) {
+	if ew <= scrollbarGrabWidth+1 || !tab.ScrollbarVisible(eh) {
 		return 0, false
 	}
-	if x != ex+ew-1 || y < ey || y >= ey+eh {
+	if x <= ex+ew-1-scrollbarGrabWidth || x > ex+ew-1 || y < ey || y >= ey+eh {
 		return 0, false
 	}
 	return y - ey, true
+}
+
+// splitterHit reports whether a press at (x, y) grabs the sidebar's
+// resize splitter. The splitter is painted in one column and answers
+// to three: itself and a neighbour on each side, because a one-cell
+// drag handle is the hardest target on the screen to hit from a phone.
+// Both neighbours have owners, and each overlap goes to whichever
+// target is PAINTED there: a cell that shows a scrollbar thumb or a git
+// change marker is a promise, and a press on it has to keep it. On the
+// left that is the sidebar bar's column while a bar is drawn (the bar's
+// own grab widens inward instead, see filetree.ScrollbarGrabWidth); on
+// the right it is the editor's gutter marker on that row, which opens a
+// hunk diff. A plain row cell or an unmarked gutter cell goes to the
+// splitter, whose miss is the cheapest — a grab released in place
+// changes nothing.
+//
+// The neighbours widen the grab on the body rows only. On the tab bar
+// the right neighbour is the ≡ button's first cell (menuButtonRect
+// starts at sidebarW) and the left one the sidebar header's last; on
+// the status row both are the bar's own targets. A press there used
+// to arm a sidebar drag instead of opening the menu — on a phone, the
+// cell most likely to be hit first.
+func (a *App) splitterHit(x, y int) bool {
+	splitX := a.splitterX()
+	if splitX < 0 {
+		return false
+	}
+	if x == splitX {
+		return true
+	}
+	if y <= 0 || y >= a.height-1 {
+		return false
+	}
+	switch x {
+	case splitX - 1:
+		return !a.treeScrollbarHit(x, y) && !a.gitPanelScrollbarHit(x, y)
+	case splitX + 1:
+		return !a.gutterMarkerAt(y)
+	}
+	return false
+}
+
+// gutterMarkerAt reports whether the editor row at screen row y carries
+// a git change marker in its gutter column — the one cell of the
+// editor's first column that is a click target of its own (see
+// openGitHunkAt).
+func (a *App) gutterMarkerAt(y int) bool {
+	tab := a.activeTabPtr()
+	if tab == nil || tab.IsImage() || a.activeMdPreview() != nil {
+		return false
+	}
+	_, ey, _, eh := a.editorRect()
+	if y < ey || y >= ey+eh {
+		return false
+	}
+	_, ok := a.gutterLineAt(tab, y-ey)
+	return ok
+}
+
+// gutterLineAt maps editor-local row localY to the buffer line whose
+// git marker is painted in that row's gutter, and reports false when
+// the row carries none: it is past the buffer's end, the line is
+// clean, or — in wrap mode — it is a continuation row, whose gutter
+// is blank because only a line's first segment shows its number and
+// marker. The row goes through the tab's own HitTest so the answer is
+// wrap-aware: ScrollY+localY names the wrong line as soon as any line
+// above it wraps, and the gutter click used to open the hunk of a
+// line the marker was not on. A gutter hit lands on the segment's
+// first rune, so Col == 0 is exactly "this is the line's first row".
+func (a *App) gutterLineAt(tab *editor.Tab, localY int) (int, bool) {
+	_, _, ew, eh := a.editorRect()
+	pos, ok := tab.HitTest(0, localY, ew, eh)
+	if !ok || pos.Col != 0 {
+		return 0, false
+	}
+	if tab.GitLines[pos.Line] == editor.GitLineNone {
+		return 0, false
+	}
+	return pos.Line, true
 }
 
 // scrollbarTo scrolls the active tab so the thumb centers on the
@@ -692,11 +1050,20 @@ func (a *App) scrollbarTo(localY int) {
 }
 
 // treeScrollbarHit reports whether (x, y) lands on the file tree's
-// scrollbar. The bar owns the tree rect's rightmost column, which is
+// scrollbar. The bar is painted in the tree rect's rightmost column,
 // the cell immediately LEFT of the resize splitter (sidebarRect is one
-// column narrower than the sidebar block) — so the splitter, the bar
-// and the tree rows occupy three distinct column ranges at any y and
-// each keeps its own clicks.
+// column narrower than the sidebar block), and answers to that column
+// and the one to its left (filetree.ScrollbarGrabWidth).
+//
+// The invariant is that the splitter, the bar and the tree rows occupy
+// three distinct column ranges at any y and each keeps its own clicks
+// — but the ranges are hit zones, wider than what is painted, and the
+// press dispatch resolves them in a fixed order: the splitter first
+// (its zone reaches one column into the bar's painted cell only while
+// no bar is drawn there, see splitterHit), then the bar (whose grab
+// reaches one column into the rows), then the rows. So at any y,
+// walking right to left: splitter zone, bar zone, row zone — never
+// interleaved, never a cell with two owners.
 //
 // The Git panel draws its own list over the same rect and has no tree
 // bar, so it opts out entirely.
@@ -748,6 +1115,40 @@ func (a *App) gitPanelScrollbarTo(y int) {
 	}
 	_, sy, _, _ := a.sidebarRect()
 	a.gitPanelScrollToBar(y - sy)
+}
+
+// activeMdPreview returns the active tab's markdown preview state, or
+// nil when the active tab is not in preview mode — the one question
+// every preview branch in the dispatcher asks first.
+func (a *App) activeMdPreview() *mdPreviewState {
+	t := a.activeTabPtr()
+	if t == nil {
+		return nil
+	}
+	return a.mdPreviewFor(t)
+}
+
+// mdPreviewScrollbarHit reports whether (x, y) lands on the preview's
+// scrollbar: the editor rect's rightmost column plus the editor bar's
+// scrollbarGrabWidth, and only while drawMdPreview paints a bar there
+// (a document that fits has none).
+func (a *App) mdPreviewScrollbarHit(st *mdPreviewState, x, y int) bool {
+	ex, ey, ew, eh := a.editorRect()
+	if x <= ex+ew-1-scrollbarGrabWidth || x > ex+ew-1 || y < ey || y >= ey+eh {
+		return false
+	}
+	_, _, ok := scrollbar.Geom(len(st.lines), eh, st.scroll)
+	return ok
+}
+
+// mdPreviewScrollbarTo scrolls the preview so its thumb centers on
+// screen row y — shared by the press and the drag, like every other bar.
+func (a *App) mdPreviewScrollbarTo(st *mdPreviewState, y int) {
+	_, ey, _, eh := a.editorRect()
+	if _, _, ok := scrollbar.Geom(len(st.lines), eh, st.scroll); !ok {
+		return
+	}
+	st.scroll = scrollbar.TargetForThumb(len(st.lines), eh, y-ey)
 }
 
 // selectWordAt selects the word under the buffer position p (or does

@@ -23,24 +23,195 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/customactions"
+	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/icons"
+	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 	"github.com/johnlam90/skiff/internal/version"
 )
 
-// TestDetectLangLabel covers the language label helper's three cases.
-func TestDetectLangLabel(t *testing.T) {
-	cases := map[string]string{
-		"":               "text",
-		"foo.go":         "go",
-		"foo":            "text",
-		"path/to/x.py":   "py",
-		"archive.tar.gz": "gz",
+// TestTabLocationLabel pins the readout's lead piece: a project file is
+// named by its repo-relative, slash-separated path (the part that tells
+// two draw.go tabs apart, where the old extension label said nothing
+// the tab name did not), a file outside the root by its base name, and
+// a pathless buffer as "untitled".
+func TestTabLocationLabel(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	inner := filepath.Join(dir, "internal", "app")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
 	}
-	for in, want := range cases {
-		if got := detectLangLabel(in); got != want {
-			t.Errorf("detectLangLabel(%q) = %q, want %q", in, got, want)
+	deep := openTestFile(t, a, inner, "draw.go", "package app\n")
+	if got := a.tabLocationLabel(a.activeTabPtr()); got != "internal/app/draw.go" {
+		t.Fatalf("label = %q, want the repo-relative path", got)
+	}
+	_ = deep
+	outside := openTestFile(t, a, t.TempDir(), "elsewhere.txt", "x\n")
+	if got := a.tabLocationLabel(a.activeTabPtr()); got != "elsewhere.txt" {
+		t.Fatalf("label for %s = %q, want the base name", outside, got)
+	}
+	untitled, _ := editor.NewTab("")
+	if got := a.tabLocationLabel(untitled); got != "untitled" {
+		t.Fatalf("label for a pathless buffer = %q, want untitled", got)
+	}
+}
+
+// TestLeftEllipsisPath pins the left-hand ellipsis: leading components
+// go first so the tail survives, and a path that cannot keep even its
+// last component is reported unfit rather than reduced to "…".
+func TestLeftEllipsisPath(t *testing.T) {
+	cases := []struct {
+		path string
+		maxW int
+		want string
+		ok   bool
+	}{
+		{"internal/app/draw.go", 30, "internal/app/draw.go", true},
+		{"internal/app/draw.go", 14, "…/app/draw.go", true},
+		{"internal/app/draw.go", 10, "…/draw.go", true},
+		{"internal/app/draw.go", 8, "", false},
+		{"draw.go", 7, "draw.go", true},
+		{"draw.go", 6, "", false},
+	}
+	for _, c := range cases {
+		got, ok := leftEllipsisPath(c.path, c.maxW)
+		if got != c.want || ok != c.ok {
+			t.Errorf("leftEllipsisPath(%q, %d) = (%q, %v), want (%q, %v)", c.path, c.maxW, got, ok, c.want, c.ok)
 		}
+	}
+}
+
+// statusReadoutApp opens internal/app/draw.go with a 281-line body and
+// a dirty buffer — the readout shape the narrow-bar bug was observed
+// with ("281 lines ·" and "997 " hard-cut at 48 columns).
+func statusReadoutApp(t *testing.T, w, h int) *App {
+	t.Helper()
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	inner := filepath.Join(dir, "internal", "app")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	openTestFile(t, a, inner, "draw.go", strings.Repeat("package app\n", 280)+"package app")
+	a.activeTabPtr().Dirty = true
+	a.gitSnap.Branch = "feature/status-bar"
+	a.tree.IconsEnabled = false
+	resizeTestApp(t, a, w, h)
+	a.statusMsg = ""
+	return a
+}
+
+// TestStatusLeftText_DropsWholePiecesAtEveryWidth is the ladder's
+// contract: at 80 columns the readout leads with the path, at 48 the
+// path is ellipsised or dropped but "Ln, Col" and the line count stay
+// whole, at 40 whatever remains is still a whole tier — and at NO width
+// does the bar hold a dangling "·" or a cut number.
+func TestStatusLeftText_DropsWholePiecesAtEveryWidth(t *testing.T) {
+	a := statusReadoutApp(t, 80, 24)
+	_, _, sw, _ := a.statusRect()
+	full := a.statusLeftText(a.statusLeftMax(sw))
+	if !strings.HasPrefix(full, " internal/app/draw.go · Ln 1, Col 1 · 281 lines · ●") {
+		t.Fatalf("80-column readout = %q, want the path-led tier", full)
+	}
+	tab := a.activeTabPtr()
+	for width := 4; width <= 80; width++ {
+		got := a.statusLeftText(width)
+		tiers := a.statusReadoutTiers(tab, width)
+		whole := false
+		for _, tier := range tiers {
+			if got == tier {
+				whole = true
+			}
+		}
+		if !whole {
+			t.Fatalf("width %d: readout %q is not a whole tier %q", width, got, tiers)
+		}
+		if runeLen(got) > width && got != tiers[len(tiers)-1] {
+			t.Fatalf("width %d: readout %q overruns while a shorter tier exists", width, got)
+		}
+		if strings.HasSuffix(strings.TrimSpace(got), "·") {
+			t.Fatalf("width %d: readout %q ends on a dangling separator", width, got)
+		}
+	}
+	// The observed failures: at 48 and 40 columns the painted bar must
+	// still read as whole pieces.
+	for _, width := range []int{48, 40} {
+		resizeTestApp(t, a, width, 16)
+		a.draw()
+		scr := a.screen.(tcell.SimulationScreen)
+		scr.Show()
+		bar := screenLine(scr, a.height-1)
+		if !strings.Contains(bar, "Ln 1, Col 1") {
+			t.Fatalf("%d columns: bar lost the caret position: %q", width, bar)
+		}
+		if strings.Contains(bar, "lines ·  ") || strings.Contains(bar, " 28 ") || strings.Contains(bar, "281 lines · ") && !strings.Contains(bar, "●") {
+			t.Fatalf("%d columns: bar shows a cut piece: %q", width, bar)
+		}
+	}
+}
+
+// TestStatusRightSegments_DropOrderFollowsImportance pins the admission
+// order the marker's own comment promised: on a bar too narrow for
+// everything, the disk-conflict marker and the Esc tag survive and the
+// git chip is what shortens — first to the branch's last component,
+// then to a bare glyph — before anything more important is lost. The
+// paint order (git rightmost, conflict left of the Esc tag) is
+// unchanged by the reordering.
+func TestStatusRightSegments_DropOrderFollowsImportance(t *testing.T) {
+	a := statusReadoutApp(t, 80, 24)
+	a.noteDiskConflict(a.activeTabPtr().Path, time.Now())
+	a.lastEscape = time.Now()
+	texts := func(sw int) []string {
+		var out []string
+		for _, seg := range a.statusRightSegments(sw) {
+			out = append(out, seg.text)
+		}
+		return out
+	}
+	wide := texts(80)
+	if len(wide) != 3 || wide[0] != " feature/status-bar " || wide[1] != "Esc… " || wide[2] != statusConflictTag {
+		t.Fatalf("80-column group = %q, want full git chip, Esc tag, conflict marker in paint order", wide)
+	}
+	// Room for the conflict tag and Esc tag with a few cells over: the
+	// chip must shorten rather than the marker vanishing.
+	narrow := texts(runeLen(statusConflictTag) + runeLen("Esc… ") + runeLen(" status-bar ") + 2)
+	if len(narrow) != 3 || narrow[0] != " status-bar " {
+		t.Fatalf("narrow group = %q, want the basename chip beside both tags", narrow)
+	}
+	tighter := texts(runeLen(statusConflictTag) + runeLen("Esc… ") + runeLen(" ⎇ ") + 2)
+	if len(tighter) != 3 || tighter[0] != " ⎇ " {
+		t.Fatalf("tighter group = %q, want the bare glyph chip beside both tags", tighter)
+	}
+	tightest := texts(runeLen(statusConflictTag) + 2)
+	if len(tightest) != 1 || tightest[0] != statusConflictTag {
+		t.Fatalf("tightest group = %q, want the conflict marker alone", tightest)
+	}
+}
+
+// TestStatusGitChipForms pins the chip's ladder, including the dirty
+// count riding every rung: the person who checked out
+// feature/widgets/tabs knows it as "tabs", and even the bare glyph
+// still says "repo, N changed, click here".
+func TestStatusGitChipForms(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.gitSnap.Branch = "feature/widgets/tabs"
+	a.gitSnap.Ahead = 2
+	a.tree.DirtyFiles = map[string]filetree.GitChangeKind{"a": filetree.GitChangeModified, "b": filetree.GitChangeAdded}
+	got := a.statusGitChipForms()
+	want := []string{" feature/widgets/tabs ↑2 · 2 ", " tabs · 2 ", " ⎇ 2 "}
+	if len(got) != len(want) {
+		t.Fatalf("forms = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("form %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	a.gitSnap.Branch = ""
+	if forms := a.statusGitChipForms(); forms != nil {
+		t.Fatalf("no repo should yield no forms, got %q", forms)
 	}
 }
 
@@ -127,7 +298,7 @@ func TestDraw_AllPanels(t *testing.T) {
 
 	a.openTreeContext(a.tree.Root, 5, 5)
 	a.draw()
-	paints("tree context", "Copy rel path")
+	paints("tree context", "Copy relative path")
 	a.closeAllModals()
 
 	a.flash("hello")
@@ -247,6 +418,131 @@ func TestLayoutTabs_IconsExpandWidth(t *testing.T) {
 	}
 }
 
+// TestTabLabels_DisambiguateSharedBasenames pins the strip's answer to
+// three open index.ts files rendering identically: a label that
+// collides with another open tab's grows a trailing path component
+// until the two differ, while a name nothing else shares stays bare.
+// The disambiguation lives in the strip, not in Tab.DisplayName — it
+// is a property of what else is open, not of the file.
+func TestTabLabels_DisambiguateSharedBasenames(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	for _, sub := range []string{"web", "api", "web/admin"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		openTestFile(t, a, filepath.Join(dir, sub), "index.ts", "export {}\n")
+	}
+	openTestFile(t, a, dir, "README.md", "# r\n")
+	got := a.tabLabels()
+	want := []string{"web/index.ts", "api/index.ts", "admin/index.ts", "README.md"}
+	if len(got) != len(want) {
+		t.Fatalf("labels = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("label %d = %q, want %q (all %q)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestTabLabels_ClipLongNamesInCells pins the cap and its unit: a name
+// past maxTabLabelCells is ellipsised, and the measure is cells — a
+// CJK name of eight ideographs is sixteen cells, not eight runes, and
+// lays out (and closes) at the cell it paints in.
+func TestTabLabels_ClipLongNamesInCells(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	a.tree.IconsEnabled = false
+	long := strings.Repeat("x", maxTabLabelCells+5) + ".go"
+	openTestFile(t, a, dir, long, "package x\n")
+	cjk := "日本語日本語日本.md"
+	openTestFile(t, a, dir, cjk, "# j\n")
+	labels := a.tabLabels()
+	if textdraw.Width(labels[0]) != maxTabLabelCells || !strings.HasSuffix(labels[0], "…") {
+		t.Fatalf("long label = %q (%d cells), want %d cells ending in …", labels[0], textdraw.Width(labels[0]), maxTabLabelCells)
+	}
+	if labels[1] != cjk {
+		t.Fatalf("CJK label = %q, want it whole at %d cells", labels[1], textdraw.Width(cjk))
+	}
+	rects := a.layoutTabs()
+	if want := 1 + 2 + textdraw.Width(cjk) + 3; rects[1].Width != want {
+		t.Fatalf("CJK tab width = %d, want %d cells (not %d runes)", rects[1].Width, want, len([]rune(cjk)))
+	}
+	a.drawTabBar()
+	a.screen.Show()
+	cells, _, _ := a.screen.(tcell.SimulationScreen).GetContents()
+	for _, r := range a.lastTabRects {
+		if c := cells[r.CloseX]; len(c.Runes) == 0 || c.Runes[0] != '×' {
+			t.Fatalf("tab %d: CloseX %d holds %q, want × (layout and paint disagree)", r.Index, r.CloseX, c.Runes)
+		}
+	}
+}
+
+// TestTabStrip_BadgeOwnsItsCells is the regression test for "‹2.go ×":
+// with eight tabs open and the strip scrolled, the left badge paints in
+// its own reserved slot and the first visible tab's label is intact
+// right after it — and every remembered hit rect lies inside the tab
+// window, so a click on the badge's cells never reaches a tab.
+func TestTabStrip_BadgeOwnsItsCells(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	openManyTabs(t, a, dir, 8)
+	a.tabScroll = a.maxTabScroll() / 2
+	if nl, nr := a.tabOverflow(); nl == 0 || nr == 0 {
+		t.Fatalf("precondition: want tabs hidden both ways, got %d/%d", nl, nr)
+	}
+	a.drawTabBar()
+	a.screen.Show()
+	row := []rune(screenLine(a.screen.(tcell.SimulationScreen), 0))
+
+	stripX, stripW := a.tabStripRegion()
+	winX, winW := a.tabWindow()
+	left, right := a.tabChevrons()
+	if left.X != stripX || !strings.HasPrefix(left.Label, "‹") {
+		t.Fatalf("left badge = %+v, want it at the strip's first cell", left)
+	}
+	if right.X+textdraw.Width(right.Label) != stripX+stripW || !strings.HasSuffix(right.Label, "›") {
+		t.Fatalf("right badge = %+v, want it ending on the strip's last cell", right)
+	}
+	// The badge slot holds the badge and then blank cells — never a
+	// tab's glyphs.
+	for x := stripX + textdraw.Width(left.Label); x < winX; x++ {
+		if row[x] != ' ' {
+			t.Fatalf("cell %d in the badge slot holds %q: %q", x, row[x], string(row))
+		}
+	}
+	// The first visible tab: its label appears whole, starting after
+	// the slot.
+	var first *tabRect
+	for i := range a.lastTabRects {
+		r := a.lastTabRects[i]
+		if r.CloseX >= 0 && r.X >= winX {
+			first = &r
+			break
+		}
+	}
+	if first == nil {
+		t.Fatal("no fully visible tab after the badge")
+	}
+	painted := string(row[first.X : first.X+first.Width])
+	if !strings.Contains(painted, first.Label) || strings.ContainsRune(painted, '‹') {
+		t.Fatalf("first visible tab painted as %q, want %q intact after the badge", painted, first.Label)
+	}
+	for _, r := range a.lastTabRects {
+		if r.X < winX || r.X+r.Width > winX+winW {
+			t.Fatalf("hit rect %+v escapes the tab window [%d,%d)", r, winX, winX+winW)
+		}
+		if r.CloseX >= 0 && (r.CloseX < r.X || r.CloseX >= r.X+r.Width) {
+			t.Fatalf("hit rect %+v has a CloseX outside itself", r)
+		}
+	}
+	if bw := a.tabBadgeWidth(); left.hit(winX, bw) || right.hit(winX+winW-1, bw) {
+		t.Fatal("badge hit ranges must not reach into the tab window")
+	}
+}
+
 // TestDrawTabBar_RendersIconWhenEnabled verifies the glyph actually
 // lands on screen between the dirty slot and the file name when
 // icons are enabled. We use the simulation screen and look for the
@@ -326,6 +622,52 @@ func TestTabBar_ActiveTabScrollsIntoView(t *testing.T) {
 	}
 }
 
+// TestTabScroll_SnapsToTabBoundaries pins the whole-tab window: after
+// the active tab is scrolled into view, and after every chevron / wheel
+// step, the window's left edge sits exactly on a tab start — never
+// inside a tab, where the strip used to paint a bare filename tail.
+func TestTabScroll_SnapsToTabBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	openManyTabs(t, a, dir, 8)
+	winX, winW := a.tabWindow()
+	onBoundary := func(what string) {
+		t.Helper()
+		for _, r := range a.layoutTabs() {
+			if r.X-winX == a.tabScroll {
+				return
+			}
+		}
+		t.Fatalf("%s: tabScroll %d is not a tab start", what, a.tabScroll)
+	}
+	a.ensureActiveTabVisible()
+	if a.tabScroll == 0 {
+		t.Fatal("precondition: the last of 8 tabs should need scrolling at 80 columns")
+	}
+	onBoundary("after ensureActiveTabVisible")
+	if r := a.layoutTabs()[a.tabs.ActiveIndex()]; r.X-a.tabScroll < winX || r.X+r.Width-a.tabScroll > winX+winW {
+		t.Fatal("snapping must keep the active tab in the window")
+	}
+	before := a.tabScroll
+	a.scrollTabStrip(-tabScrollStep)
+	onBoundary("after a step left")
+	if a.tabScroll >= before {
+		t.Fatalf("a step left should move to the previous tab start, got %d from %d", a.tabScroll, before)
+	}
+	a.scrollTabStrip(tabScrollStep)
+	onBoundary("after a step right")
+	if a.tabScroll != before {
+		t.Fatalf("right then left should return to %d, got %d", before, a.tabScroll)
+	}
+	for i := 0; i < 20; i++ {
+		a.scrollTabStrip(-tabScrollStep)
+	}
+	if a.tabScroll != 0 {
+		t.Fatalf("stepping left past the start should stop at 0, got %d", a.tabScroll)
+	}
+}
+
 // TestTabBar_ChevronsMarkOverflow pins the marker rules: at scroll 0
 // with overflow only a › shows; scrolled to the end only a ‹ shows.
 func TestTabBar_ChevronsMarkOverflow(t *testing.T) {
@@ -381,7 +723,9 @@ func TestDrawStatusBar_ArmedEscTag(t *testing.T) {
 // the editor pane: on a narrow pane the 45-rune hint used to start left
 // of the editor rect and overwrite file-tree rows and the splitter.
 func TestDrawEmptyEditor_ClipsToEditorRect(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
+	dir := t.TempDir()
+	mkFile(t, dir, "a.txt", "x") // a tree with rows: the two-line hint shape
+	a := newTestApp(t, dir)
 	scr := a.screen.(tcell.SimulationScreen)
 	scr.SetSize(60, 24)
 	a.width, a.height = scr.Size()
@@ -406,7 +750,9 @@ func TestDrawEmptyEditor_ClipsToEditorRect(t *testing.T) {
 // reporting, so the empty state has to name the Esc-leader gestures that
 // actually open something: Esc p, Esc n, and Esc Esc for the menu.
 func TestDrawEmptyEditor_NamesKeyboardRoutes(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
+	dir := t.TempDir()
+	mkFile(t, dir, "a.txt", "x")
+	a := newTestApp(t, dir)
 	a.draw()
 	a.screen.Show()
 
@@ -418,19 +764,118 @@ func TestDrawEmptyEditor_NamesKeyboardRoutes(t *testing.T) {
 }
 
 // TestDrawEmptyEditor_HintsAreLeaderBindings guards the hint text
-// against the bindings drifting out from under it: every key the second
-// hint advertises must still be a live leader binding, because a hint
-// that names a removed gesture is worse than no hint.
+// against the bindings drifting out from under it: every "Esc <key>"
+// any shape's hint advertises must still be a live leader binding,
+// because a hint that names a removed gesture is worse than no hint.
+// The keys are read off the hint text itself, so a new shape cannot
+// advertise a key this test never heard of.
 func TestDrawEmptyEditor_HintsAreLeaderBindings(t *testing.T) {
-	hint := emptyEditorHints[len(emptyEditorHints)-1]
 	bound := map[rune]bool{}
 	for _, b := range leaderBindings() {
 		bound[b.key] = true
 	}
-	for _, key := range []rune{'p', 'n'} {
-		if !bound[key] {
-			t.Fatalf("hint %q advertises Esc %c but nothing is bound to it", hint, key)
+	for _, shape := range emptyEditorShapes(t) {
+		for _, hint := range shape.app.emptyEditorHints() {
+			words := strings.Fields(hint)
+			for i := 0; i+1 < len(words); i++ {
+				if words[i] != "Esc" {
+					continue
+				}
+				if words[i+1] == "Esc" { // the double-tap that opens the menu
+					i++
+					continue
+				}
+				key := []rune(words[i+1])
+				if len(key) != 1 || !bound[key[0]] {
+					t.Errorf("%s: hint %q advertises Esc %s but nothing is bound to it", shape.name, hint, words[i+1])
+				}
+			}
 		}
+	}
+}
+
+// emptyEditorShape is one session shape the empty-editor hint answers
+// for, with the app already in that shape and the text every hint line
+// must (and must not) carry.
+type emptyEditorShape struct {
+	name    string
+	app     *App
+	want    []string
+	forbids []string
+}
+
+// emptyEditorShapes builds the four shapes emptyEditorHints branches on:
+// a tree with rows, the tree hidden, single-file mode, and an empty
+// project. Shared by the hint tests so each pins the same apps.
+func emptyEditorShapes(t *testing.T) []emptyEditorShape {
+	t.Helper()
+	withRows := t.TempDir()
+	mkFile(t, withRows, "a.txt", "x")
+	tree := newTestApp(t, withRows)
+
+	hidden := newTestApp(t, withRows)
+	hidden.menuToggleSidebar()
+
+	single := newSingleFileTestApp(t, filepath.Join(t.TempDir(), "only.txt"))
+	if single.tabs.Len() != 1 {
+		t.Fatalf("single-file fixture opened %d tabs, want 1", single.tabs.Len())
+	}
+	single.closeTab(single.activeTabPtr())
+
+	empty := newTestApp(t, t.TempDir())
+
+	return []emptyEditorShape{
+		{"tree with rows", tree, []string{"Click a file", "Esc p", "Esc n", "Esc Esc"}, []string{"Esc t"}},
+		{"tree hidden", hidden, []string{"Esc t", "file explorer", "Esc p", "Esc Esc"}, []string{"Click a file"}},
+		{"single file", single, []string{"Esc n", "Esc Esc"}, []string{"Click a file", "Esc p", "Esc t"}},
+		{"empty project", empty, []string{"Esc n", "≡"}, []string{"Click a file", "Esc p"}},
+	}
+}
+
+// newSingleFileTestApp builds the real single-file shape (tree nil,
+// sidebar hidden, no finder) on a simulation screen over a freshly
+// seeded file.
+func newSingleFileTestApp(t *testing.T, path string) *App {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("one\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	t.Cleanup(func() { scr.Fini() })
+	scr.SetSize(120, 40)
+	a := newSingleFileApp(scr, path)
+	a.width, a.height = scr.Size()
+	return a
+}
+
+// TestDrawEmptyEditor_HintsFollowTheSessionShape pins the per-shape
+// text: a single-file session is no longer told to click a tree it does
+// not have, an empty project is not told to click a file that does not
+// exist, and a hidden tree is told the key that brings it back. Each
+// shape is drawn, so the assertion is on the painted screen.
+func TestDrawEmptyEditor_HintsFollowTheSessionShape(t *testing.T) {
+	for _, shape := range emptyEditorShapes(t) {
+		t.Run(shape.name, func(t *testing.T) {
+			a := shape.app
+			if a.tabs.Len() != 0 {
+				t.Fatalf("fixture has %d tabs open; the empty editor needs none", a.tabs.Len())
+			}
+			a.draw()
+			a.screen.Show()
+			for _, want := range shape.want {
+				if !screenHasText(t, a, want) {
+					t.Errorf("empty editor should mention %q; hints = %v", want, a.emptyEditorHints())
+				}
+			}
+			for _, bad := range shape.forbids {
+				if screenHasText(t, a, bad) {
+					t.Errorf("empty editor must not mention %q; hints = %v", bad, a.emptyEditorHints())
+				}
+			}
+		})
 	}
 }
 
@@ -438,7 +883,9 @@ func TestDrawEmptyEditor_HintsAreLeaderBindings(t *testing.T) {
 // guarantee to the keyboard hint: the longer second line is the one most
 // likely to overrun, and it must not paint on the splitter either.
 func TestDrawEmptyEditor_ClipsEveryHintRow(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
+	dir := t.TempDir()
+	mkFile(t, dir, "a.txt", "x")
+	a := newTestApp(t, dir)
 	scr := a.screen.(tcell.SimulationScreen)
 	scr.SetSize(60, 24)
 	a.width, a.height = scr.Size()
@@ -448,7 +895,7 @@ func TestDrawEmptyEditor_ClipsEveryHintRow(t *testing.T) {
 	cells, w, _ := scr.GetContents()
 	_, ey, _, eh := a.editorRect()
 	sx := a.splitterX()
-	for row := range len(emptyEditorHints) {
+	for row := range len(a.emptyEditorHints()) {
 		y := ey + eh/2 + 1 + row
 		if r := cells[y*w+sx].Runes[0]; r != '│' {
 			t.Fatalf("hint row %d bled onto the splitter: %q", row, r)
@@ -506,6 +953,31 @@ func TestDrawStatusBar_LowColorUsesAttributes(t *testing.T) {
 	_, _, attrs := cells[sy*w].Style.Decompose()
 	if attrs&tcell.AttrReverse == 0 {
 		t.Fatalf("degraded status bar attrs = %v, want AttrReverse", attrs)
+	}
+}
+
+// TestDrawStatusBar_ErrorFlashPaintsInErrorColour pins the visual half
+// of flashError: a failure report on the bar takes the palette's Error
+// foreground (the disk-conflict marker's treatment), where a plain
+// flash keeps StatusFg — so the two kinds are told apart at a glance.
+func TestDrawStatusBar_ErrorFlashPaintsInErrorColour(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 80, 24)
+	scr := a.screen.(tcell.SimulationScreen)
+	cellFg := func() tcell.Color {
+		a.drawStatusBar()
+		scr.Show()
+		cells, w, _ := scr.GetContents()
+		fg, _, _ := cells[(a.height-1)*w+1].Style.Decompose()
+		return fg
+	}
+	a.flash("Copied")
+	if got := cellFg(); got != a.theme.StatusFg {
+		t.Fatalf("info flash fg = %v, want StatusFg %v", got, a.theme.StatusFg)
+	}
+	a.flashError("save failed")
+	if got := cellFg(); got != a.theme.Error {
+		t.Fatalf("error flash fg = %v, want Error %v", got, a.theme.Error)
 	}
 }
 
@@ -885,7 +1357,7 @@ func TestTabChevrons_DropCountsOnACrampedStrip(t *testing.T) {
 		t.Fatalf("cramped strip badges = %q / %q, want the bare chevrons",
 			left.Label, right.Label)
 	}
-	if !left.hit(left.X) || !right.hit(right.X) {
+	if bw := a.tabBadgeWidth(); !left.hit(left.X, bw) || !right.hit(right.X, bw) {
 		t.Fatal("the bare chevrons must still be click targets")
 	}
 }
@@ -1050,8 +1522,11 @@ func TestDraw_EveryPrefabFitsAtTheMinimumSize(t *testing.T) {
 		}, []string{"first choice"}},
 		{"menu", func(a *App) { a.openMenu() }, []string{"Menu", "New file", "v" + version.Version}},
 		{"cheat sheet", func(a *App) { a.menuKeyboardShortcuts() }, []string{"Esc is the", "[  OK  ]"}},
-		{"tree context", func(a *App) { a.openTreeContext(a.tree.Root, 2, 2) }, []string{"Copy rel path"}},
-		{"git extras", func(a *App) { a.openGitExtras(2, 2) }, []string{"Fetch", "▼"}},
+		{"tree context", func(a *App) { a.openTreeContext(a.tree.Root, 2, 2) }, []string{"Copy relative path"}},
+		{"git extras", func(a *App) {
+			a.gitSnap.IsRepo, a.gitSnap.Branch = true, "main"
+			a.openGitExtras(2, 2)
+		}, []string{"More git actions", "Fetch"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1230,5 +1705,40 @@ func TestStatusBarClick_BranchChipOpensGitPanel(t *testing.T) {
 	a.statusBarClick(chipX)
 	if !a.gitPanel.active {
 		t.Fatal("clicking the branch chip should open the git panel")
+	}
+}
+
+// TestDraw_PrefabFramesAdvertiseEnter pins the per-prefab hint each
+// frame paints in its title row, because the prefabs disagree about
+// Enter — the prompt submits, the dirty prompt presses Cancel, the form
+// moves to the next field, the info overlay dismisses, the menu runs
+// the highlighted row — and a frame that said only "esc" left the user
+// to find out by pressing it. Nothing here costs a row: the hint is
+// budgeted out of the title row the way the old "esc" was.
+func TestDraw_PrefabFramesAdvertiseEnter(t *testing.T) {
+	cases := []struct {
+		name string
+		open func(*App)
+		want string
+	}{
+		{"prompt", func(a *App) { a.openPrompt("Rename file", "", "x", nil) }, "⏎ ok · esc"},
+		{"confirm", func(a *App) { a.openConfirm("Delete file", "sure?", nil) }, "⏎ no · esc"},
+		{"dirty", func(a *App) { a.openDirtyClose("Unsaved changes", "m", nil, nil) }, "⏎ cancel · esc"},
+		{"form", func(a *App) {
+			a.openForm("Copy", []customactions.Prompt{{Key: "H", Label: "Host", Type: customactions.PromptText}}, nil)
+		}, "⇥ next · esc"},
+		{"info", func(a *App) { a.openInfo("Report", []string{"l"}) }, "⏎ ok · esc"},
+		{"menu", func(a *App) { a.openMenu() }, "⏎ run · esc"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := newTestApp(t, t.TempDir())
+			c.open(a)
+			a.draw()
+			a.screen.Show()
+			if !screenHasText(t, a, c.want) {
+				t.Errorf("%s frame never painted %q", c.name, c.want)
+			}
+		})
 	}
 }

@@ -17,15 +17,13 @@
 package app
 
 import (
+	"strings"
+
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/overlay"
 )
-
-// contextMenuWidth is fixed so the popup geometry stays predictable —
-// the labels are short enough to fit comfortably.
-const contextMenuWidth = 19
 
 // closeAllModals dismisses every modal in one shot and parks any in-flight
 // drag / auto-scroll state. Every "open this modal" helper calls it first
@@ -116,6 +114,17 @@ func (a *App) openConfirm(title, message string, callback func(*App)) *overlay.C
 	return c
 }
 
+// confirmButtons builds the caption pair for a Confirm whose action is
+// a named verb: "[ Cancel ]" on the left and "[ <verb> ]" on the right,
+// bracketed the way every prefab button is. Every destructive confirm
+// the app owns should name its verb — a bare Yes under "Delete x?
+// Unmerged work would be lost." makes the user re-read the question to
+// learn what Enter does. Keep verbs short: the pair must fit the
+// 38-cell frame a minWidth terminal leaves the confirm.
+func confirmButtons(verb string) [2]string {
+	return [2]string{"[ Cancel ]", "[ " + verb + " ]"}
+}
+
 // openInfo shows the single-button report overlay — an overlay.Info —
 // for passive reporting: most importantly, the full stderr from a
 // failed custom action where the status-bar flash isn't enough room.
@@ -176,6 +185,14 @@ func (a *App) openDirtyClose(title, message string, saveCB, discardCB func(*App)
 // n is a file or a folder; renaming or deleting the project root is
 // intentionally not allowed. Each item is a closure over the node, so
 // the popup itself needs no tree knowledge.
+//
+// The labels are the ≡ menu's own (the label* constants in menudef.go,
+// with "file" swapped for "folder" on a folder node), so a user meets
+// one name per action whichever surface they reach it from — the popup
+// used to say "Rename" / "Copy rel path" / "Paste here" next to a menu
+// reading "Rename file…" / "Copy relative path" / "Paste into x/".
+// CLAUDE.md's rule makes the popup a redundant shortcut to the menu,
+// and a shortcut that renames what it points at is not one.
 func (a *App) openTreeContext(n *filetree.Node, x, y int) {
 	a.closeAllModals()
 
@@ -184,28 +201,46 @@ func (a *App) openTreeContext(n *filetree.Node, x, y int) {
 		items = append(items, overlay.PopupItem{Label: label, OnPick: func() { action(a, n) }})
 	}
 	if n.IsDir {
-		add("New File", ctxNewFile)
+		add(labelNewFile+"…", ctxNewFile)
 	}
 	if n != a.tree.Root {
-		add("Rename", ctxRename)
-		add("Delete", ctxDelete)
-		add("Cut", ctxCutNode)
-		add("Copy", ctxCopyNode)
-		add("Duplicate", ctxDuplicateNode)
+		add(treeContextLabel(labelRenameFile, n.IsDir), ctxRename)
+		add(treeContextLabel(labelDeleteFile, n.IsDir), ctxDelete)
+		add(treeContextLabel(labelCutFile, n.IsDir), ctxCutNode)
+		add(treeContextLabel(labelCopyFile, n.IsDir), ctxCopyNode)
+		add(treeContextLabel(labelDuplicateFile, n.IsDir), ctxDuplicateNode)
 	}
 	if a.hasFileClip() {
-		add("Paste here", ctxPasteNode)
+		// Same wording as the menu's paste row, naming the folder the
+		// paste lands in — the clicked folder, or the clicked file's.
+		add(labelPasteInto+a.relativeFolderLabel(pasteDirForPath(n.Path, n.IsDir)), ctxPasteNode)
 	}
-	add("Copy rel path", ctxCopyRelativePath)
-	add("Copy abs path", ctxCopyAbsolutePath)
+	add(labelCopyRelativePath, ctxCopyRelativePath)
+	add(labelCopyAbsolutePath, ctxCopyAbsolutePath)
 
 	a.openPopup(items, x, y)
 }
 
-// openPopup places and opens an anchored action popup — the shared tail
-// of the tree context menu and the git extras menu.
+// treeContextLabel adapts a menu row's file label to the clicked tree
+// entry: a folder node swaps the noun ("Cut file" → "Cut folder",
+// "Delete file…" → "Delete folder…"), a file node keeps the menu's
+// string verbatim. Deriving rather than restating is what keeps the
+// two surfaces from drifting apart again.
+func treeContextLabel(fileLabel string, isDir bool) string {
+	if !isDir {
+		return fileLabel
+	}
+	return strings.Replace(fileLabel, "file", "folder", 1)
+}
+
+// openPopup places and opens an anchored action popup — the tree
+// context menu's tail. (The git extras list used to share it; it is a
+// registered drill-in now, see gitExtrasDrillIn.) The width is what
+// the labels measure, not a pinned constant: a fixed 19 cells would
+// have clipped "Copy absolute path" the moment the popup borrowed the
+// menu's spelled-out labels.
 func (a *App) openPopup(items []overlay.PopupItem, x, y int) {
-	w := overlay.PopupWidth(items, contextMenuWidth)
+	w := overlay.PopupWidth(items, 0)
 	if w > a.width-2 {
 		w = a.width - 2
 	}
@@ -229,32 +264,6 @@ func fillRect(scr tcell.Screen, x, y, w, h int, st tcell.Style) {
 		for cx := x; cx < x+w; cx++ {
 			scr.SetContent(cx, cy, ' ', nil, st)
 		}
-	}
-}
-
-// drawBorder draws a single-line box border around the rectangle.
-func drawBorder(scr tcell.Screen, x, y, w, h int, st tcell.Style) {
-	scr.SetContent(x, y, '┌', nil, st)
-	scr.SetContent(x+w-1, y, '┐', nil, st)
-	scr.SetContent(x, y+h-1, '└', nil, st)
-	scr.SetContent(x+w-1, y+h-1, '┘', nil, st)
-	for cx := x + 1; cx < x+w-1; cx++ {
-		scr.SetContent(cx, y, '─', nil, st)
-		scr.SetContent(cx, y+h-1, '─', nil, st)
-	}
-	for cy := y + 1; cy < y+h-1; cy++ {
-		scr.SetContent(x, cy, '│', nil, st)
-		scr.SetContent(x+w-1, cy, '│', nil, st)
-	}
-}
-
-// drawHDivider draws a horizontal divider with ├ ┤ end caps inside an
-// existing border.
-func drawHDivider(scr tcell.Screen, x, y, w int, st tcell.Style) {
-	scr.SetContent(x, y, '├', nil, st)
-	scr.SetContent(x+w-1, y, '┤', nil, st)
-	for cx := x + 1; cx < x+w-1; cx++ {
-		scr.SetContent(cx, y, '─', nil, st)
 	}
 }
 

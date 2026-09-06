@@ -65,74 +65,140 @@ func (a *App) leaderStripVisible() bool {
 	return true
 }
 
+// leaderStripTailHint is what the strip's last row says when even the
+// keys-only form cannot fit: the one gesture that reaches the whole
+// table. It is spent as a row of its own rather than appended, so it
+// can never be the thing that gets clipped.
+const leaderStripTailHint = "… Esc ? for all"
+
+// stripSegment is one styled run of text on a strip row.
+type stripSegment struct {
+	text  string
+	style tcell.Style
+}
+
+// stripStyles are the three styles a leader strip row is painted in.
+type stripStyles struct {
+	base, key, muted tcell.Style
+}
+
+// leaderStripForms returns the strip's candidate layouts from most to
+// least verbose: the full table with " · " between entries, the same
+// table with single-space separators, and the bare keys with a trailing
+// pointer at the reference. leaderStripRows takes the first that fits
+// its row budget, so a narrow terminal loses air before it loses
+// descriptions, and descriptions before it loses keys.
+func leaderStripForms(bindings []leaderBinding, st stripStyles) [][]stripSegment {
+	table := func(sep string) []stripSegment {
+		segs := []stripSegment{{" Esc ", st.key}}
+		for i, b := range bindings {
+			s := sep
+			if i == 0 {
+				s = " "
+			}
+			segs = append(segs,
+				stripSegment{s, st.muted},
+				stripSegment{string(b.key), st.key},
+				stripSegment{" " + b.desc, st.base})
+		}
+		return segs
+	}
+	keys := []stripSegment{{" Esc ", st.key}}
+	for _, b := range bindings {
+		keys = append(keys, stripSegment{" ", st.muted}, stripSegment{string(b.key), st.key})
+	}
+	keys = append(keys, stripSegment{"  Esc ? for all", st.muted})
+	return [][]stripSegment{table(" · "), table(" "), keys}
+}
+
+// wrapStripSegments breaks segs into rows of at most width cells,
+// moving a segment that would cross the edge onto the next row under a
+// two-cell continuation indent (the " Esc " lead's shoulder). Segments
+// are never split; a single segment wider than the row is clipped by
+// the paint, which is the one case the wrap cannot solve.
+func wrapStripSegments(segs []stripSegment, width int) [][]stripSegment {
+	var rows [][]stripSegment
+	var row []stripSegment
+	x := 0
+	for _, seg := range segs {
+		w := textdraw.Width(seg.text)
+		if x+w > width && len(row) > 0 {
+			rows = append(rows, row)
+			row, x = nil, 2
+		}
+		row = append(row, seg)
+		x += w
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// leaderStripRows picks the strip's rows for a terminal width cells wide
+// with maxRows rows to spend: the most verbose form that fits, or — when
+// even the keys-only form overruns — its first maxRows-1 rows with the
+// tail hint as the last, so the strip always paints and always says
+// where the rest went. clipped reports the latter. maxRows under one
+// yields nothing: a strip with no row is not a strip.
+func leaderStripRows(bindings []leaderBinding, width, maxRows int, st stripStyles) (rows [][]stripSegment, clipped bool) {
+	if maxRows < 1 || width < 1 {
+		return nil, false
+	}
+	forms := leaderStripForms(bindings, st)
+	for _, form := range forms {
+		rows = wrapStripSegments(form, width)
+		if len(rows) <= maxRows {
+			return rows, false
+		}
+	}
+	rows = rows[:maxRows-1]
+	rows = append(rows, []stripSegment{{leaderStripTailHint, st.muted}})
+	return rows, true
+}
+
 // draw paints the key overview above the status bar. On a wide terminal
-// it is one row; when the full table doesn't fit, it wraps onto as many
-// rows as the table needs rather than silently dropping bindings — the
-// strip exists precisely for people who don't have the table memorised,
-// so a fixed row cap that clips the tail defeats it. It overlays the
-// editor for the ~half-second the leader window is armed, which is a
-// fair trade.
+// it is one row; when the full table doesn't fit, it wraps onto more —
+// the strip exists precisely for people who don't have the table
+// memorised, so it prefers dropping air, then descriptions, over
+// dropping bindings (leaderStripRows). It overlays the editor for the
+// ~half-second the leader window is armed, which is a fair trade.
 //
 // r is the floor it stacks up from, not a box it paints inside: the
 // table spans the full terminal width, sidebar included, and grows
-// upward from the row above r.
+// upward from the row above r. Its row budget is the smaller of what
+// the editor can spare (stripRowBudget) and the rows above r that are
+// not the tab bar — row 0 is never painted, and a table too tall for
+// what is left ends on the tail hint rather than silently drawing
+// nothing, which is what an unbounded strip did the moment one more
+// binding pushed its top past the screen.
 func (s leaderStrip) draw(r rect) {
 	a := s.a
 	if !a.leaderStripVisible() {
 		return
 	}
 	bg := a.theme.LineHL
-	baseStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text)
-	keyStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true)
-	mutedStyle := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
-
-	type segment struct {
-		text  string
-		style tcell.Style
+	st := stripStyles{
+		base:  tcell.StyleDefault.Background(bg).Foreground(a.theme.Text),
+		key:   tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true),
+		muted: tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted),
 	}
-	segs := []segment{{" Esc ", keyStyle}}
-	for i, b := range leaderBindings() {
-		sep := " · "
-		if i == 0 {
-			sep = " "
-		}
-		segs = append(segs,
-			segment{sep, mutedStyle},
-			segment{string(b.key), keyStyle},
-			segment{" " + b.desc, baseStyle})
-	}
-
-	// Two passes over the same wrap rule: first count the rows the whole
-	// table needs, then paint. Keeping the passes rule-identical is what
-	// guarantees the paint loop never runs out of rows mid-table.
-	rows := 1
-	simX := 0
-	for _, seg := range segs {
-		w := runeLen(seg.text)
-		if simX+w > a.width {
-			rows++
-			simX = 2 // continuation indent under " Esc "
-		}
-		simX += w
-	}
-	topY := r.y - rows
-	if topY < 0 {
+	rows, _ := leaderStripRows(leaderBindings(), a.width, min(a.stripRowBudget(), r.y-1), st)
+	if len(rows) == 0 {
 		return
 	}
-	for r := 0; r < rows; r++ {
+	topY := r.y - len(rows)
+	for i, row := range rows {
+		y := topY + i
 		for x := 0; x < a.width; x++ {
-			a.screen.SetContent(x, topY+r, ' ', nil, baseStyle)
+			a.screen.SetContent(x, y, ' ', nil, st.base)
 		}
-	}
-	x, y := 0, topY
-	for _, seg := range segs {
-		w := runeLen(seg.text)
-		if x+w > a.width && y < topY+rows-1 {
-			x, y = 2, y+1 // continuation indent under " Esc "
+		x := 0
+		if i > 0 {
+			x = 2 // continuation indent under " Esc "
 		}
-		x = drawStripSegment(a.screen, x, y, a.width, seg.text, seg.style)
-		if x >= a.width && y == topY+rows-1 {
-			break
+		for _, seg := range row {
+			x = drawStripSegment(a.screen, x, y, a.width, seg.text, seg.style)
 		}
 	}
 }

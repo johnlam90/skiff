@@ -387,10 +387,13 @@ func (t *Tab) renderWrappedBody(scr tcell.Screen, th theme.Theme, x, y, w, h int
 		}
 		isCursorLine := line == t.Cursor.Line
 		lineBg := bg
-		if isCursorLine {
-			lineBg = th.LineHL
-		}
 		lineBgStyle := tcell.StyleDefault.Background(lineBg).Foreground(th.Text)
+		if isCursorLine {
+			// Attrs.CursorLine is the tint's stand-in on a degraded
+			// palette — same rule as the line path in Render.
+			lineBg = th.LineHL
+			lineBgStyle = theme.WithAttrs(lineBgStyle.Background(lineBg), th.Attrs.CursorLine)
+		}
 
 		for ; seg < len(segs) && row < h; seg++ {
 			cy := y + row
@@ -469,4 +472,109 @@ func (t *Tab) renderWrappedBody(scr tcell.Screen, th theme.Theme, x, y, w, h int
 	} else {
 		scr.HideCursor()
 	}
+}
+
+// wrapCaretRow resolves the caret's visual row at width: its segment
+// index within its line and the caret's cell offset inside that row.
+func (t *Tab) wrapCaretRow(width int) (seg, visualCol int) {
+	runes := t.Buffer.LineRunes(t.Cursor.Line)
+	segs := WrapSegments(runes, width)
+	seg = WrapRowOfCol(segs, t.Cursor.Col)
+	start, end := wrapSegBounds(segs, seg, len(runes))
+	return seg, LineVisualCol(runes[start:end], t.Cursor.Col-start)
+}
+
+// wrapRowCol maps a cell offset onto a rune column inside visual row
+// (line, seg): the cluster covering that cell, or the row's last
+// caret-able column when the row is shorter. On a non-final segment
+// the last such column is end-1 — WrapRowOfCol assigns the boundary
+// column to the FOLLOWING row, so a caret at end would paint at the
+// start of the next row — and only the final segment may hold the
+// caret at the line's end. Same rule clampCursorWrapped applies.
+func (t *Tab) wrapRowCol(line, seg, visualCol, width int) int {
+	runes := t.Buffer.LineRunes(line)
+	segs := WrapSegments(runes, width)
+	if seg >= len(segs) {
+		seg = len(segs) - 1
+	}
+	start, end := wrapSegBounds(segs, seg, len(runes))
+	limit := end
+	if seg < len(segs)-1 {
+		limit = end - 1
+	}
+	col := start + RuneColAtVisual(runes[start:end], visualCol)
+	return min(col, max(limit, start))
+}
+
+// MoveCursorRows moves the caret n visual rows down (negative: up),
+// keeping the anchor when extend is set. With soft wrap off — or before
+// the first wrap-mode render has recorded a width — a row is a buffer
+// line and the call is MoveCursor's vertical half. With wrap on the
+// walk is by segment, so Down on a wrapped paragraph steps to its next
+// row rather than over the whole paragraph, and PgDn moves a screen of
+// rows rather than a screen of paragraphs. Cost is O(n) lines from the
+// caret, the same bound every other wrap walk keeps.
+//
+// The cell column is sticky across consecutive vertical moves: a caret
+// that crossed a short row remembers the column it started in and
+// returns to it on the next long row, so stepping through a ragged
+// paragraph does not drift the caret leftwards. Any other motion or
+// edit forgets the column, because it is a property of the run of
+// vertical moves and nothing else.
+func (t *Tab) MoveCursorRows(n int, extend bool) {
+	if t.IsImage() {
+		return
+	}
+	if !t.Wrap || t.lastWrapW <= 0 {
+		t.MoveCursor(n, 0, extend)
+		return
+	}
+	width := t.lastWrapW
+	seg, visualCol := t.wrapCaretRow(width)
+	if t.stickyValid && t.stickyFor == t.Cursor {
+		visualCol = t.stickyCol
+	}
+	line := t.Cursor.Line
+	if n > 0 {
+		line, seg = t.advanceAnchor(line, seg, n, width)
+	} else if n < 0 {
+		line, seg = t.retreatAnchor(line, seg, -n, width)
+	}
+	col := t.wrapRowCol(line, seg, visualCol, width)
+	t.MoveCursorTo(Position{Line: line, Col: col}, extend)
+	// MoveCursorTo forgot the column, as every other motion must; this
+	// one is the run of vertical moves the column belongs to.
+	t.stickyCol, t.stickyFor, t.stickyValid = visualCol, t.Cursor, true
+}
+
+// wrapHomeCol is MoveLineHome's wrap-mode answer: the start of the
+// caret's visual row, or — when the caret is already there, or on the
+// line's first row — column 0, so a second Home reaches the logical
+// line start the way it always has.
+func (t *Tab) wrapHomeCol(width int) int {
+	runes := t.Buffer.LineRunes(t.Cursor.Line)
+	segs := WrapSegments(runes, width)
+	seg := WrapRowOfCol(segs, t.Cursor.Col)
+	if start := segs[seg]; seg > 0 && t.Cursor.Col != start {
+		return start
+	}
+	return 0
+}
+
+// wrapEndCol is MoveLineEnd's wrap-mode answer: the last caret-able
+// column of the caret's visual row (see wrapRowCol for why that is
+// end-1 on a non-final row), or — when the caret is already there, or
+// on the line's last row — the logical line end, so a second End still
+// reaches it.
+func (t *Tab) wrapEndCol(width int) int {
+	runes := t.Buffer.LineRunes(t.Cursor.Line)
+	segs := WrapSegments(runes, width)
+	seg := WrapRowOfCol(segs, t.Cursor.Col)
+	if seg < len(segs)-1 {
+		_, end := wrapSegBounds(segs, seg, len(runes))
+		if limit := max(end-1, segs[seg]); t.Cursor.Col != limit {
+			return limit
+		}
+	}
+	return len(runes)
 }

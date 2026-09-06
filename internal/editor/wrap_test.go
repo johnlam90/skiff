@@ -251,17 +251,23 @@ func TestSetWrap(t *testing.T) {
 	}
 }
 
+// wrapViewW is the viewport width the wrap-layout tests render into: a
+// nine-cell content column beside whatever gutter a small file gets, so
+// the wrap points these tests pin move with the gutter floor instead of
+// silently shifting when it changes.
+const wrapViewW = defaultGutterWidth + 1 + 9
+
 // TestRenderWrapped_ContinuationRows renders one wrapping line plus a
 // short second line and pins the wrap-mode body layout: content flows
 // onto continuation rows, the gutter number appears only on a line's
 // first row, the next line's number lands after the wrapped rows, and no
 // horizontal-overflow chevron is drawn.
 func TestRenderWrapped_ContinuationRows(t *testing.T) {
-	scr := newSimScreen(t, 16, 6) // gutter 6 → content width 9
+	scr := newSimScreen(t, wrapViewW, 6) // content width 9 beside the gutter
 	defer scr.Fini()
 
 	tab := wrapTestTab(t, "alpha beta gamma\nsecond")
-	tab.Render(scr, theme.Default(), 0, 0, 16, 6)
+	tab.Render(scr, theme.Default(), 0, 0, wrapViewW, 6)
 	scr.Show()
 
 	rows := simScreenRows(scr)
@@ -293,13 +299,13 @@ func TestRenderWrapped_ContinuationRows(t *testing.T) {
 // glyph owns two cells, and the caret on the continuation row lands at the
 // segment-local cell — not the segment-local rune.
 func TestRenderWrapped_WideGlyphsRowLayout(t *testing.T) {
-	scr := newSimScreen(t, 16, 6) // gutter 6 → content width 9
+	scr := newSimScreen(t, wrapViewW, 6) // content width 9 beside the gutter
 	defer scr.Fini()
 
 	tab := wrapTestTab(t, "日本語です。ました")
 	tab.Cursor = Position{Line: 0, Col: 5} // second row, one glyph in
 	tab.Anchor = tab.Cursor
-	tab.Render(scr, theme.Default(), 0, 0, 16, 6)
+	tab.Render(scr, theme.Default(), 0, 0, wrapViewW, 6)
 	scr.Show()
 
 	cells, w, _ := scr.GetContents()
@@ -338,13 +344,13 @@ func TestRenderWrapped_WideGlyphsRowLayout(t *testing.T) {
 // placement on a wrapped row: a cursor in the third segment lands on
 // screen row 2 at the segment-local column.
 func TestRenderWrapped_CursorOnContinuationRow(t *testing.T) {
-	scr := newSimScreen(t, 16, 6)
+	scr := newSimScreen(t, wrapViewW, 6)
 	defer scr.Fini()
 
 	tab := wrapTestTab(t, "alpha beta gamma\nsecond")
 	tab.Cursor = Position{Line: 0, Col: 11} // start of "gamma"
 	tab.Anchor = tab.Cursor
-	tab.Render(scr, theme.Default(), 0, 0, 16, 6)
+	tab.Render(scr, theme.Default(), 0, 0, wrapViewW, 6)
 	scr.Show()
 
 	cx, cy, vis := scr.GetCursor()
@@ -363,13 +369,13 @@ func TestRenderWrapped_CursorOnContinuationRow(t *testing.T) {
 // cursor on a row that fills the pane exactly: it clamps onto the last
 // cell instead of landing in the scrollbar/border column.
 func TestRenderWrapped_CursorClampAtFullWidthRow(t *testing.T) {
-	scr := newSimScreen(t, 16, 4)
+	scr := newSimScreen(t, wrapViewW, 4)
 	defer scr.Fini()
 
 	tab := wrapTestTab(t, "abcdefghi") // exactly content width (9)
 	tab.Cursor = Position{Line: 0, Col: 9}
 	tab.Anchor = tab.Cursor
-	tab.Render(scr, theme.Default(), 0, 0, 16, 4)
+	tab.Render(scr, theme.Default(), 0, 0, wrapViewW, 4)
 	scr.Show()
 
 	cx, cy, vis := scr.GetCursor()
@@ -389,26 +395,26 @@ func TestRenderWrapped_CursorClampAtFullWidthRow(t *testing.T) {
 // segment's rune offsets, gutter clicks land at the row's first rune,
 // and clicks below the last row miss.
 func TestHitTestWrapped(t *testing.T) {
-	scr := newSimScreen(t, 16, 6)
+	scr := newSimScreen(t, wrapViewW, 6)
 	defer scr.Fini()
 
 	tab := wrapTestTab(t, "alpha beta gamma\nsecond")
-	tab.Render(scr, theme.Default(), 0, 0, 16, 6)
+	tab.Render(scr, theme.Default(), 0, 0, wrapViewW, 6)
 
 	contentX := defaultGutterWidth + 1
-	if pos, ok := tab.HitTest(contentX+2, 1, 16, 6); !ok || pos != (Position{Line: 0, Col: 8}) {
+	if pos, ok := tab.HitTest(contentX+2, 1, wrapViewW, 6); !ok || pos != (Position{Line: 0, Col: 8}) {
 		t.Errorf("continuation click = %+v ok=%v, want line 0 col 8", pos, ok)
 	}
-	if pos, ok := tab.HitTest(contentX, 2, 16, 6); !ok || pos != (Position{Line: 0, Col: 11}) {
+	if pos, ok := tab.HitTest(contentX, 2, wrapViewW, 6); !ok || pos != (Position{Line: 0, Col: 11}) {
 		t.Errorf("third-row click = %+v ok=%v, want line 0 col 11", pos, ok)
 	}
-	if pos, ok := tab.HitTest(2, 1, 16, 6); !ok || pos != (Position{Line: 0, Col: 6}) {
+	if pos, ok := tab.HitTest(2, 1, wrapViewW, 6); !ok || pos != (Position{Line: 0, Col: 6}) {
 		t.Errorf("gutter click = %+v ok=%v, want segment start col 6", pos, ok)
 	}
-	if pos, ok := tab.HitTest(contentX+1, 3, 16, 6); !ok || pos != (Position{Line: 1, Col: 1}) {
+	if pos, ok := tab.HitTest(contentX+1, 3, wrapViewW, 6); !ok || pos != (Position{Line: 1, Col: 1}) {
 		t.Errorf("second-line click = %+v ok=%v, want line 1 col 1", pos, ok)
 	}
-	if _, ok := tab.HitTest(contentX, 5, 16, 6); ok {
+	if _, ok := tab.HitTest(contentX, 5, wrapViewW, 6); ok {
 		t.Error("click below the last visual row should miss")
 	}
 }
@@ -687,5 +693,183 @@ func TestClampCursorWrapped(t *testing.T) {
 	tab.ensureVisibleWrapped(5, 2)
 	if tab.ScrollY != y || tab.ScrollSeg != s {
 		t.Fatalf("anchor moved to (%d,%d) — yank-back is back", tab.ScrollY, tab.ScrollSeg)
+	}
+}
+
+// TestMoveCursorRows_StepsVisualRows is the wrap-aware caret motion:
+// Down moves to a wrapped line's next row instead of skipping the
+// paragraph, and the cell column is sticky across a short row so the
+// caret comes back to its column on the next long row.
+func TestMoveCursorRows_StepsVisualRows(t *testing.T) {
+	tab := wrapTestTab(t, "abcdefghijkl\nx\nyy")
+	tab.lastWrapW = 5 // line 0 wraps [0,5,10]
+	tab.MoveCursorTo(Position{Line: 0, Col: 1}, false)
+
+	want := []Position{{0, 6}, {0, 11}, {1, 1}, {2, 1}}
+	for i, w := range want {
+		tab.MoveCursorRows(1, false)
+		if tab.Cursor != w {
+			t.Fatalf("Down #%d: cursor = %+v, want %+v", i+1, tab.Cursor, w)
+		}
+	}
+	// Back up through the one-rune line: the sticky column survives it.
+	tab.MoveCursorRows(-1, false)
+	tab.MoveCursorRows(-1, false)
+	if tab.Cursor != (Position{Line: 0, Col: 11}) {
+		t.Fatalf("Up through a short row should restore column 1 on the long row, got %+v", tab.Cursor)
+	}
+	if !tab.cursorMoved {
+		t.Fatal("vertical motion must flag cursorMoved")
+	}
+}
+
+// TestMoveCursorRows_ClampsInsideTheRow pins the row-end rule: on a
+// non-final row the caret stops at end-1 (the boundary column paints on
+// the next row), on the final row it may sit at the line's end, and a
+// page-sized step walks that many rows across lines.
+func TestMoveCursorRows_ClampsInsideTheRow(t *testing.T) {
+	tab := wrapTestTab(t, "abcdefghijkl\nx\nyy")
+	tab.lastWrapW = 5
+	tab.MoveCursorTo(Position{Line: 0, Col: 4}, false)
+	tab.MoveCursorRows(1, false)
+	if tab.Cursor != (Position{Line: 0, Col: 9}) {
+		t.Fatalf("Down onto a non-final row: cursor = %+v, want col 9", tab.Cursor)
+	}
+	tab.MoveCursorRows(1, false)
+	if tab.Cursor != (Position{Line: 0, Col: 12}) {
+		t.Fatalf("Down onto the short final row: cursor = %+v, want the line end", tab.Cursor)
+	}
+
+	tab.MoveCursorTo(Position{}, false)
+	tab.MoveCursorRows(4, true)
+	if tab.Cursor != (Position{Line: 2, Col: 0}) || tab.Anchor != (Position{}) {
+		t.Fatalf("PgDn by 4 rows with extend: cursor %+v anchor %+v", tab.Cursor, tab.Anchor)
+	}
+	tab.MoveCursorRows(99, false)
+	if tab.Cursor != (Position{Line: 2, Col: 0}) {
+		t.Fatalf("past EOF should stop on the last row, got %+v", tab.Cursor)
+	}
+}
+
+// TestMoveCursorRows_FallsBackToLines keeps the unwrapped path (and a
+// wrap tab that has never rendered) on plain line motion.
+func TestMoveCursorRows_FallsBackToLines(t *testing.T) {
+	tab := wrapTestTab(t, "abcdefghijkl\nx\nyy")
+	tab.MoveCursorTo(Position{Line: 0, Col: 3}, false)
+	tab.MoveCursorRows(1, false)
+	if tab.Cursor != (Position{Line: 1, Col: 1}) {
+		t.Fatalf("never-rendered wrap tab should move by line, got %+v", tab.Cursor)
+	}
+	plain := wrapTestTab(t, "abcdefghijkl\nx\nyy")
+	plain.Wrap = false
+	plain.lastWrapW = 5
+	plain.MoveCursorRows(-1, false)
+	if plain.Cursor != (Position{}) {
+		t.Fatalf("unwrapped Up from line 0 should clamp, got %+v", plain.Cursor)
+	}
+}
+
+// TestMoveCursorRows_OtherMotionForgetsStickyColumn pins the sticky
+// column's scope: it belongs to a run of vertical moves, so a
+// horizontal step in between resets it to the caret's real column.
+func TestMoveCursorRows_OtherMotionForgetsStickyColumn(t *testing.T) {
+	tab := wrapTestTab(t, "abcdefghijkl\nx\nyy")
+	tab.lastWrapW = 5
+	tab.MoveCursorTo(Position{Line: 0, Col: 4}, false)
+	tab.MoveCursorRows(2, false) // sticky 4, lands at (0,12)
+	tab.MoveCursor(0, -1, false) // (0,11): sticky forgotten
+	tab.MoveCursorRows(1, false)
+	if tab.Cursor != (Position{Line: 1, Col: 1}) {
+		t.Fatalf("after a horizontal move the column should be the caret's, got %+v", tab.Cursor)
+	}
+}
+
+// TestMoveCursorRows_EditAndUndoForgetStickyColumn is the regression
+// fence for a stale sticky column: Down onto a short row, type, Undo
+// put the caret back at exactly the position the column was recorded
+// for, so the next Down jumped to the remembered column instead of
+// the caret's real one. An edit now ends the vertical run, and a
+// snapshot restore does too.
+func TestMoveCursorRows_EditAndUndoForgetStickyColumn(t *testing.T) {
+	tab := wrapTestTab(t, "abcdefghijkl\nmnopqrs\nyy")
+	tab.lastWrapW = 5
+	tab.MoveCursorTo(Position{Line: 0, Col: 4}, false)
+	tab.MoveCursorRows(2, false) // sticky 4, lands on the short row at (0,12)
+	if tab.Cursor != (Position{Line: 0, Col: 12}) || !tab.stickyValid {
+		t.Fatalf("setup: cursor %+v sticky %v", tab.Cursor, tab.stickyValid)
+	}
+	tab.InsertRune('z')
+	if tab.stickyValid {
+		t.Fatal("an edit must forget the sticky column")
+	}
+	if !tab.Undo() || tab.Cursor != (Position{Line: 0, Col: 12}) {
+		t.Fatalf("undo should restore the caret to (0,12), got %+v", tab.Cursor)
+	}
+	tab.MoveCursorRows(1, false)
+	if tab.Cursor != (Position{Line: 1, Col: 2}) {
+		t.Fatalf("Down after type+undo should use the caret's real column 2, got %+v", tab.Cursor)
+	}
+}
+
+// TestMoveLineHomeEnd_WrapStopsAtTheRowFirst pins Home / End in wrap
+// mode: the first press reaches the visual row's edge, the second the
+// logical line's, and a caret already on the first / last row goes
+// straight to the line edge.
+func TestMoveLineHomeEnd_WrapStopsAtTheRowFirst(t *testing.T) {
+	tab := wrapTestTab(t, "abcdefghijkl")
+	tab.lastWrapW = 5
+	tab.MoveCursorTo(Position{Line: 0, Col: 7}, false)
+	tab.MoveLineHome(false)
+	if tab.Cursor.Col != 5 {
+		t.Fatalf("first Home should stop at the row start, got col %d", tab.Cursor.Col)
+	}
+	tab.MoveLineHome(false)
+	if tab.Cursor.Col != 0 {
+		t.Fatalf("second Home should reach column 0, got col %d", tab.Cursor.Col)
+	}
+
+	tab.MoveCursorTo(Position{Line: 0, Col: 7}, false)
+	tab.MoveLineEnd(true)
+	if tab.Cursor.Col != 9 || tab.Anchor.Col != 7 {
+		t.Fatalf("first End should stop at the row end and keep the anchor: cursor %d anchor %d", tab.Cursor.Col, tab.Anchor.Col)
+	}
+	tab.MoveLineEnd(false)
+	if tab.Cursor.Col != 12 {
+		t.Fatalf("second End should reach the line end, got col %d", tab.Cursor.Col)
+	}
+	tab.MoveLineHome(false)
+	if tab.Cursor.Col != 10 {
+		t.Fatalf("Home on the last row should stop at its start, got col %d", tab.Cursor.Col)
+	}
+	tab.MoveCursorTo(Position{Line: 0, Col: 3}, false)
+	tab.MoveLineHome(false)
+	if tab.Cursor.Col != 0 {
+		t.Fatalf("Home on the first row goes to column 0, got col %d", tab.Cursor.Col)
+	}
+}
+
+// TestRenderWrapped_DegradedCursorLineUnderlined is the wrap-mode half
+// of the cursor-line channel: every segment of the caret's logical line
+// — continuation rows included — wears Attrs.CursorLine on a degraded
+// palette, so a wrapped current line still reads as one unit when the
+// LineHL tint is gone.
+func TestRenderWrapped_DegradedCursorLineUnderlined(t *testing.T) {
+	scr := newSimScreen(t, wrapViewW, 6)
+	defer scr.Fini()
+
+	tab := wrapTestTab(t, "alpha beta gamma\nsecond")
+	tab.Cursor = Position{Line: 0, Col: 0}
+	tab.Anchor = tab.Cursor
+	tab.Render(scr, theme.Degrade(theme.Default(), 8), 0, 0, wrapViewW, 6)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	contentX := defaultGutterWidth + 1
+	for _, y := range []int{0, 1, 2} {
+		if st := cells[y*w+contentX].Style; st.GetUnderlineStyle() == tcell.UnderlineStyleNone {
+			t.Fatalf("row %d of the wrapped cursor line lost its underline", y)
+		}
+	}
+	if st := cells[3*w+contentX].Style; st.GetUnderlineStyle() != tcell.UnderlineStyleNone {
+		t.Fatal("the next line must not be underlined")
 	}
 }

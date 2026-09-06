@@ -1033,8 +1033,8 @@ func TestGitPanelKeys_TabReachesButtonsAndEnterRuns(t *testing.T) {
 		t.Fatalf("→ should walk the button row, got %d", a.gitPanel.btn)
 	}
 	a.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
-	if labels := popupLabels(t, a); len(labels) == 0 {
-		t.Fatal("enter on the ⋯ button should open the git extras popup")
+	if !pickIsOpen(a) {
+		t.Fatalf("enter on the ⋯ button should open the More git actions pick; top = %T", a.overlays.Top())
 	}
 }
 
@@ -1510,5 +1510,130 @@ func TestGitPanelScrollbar_ThumbBrightensWhileDragging(t *testing.T) {
 	a.dragMode = dragNone
 	if _, fg := barCell(t, a, barX, thumbY); fg != a.theme.Muted {
 		t.Fatalf("thumb stayed lit after the drag ended, fg %v", fg)
+	}
+}
+
+// TestGitPanelScrollbar_TwoCellGrab: the change list's bar answers to
+// its painted column and the one to its left, the same grab the tree's
+// bar has — a press one cell in scrolls instead of selecting the row
+// whose last label cell it landed on.
+func TestGitPanelScrollbar_TwoCellGrab(t *testing.T) {
+	a := gitPanelApp(t, 80)
+	a.draw()
+	_, sy, sw, _ := a.sidebarRect()
+	listH, _ := a.gitPanelBody()
+	barX, ok := a.gitPanelBar(sw)
+	if !ok {
+		t.Fatal("fixture should draw a bar")
+	}
+	y := sy + gitPanelListTop + listH - 1
+	a.handleMouse(tcell.NewEventMouse(barX-1, y, tcell.Button1, 0))
+	if a.dragMode != dragGitPanelScrollbar {
+		t.Fatalf("press one cell left of the bar: dragMode = %d, want the panel bar", a.dragMode)
+	}
+	if a.gitPanel.Scroll() == 0 {
+		t.Fatal("the grab should have scrolled the list")
+	}
+	if a.gitPanel.Sel() != 0 {
+		t.Fatalf("the grab moved the selection to %d", a.gitPanel.Sel())
+	}
+	a.handleMouse(tcell.NewEventMouse(barX-1, y, tcell.ButtonNone, 0))
+	if a.gitPanelBarHit(barX-2, gitPanelListTop) {
+		t.Fatal("two cells in is a row, not the bar")
+	}
+}
+
+// TestGitPanelButtons_KeepTheirGapAtEveryTier pins the ladder's one
+// invariant: neighbouring buttons never touch. The glyph tiers used to
+// close the gap to fit, which made "[✓][↑][↓][⋯]" one run where a press
+// one cell wide of Commit was Push. A row that cannot keep its gaps
+// sheds the ⋯ (the ≡ menu has everything behind it) and keeps the
+// three verbs apart.
+func TestGitPanelButtons_KeepTheirGapAtEveryTier(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.gitSnap.IsRepo = true
+	a.gitSnap.Ahead, a.gitSnap.Behind = 12, 3
+	a.gitPanel.rows = []gitChangeRow{{Abs: "/p/a.go"}, {Abs: "/p/b.go"}}
+	sawThree := false
+	for sw := 60; sw >= 14; sw-- {
+		btns := a.gitPanelButtons(sw)
+		if len(btns) < 3 {
+			t.Fatalf("sw=%d: the three verbs must survive, got %d buttons", sw, len(btns))
+		}
+		if len(btns) == 3 {
+			sawThree = true
+		}
+		for i := 1; i < len(btns); i++ {
+			if btns[i].x0-btns[i-1].x1 < gitPanelBtnGap {
+				t.Fatalf("sw=%d: %q (ends %d) and %q (starts %d) touch", sw,
+					btns[i-1].label, btns[i-1].x1, btns[i].label, btns[i].x0)
+			}
+		}
+		if last := btns[len(btns)-1]; last.x1 > sw && sw >= 1+rowWidth([]string{"[✓]", "[↑]", "[↓]"}, gitPanelBtnGap) {
+			t.Fatalf("sw=%d: row ends at %d, past the panel", sw, last.x1)
+		}
+	}
+	if !sawThree {
+		t.Fatal("the narrowest widths should shed the ⋯ rather than close the gap")
+	}
+	// Wide labels with live counts still lead the ladder.
+	if got := a.gitPanelButtons(60)[1].label; got != "[ Push ↑12 ]" {
+		t.Fatalf("wide tier label = %q", got)
+	}
+}
+
+// TestGitPanelClick_GlyphButtonFlashesItsVerb: a glyph-tier button
+// does not say what it does and fires on the press, so the press names
+// the verb in the status bar first (revealMenuRowLabel's idea). A wide
+// label that already spells the verb flashes nothing.
+func TestGitPanelClick_GlyphButtonFlashesItsVerb(t *testing.T) {
+	a := gitPanelApp(t, 5)
+	a.sidebarWidth = minSidebarWidth
+	a.draw()
+	_, _, sw, _ := a.sidebarRect()
+	btns := a.gitPanelButtons(sw)
+	more := btns[len(btns)-1]
+	if strings.Contains(more.label, more.verb) {
+		t.Fatalf("fixture: expected a glyph tier at %d cells, got %q", sw, more.label)
+	}
+	a.gitPanelClick(more.x0, 2)
+	if a.statusMsg != more.verb {
+		t.Fatalf("status = %q, want the verb %q flashed before the action", a.statusMsg, more.verb)
+	}
+	a.closeAllModals()
+
+	a.sidebarWidth = 40
+	a.statusMsg = ""
+	a.gitRunner = &git.Fake{}
+	a.draw()
+	_, _, sw, _ = a.sidebarRect()
+	push := a.gitPanelButtons(sw)[1]
+	if !strings.Contains(push.label, push.verb) {
+		t.Fatalf("fixture: expected a wide tier at %d cells, got %q", sw, push.label)
+	}
+	a.gitPanelClick(push.x0, 2)
+	if a.statusMsg == push.verb {
+		t.Fatal("a label that spells its verb needs no echo")
+	}
+}
+
+// TestDrawGitPanelRow_LongNameEndsInEllipsis: a basename wider than
+// the panel is cut with … so it reads as truncated instead of as a
+// shorter file that happens to exist.
+func TestDrawGitPanelRow_LongNameEndsInEllipsis(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	row := gitChangeRow{Rel: "pkg/" + strings.Repeat("component", 6) + ".go", Abs: "/p/x.go"}
+	const sw = 24
+	a.screen.Clear()
+	a.drawGitPanelRow(0, 3, sw, row, false, false)
+	a.screen.Show()
+	cells, w, _ := a.screen.(tcell.SimulationScreen).GetContents()
+	last := cells[3*w+sw-1]
+	if len(last.Runes) == 0 || last.Runes[0] != '…' {
+		t.Fatalf("last cell of the row = %q, want …", string(last.Runes))
+	}
+	past := cells[3*w+sw]
+	if len(past.Runes) > 0 && past.Runes[0] != ' ' {
+		t.Fatalf("the name bled past the panel: %q", string(past.Runes))
 	}
 }

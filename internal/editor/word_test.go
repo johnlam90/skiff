@@ -293,3 +293,72 @@ func TestMoveWord_IgnoresImageTabs(t *testing.T) {
 		t.Fatalf("image tab caret moved to %v", tab.Cursor)
 	}
 }
+
+// TestDeleteWordLeft pins the Alt/Ctrl+Backspace gesture: it removes the
+// span Alt+Left would walk, joins lines at column 0 like Backspace, is
+// a no-op at the very start, takes a selection whole, and is its own
+// undo step.
+func TestDeleteWordLeft(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("alpha beta\ngamma")}
+	tab.initUndo()
+	tab.Cursor = Position{Line: 0, Col: 10}
+	tab.Anchor = tab.Cursor
+	tab.DeleteWordLeft()
+	if got := tab.Buffer.Lines[0]; got != "alpha " {
+		t.Fatalf("after deleting 'beta': %q", got)
+	}
+	tab.DeleteWordLeft()
+	if got := tab.Buffer.Lines[0]; got != "" {
+		t.Fatalf("after deleting 'alpha ': %q", got)
+	}
+	if !tab.Undo() || tab.Buffer.Lines[0] != "alpha " {
+		t.Fatalf("each word delete should be its own undo step, got %q", tab.Buffer.Lines[0])
+	}
+
+	tab.Cursor = Position{Line: 1, Col: 0}
+	tab.Anchor = tab.Cursor
+	tab.DeleteWordLeft()
+	if got := tab.Buffer.String(); got != "alpha gamma" {
+		t.Fatalf("column 0 should join onto the previous line, got %q", got)
+	}
+
+	tab.Cursor = Position{}
+	tab.Anchor = tab.Cursor
+	entries := len(tab.undoStack)
+	tab.DeleteWordLeft()
+	if len(tab.undoStack) != entries {
+		t.Fatal("a no-op at the start of the buffer must not record undo state")
+	}
+
+	tab.Anchor = Position{Line: 0, Col: 0}
+	tab.Cursor = Position{Line: 0, Col: 5}
+	tab.DeleteWordLeft()
+	if got := tab.Buffer.Lines[0]; got != " gamma" {
+		t.Fatalf("a selection should be deleted whole, got %q", got)
+	}
+}
+
+// TestDeleteWordRight is the mirror: Alt/Ctrl+Delete removes the span
+// Alt+Right would walk and joins the next line at the end of a line.
+func TestDeleteWordRight(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("alpha beta\ngamma")}
+	tab.initUndo()
+	tab.Cursor = Position{}
+	tab.Anchor = tab.Cursor
+	tab.DeleteWordRight()
+	if got := tab.Buffer.Lines[0]; got != " beta" {
+		t.Fatalf("after deleting 'alpha': %q", got)
+	}
+	tab.Cursor = Position{Line: 0, Col: 5}
+	tab.Anchor = tab.Cursor
+	tab.DeleteWordRight()
+	if got := tab.Buffer.String(); got != " betagamma" {
+		t.Fatalf("end of line should join the next line on, got %q", got)
+	}
+	tab.MoveDocEnd(false)
+	entries := len(tab.undoStack)
+	tab.DeleteWordRight()
+	if len(tab.undoStack) != entries {
+		t.Fatal("a no-op at the end of the buffer must not record undo state")
+	}
+}

@@ -299,3 +299,22 @@ func TestHighlightWindow_GridIsAbsolutelyIndexed(t *testing.T) {
 		t.Fatalf("row 500 has %d styles, want the line's rune count", len(styles[500]))
 	}
 }
+
+// TestHighlight_DegradedCommentIsDim pins the comment channel: once the
+// palette has degraded and SynComment sits on the terminal default,
+// Attrs.Comment (dim) is what keeps a comment apart from the code
+// beside it — and it must actually reach the style grid, which it did
+// not until the token mapping applied it.
+func TestHighlight_DegradedCommentIsDim(t *testing.T) {
+	th := theme.Degrade(theme.Default(), 16)
+	if th.Attrs.Comment == tcell.AttrNone {
+		t.Fatal("precondition: the degraded palette should carry a comment attribute")
+	}
+	got := Highlight("main.go", "package main\n// note\nvar x = 1\n", th)
+	if _, _, attrs := got[1][3].Decompose(); attrs&th.Attrs.Comment != th.Attrs.Comment {
+		t.Fatalf("comment cell attrs = %v, want %v set", attrs, th.Attrs.Comment)
+	}
+	if _, _, attrs := got[2][0].Decompose(); attrs&th.Attrs.Comment != 0 {
+		t.Fatalf("code cell wears the comment attribute: %v", attrs)
+	}
+}

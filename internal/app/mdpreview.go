@@ -126,15 +126,40 @@ func (a *App) previewMarkdownLabel() string {
 	return "Preview Markdown"
 }
 
-// mdPreviewContentWidth is the wrap budget for the current editor rect:
-// one column of left padding, one for the scrollbar, one of right
-// breathing room.
-func (a *App) mdPreviewContentWidth() int {
-	_, _, ew, _ := a.editorRect()
-	w := ew - 3
-	if w < 4 {
-		w = 4
+// mdPreviewMaxWidth caps the preview's measure. Prose past roughly
+// eighty cells is hard to track from one line to the next; a 200-column
+// terminal used to wrap the document at 197. The document is centred
+// in whatever room the editor has beyond the cap.
+const mdPreviewMaxWidth = 80
+
+// mdPreviewGeom returns the preview's content column: the x the text
+// starts at and the width it is wrapped to. The width is the editor
+// rect minus one column of left padding, one for the scrollbar and one
+// of right breathing room, capped at mdPreviewMaxWidth; the text is
+// centred in the room the cap leaves. This is the ONE origin the paint
+// (drawMdPreview) and the hit-test (mdPreviewHit) share, so what is
+// clicked is what was painted even when the document is centred.
+func (a *App) mdPreviewGeom() (contentX, contentW int) {
+	ex, _, ew, _ := a.editorRect()
+	room := ew - 3
+	contentW = room
+	if contentW > mdPreviewMaxWidth {
+		contentW = mdPreviewMaxWidth
 	}
+	if contentW < 4 {
+		contentW = 4
+	}
+	contentX = ex + 1
+	if room > contentW {
+		contentX += (room - contentW) / 2
+	}
+	return contentX, contentW
+}
+
+// mdPreviewContentWidth is the wrap budget for the current editor rect
+// — mdPreviewGeom's width.
+func (a *App) mdPreviewContentWidth() int {
+	_, w := a.mdPreviewGeom()
 	return w
 }
 
@@ -199,20 +224,17 @@ func (a *App) handleMdPreviewKey(st *mdPreviewState, ev *tcell.EventKey) bool {
 }
 
 // mdPreviewPress handles a mouse press inside the editor rect while the
-// preview is up: a click on the scrollbar column jumps; a press on the
-// content anchors a drag-selection over the RENDERED text — skiff's
-// select-to-copy works in the preview exactly as in the editor, it
-// just selects what the reader sees instead of markdown syntax.
-// Returns true when the press should arm the preview drag.
+// preview is up: a press on the content anchors a drag-selection over
+// the RENDERED text — skiff's select-to-copy works in the preview
+// exactly as in the editor, it just selects what the reader sees
+// instead of markdown syntax. Returns true when the press should arm
+// the preview drag. The scrollbar column is not content: the
+// dispatcher claims it first (mdPreviewScrollbarHit, mouse.go) so the
+// thumb gets the same press-and-drag contract as the editor's bar,
+// and a press there never starts a selection.
 func (a *App) mdPreviewPress(st *mdPreviewState, x, y int) bool {
 	ex, ey, ew, eh := a.editorRect()
-	if x < ex || x >= ex+ew || y < ey || y >= ey+eh {
-		return false
-	}
-	if x == ex+ew-1 {
-		if _, _, ok := scrollbar.Geom(len(st.lines), eh, st.scroll); ok {
-			st.scroll = scrollbar.TargetForThumb(len(st.lines), eh, y-ey)
-		}
+	if x < ex || x >= ex+ew-1 || y < ey || y >= ey+eh {
 		return false
 	}
 	pos := a.mdPreviewHit(st, x, y)
@@ -231,7 +253,7 @@ func (a *App) mdPreviewDragTo(st *mdPreviewState, x, y int) {
 // walking real cluster widths — the inverse of drawStyledRunes' cell
 // advance, so what you click is what you select even through CJK.
 func (a *App) mdPreviewHit(st *mdPreviewState, x, y int) previewPos {
-	ex, ey, ew, eh := a.editorRect()
+	_, ey, ew, eh := a.editorRect()
 	y = min(max(y, ey), ey+eh-1)
 	line := st.scroll + (y - ey)
 	if line >= len(st.lines) {
@@ -240,7 +262,8 @@ func (a *App) mdPreviewHit(st *mdPreviewState, x, y int) previewPos {
 	if line < 0 {
 		return previewPos{}
 	}
-	off := min(max(x-(ex+1), 0), ew)
+	contentX, _ := a.mdPreviewGeom()
+	off := min(max(x-contentX, 0), ew)
 	col, acc := 0, 0
 	for _, ru := range st.lines[line] {
 		w := uniseg.StringWidth(string(ru))
@@ -341,13 +364,18 @@ func (a *App) drawMdPreview(tab *editor.Tab, st *mdPreviewState, x, y, w, h int)
 	if st.scroll < 0 {
 		st.scroll = 0
 	}
+	// Text starts at the shared origin and may paint up to the
+	// scrollbar column; the wrapper already fit the budget, the clip
+	// only guards a narrower-than-cached frame mid-resize.
+	contentX, _ := a.mdPreviewGeom()
+	maxW := x + w - 1 - contentX
 	for row := 0; row < h; row++ {
 		i := st.scroll + row
 		if i >= len(st.lines) {
 			break
 		}
 		selFrom, selTo := st.selRange(i)
-		drawStyledRunes(a.screen, x+1, y+row, w-2, st.lines[i], st.styles[i],
+		drawStyledRunes(a.screen, contentX, y+row, maxW, st.lines[i], st.styles[i],
 			selFrom, selTo, a.theme)
 	}
 	if thumb, size, ok := scrollbar.Geom(len(st.lines), h, st.scroll); ok {

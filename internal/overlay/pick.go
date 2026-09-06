@@ -53,6 +53,9 @@ type Pick struct {
 	// OnCancel fires on dismissal without a pick, after any preview may
 	// have run — revert hooks live here.
 	OnCancel func()
+	// press is the click latch — see Press. A row picks on a fresh
+	// press only; the scroll indicator still follows a held drag.
+	press Press
 }
 
 // Init snaps the highlight onto the Current item and scrolls it into
@@ -195,6 +198,7 @@ func (p *Pick) HandleKey(ev *tcell.EventKey) {
 // indicator's column, which the bar claims for itself.
 func (p *Pick) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	r := p.sync()
+	fresh := p.press.Fresh(btn)
 	if btn&tcell.WheelUp != 0 {
 		p.ScrollBy(-3)
 		return
@@ -221,7 +225,7 @@ func (p *Pick) HandleMouse(x, y int, btn tcell.ButtonMask) {
 			idx = i
 		}
 	}
-	if btn&tcell.Button1 != 0 {
+	if fresh {
 		if idx >= 0 {
 			p.Select(idx)
 			p.Confirm()
@@ -232,6 +236,8 @@ func (p *Pick) HandleMouse(x, y int, btn tcell.ButtonMask) {
 		}
 		return
 	}
+	// Held-button motion hovers like button-less motion does: the
+	// highlight follows, but a pick needs the press to land on the row.
 	if idx >= 0 && idx != p.Sel() {
 		p.Select(idx)
 		p.moved()
@@ -308,7 +314,7 @@ func (p *Pick) rect() Rect {
 func (p *Pick) Draw(scr tcell.Screen) {
 	r := p.sync()
 	th := p.Theme
-	DrawFrame(scr, r, p.Title, th)
+	DrawFrameHint(scr, r, p.Title, "⏎ pick · "+FrameHintEsc, th)
 
 	bg := th.LineHL
 	mutedStyle := tcell.StyleDefault.Background(bg).Foreground(th.Muted)

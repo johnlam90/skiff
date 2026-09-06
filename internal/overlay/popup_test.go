@@ -295,3 +295,25 @@ func TestPopup_TallScreenNeverWindows(t *testing.T) {
 		t.Fatalf("scroll moved to %d on a screen that fits", p.scroll)
 	}
 }
+
+// TestPopup_DragOntoRowDoesNotActivate pins the press latch on the
+// popup, which opens UNDER the button that was just pressed: the
+// motion of that same held press crossing a row must only hover it.
+func TestPopup_DragOntoRowDoesNotActivate(t *testing.T) {
+	p, log := testPopup()
+	r := p.At
+	p.HandleMouse(r.X+3, r.Y+1, tcell.Button1) // press on the first row
+	p.HandleMouse(r.X+3, r.Y+2, tcell.Button1) // drag onto the second
+	if len(*log) != 2 || (*log)[1] != "one" {
+		t.Fatalf("only the pressed row may run, got %v", *log)
+	}
+	if p.Hover != 1 {
+		t.Fatalf("the drag should hover the second row, got %d", p.Hover)
+	}
+	p, log = testPopup()
+	p.HandleMouse(r.X+3, r.Y+1, tcell.Button1)
+	p.HandleMouse(0, 0, tcell.Button1)
+	if len(*log) != 2 {
+		t.Fatalf("a drag out of the frame must not close again, got %v", *log)
+	}
+}

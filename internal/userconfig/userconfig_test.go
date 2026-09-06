@@ -490,3 +490,56 @@ func TestSetScrollCaretRoundTrip(t *testing.T) {
 		t.Fatalf("load after set: %+v %v", cfg, err)
 	}
 }
+
+// TestSetIconsPersistsAndLoads pins the icons setter's round trip: the
+// mode lands in config.json as its string form, other keys survive,
+// and Load reads it back with IconsSet true.
+func TestSetIconsPersistsAndLoads(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"theme": "nord", "future-key": 7}`), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := SetIcons(path, IconsOn); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	for _, want := range []string{`"icons": "on"`, `"theme": "nord"`, `"future-key": 7`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("missing %s in:\n%s", want, data)
+		}
+	}
+	cfg, err := Load(path)
+	if err != nil || cfg.Icons != IconsOn || !cfg.IconsSet {
+		t.Fatalf("load after set: %+v %v", cfg, err)
+	}
+	if err := SetIcons("", IconsOff); err == nil {
+		t.Fatal("an empty path must be refused, not silently dropped")
+	}
+}
+
+// TestLoadReportsIconsSet pins the "was the choice ever made?" flag: a
+// file without an icons key loads as auto with IconsSet false, and an
+// explicit "auto" is auto with IconsSet true — the difference between a
+// default and a decision.
+func TestLoadReportsIconsSet(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"theme": "nord"}`), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil || cfg.Icons != IconsAuto || cfg.IconsSet {
+		t.Fatalf("no icons key: %+v %v, want auto with IconsSet false", cfg, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"icons": "auto"}`), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	cfg, err = Load(path)
+	if err != nil || cfg.Icons != IconsAuto || !cfg.IconsSet {
+		t.Fatalf("explicit auto: %+v %v, want auto with IconsSet true", cfg, err)
+	}
+	if Defaults().IconsSet {
+		t.Fatal("Defaults() must not claim the user chose")
+	}
+}

@@ -8,6 +8,8 @@
 package overlay
 
 import (
+	"strings"
+
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/textdraw"
@@ -17,7 +19,28 @@ import (
 // DrawFrame paints the chrome every overlay shares: a filled body, a
 // single-line border, the title row ("<title>   esc") and the divider
 // under it. Overlays draw their content inside, starting at r.Y+3.
+// The hint is the bare "esc"; a prefab whose Enter means something
+// (submit, run the focused button, next field) says so through
+// DrawFrameHint instead.
 func DrawFrame(scr tcell.Screen, r Rect, title string, th theme.Theme) {
+	DrawFrameHint(scr, r, title, FrameHintEsc, th)
+}
+
+// FrameHintEsc is the default title-row hint: the one key every
+// overlay answers to.
+const FrameHintEsc = "esc"
+
+// DrawFrameHint is DrawFrame with the caller's own title-row hint —
+// "⏎ ok · esc" on a prompt, "⏎ delete · esc" on a confirm focused on
+// its action, "⇥ next · esc" on a form — because the prefabs disagree
+// about Enter (submit, press the focused button, cancel, next field)
+// and a frame that advertised only esc left the user to find out by
+// pressing it. The hint costs no row: it is budgeted out of the title
+// row exactly as the old "esc" was. When the title would be squeezed to
+// an ellipsis by a long hint on a narrow frame, the hint degrades to
+// the bare "esc" — the title is what says which overlay this is, so it
+// wins the row.
+func DrawFrameHint(scr tcell.Screen, r Rect, title, hint string, th theme.Theme) {
 	bg := th.LineHL
 	bgStyle := tcell.StyleDefault.Background(bg).Foreground(th.Text)
 	borderStyle := tcell.StyleDefault.Background(bg).Foreground(th.Subtle)
@@ -28,13 +51,31 @@ func DrawFrame(scr tcell.Screen, r Rect, title string, th theme.Theme) {
 	drawBorder(scr, r.X, r.Y, r.W, r.H, borderStyle)
 	drawHDivider(scr, r.X, r.Y+2, r.W, borderStyle)
 	// The title's budget is the interior (r.W-2) minus the right-aligned
-	// hint and one gap cell before it — a long path used to paint
-	// straight through the ┐ border onto whatever sat behind the frame.
-	hint := "esc "
+	// hint (with its one-cell gap to the border) and one gap cell before
+	// it — a long path used to paint straight through the ┐ border onto
+	// whatever sat behind the frame.
+	if hint == "" {
+		hint = FrameHintEsc
+	}
+	hint += " "
 	hintW := runeLen(hint)
 	titleBudget := r.W - 2 - hintW - 1
+	if hint != FrameHintEsc+" " && runeLen(" "+title) > titleBudget {
+		hint = FrameHintEsc + " "
+		hintW = runeLen(hint)
+		titleBudget = r.W - 2 - hintW - 1
+	}
 	drawText(scr, r.X+1, r.Y+1, titleBudget, trimRunes(" "+title, titleBudget), titleStyle)
 	drawText(scr, r.X+r.W-1-hintW, r.Y+1, hintW, hint, mutedStyle)
+}
+
+// EnterHint builds the "⏎ <verb> · esc" hint for a frame whose Enter
+// presses a button: the caption's brackets and padding are stripped
+// and the verb lower-cased, so "[ Delete branch ]" reads "⏎ delete
+// branch · esc" and the stock "[  No  ]" reads "⏎ no · esc".
+func EnterHint(caption string) string {
+	verb := strings.TrimSpace(strings.Trim(strings.TrimSpace(caption), "[]"))
+	return "⏎ " + strings.ToLower(verb) + " · " + FrameHintEsc
 }
 
 // DrawButton renders a bracketed-label button at (x, y). The focused

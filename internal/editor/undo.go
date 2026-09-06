@@ -20,7 +20,11 @@
 // window collapse into a single undo step, so undoing a 50-character
 // word is one click, not 50. Anything structural — pasting, hitting
 // Enter, deleting a selection, an explicit cursor move — closes the
-// current group so the next mutation starts a fresh entry.
+// current group so the next mutation starts a fresh entry, and so does
+// a space typed after a word (see Tab.InsertRune). A group also closes
+// on its own once it has been open for undoCoalesceMaxSpan or absorbed
+// undoCoalesceMaxOps edits, so a held key can't slide the window
+// forever and turn a minute of typing into one undo step.
 
 package editor
 
@@ -57,6 +61,21 @@ const lineHeaderBytes = 16
 // group. 500ms feels right — pause-and-think between words almost
 // always lasts longer than this, while a typing burst lands well inside.
 const undoCoalesceWindow = 500 * time.Millisecond
+
+// undoCoalesceMaxSpan caps how long one coalescing group may stay open
+// from its FIRST edit, whatever the gaps between edits. The inactivity
+// window alone slid forever: every coalesced push re-armed it, so a
+// held Backspace or an unbroken typing run collapsed into a single
+// entry however long it went on, and one undo threw away all of it.
+// Two seconds is long enough for a word or a short phrase and short
+// enough that a held key produces a run of steps to walk back through.
+const undoCoalesceMaxSpan = 2 * time.Second
+
+// undoCoalesceMaxOps caps how many edits one group may absorb, the
+// backstop for the same runaway when the clock is not the limit: a
+// key-repeat burst at 30 Hz stays under the span cap for two seconds
+// but a paste-like typing flood does not deserve a single entry.
+const undoCoalesceMaxOps = 100
 
 // undoGroup tags each snapshot with the kind of operation that produced
 // it so consecutive ops of the same kind can be merged. Anything labelled
@@ -119,6 +138,9 @@ func (t *Tab) applySnapshot(s snapshot) {
 	t.Anchor = s.Anchor
 	t.cursorMoved = true
 	t.StyleStale = true
+	// A restored caret is a new position, not a continuation of the
+	// vertical run the sticky column was measured in — see Tab.edit.
+	t.stickyValid = false
 }
 
 // initUndo seeds the original-state snapshot used by RevertFile and the
@@ -140,14 +162,27 @@ func (t *Tab) initUndo() {
 // no-op, while undoGroupStructural always creates a new entry. Any new
 // edit invalidates the redo stack.
 func (t *Tab) pushUndo(group undoGroup) {
-	if t.canCoalesce(group) {
-		t.lastUndoAt = time.Now() // extend the window
+	now := t.now()
+	if t.canCoalesce(group, now) {
+		t.lastUndoAt = now // extend the inactivity window
+		t.undoGroupOps++
 		return
 	}
 	t.pushUndoSnapshot(t.captureSnapshot())
 	t.redoStack = nil
 	t.lastUndoGroup = group
-	t.lastUndoAt = time.Now()
+	t.lastUndoAt = now
+	t.undoGroupAt = now
+	t.undoGroupOps = 1
+}
+
+// now reads the undo clock — the injected one when a test set it, the
+// wall clock otherwise.
+func (t *Tab) now() time.Time {
+	if t.clock != nil {
+		return t.clock()
+	}
+	return time.Now()
 }
 
 // pushUndoSnapshot appends one entry and trims the stack back inside
@@ -194,16 +229,24 @@ func (t *Tab) trimUndoStack() {
 	t.undoBytes = bytes
 }
 
-// canCoalesce reports whether a pending push of the given group should
-// be skipped because it would collapse into the previous one.
-func (t *Tab) canCoalesce(group undoGroup) bool {
+// canCoalesce reports whether a pending push of the given group at time
+// now should be skipped because it would collapse into the previous
+// one: same group, inside the inactivity window, and the open group has
+// exhausted neither its time span nor its edit budget.
+func (t *Tab) canCoalesce(group undoGroup, now time.Time) bool {
 	if t.lastUndoGroup == undoGroupNone || group == undoGroupStructural {
 		return false
 	}
 	if t.lastUndoGroup != group {
 		return false
 	}
-	return time.Since(t.lastUndoAt) <= undoCoalesceWindow
+	if now.Sub(t.lastUndoAt) > undoCoalesceWindow {
+		return false
+	}
+	if now.Sub(t.undoGroupAt) > undoCoalesceMaxSpan {
+		return false
+	}
+	return t.undoGroupOps < undoCoalesceMaxOps
 }
 
 // breakUndoGroup closes the current coalescing window so the next

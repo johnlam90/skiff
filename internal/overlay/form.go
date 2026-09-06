@@ -48,6 +48,9 @@ type Form struct {
 	Rows  []FormRow
 	// Focus is the focused row index.
 	Focus int
+	// press is the click latch — see Press. Every target here is a
+	// press target; nothing on a form follows a drag.
+	press Press
 	Theme theme.Theme
 
 	Size  func() (w, h int)
@@ -186,9 +189,9 @@ func (f *Form) HandleKey(ev *tcell.EventKey) {
 
 // HandleMouse: clicks on a row focus it, select chevrons cycle, text
 // clicks reposition the caret, the buttons resolve the form, and a
-// click outside cancels.
+// click outside cancels. Only a fresh press counts as a click.
 func (f *Form) HandleMouse(x, y int, btn tcell.ButtonMask) {
-	if btn&tcell.Button1 == 0 {
+	if !f.press.Fresh(btn) {
 		return
 	}
 	r := f.rect()
@@ -257,15 +260,15 @@ func (f *Form) HandleMouse(x, y int, btn tcell.ButtonMask) {
 }
 
 // Draw renders the form: frame, one label/input pair per visible row —
-// the focused row's label in the accent, its input on a lifted
-// background, selects with < > chevron targets — and the button row.
+// the focused row's label in the accent, its input on the theme's
+// FieldBG, selects with < > chevron targets — and the button row.
 // When the terminal is too short for every row, ▲/▼ markers go into the
 // divider and the bottom border (the menu's vocabulary) so the hidden
 // fields announce themselves without costing a content row.
 func (f *Form) Draw(scr tcell.Screen) {
 	r := f.rect()
 	th := f.Theme
-	DrawFrame(scr, r, f.Title, th)
+	DrawFrameHint(scr, r, f.Title, "⇥ next · "+FrameHintEsc, th)
 
 	bg := th.LineHL
 	titleStyle := tcell.StyleDefault.Background(bg).Foreground(th.Accent).Bold(true)
@@ -291,9 +294,14 @@ func (f *Form) Draw(scr tcell.Screen) {
 		fieldEnd := r.X + r.W - 3
 		fieldWidth := fieldEnd - fieldStart
 
+		// The focused field lifts onto FieldBG, the palette's selection
+		// tint corrected for Text — never Subtle, which readable() now
+		// walks toward white for the 3:1 graphics floor and so toward
+		// Text: the one field the user types into measured 1.1–3.6:1
+		// under it. FieldBG is fenced at 4.5:1 across the registry.
 		inputBg := th.BG
 		if i == f.Focus {
-			inputBg = th.Subtle
+			inputBg = th.FieldBG()
 		}
 		inputStyle := tcell.StyleDefault.Background(inputBg).Foreground(th.Text)
 

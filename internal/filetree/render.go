@@ -238,7 +238,10 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 	}
 	rowStyle := tcell.StyleDefault.Background(bg).Foreground(fg)
 	if active {
-		rowStyle = rowStyle.Bold(true)
+		// Bold plus, on a degraded palette, Attrs.SelectedRow: the
+		// Accent hue is gone there and bold alone does not say "this is
+		// the row you are on" among rows that are bold for being dirty.
+		rowStyle = theme.WithAttrs(rowStyle.Bold(true), th.Attrs.SelectedRow)
 	}
 
 	// Build the left chunk (indent + chevron + space) and right chunk
@@ -273,8 +276,14 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 		suffix += " " + UnreadableLabel
 	}
 
+	// The name's budget stops short of the status letter's home (" M"
+	// at the right edge) so a long name is ellipsised in front of the
+	// letter instead of being cut under it — the old full-width clip
+	// left the name's last glyph stranded in the cell past the letter.
+	nameW := w - changeLetterCells(change, w)
+
 	if !withIcons {
-		drawString(scr, x, y, w, prefix+suffix, rowStyle)
+		drawString(scr, x, y, nameW, textdraw.ClipEllipsis(prefix+suffix, nameW), rowStyle)
 		drawChangeLetter(scr, x, y, w, change, rowStyle)
 		return
 	}
@@ -289,26 +298,39 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 		glyphStyle = glyphStyle.Bold(true)
 	}
 
-	drawString(scr, x, y, w, prefix, rowStyle)
+	drawString(scr, x, y, nameW, prefix, rowStyle)
 	// Cell widths, not rune counts: a Nerd Font glyph or a CJK chain
 	// label advancing by its rune count would overdraw the name.
 	px := textdraw.Width(prefix)
-	drawString(scr, x+px, y, w-px, glyph, glyphStyle)
+	drawString(scr, x+px, y, nameW-px, glyph, glyphStyle)
 	gx := textdraw.Width(glyph)
-	drawString(scr, x+px+gx, y, w-px-gx, "  "+suffix, rowStyle)
+	drawString(scr, x+px+gx, y, nameW-px-gx, textdraw.ClipEllipsis("  "+suffix, nameW-px-gx), rowStyle)
 	drawChangeLetter(scr, x, y, w, change, rowStyle)
 }
 
+// changeLetterCells is how many cells at the row's right edge the
+// status letter claims — " M" plus the blank cell after it — or zero
+// when the row is clean or too narrow to show one. drawNodeRow shortens
+// the name's budget by exactly this, and drawChangeLetter paints
+// exactly this, so the two cannot overlap.
+func changeLetterCells(change GitChangeKind, w int) int {
+	if gitChangeLetter(change) == 0 || w < 4 {
+		return 0
+	}
+	return 3
+}
+
 // drawChangeLetter paints the git status letter (with one leading space
-// so it survives long truncated names) at the row's right edge. No-op
-// when the row is clean or the row is too narrow to fit it.
+// so it survives long truncated names) at the row's right edge and
+// blanks the cell after it. No-op when the row is clean or the row is
+// too narrow to fit it.
 func drawChangeLetter(scr tcell.Screen, x, y, w int, change GitChangeKind, st tcell.Style) {
-	letter := gitChangeLetter(change)
-	if letter == 0 || w < 4 {
+	if changeLetterCells(change, w) == 0 {
 		return
 	}
 	scr.SetContent(x+w-3, y, ' ', nil, st)
-	scr.SetContent(x+w-2, y, letter, nil, st)
+	scr.SetContent(x+w-2, y, gitChangeLetter(change), nil, st)
+	scr.SetContent(x+w-1, y, ' ', nil, st)
 }
 
 // gitChangeLetter maps git status kinds to the one-cell letter drawn at

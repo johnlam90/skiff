@@ -46,6 +46,11 @@ features, make sure they're reachable from the main menu first.
 main.go                       Entry — one optional rootDir / file[:line] arg;
                               extra arguments are refused, never dropped
 internal/app/app.go           App struct + New/NewSingleFile, Run, handleEvent, flash
+internal/app/esctty.go        The /dev/tty read filter under tcell: rewrites a
+                              fast "Esc Esc" (which tcell would fold into ONE
+                              plain Esc) into the CSI-u form of Alt+Esc so the
+                              menu opens; holds a lone ESC ≤60ms to catch a
+                              pair split across writes (tmux, SSH)
 internal/app/layout.go        All screen geometry: panel rects + splitter clamping
 internal/app/draw.go          The render pass + tab-strip layout
 internal/app/refresh.go       10s tick: off-thread scan, on-loop apply, tab reconcile
@@ -69,6 +74,8 @@ internal/app/gitchanges.go    Git panel: rows, buttons, keyboard mode, hint
 internal/app/gitstatus.go     Best-effort `git status` read behind the tree tint
 internal/app/overlays.go      Overlay stack wiring: menu adapter + dropOverlay
 internal/app/modals.go        Openers for the prefab overlays + closeAllModals
+internal/app/iconpick.go      ≡ → Icons… picker (Auto / On / Off, live preview);
+                              Nerd Font detection cannot see the client over SSH
 internal/app/strip.go         The strip interface + App's one strip slot: what a
                               docked bar reserves, routes, paints and tears down
 internal/app/projfind.go      Project-wide content search panel (Esc-F)
@@ -93,6 +100,8 @@ internal/editor/scrollbar.go  Right-edge scrollbar + git change map
 internal/editor/highlight.go  Chroma → []tcell.Style per line
 internal/editor/indent.go     Visual-column math, indent detection, Enter auto-indent
 internal/editor/word.go       The single definition of "a word" + word-wise motion
+internal/editor/select.go     SelectAll / SelectLine — the whole-buffer and
+                              whole-line selections behind Esc a / Esc L
 internal/editor/cluster.go    Grapheme clusters + terminal cell widths (uniseg)
 internal/editor/bracket.go    Bracket match under the caret (+ the render decision)
 internal/filetree/filetree.go Tree + Node model: lazy loading, the
@@ -162,6 +171,9 @@ internal/atomicfile/atomicfile.go Temp-file + fsync + rename write, shared by
                               every config/state file (session, trust,
                               config.json, .skiff/format.json)
 internal/overlay/             Floating surfaces: the Stack (routing truth),
+                              press.go is the per-surface click latch: buttons
+                              answer a FRESH Button1 press, never the motion of
+                              a drag that started elsewhere;
                               Field/chrome primitives, and the prefab
                               overlays (Prompt/Confirm/Info/Dirty/Form/
                               Popup/Pick). list.go is the one scrolled,
@@ -406,7 +418,10 @@ mutations, closing the project-find panel). Don't add a per-job event
 struct or a loose `xBusy` bool back — add a `Job` field and a line in
 `wireJobs`, and pick the policy in its field comment. `safeGo` stays
 the only goroutine spawner: the job's `Spawn` seam is `a.safeGo`, so a
-panic in a worker still reaches the crash guard. Tests drain with the
+panic in a worker still reaches the crash guard. The one exception sits
+below the App: `escTty.readLoop` (esctty.go) is spawned before an App
+exists, recovers its own panic into a Read error, and tcell turns that
+into an EventError — never add a second exception. Tests drain with the
 one `pumpUntil(t, a, what, done)` and the `idle(&a.job)` adapter.
 
 ### Identity-preserving tree refresh (filetree.go)

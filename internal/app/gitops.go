@@ -26,7 +26,6 @@ import (
 	"strings"
 
 	"github.com/johnlam90/skiff/internal/git"
-	"github.com/johnlam90/skiff/internal/overlay"
 )
 
 // gitOpResult is what a finished git mutation lands beside its error
@@ -75,32 +74,35 @@ func (a *App) handleGitOpDone(r gitOpResult, err error) {
 	case err == nil:
 		a.flash(r.okFlash)
 	case opErr != nil && opErr.NonFastForward && r.label == "Push":
-		a.openConfirm("Push rejected",
+		c := a.openConfirm("Push rejected",
 			"origin has commits you don't. Pull (merge), then push?",
 			func(app *App) { app.doGitPullAndPush() })
+		c.Labels = confirmButtons("Pull, then push")
 	case opErr != nil && opErr.NotMerged && r.label == "Delete branch" && a.gitDeleteTarget != "":
 		// `-d` refused an unmerged branch — losing work needs its own
 		// explicit yes, so the force delete is a second confirm, never
 		// the default.
 		name := a.gitDeleteTarget
 		a.gitDeleteTarget = ""
-		a.openConfirm("Branch not merged",
+		c := a.openConfirm("Branch not merged",
 			name+" has commits that aren't merged anywhere. Force delete?",
 			func(app *App) {
 				app.runGitOp("Force delete", "Deleted "+name, false,
 					func(r *git.Repo) error { return r.DeleteBranch(name, true) })
 			})
+		c.Labels = confirmButtons("Force delete")
 	case opErr != nil && opErr.WorktreeDirty && r.label == "Remove worktree" && a.gitWorktreeTarget != "":
 		// A plain remove refused uncommitted work — force is a second
 		// confirm, mirroring the branch-delete ladder.
 		path := a.gitWorktreeTarget
 		a.gitWorktreeTarget = ""
-		a.openConfirm("Worktree not clean",
+		c := a.openConfirm("Worktree not clean",
 			path+" has uncommitted or untracked files. Force remove?",
 			func(app *App) {
 				app.runGitOp("Force remove worktree", "Removed worktree", false,
 					func(r *git.Repo) error { return r.WorktreeRemove(path, true) })
 			})
+		c.Labels = confirmButtons("Force remove")
 	case opErr != nil:
 		lines := []string{opErr.Advice, ""}
 		lines = append(lines, splitNonEmptyLines(opErr.Output)...)
@@ -201,7 +203,7 @@ func (a *App) menuGitCommit() {
 		a.flash("Nothing checked to commit")
 		return
 	}
-	hint := fmt.Sprintf("%d file(s)", len(paths))
+	hint := plural(len(paths), "%d file", "%d files")
 	a.openPrompt("Commit message", hint, "", func(app *App, msg string) {
 		app.doGitCommit(paths, msg)
 	})
@@ -209,7 +211,7 @@ func (a *App) menuGitCommit() {
 
 // doGitCommit runs the path-scoped commit for paths.
 func (a *App) doGitCommit(paths []string, message string) {
-	ok := fmt.Sprintf("Committed %d file(s)", len(paths))
+	ok := plural(len(paths), "Committed %d file", "Committed %d files")
 	a.runGitOp("Commit", ok, false, func(r *git.Repo) error { return r.Commit(paths, message) })
 }
 
@@ -466,12 +468,13 @@ func (a *App) menuGitUndoCommit() {
 	if !a.hasGitRepo() {
 		return
 	}
-	a.openConfirm("Undo last commit",
+	c := a.openConfirm("Undo last commit",
 		"Remove the last commit? Its changes stay in your working tree. "+
 			"If it was already pushed, the next push will need a merge.",
 		func(app *App) {
 			app.runGitOp("Undo commit", "Last commit undone", false, (*git.Repo).UndoCommit)
 		})
+	c.Labels = confirmButtons("Undo commit")
 }
 
 // menuGitMergeBranch picks any other branch and merges it into the
@@ -548,13 +551,14 @@ func (a *App) openDeleteBranchPick(all []string) {
 			if _, ok := app.safeRef(name); !ok {
 				return
 			}
-			app.openConfirm("Delete branch",
+			c := app.openConfirm("Delete branch",
 				"Delete "+name+"? Unmerged work on it would be lost.",
 				func(app2 *App) {
 					app2.gitDeleteTarget = name
 					app2.runGitOp("Delete branch", "Deleted "+name, false,
 						func(r *git.Repo) error { return r.DeleteBranch(name, false) })
 				})
+			c.Labels = confirmButtons("Delete branch")
 		}, nil, nil)
 }
 
@@ -575,38 +579,23 @@ func otherNames(all []string, current string, localOnly bool) []string {
 	return out
 }
 
-// menuGitExtras opens the less-used git verbs as a small popup so the
-// main menu doesn't grow five more rows. Reuses the context-menu modal
-// with the tree root as a harmless anchor node.
+// menuGitExtras is the ≡ → Git… → More git actions… row: the less-used
+// git verbs as a filterable pick, registered in menuDrillIns like the
+// Git… door itself so the reachability test — and the top-level
+// filter — cover every one of them.
 func (a *App) menuGitExtras() {
 	a.closeMenu()
 	if !a.hasGitRepo() {
 		return
 	}
-	a.openGitExtras(a.width/2-contextMenuWidth/2, a.height/2-4)
+	a.openMenuDrillIn(gitExtrasDrillIn())
 }
 
-// openGitExtras opens the extras popup anchored near (x, y) — shared by
-// the ≡ menu row (centered) and the Git panel's ⋯ button (anchored).
-func (a *App) openGitExtras(x, y int) {
-	a.closeAllModals()
-	a.openPopup([]overlay.PopupItem{
-		{Label: "Fetch", OnPick: func() { a.menuGitFetch() }},
-		{Label: "Compare against…", OnPick: func() { a.menuGitCompareAgainst() }},
-		{Divider: true},
-		{Label: "New branch…", OnPick: func() { a.menuGitNewBranch() }},
-		{Label: "Merge branch…", OnPick: func() { a.menuGitMergeBranch() }},
-		{Label: "Rename branch…", OnPick: func() { a.menuGitRenameBranch() }},
-		{Label: "Delete branch…", OnPick: func() { a.menuGitDeleteBranch() }},
-		{Divider: true},
-		{Label: "New worktree…", OnPick: func() { a.menuGitNewWorktree() }},
-		{Label: "List worktrees", OnPick: func() { a.menuGitListWorktrees() }},
-		{Label: "Remove worktree…", OnPick: func() { a.menuGitRemoveWorktree() }},
-		{Divider: true},
-		{Label: "Stash changes", OnPick: func() { a.menuGitStash() }},
-		{Label: "Pop stash", OnPick: func() { a.menuGitStashPop() }},
-		{Divider: true},
-		{Label: "Undo last commit", OnPick: func() { a.menuGitUndoCommit() }},
-		{Label: "Commit history", OnPick: func() { a.menuCommitHistory() }},
-	}, x, y)
+// openGitExtras is the git panel's ⋯ button: the same drill-in the menu
+// row opens. The anchor the button hands over is accepted for the
+// button's sake and ignored — a pick centers itself, and the panel
+// gains nothing from the list hugging the cursor except a second
+// geometry to keep on screen.
+func (a *App) openGitExtras(_, _ int) {
+	a.openMenuDrillIn(gitExtrasDrillIn())
 }

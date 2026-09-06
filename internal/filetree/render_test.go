@@ -189,6 +189,50 @@ func TestRender_ActiveFileIsBold(t *testing.T) {
 	}
 }
 
+// TestRender_ActiveRowWearsSelectedRowAttrsWhenDegraded pins the tree's
+// low-colour channel: with Accent collapsed onto the terminal default,
+// bold alone cannot single out the active row among rows that are bold
+// for being dirty, so the active row also wears Attrs.SelectedRow
+// (reverse video) — and only the active row does.
+func TestRender_ActiveRowWearsSelectedRowAttrsWhenDegraded(t *testing.T) {
+	root := mkTree(t)
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	alpha := findChild(tr.Root, "alpha")
+	if err := tr.reload(alpha); err != nil {
+		t.Fatalf("reload alpha: %v", err)
+	}
+	alpha.Expanded = true
+	inner := findChild(alpha, "inner.go")
+	tr.ActiveFile = inner.Path
+	th := theme.Degrade(theme.Default(), 8)
+
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("scr.Init: %v", err)
+	}
+	t.Cleanup(scr.Fini)
+	scr.SetSize(40, 20)
+	tr.Render(scr, th, 0, 0, 40, 20)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	rowY := findRowY(cells, w, 20, "inner.go")
+	if rowY < 0 {
+		t.Fatal("could not find active file row")
+	}
+	x := strings.Index(rowText(cells, w, rowY), "inner.go")
+	if _, _, attrs := cells[rowY*w+x].Style.Decompose(); attrs&th.Attrs.SelectedRow != th.Attrs.SelectedRow {
+		t.Fatalf("active row attrs = %v, want %v set", attrs, th.Attrs.SelectedRow)
+	}
+	otherY := findRowY(cells, w, 20, "alpha")
+	ox := strings.Index(rowText(cells, w, otherY), "alpha")
+	if _, _, attrs := cells[otherY*w+ox].Style.Decompose(); attrs&tcell.AttrReverse != 0 {
+		t.Fatalf("an inactive row wears the selected-row attribute: %v", attrs)
+	}
+}
+
 // TestRender_TinyHeightDoesNotPanic guards against an off-by-one when the
 // caller hands Render a height smaller than the 2-row header — listH goes
 // to zero and we shouldn't blow up dividing or indexing.
@@ -626,6 +670,91 @@ func TestRender_CJKFilenameKeepsStatusLetterAligned(t *testing.T) {
 		if c := cells[fileY*w+x]; len(c.Runes) > 0 && c.Runes[0] != ' ' {
 			t.Fatalf("glyph painted past the sidebar at x=%d: %q", x, c.Runes[0])
 		}
+	}
+}
+
+// TestRender_LongDirtyNameEllipsisedBeforeStatusLetter pins the narrow-
+// sidebar row layout: at the 18-column minimum a long modified name is
+// cut with an ellipsis IN FRONT of the " M" letter, and the cell past
+// the letter is blank. Before, the name was clipped to the full row
+// width and the letter painted over it, which left the name's last
+// glyph stranded alone in the final cell — "…very_long_nam M e".
+func TestRender_LongDirtyNameEllipsisedBeforeStatusLetter(t *testing.T) {
+	root := t.TempDir()
+	const name = "a_very_long_modified_filename.go"
+	mustWrite(t, filepath.Join(root, name), "package x\n")
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tr.DirtyFiles = map[string]GitChangeKind{filepath.Join(root, name): GitChangeModified}
+
+	const treeW = 18 // minSidebarWidth
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("scr.Init: %v", err)
+	}
+	t.Cleanup(scr.Fini)
+	scr.SetSize(40, 10)
+	tr.Render(scr, theme.Default(), 0, 0, treeW, 10)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+
+	fileY := findRowY(cells, w, 10, "a_very")
+	if fileY < 0 {
+		t.Fatal("could not find the long file row in render output")
+	}
+	at := func(x int) rune {
+		c := cells[fileY*w+x]
+		if len(c.Runes) == 0 {
+			return ' '
+		}
+		return c.Runes[0]
+	}
+	if got := at(treeW - 4); got != '…' {
+		t.Fatalf("cell before the letter slot = %q, want the ellipsis", got)
+	}
+	if at(treeW-3) != ' ' || at(treeW-2) != 'M' {
+		t.Fatalf("letter slot = %q%q, want \" M\"", at(treeW-3), at(treeW-2))
+	}
+	if got := at(treeW - 1); got != ' ' {
+		t.Fatalf("cell past the letter = %q, want blank (no stranded glyph)", got)
+	}
+	for x := treeW; x < w; x++ {
+		if got := at(x); got != ' ' {
+			t.Fatalf("glyph painted past the sidebar at x=%d: %q", x, got)
+		}
+	}
+}
+
+// TestRender_LongCleanNameEllipsised pins the clean-row half: with no
+// status letter the name may use the whole row, but it still ends in
+// an ellipsis rather than a silent cut, so a truncated name never
+// reads as a complete-but-wrong one.
+func TestRender_LongCleanNameEllipsised(t *testing.T) {
+	root := t.TempDir()
+	const name = "another_very_long_filename_here.go"
+	mustWrite(t, filepath.Join(root, name), "package x\n")
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const treeW = 18
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("scr.Init: %v", err)
+	}
+	t.Cleanup(scr.Fini)
+	scr.SetSize(40, 10)
+	tr.Render(scr, theme.Default(), 0, 0, treeW, 10)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	fileY := findRowY(cells, w, 10, "another")
+	if fileY < 0 {
+		t.Fatal("could not find the long file row in render output")
+	}
+	if c := cells[fileY*w+treeW-1]; len(c.Runes) == 0 || c.Runes[0] != '…' {
+		t.Fatalf("last row cell = %q, want the ellipsis", c.Runes)
 	}
 }
 

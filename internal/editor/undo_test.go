@@ -45,6 +45,21 @@ func TestNewTabCapturesOriginal(t *testing.T) {
 	}
 }
 
+// TestApplySnapshot_ForgetsStickyColumn pins that restoring a snapshot
+// ends any run of vertical moves: the caret it puts back is a fresh
+// position, so a sticky column recorded before the change must not
+// steer the next Down. Guarded here directly because Undo and Redo
+// both land through applySnapshot.
+func TestApplySnapshot_ForgetsStickyColumn(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("a\nb")}
+	tab.initUndo()
+	tab.stickyValid, tab.stickyCol, tab.stickyFor = true, 3, tab.Cursor
+	tab.applySnapshot(tab.captureSnapshot())
+	if tab.stickyValid {
+		t.Fatal("applySnapshot left the sticky column valid")
+	}
+}
+
 // TestInsertRune_CoalescesIntoSingleStep types five characters in quick
 // succession and asserts there is exactly one undo entry — the burst.
 // One Undo should restore the empty buffer rather than removing chars
@@ -668,5 +683,118 @@ func TestBufferContentsAfterMixedHistory(t *testing.T) {
 	// Trailing newlines / whitespace shouldn't sneak in via snapshot copies.
 	if strings.TrimSpace(tab.Buffer.String()) != "seed" {
 		t.Fatal("trailing junk crept into restored buffer")
+	}
+}
+
+// fakeClock installs a controllable time source on tab and returns the
+// function that advances it. The coalescing caps are wall-clock rules,
+// and a test that slept through them would cost seconds per case.
+func fakeClock(tab *Tab) func(d time.Duration) {
+	now := time.Unix(1_700_000_000, 0)
+	tab.clock = func() time.Time { return now }
+	return func(d time.Duration) { now = now.Add(d) }
+}
+
+// TestInsertRune_GroupClosesAfterMaxSpan is the regression for the
+// sliding window: every coalesced push used to re-arm the 500ms gap, so
+// a run of runes typed 100ms apart for five seconds was one undo entry.
+// The group now closes once it has been open for undoCoalesceMaxSpan
+// even though no single gap ever exceeded the inactivity window.
+func TestInsertRune_GroupClosesAfterMaxSpan(t *testing.T) {
+	tab := newScratchTab("")
+	advance := fakeClock(tab)
+	step := undoCoalesceWindow / 5
+	steps := int(undoCoalesceMaxSpan/step) + 5
+	for i := 0; i < steps; i++ {
+		tab.InsertRune('x')
+		advance(step)
+	}
+	if got := len(tab.undoStack); got < 2 {
+		t.Fatalf("a burst longer than the span cap should be several undo steps, got %d", got)
+	}
+	tab.Undo()
+	if got := len([]rune(tab.Buffer.Lines[0])); got == 0 || got >= steps {
+		t.Fatalf("one undo should peel back part of the burst, %d of %d runes remain", got, steps)
+	}
+}
+
+// TestBackspace_HeldKeyIsNotOneUndoStep covers the other runaway: a held
+// Backspace repeats far inside the inactivity window, and the op cap is
+// what stops a whole paragraph from vanishing into one entry.
+func TestBackspace_HeldKeyIsNotOneUndoStep(t *testing.T) {
+	text := strings.Repeat("a", undoCoalesceMaxOps*2)
+	tab := newScratchTab(text)
+	fakeClock(tab)
+	tab.Cursor = Position{Line: 0, Col: len(text)}
+	tab.Anchor = tab.Cursor
+	for i := 0; i < undoCoalesceMaxOps+10; i++ {
+		tab.Backspace()
+	}
+	if got := len(tab.undoStack); got != 2 {
+		t.Fatalf("expected the op cap to split the burst into 2 entries, got %d", got)
+	}
+	tab.Undo()
+	if got := len(tab.Buffer.Lines[0]); got != undoCoalesceMaxOps {
+		t.Fatalf("one undo should restore only the second group: %d runes left, want %d", got, undoCoalesceMaxOps)
+	}
+}
+
+// TestInsertRune_SpaceAfterWordBreaksGroup pins word-granularity undo: a
+// space typed right after a word closes the word's group, so undo peels
+// back one word at a time instead of the whole sentence. A space typed
+// after another space, or at the start of a line, keeps coalescing.
+func TestInsertRune_SpaceAfterWordBreaksGroup(t *testing.T) {
+	tab := newScratchTab("")
+	fakeClock(tab)
+	for _, r := range "ab cd" {
+		tab.InsertRune(r)
+	}
+	if got := len(tab.undoStack); got != 2 {
+		t.Fatalf("expected 2 groups for %q, got %d", "ab cd", got)
+	}
+	tab.Undo()
+	if got := tab.Buffer.Lines[0]; got != "ab" {
+		t.Fatalf("one undo should drop the second word, got %q", got)
+	}
+
+	run := newScratchTab("")
+	fakeClock(run)
+	for _, r := range "  x" {
+		run.InsertRune(r)
+	}
+	if got := len(run.undoStack); got != 1 {
+		t.Fatalf("leading spaces must keep coalescing, got %d groups", got)
+	}
+	if !run.startsWordBreak(' ') {
+		t.Fatal("a space after 'x' at the caret should break the group")
+	}
+}
+
+// TestCanCoalesce_Caps pins the three limits directly: the inactivity
+// gap, the span since the group opened, and the op budget each close
+// the group on their own.
+func TestCanCoalesce_Caps(t *testing.T) {
+	tab := newScratchTab("")
+	advance := fakeClock(tab)
+	tab.InsertRune('a')
+	now := tab.now()
+	if !tab.canCoalesce(undoGroupTyping, now) {
+		t.Fatal("a second rune right away must coalesce")
+	}
+	if tab.canCoalesce(undoGroupTyping, now.Add(undoCoalesceWindow+time.Millisecond)) {
+		t.Fatal("the inactivity gap must close the group")
+	}
+	if tab.canCoalesce(undoGroupBackspace, now) {
+		t.Fatal("a different group must not coalesce")
+	}
+	advance(undoCoalesceMaxSpan + time.Millisecond)
+	tab.lastUndoAt = tab.now() // keep the gap inside the window
+	if tab.canCoalesce(undoGroupTyping, tab.now()) {
+		t.Fatal("the span cap must close the group even with a live gap")
+	}
+	tab.undoGroupAt = tab.now()
+	tab.undoGroupOps = undoCoalesceMaxOps
+	if tab.canCoalesce(undoGroupTyping, tab.now()) {
+		t.Fatal("the op cap must close the group")
 	}
 }

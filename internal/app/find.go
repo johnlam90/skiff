@@ -98,17 +98,23 @@ func barLabelsThatFit(spare, counterCost, hintCost int) (counter, hint bool) {
 	return counter, hint
 }
 
-// openFind shows the find bar with an empty input. We don't pre-fill
-// the user's last query because closing the bar already clears find
-// state — Esc means "I'm done searching." Each Esc-f opens a fresh
-// search.
+// openFind shows the find bar, seeded with the tab's remembered query
+// when it has one: closing the bar keeps the query (see
+// ClearFindHighlights), so Esc f after an Esc picks the search back
+// up — highlights relit, caret on the nearest hit — instead of making
+// the user retype it. Typing replaces the seed as it would any text.
 func (a *App) openFind() {
 	tab := a.activeTabPtr()
 	if tab == nil || tab.IsImage() {
 		return
 	}
 	a.closeAllModals() // a modal (or the other strip) would eat our keystrokes
-	a.strip = &findStrip{a: a, tab: tab}
+	s := &findStrip{a: a, tab: tab}
+	a.strip = s
+	if tab.FindQuery != "" {
+		s.query.SetText(tab.FindQuery)
+		s.applyQuery()
+	}
 }
 
 // findBar returns the find bar when it is the strip that is up, else
@@ -124,12 +130,12 @@ func (a *App) findBarOpen() bool {
 	return a.findBar() != nil
 }
 
-// closeFind hides the find bar, and findStrip.close clears the find
-// state of the tab it opened on so the highlights disappear with it.
-// Leaving them
-// painted after close is surprising — users expect Esc to mean "I'm
-// done searching." It drops the slot only when the bar is the strip
-// that is up, so a stray call can't dismiss the project-find panel.
+// closeFind hides the find bar, and findStrip.close takes the
+// highlights of the tab it opened on down with it — leaving them
+// painted after close is surprising; users expect Esc to mean "I'm
+// done looking at hits." The query itself is kept for Esc f / Esc ;.
+// It drops the slot only when the bar is the strip that is up, so a
+// stray call can't dismiss the project-find panel.
 func (a *App) closeFind() {
 	if a.findBarOpen() {
 		a.dropStrip()
@@ -154,12 +160,13 @@ func (s *findStrip) boundTab() *editor.Tab {
 	return s.tab
 }
 
-// close clears the find state of the tab the bar opened on. The bar
-// owns no highlights itself; this is the one thing it leaves behind, so
-// dropping the slot has to take it too.
+// close takes down the highlights of the tab the bar opened on. The
+// bar owns no highlights itself; this is the one thing it leaves
+// behind, so dropping the slot has to take it too. The query stays on
+// the tab, suspended, for the next Esc f or Esc ;.
 func (s *findStrip) close() {
 	if tab := s.boundTab(); tab != nil {
-		tab.ClearFind()
+		tab.ClearFindHighlights()
 	}
 }
 
@@ -179,12 +186,18 @@ func (s *findStrip) handleMouse(int, int, tcell.ButtonMask) bool { return false 
 //	Enter                   next match, or replace when the replace
 //	                        field has the keyboard
 //	Shift+Enter             previous match, or replace-all
+//	Alt+c                   toggle match case (Alt is the tmux-safe
+//	                        modifier; see keys.go)
 //
 // Everything else is text editing and belongs to the focused
 // overlay.Field — the same split prompt.go and form.go use. Keys no
 // field claims (Up/Down, function keys) are dropped on the floor: the
 // find bar owns the keyboard while it's open.
 func (s *findStrip) handleKey(ev *tcell.EventKey) {
+	if ev.Modifiers()&tcell.ModAlt != 0 && ev.Key() == tcell.KeyRune && ev.Rune() == 'c' {
+		s.toggleMatchCase()
+		return
+	}
 	switch ev.Key() {
 	case tcell.KeyEsc:
 		s.a.closeFind()
@@ -218,6 +231,17 @@ func (s *findStrip) applyQuery() {
 	}
 	tab.SetFindQuery(s.query.Text())
 	tab.FocusCurrentMatch()
+}
+
+// toggleMatchCase flips the bar's Aa mode on the tab it searches and
+// re-runs the query so the highlights and the counter follow at once.
+func (s *findStrip) toggleMatchCase() {
+	tab := s.boundTab()
+	if tab == nil {
+		return
+	}
+	tab.FindMatchCase = !tab.FindMatchCase
+	s.applyQuery()
 }
 
 // next is the Enter-in-the-bar action: jump to the next match (with
@@ -292,6 +316,31 @@ func (a *App) hasFindable() bool {
 	return t != nil && !t.IsImage()
 }
 
+// menuFindNext repeats the active tab's last search without the bar —
+// Esc ; and the Go row "Find next". Nothing to repeat is said out loud:
+// a leader that silently does nothing teaches that it does nothing.
+func (a *App) menuFindNext() {
+	a.closeMenu()
+	t := a.activeTabPtr()
+	if t == nil || t.IsImage() {
+		return
+	}
+	if !t.HasFindQuery() {
+		a.flash("No search to repeat — Esc f to start one")
+		return
+	}
+	if !t.FindAgain() {
+		a.flash(fmt.Sprintf("No matches for %q", t.FindQuery))
+	}
+}
+
+// hasFindQuery gates the "Find next" row: enabled once the active tab
+// remembers a query, live or suspended.
+func (a *App) hasFindQuery() bool {
+	t := a.activeTabPtr()
+	return t != nil && t.HasFindQuery()
+}
+
 // draw renders the 1-row find bar into the rect layout reserved for it.
 // Layout (left to right):
 //
@@ -329,9 +378,9 @@ func (s *findStrip) draw(r rect) {
 	// the input can be clipped against them, but they only get the cells
 	// left over once the input has minFieldWidth — the input outranks
 	// both, and the counter outranks the hint.
-	hint := " Enter: next · Shift+Enter: prev · Tab: replace · Esc: close "
+	hint := " Enter: next · Shift+Enter: prev · Tab: replace · Esc: close · Alt+c: case "
 	if s.replaceOpen && s.focusReplace {
-		hint = " Enter: replace · Shift+Enter: all · Tab: query · Esc: close "
+		hint = " Enter: replace · Shift+Enter: all · Tab: query · Esc: close · Alt+c: case "
 	}
 	counter := s.counterText()
 	counterCost := 0
@@ -411,8 +460,10 @@ func (s *findStrip) draw(r rect) {
 }
 
 // counterText renders the "N of M" indicator for the tab the bar
-// opened on. Returns "" when there is no query — or no tab left to
-// count against — so the renderer can skip drawing the field entirely.
+// opened on, with the Aa marker appended while match case is armed so
+// the mode is legible in text, not only as a colour. Returns "" when
+// there is no query — or no tab left to count against — so the
+// renderer can skip drawing the field entirely.
 func (s *findStrip) counterText() string {
 	if len(s.query.Value) == 0 {
 		return ""
@@ -421,10 +472,14 @@ func (s *findStrip) counterText() string {
 	if tab == nil {
 		return ""
 	}
-	if len(tab.FindMatches) == 0 {
-		return "no results"
+	text := "no results"
+	if len(tab.FindMatches) > 0 {
+		text = fmt.Sprintf("%d of %d", tab.FindIndex+1, len(tab.FindMatches))
 	}
-	return fmt.Sprintf("%d of %d", tab.FindIndex+1, len(tab.FindMatches))
+	if tab.FindMatchCase {
+		text += " · Aa"
+	}
+	return text
 }
 
 // hasNoMatches reports whether the user has typed a query that returned

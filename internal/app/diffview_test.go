@@ -783,3 +783,135 @@ func TestHandleDiffLoaded_EmptyResultExplainsPerSurface(t *testing.T) {
 		t.Fatal("a marker click with no hunk should explain itself in a dialog")
 	}
 }
+
+// TestDrawDiffView_LongTitleStaysInsideFrame pins the frame budget: a
+// sixty-cell repo-relative path on a 40-column terminal is clipped
+// before the ┐, not painted through it. The title used to go down with
+// an unbounded drawAt, which on a phone-width pane overran the border
+// and whatever sat behind the frame.
+func TestDrawDiffView_LongTitleStaysInsideFrame(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 40, 24)
+	title := "Diff · " + strings.Repeat("deeply/nested/", 4) + "file.go"
+	if runeLen(title) < 60 {
+		t.Fatalf("precondition: title should be at least 60 cells, is %d", runeLen(title))
+	}
+	a.openDiffView(title, samplePatch(), "", "f.txt")
+	d := diffOv(t, a)
+	d.Draw(a.screen)
+	a.screen.Show()
+	scr := a.screen.(tcell.SimulationScreen)
+	mx, my, mw, _ := d.modalRect()
+	if top := []rune(screenLine(scr, my)); top[mx+mw-1] != '┐' {
+		t.Fatalf("top border lost its ┐ at column %d: %q", mx+mw-1, string(top))
+	}
+	row := []rune(screenLine(scr, my+1))
+	if row[mx+mw-1] != '│' {
+		t.Fatalf("title row lost its right border at column %d: %q", mx+mw-1, string(row))
+	}
+	if !strings.Contains(string(row), "esc") {
+		t.Fatalf("title row lost its esc hint: %q", string(row))
+	}
+	if !strings.Contains(string(row), "…") {
+		t.Fatalf("clipped title should end in an ellipsis: %q", string(row))
+	}
+	for x := mx + mw; x < a.width; x++ {
+		if row[x] != ' ' {
+			t.Fatalf("title painted past the frame at column %d: %q", x, string(row))
+		}
+	}
+}
+
+// TestDrawDiffView_WideGlyphsStayInsideColumns pins the cell unit in
+// both layouts: an ideograph is two cells, so a CJK line that fits by
+// rune count used to overrun the unified body's right border and the
+// side-by-side row's divider by one cell per glyph. Both must now keep
+// their │ intact with the text clipped in front of it.
+func TestDrawDiffView_WideGlyphsStayInsideColumns(t *testing.T) {
+	cjk := strings.Repeat("日本語", 30)
+	patch := patchOf(
+		"diff --git a/f.txt b/f.txt",
+		"--- a/f.txt",
+		"+++ b/f.txt",
+		"@@ -1,1 +1,1 @@",
+		"-"+cjk,
+		"+"+cjk+"変",
+	)
+	for _, width := range []int{70, 160} {
+		a := newTestApp(t, t.TempDir())
+		resizeTestApp(t, a, width, 24)
+		a.openDiffView("Diff · f.txt", patch, "", "f.txt")
+		d := diffOv(t, a)
+		d.Draw(a.screen)
+		a.screen.Show()
+		scr := a.screen.(tcell.SimulationScreen)
+		mx, my, mw, _ := d.modalRect()
+		for i := 0; i < d.visibleRows() && i < d.bodyCount(); i++ {
+			row := []rune(screenLine(scr, my+3+i))
+			if row[mx+mw-1] != '│' {
+				t.Fatalf("width %d: body row %d overran its right border: %q", width, i, string(row))
+			}
+			if d.sideBySide() {
+				bodyW := mw - 4
+				leftW := (bodyW - 3) / 2
+				if got := row[mx+2+leftW+1]; got != '│' && got != ' ' {
+					t.Fatalf("width %d: row %d overran the column divider: %q", width, i, string(row))
+				}
+			}
+		}
+	}
+}
+
+// TestSkipCells pins the unified body's horizontal-scroll unit: cells,
+// whole clusters at a time, so a CJK line slides the same distance an
+// ASCII one does and never starts on the second half of a glyph.
+func TestSkipCells(t *testing.T) {
+	if got := skipCells("hello", 2); got != "llo" {
+		t.Fatalf("skipCells(hello, 2) = %q", got)
+	}
+	if got := skipCells("日本語", 2); got != "本語" {
+		t.Fatalf("skipCells(日本語, 2) = %q", got)
+	}
+	if got := skipCells("日本語", 1); got != "本語" {
+		t.Fatalf("a one-cell offset into a two-cell glyph should drop the whole glyph, got %q", got)
+	}
+	if got := skipCells("ab", 0); got != "ab" {
+		t.Fatalf("zero offset should return the input, got %q", got)
+	}
+	if got := skipCells("ab", 5); got != "" {
+		t.Fatalf("offset past the end should return nothing, got %q", got)
+	}
+}
+
+// TestDrawDiffView_HintTracksTheFocusedButton pins the diff view's
+// title-row hint to what Enter does: with Open file focused the frame
+// says "open file", with Close focused (or no file to open) it says
+// "close" — the same focus-tracking contract Confirm's frame follows,
+// where a bare "esc" used to leave Enter unexplained.
+func TestDrawDiffView_HintTracksTheFocusedButton(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.openDiffView("Diff · f.txt", samplePatch(), filepath.Join(a.rootDir, "f.txt"), "f.txt")
+	d := diffOv(t, a)
+	scr := a.screen.(tcell.SimulationScreen)
+	_, my, _, _ := d.modalRect()
+	titleRow := func() string {
+		d.Draw(a.screen)
+		a.screen.Show()
+		return screenLine(scr, my+1)
+	}
+	d.hover = 1
+	if row := titleRow(); !strings.Contains(row, "⏎ open file · esc") {
+		t.Fatalf("with Open file focused the hint should say so: %q", row)
+	}
+	d.hover = 0
+	if row := titleRow(); !strings.Contains(row, "⏎ close · esc") {
+		t.Fatalf("with Close focused the hint should say so: %q", row)
+	}
+
+	a.openDiffView("Diff · f.txt", samplePatch(), "", "f.txt")
+	d = diffOv(t, a)
+	d.hover = 1 // nothing to open: Enter closes whatever the stale focus says
+	if row := titleRow(); !strings.Contains(row, "⏎ close · esc") {
+		t.Fatalf("with no file to open the hint should say close: %q", row)
+	}
+}

@@ -124,6 +124,17 @@ func TestRender_LinkAndImage(t *testing.T) {
 	if findLine(lines, "[image: diagram]") < 0 {
 		t.Fatalf("image placeholder missing in %q", lines)
 	}
+	// The URL and the placeholder are read, not glanced at: they sit on
+	// Muted (the 4.5:1 text tier), never on Subtle, which only clears
+	// the 3:1 graphics floor and is reserved for rules and borders.
+	u := strings.Index(lines[i], "x.dev")
+	if fg, _, _ := styles[i][u].Decompose(); fg != th.Muted {
+		t.Fatalf("link URL fg = %v, want Muted", fg)
+	}
+	k := findLine(lines, "[image: diagram]")
+	if fg, _, _ := styles[k][0].Decompose(); fg != th.Muted {
+		t.Fatalf("image placeholder fg = %v, want Muted", fg)
+	}
 }
 
 // TestRender_CJKWrapStaysInBudget pins cluster safety: wide glyphs
@@ -207,5 +218,224 @@ func TestRender_TaskListAndStrikethrough(t *testing.T) {
 	j := strings.Index(lines[i], "gone")
 	if _, _, attrs := styles[i][j].Decompose(); attrs&tcell.AttrStrikeThrough == 0 {
 		t.Fatal("~~text~~ should carry StrikeThrough")
+	}
+}
+
+// TestRender_HeadingLevelsAreToldApart pins the level scheme: an H1 is
+// followed by a heavy full-width rule, an H2 by a light one, and H3+
+// carry one › per level past two — so six levels stay distinguishable
+// on a monochrome terminal where Accent and AccentSoft are the same
+// colour. The old scheme collapsed all six onto two colours.
+func TestRender_HeadingLevelsAreToldApart(t *testing.T) {
+	th := theme.Default()
+	src := "# One\n\n## Two\n\n### Three\n\n#### Four\n\nbody\n"
+	lines, styles := Render([]byte(src), 40, th)
+	i1 := findLine(lines, "One")
+	if i1 < 0 || lines[i1+1] != strings.Repeat("━", 40) {
+		t.Fatalf("H1 should be followed by a heavy full-width rule, got %q", lines[i1+1])
+	}
+	if fg, _, _ := styles[i1+1][0].Decompose(); fg != th.Accent {
+		t.Fatalf("H1 rule fg = %v, want Accent", fg)
+	}
+	i2 := findLine(lines, "Two")
+	if i2 < 0 || lines[i2+1] != strings.Repeat("─", 40) {
+		t.Fatalf("H2 should be followed by a light full-width rule, got %q", lines[i2+1])
+	}
+	if fg, _, _ := styles[i2+1][0].Decompose(); fg != th.Muted {
+		t.Fatalf("H2 rule fg = %v, want Muted", fg)
+	}
+	if i3 := findLine(lines, "Three"); i3 < 0 || lines[i3] != "› Three" {
+		t.Fatalf("H3 = %q, want a single-chevron prefix", lines[findLine(lines, "Three")])
+	}
+	i4 := findLine(lines, "Four")
+	if i4 < 0 || lines[i4] != "›› Four" {
+		t.Fatalf("H4 = %q, want a double-chevron prefix", lines[i4])
+	}
+	if _, _, attrs := styles[i4][3].Decompose(); attrs&boldAttr == 0 {
+		t.Fatal("H4 text should be bold")
+	}
+	if fg, _, _ := styles[i4][3].Decompose(); fg != th.AccentSoft {
+		t.Fatalf("H4 fg = %v, want AccentSoft", fg)
+	}
+}
+
+// TestRender_CodeBlockIsARectangle pins the fenced block's shape: a
+// blank line inside the fence is a blank ROW (it used to be dropped),
+// every row starts with the rail, every row is padded to the block's
+// widest line so the LineHL surface forms a rectangle, and the padding
+// carries that surface too.
+func TestRender_CodeBlockIsARectangle(t *testing.T) {
+	th := theme.Default()
+	src := "```go\nfunc main() {\n\n\tx := 1\n}\n```\n"
+	lines, styles := Render([]byte(src), 60, th)
+	first := findLine(lines, "func main")
+	if first < 0 {
+		t.Fatalf("code missing in %q", lines)
+	}
+	rows := lines[first : first+4]
+	if !strings.HasPrefix(rows[1], string(codeRail)) || strings.TrimSpace(rows[1][len(string(codeRail)):]) != "" {
+		t.Fatalf("the blank line inside the fence should be a blank rail row, got %q", rows[1])
+	}
+	want := textdraw.Width(rows[0])
+	for i, row := range rows {
+		if !strings.HasPrefix(row, string(codeRail)) {
+			t.Fatalf("row %d %q lacks the rail", i, row)
+		}
+		if w := textdraw.Width(row); w != want {
+			t.Fatalf("row %d is %d cells, want the block width %d: %q", i, w, want, row)
+		}
+		last := styles[first+i][len(styles[first+i])-1]
+		if _, bg, _ := last.Decompose(); bg != th.LineHL {
+			t.Fatalf("row %d padding bg = %v, want LineHL", i, bg)
+		}
+	}
+	if fg, _, _ := styles[first][0].Decompose(); fg != th.Subtle {
+		t.Fatalf("rail fg = %v, want Subtle", fg)
+	}
+}
+
+// TestRender_CodeBlockHardWrapsInsideTheBudget pins the wrap rule for
+// code: a line wider than the budget breaks between clusters (never
+// reflowing at spaces), and every resulting row — rail included — fits
+// the width.
+func TestRender_CodeBlockHardWrapsInsideTheBudget(t *testing.T) {
+	th := theme.Default()
+	src := "```\n" + strings.Repeat("abcdefghij", 5) + "\n```\n"
+	lines, _ := Render([]byte(src), 20, th)
+	rows := 0
+	for _, l := range lines {
+		if strings.HasPrefix(l, string(codeRail)) {
+			rows++
+			if w := textdraw.Width(l); w > 20 {
+				t.Fatalf("code row %q is %d cells, budget 20", l, w)
+			}
+		}
+	}
+	if rows != 3 {
+		t.Fatalf("50 cells over a 19-cell text column should take 3 rows, got %d: %q", rows, lines)
+	}
+}
+
+// TestRender_CodeBlockInsideListKeepsIndent pins the block prefix on
+// code rows: a fenced block inside a list item starts under the item's
+// hang, rail included, instead of at column 0. The rows used to be
+// appended straight to the output, bypassing the indent every other
+// block row carries, so the block fell out of its list.
+func TestRender_CodeBlockInsideListKeepsIndent(t *testing.T) {
+	th := theme.Default()
+	src := "- item\n\n  ```\n  code\n  ```\n\n- next\n"
+	lines, styles := Render([]byte(src), 40, th)
+	i := findLine(lines, "code")
+	if i < 0 || lines[i] != "  "+string(codeRail)+"code" {
+		t.Fatalf("code row = %q, want it under the item's hang", lines[i])
+	}
+	if fg, _, _ := styles[i][2].Decompose(); fg != th.Subtle {
+		t.Fatalf("rail after the hang fg = %v, want Subtle", fg)
+	}
+	if j := findLine(lines, "next"); j < 0 || lines[j] != "• next" {
+		t.Fatalf("the list should resume after the block, got %q", lines)
+	}
+}
+
+// TestRender_CodeBlockInsideQuoteKeepsGutter pins the same prefix rule
+// for blockquotes: every code row keeps the │ gutter, and hard-wrapped
+// rows share the gutter with the first.
+func TestRender_CodeBlockInsideQuoteKeepsGutter(t *testing.T) {
+	th := theme.Default()
+	src := "> quote\n>\n> ```\n> " + strings.Repeat("abcdefghij", 3) + "\n> ```\n"
+	lines, _ := Render([]byte(src), 20, th)
+	rows := 0
+	for _, l := range lines {
+		if strings.Contains(l, string(codeRail)) {
+			rows++
+			if !strings.HasPrefix(l, "│ "+string(codeRail)) {
+				t.Fatalf("code row %q lost the quote gutter", l)
+			}
+			if w := textdraw.Width(l); w > 20 {
+				t.Fatalf("code row %q is %d cells, budget 20", l, w)
+			}
+		}
+	}
+	if rows != 2 {
+		t.Fatalf("30 cells over a 17-cell text column should take 2 rows, got %d: %q", rows, lines)
+	}
+}
+
+// TestRender_HeadingSharesTheMarkerRow pins `- # Title` and `> # Title`:
+// the heading joins the row that holds the list marker or quote gutter
+// instead of flushing that prefix out as a row of its own — which
+// painted a lone • above the heading and a bare │ above a quoted one.
+// The rules under H1/H2 carry the prefix too and fit inside it.
+func TestRender_HeadingSharesTheMarkerRow(t *testing.T) {
+	th := theme.Default()
+	lines, _ := Render([]byte("- # Title\n"), 30, th)
+	if i := findLine(lines, "Title"); i < 0 || lines[i] != "• Title" {
+		t.Fatalf("list heading = %q, want the bullet on the same row", lines)
+	}
+	for _, l := range lines {
+		if strings.TrimSpace(l) == "•" {
+			t.Fatalf("a bare bullet row leaked out: %q", lines)
+		}
+	}
+	lines, _ = Render([]byte("> # Title\n> body\n"), 30, th)
+	i := findLine(lines, "Title")
+	if i < 0 || lines[i] != "│ Title" {
+		t.Fatalf("quoted heading = %q, want it on the gutter row", lines)
+	}
+	if lines[i+1] != "│ "+strings.Repeat("━", 28) {
+		t.Fatalf("the H1 rule should sit inside the gutter, got %q", lines[i+1])
+	}
+	for _, l := range lines {
+		if strings.TrimSpace(l) == "│" {
+			t.Fatalf("a bare gutter row leaked out: %q", lines)
+		}
+	}
+}
+
+// TestRender_NestedListKeepsOuterIndent pins the marker row of a
+// nested item: it starts under the parent's hang, so the levels read
+// as a tree. The marker used to replace the whole seeded prefix, which
+// flattened every level onto column 0.
+func TestRender_NestedListKeepsOuterIndent(t *testing.T) {
+	lines, _ := Render([]byte("- a\n  - b\n    - c\n"), 30, theme.Default())
+	want := []string{"• a", "  • b", "    • c"}
+	for _, w := range want {
+		if findLine(lines, w) < 0 || lines[findLine(lines, w)] != w {
+			t.Fatalf("nested list = %q, want %q", lines, want)
+		}
+	}
+}
+
+// TestRender_CodeTabsExpandToTabStops pins tab handling inside code:
+// a tab is painted as spaces to the next 4-cell stop, so a tab-indented
+// Go block keeps its indentation. uniseg measures a tab at 0 cells, so
+// left alone the indent vanished and the rectangle's padding miscounted.
+func TestRender_CodeTabsExpandToTabStops(t *testing.T) {
+	lines, styles := Render([]byte("```\n\tx\na\tb\n```\n"), 30, theme.Default())
+	i := findLine(lines, "x")
+	if i < 0 || lines[i] != string(codeRail)+"    x" {
+		t.Fatalf("tab-indented row = %q, want four cells of indent", lines[i])
+	}
+	if len(styles[i]) != len([]rune(lines[i])) {
+		t.Fatalf("style grid %d runes vs line %d", len(styles[i]), len([]rune(lines[i])))
+	}
+	if j := findLine(lines, "a"); j < 0 || lines[j] != string(codeRail)+"a   b" {
+		t.Fatalf("mid-line tab row = %q, want the next stop", lines[j])
+	}
+}
+
+// TestRender_TableInsideQuoteKeepsGutter pins the prefix rule for the
+// last block that wrote rows directly: a table inside a blockquote
+// keeps the │ gutter on every row, header rule included.
+func TestRender_TableInsideQuoteKeepsGutter(t *testing.T) {
+	src := "> | a | b |\n> |---|---|\n> | 1 | 2 |\n"
+	lines, _ := Render([]byte(src), 30, theme.Default())
+	for _, l := range lines {
+		if !strings.HasPrefix(l, "│ ") {
+			t.Fatalf("table row %q lost the quote gutter: %q", l, lines)
+		}
+	}
+	if findLine(lines, "a │ b") < 0 || findLine(lines, "1 │ 2") < 0 {
+		t.Fatalf("table content missing: %q", lines)
 	}
 }

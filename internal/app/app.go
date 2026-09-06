@@ -31,6 +31,7 @@ import (
 	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/overlay"
+	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -82,9 +83,17 @@ const (
 	// constantly, and a 39-column editor behind an 18-column tree is
 	// worth less than no tree at all. See applyResponsiveSidebar.
 	autoHideSidebarWidth = minSidebarWidth + minEditorAfterDrag
-	statusFlashFor       = 3 * time.Second
-	doubleClickWindow    = 500 * time.Millisecond
-	doubleEscWindow      = 500 * time.Millisecond
+	// A flash lives for flashMinFor plus flashPerCell for every cell of
+	// its text, capped at flashMaxFor: "Copied" is gone in about two
+	// seconds, a formatter's stderr line gets the time it takes to read
+	// it. The old flat three seconds was right for the short messages
+	// and wrong for every long one — the flash strip exists precisely
+	// for the messages that need more than a glance.
+	flashMinFor       = 2 * time.Second
+	flashPerCell      = 40 * time.Millisecond
+	flashMaxFor       = 8 * time.Second
+	doubleClickWindow = 500 * time.Millisecond
+	doubleEscWindow   = 500 * time.Millisecond
 
 	// menuEscWindow is the double-Esc window for opening the menu — much
 	// wider than the leader's doubleEscWindow on purpose. Under tmux's
@@ -159,6 +168,7 @@ const (
 	dragTreeScrollbar
 	dragGitPanelScrollbar
 	dragMdPreview
+	dragMdPreviewScrollbar
 )
 
 // App is the editor's top-level state holder and event-loop owner.
@@ -258,12 +268,22 @@ type App struct {
 	// drag the splitter to change it within [minSidebarWidth, width-minEditorAfterDrag].
 	sidebarWidth int
 
-	clipBuf      string
-	statusMsg    string
-	statusUntil  time.Time
+	clipBuf     string
+	statusMsg   string
+	statusUntil time.Time
+	// statusErr marks the live flash as a failure report. An error
+	// flash paints in the palette's Error colour and, for the rest of
+	// its window, outranks any informational flash that arrives after
+	// it — "Copied" must not wipe "save failed" off the bar before the
+	// user has read it.
+	statusErr    bool
 	dragMode     dragKind // dragEditor while a drag-select is active, etc.
 	lastClick    clickRecord
 	lastTabRects []tabRect
+	// mouse is the dispatcher's cross-event memory — which buttons the
+	// previous event carried, which overlay a press landed on, how
+	// many events have arrived at all. See mouseState in mouse.go.
+	mouse mouseState
 
 	// lastShiftAt is the wall-clock time we last saw any mouse event
 	// carrying the Shift modifier. Some terminals (notably Zellij over
@@ -311,8 +331,15 @@ type App struct {
 	// every key event is verbatim content from the terminal's paste
 	// buffer — never a command — so handleKey strips raw ESC bytes and
 	// suppresses the Esc leader instead of letting pasted text quit the
-	// editor or fire menu actions.
-	pasting bool
+	// editor or fire menu actions. Content bound for the editor is
+	// accumulated in pasteBuf and landed as ONE InsertString when the
+	// end marker arrives (see applyPaste), so a paste is one undo step
+	// and one find re-scan instead of one per rune. pasteLastCR
+	// remembers that the previous pasted key was a CR so the LF of a
+	// CRLF pair is folded into it rather than doubling the newline.
+	pasting     bool
+	pasteBuf    []rune
+	pasteLastCR bool
 
 	// files is the one owner of every file operation — create, rename,
 	// trash / restore, move, copy, duplicate — and of the session trash
@@ -516,8 +543,8 @@ func New(rootDir string) (*App, error) {
 
 	a := newApp(scr, rootDir, tree, true)
 	a.refreshGitStatus()
-	a.flash("Welcome — click a file to open · click  ≡  for the menu")
 	a.startTreeRefresh()
+	a.startMouseProbe(tmuxActive(), mouseProbeDelay)
 	// Kick off the project file index in the background so that by
 	// the time the user hits Esc-p (or ≡ → Find file) the modal can
 	// open with results already in hand. On a 50k-file repo this
@@ -531,7 +558,34 @@ func New(rootDir string) (*App, error) {
 	// Put the user back where they left this project: tabs, cursors,
 	// expanded folders, sidebar. Best-effort — no session, no change.
 	a.restoreSession()
+	// After the restore on purpose: the greeting is for a session with
+	// nothing open, and a user coming back to five restored tabs does
+	// not need to be told how to open a file.
+	a.welcomeFlash()
 	return a, nil
+}
+
+// welcomeProject and welcomeSingleFile are the first-run greetings. Both
+// name the keyboard route as well as the mouse one — skiff's habitat is
+// an SSH session where the mouse may not be wired through — and both
+// stay under 40 cells so they sit in the status bar at minWidth instead
+// of spilling onto a two-row flash strip. The single-file variant skips
+// the ≡ mention: the file the user asked for is already open, so the
+// only thing worth teaching is how to reach the menu and the key list.
+const (
+	welcomeProject    = "Welcome — ≡ or Esc Esc opens the menu"
+	welcomeSingleFile = "Menu: Esc Esc · Shortcuts: Esc ?"
+)
+
+// welcomeFlash greets a project session that starts with nothing open.
+// A session the restore just repopulated is not greeted: the tabs are
+// the greeting, and a "how to open a file" line over them reads as the
+// editor having forgotten what it just did.
+func (a *App) welcomeFlash() {
+	if a.tabs.Len() > 0 {
+		return
+	}
+	a.flash(welcomeProject)
 }
 
 // NewSingleFile is the lean alternative to New for the "skiff
@@ -574,6 +628,12 @@ func newSingleFileApp(scr tcell.Screen, filePath string) *App {
 	// `git diff`), so single-file mode shows change bars on open without
 	// the whole-repo status or tree walk that New performs.
 	a.openFile(filePath)
+	// Only over a successful open: a failed one has just flashed why,
+	// and that line matters more than a greeting. The "Opened x" flash
+	// it replaces said nothing the tab strip does not already show.
+	if a.tabs.Len() > 0 {
+		a.flash(welcomeSingleFile)
+	}
 	return a
 }
 
@@ -583,8 +643,15 @@ func newSingleFileApp(scr tcell.Screen, filePath string) *App {
 // event. Kept apart from newApp so tests can hand newApp a
 // SimulationScreen instead of a live terminal.
 func newTerminalScreen() (tcell.Screen, error) {
-	scr, err := tcell.NewScreen()
-	if err != nil {
+	// Prefer the /dev/tty screen with the ESC ESC rewrite (esctty.go) so
+	// a fast double-tap of Esc opens the menu; fall back to tcell's own
+	// choice where no dev tty exists.
+	scr, err := newDoubleEscScreen()
+	if scr == nil {
+		if scr, err = tcell.NewScreen(); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
 		return nil, err
 	}
 	if err := scr.Init(); err != nil {
@@ -823,10 +890,17 @@ func (a *App) handleEvent(ev tcell.Event) {
 	case *tcell.EventPaste:
 		// Bracketed-paste markers. The pasted content itself still
 		// arrives as individual key events; the flag tells handleKey
-		// to treat them as verbatim text. The leader window is
+		// to treat them as verbatim text, and the end marker is when
+		// the buffered text lands in the editor. The leader window is
 		// dropped so a paste can never complete an armed Esc.
 		a.pasting = e.Start()
 		a.lastEscape = time.Time{}
+		if a.pasting {
+			a.pasteBuf = a.pasteBuf[:0]
+			a.pasteLastCR = false
+		} else {
+			a.applyPaste()
+		}
 	case *tcell.EventMouse:
 		a.handleMouse(e)
 	case *quitRequestEvent:
@@ -893,13 +967,44 @@ func (a *App) applyResponsiveSidebar() {
 	a.flash("File explorer restored")
 }
 
-// flash sets a transient status message that displays for statusFlashFor
-// before the status bar reverts to the active file's info. A message too
-// long for the bar moves onto its own strip and takes a row off the
-// editor, so its expiry gets a scheduled repaint rather than waiting for
-// whatever event happens to arrive next — see scheduleFlashStripExpiry.
+// flash sets a transient informational status message that displays for
+// flashLifetime(msg) before the status bar reverts to the active file's
+// info. A message too long for the bar moves onto its own strip and
+// takes a row off the editor, so its expiry gets a scheduled repaint
+// rather than waiting for whatever event happens to arrive next — see
+// scheduleFlashStripExpiry. While an error flash is still live the
+// informational one is dropped: the failure is the thing the user has
+// to see, and it was already on screen first.
 func (a *App) flash(msg string) {
+	if a.statusErr && a.flashActive() {
+		return
+	}
+	a.flashWith(msg, false)
+}
+
+// flashError is flash for failure reports: painted in the Error colour
+// and kept over any informational flash that arrives inside its window.
+func (a *App) flashError(msg string) {
+	a.flashWith(msg, true)
+}
+
+// flashWith is the one writer of the flash state: message, kind, and
+// the deadline derived from the message's own length.
+func (a *App) flashWith(msg string, isErr bool) {
 	a.statusMsg = msg
-	a.statusUntil = time.Now().Add(statusFlashFor)
+	a.statusErr = isErr
+	a.statusUntil = time.Now().Add(flashLifetime(msg))
 	a.scheduleFlashStripExpiry()
+}
+
+// flashLifetime is how long msg stays up: flashMinFor plus flashPerCell
+// per cell of text, capped at flashMaxFor. Measured in cells rather
+// than runes so a CJK message is not charged twice for glyphs the eye
+// reads once per cell.
+func flashLifetime(msg string) time.Duration {
+	d := flashMinFor + time.Duration(textdraw.Width(msg))*flashPerCell
+	if d > flashMaxFor {
+		d = flashMaxFor
+	}
+	return d
 }

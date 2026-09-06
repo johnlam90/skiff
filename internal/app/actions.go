@@ -205,10 +205,27 @@ func (a *App) menuRevert() {
 		return
 	}
 	if !t.RevertFile() {
-		a.flash("File matches its on-open state — nothing to revert")
+		a.flash("File is unchanged since it was opened — nothing to revert")
 		return
 	}
-	a.flash("Reverted to on-open state — Undo to recover")
+	a.flash("Reverted to the file on disk — Esc u restores your edits")
+}
+
+// singleFileRefusal is the one sentence every project-scoped surface
+// flashes when the Esc leader reaches it in single-file mode (the menu
+// rows are already hidden by hasTree): it names the mode and the way
+// out. Three surfaces used to phrase it three ways.
+const singleFileRefusal = "Not available in single-file mode — open a folder to use it"
+
+// plural picks the singular or plural form for n and formats n into
+// it: plural(1, "%d file", "%d files") is "1 file", plural(3, …) is
+// "3 files". The forms carry the whole phrase so a caller never ships
+// "%d file(s)" again.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return fmt.Sprintf(one, n)
+	}
+	return fmt.Sprintf(many, n)
 }
 
 // runCustomAction executes the custom action at idx. When the action
@@ -441,7 +458,7 @@ func (a *App) menuToggleSidebar() {
 	// here directly — guard it so the toggle can't flip sidebarShown true
 	// and send draw() into a.tree.Render on a nil tree.
 	if a.tree == nil {
-		a.flash("No file explorer in single-file mode")
+		a.flash(singleFileRefusal)
 		return
 	}
 	a.sidebarShown = !a.sidebarShown
@@ -468,7 +485,7 @@ func (a *App) menuToggleWrap() {
 		t.SetWrap(a.wrapOn)
 	}
 	if err := userconfig.SetWrap(userconfig.DefaultPath(), a.wrapOn); err != nil {
-		a.flash("config: " + err.Error())
+		a.flash("Couldn't save config.json: " + err.Error())
 		return
 	}
 	if a.wrapOn {
@@ -494,7 +511,7 @@ func (a *App) menuToggleScrollCaret() {
 	a.closeMenu()
 	a.scrollCaret = !a.scrollCaret
 	if err := userconfig.SetScrollCaret(userconfig.DefaultPath(), a.scrollCaret); err != nil {
-		a.flash("config: " + err.Error())
+		a.flash("Couldn't save config.json: " + err.Error())
 		return
 	}
 	if a.scrollCaret {
@@ -527,14 +544,14 @@ func (a *App) menuToggleGitignore() {
 	// guard is here for the same reason: nothing in single-file mode
 	// should be able to dereference a nil tree.
 	if a.tree == nil {
-		a.flash("No file explorer in single-file mode")
+		a.flash(singleFileRefusal)
 		return
 	}
 	a.tree.HideIgnored = !a.tree.HideIgnored
 	a.refreshTree()
 	a.invalidateFinder()
 	if err := userconfig.SetGitignore(userconfig.DefaultPath(), a.tree.HideIgnored); err != nil {
-		a.flash("config: " + err.Error())
+		a.flash("Couldn't save config.json: " + err.Error())
 		return
 	}
 	if a.tree.HideIgnored {
@@ -595,4 +612,88 @@ func (a *App) menuQuit() {
 		},
 		func(app *App) { app.quit = true },
 	)
+}
+
+// menuIndentLines shifts the cursor line / selected block one indent
+// unit right. The same gesture as Tab over a multi-line selection; the
+// menu row is the path for terminals that never deliver Backtab, so the
+// pair stays reachable.
+func (a *App) menuIndentLines() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.IndentLines()
+	}
+}
+
+// menuOutdentLines removes one level of indentation from the cursor
+// line / selected block. Same gesture as Shift+Tab. Flashes when there
+// was nothing to remove, because a silent no-op on a row the user
+// clicked reads as a broken menu item.
+func (a *App) menuOutdentLines() {
+	a.closeMenu()
+	t := a.activeTabPtr()
+	if t == nil {
+		return
+	}
+	if !t.OutdentLines() {
+		a.flash("Nothing to outdent")
+	}
+}
+
+// menuGoToDocStart jumps the caret to the very start of the file. Also
+// on Ctrl+Home and Esc <; the menu row is where a user discovers it.
+func (a *App) menuGoToDocStart() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.MoveDocHome(false)
+	}
+}
+
+// menuGoToDocEnd jumps the caret just past the last rune of the file.
+// Also on Ctrl+End and Esc >.
+func (a *App) menuGoToDocEnd() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.MoveDocEnd(false)
+	}
+}
+
+// menuSelectAll selects the whole buffer of the active tab. Esc a is
+// the keyboard spelling; the row is where the gesture is discovered.
+func (a *App) menuSelectAll() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.SelectAll()
+	}
+}
+
+// menuSelectLine selects the caret's whole line, newline included, so
+// a following Cut removes the line. Esc L on the keyboard.
+func (a *App) menuSelectLine() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.SelectLine()
+	}
+}
+
+// menuNextTab switches to the tab on the right, wrapping. Esc . on the
+// keyboard; the row is for terminals where the leader gets eaten.
+func (a *App) menuNextTab() {
+	a.closeMenu()
+	a.activateNextTab()
+}
+
+// menuPrevTab switches to the tab on the left, wrapping. Esc ,.
+func (a *App) menuPrevTab() {
+	a.closeMenu()
+	a.activatePrevTab()
+}
+
+// menuCloseOtherTabs closes every tab but the active one, refusing
+// with a flash when any of them has unsaved changes.
+func (a *App) menuCloseOtherTabs() {
+	a.closeMenu()
+	if n := a.closeOtherTabs(); n > 0 {
+		a.flash(fmt.Sprintf("Closed %d other tab(s)", n))
+	}
 }

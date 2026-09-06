@@ -363,8 +363,8 @@ func TestOpenFinder_NoOpInSingleFileMode(t *testing.T) {
 	if finderIsOpen(a) {
 		t.Fatal("openFinder should not open the modal when finder is nil")
 	}
-	if a.statusMsg == "" {
-		t.Fatal("expected a flash explaining the finder is unavailable")
+	if a.statusMsg != singleFileRefusal {
+		t.Fatalf("expected the one single-file refusal, got %q", a.statusMsg)
 	}
 }
 
@@ -476,5 +476,81 @@ func TestFinder_WheelScrollsTheResultList(t *testing.T) {
 	deeper := fo.results[finderResultsVisible+1].Path
 	if finderRowOf(t, a, deeper) < 0 {
 		t.Fatalf("the wheel should have brought %q into the window", deeper)
+	}
+}
+
+// TestFinderDraw_FailedIndexExplainsItself pins the errored state's
+// paint: the input-row tail reads "index failed" and the empty result
+// list carries a sentence naming the error and the recovery (≡ Refresh
+// file tree), where "index err" over a blank list explained nothing.
+func TestFinderDraw_FailedIndexExplainsItself(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	// An empty root is the one input BuildIndex refuses outright, so
+	// the build lands errored without touching the disk.
+	a.finder = finder.New("")
+	a.openFinder()
+	deadline := time.Now().Add(3 * time.Second)
+	for a.finder.State() != finder.StateErrored && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if a.finder.State() != finder.StateErrored {
+		t.Fatalf("fixture: build should have failed, state %v", a.finder.State())
+	}
+	a.draw()
+	a.screen.Show()
+	for _, want := range []string{"index failed", "Index failed:", "Refresh file tree"} {
+		if !screenHasText(t, a, want) {
+			t.Errorf("finder never painted %q", want)
+		}
+	}
+	if screenHasText(t, a, "index err") {
+		t.Error("the old cryptic tail is still painted")
+	}
+}
+
+// TestFinderMouse_DragAcrossRowsOpensNothing pins the finder's click
+// latch: a press in the query field followed by a drag down the
+// result rows used to open whichever file the drag landed on, and a
+// drag out of the frame closed the finder. The hover still follows
+// the drag; only a fresh press opens or dismisses.
+func TestFinderMouse_DragAcrossRowsOpensNothing(t *testing.T) {
+	a, _ := withFinder(t)
+	a.openFinder()
+	fo := finderOv(t, a)
+	if len(fo.results) < 2 {
+		t.Fatalf("need at least 2 results, got %d", len(fo.results))
+	}
+	fr := fo.rect()
+	tabsBefore := a.tabs.Len()
+
+	fo.HandleMouse(fr.X+5, fr.Y+3, tcell.Button1)   // press in the field
+	fo.HandleMouse(fr.X+5, fr.Y+4+1, tcell.Button1) // drag onto row 1
+	if !finderIsOpen(a) || a.tabs.Len() != tabsBefore {
+		t.Fatal("a drag onto a row opened it")
+	}
+	if fo.Sel() != 1 {
+		t.Fatalf("the drag should still move the highlight, sel = %d", fo.Sel())
+	}
+	fo.HandleMouse(0, 0, tcell.Button1) // drag out of the frame
+	if !finderIsOpen(a) {
+		t.Fatal("a drag out of the frame closed the finder")
+	}
+	fo.HandleMouse(fr.X+5, fr.Y+4+1, tcell.ButtonNone)
+	fo.HandleMouse(fr.X+5, fr.Y+4+1, tcell.Button1)
+	if finderIsOpen(a) || a.tabs.Len() != tabsBefore+1 {
+		t.Fatal("a fresh press on the row after the release must open it")
+	}
+}
+
+// TestFinderDraw_HintNamesEnter pins the finder's title-row hint: Enter
+// opens the highlighted file, and the frame says so beside esc like
+// every other overlay names its Enter.
+func TestFinderDraw_HintNamesEnter(t *testing.T) {
+	a, _ := withFinder(t)
+	a.openFinder()
+	a.draw()
+	a.screen.Show()
+	if !screenHasText(t, a, "⏎ open · esc") {
+		t.Fatal("the finder's title row should name Enter as open")
 	}
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/filetree"
+	"github.com/johnlam90/skiff/internal/session"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -305,11 +306,11 @@ func TestRun_DrainsBurstAndExits(t *testing.T) {
 // project root.
 func TestNewFileLabel_Plain(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	if got := a.newFileLabel(); got != "New file" {
+	if got := a.newFileLabel(); got != "New file…" {
 		t.Fatalf("root label: got %q", got)
 	}
 	a.activeFolder = ""
-	if got := a.newFileLabel(); got != "New file" {
+	if got := a.newFileLabel(); got != "New file…" {
 		t.Fatalf("empty folder label: got %q", got)
 	}
 }
@@ -325,8 +326,8 @@ func TestNewFileLabel_SuffixForSubdir(t *testing.T) {
 	a := newTestApp(t, dir)
 	a.setActiveFolder(sub)
 	got := a.newFileLabel()
-	if !strings.HasPrefix(got, "New file (in ") {
-		t.Fatalf("expected 'New file (in ...)', got %q", got)
+	if !strings.HasPrefix(got, "New file (in ") || !strings.HasSuffix(got, ")…") {
+		t.Fatalf("expected 'New file (in ...)…', got %q", got)
 	}
 	if !strings.Contains(got, "alpha") {
 		t.Fatalf("expected basename in label, got %q", got)
@@ -399,6 +400,62 @@ func TestFlash(t *testing.T) {
 	}
 	if !a.statusUntil.After(before) {
 		t.Fatalf("statusUntil should be in the future, got %v", a.statusUntil)
+	}
+}
+
+// TestFlashLifetime_ScalesWithLength pins the reading-time rule: a
+// short message gets the floor, a long one earns flashPerCell per cell
+// of text, and nothing lives past flashMaxFor — measured in cells, so a
+// CJK message is not charged for its byte or rune count.
+func TestFlashLifetime_ScalesWithLength(t *testing.T) {
+	if got := flashLifetime("Copied"); got != flashMinFor+6*flashPerCell {
+		t.Fatalf("short flash lifetime = %v, want floor + 6 cells", got)
+	}
+	long := strings.Repeat("x", 500)
+	if got := flashLifetime(long); got != flashMaxFor {
+		t.Fatalf("500-cell flash lifetime = %v, want the %v cap", got, flashMaxFor)
+	}
+	if ascii, cjk := flashLifetime("ab"), flashLifetime("日"); ascii != cjk {
+		t.Fatalf("two ASCII cells (%v) and one two-cell ideograph (%v) should cost the same", ascii, cjk)
+	}
+	if flashLifetime(long) <= flashLifetime("Copied") {
+		t.Fatal("a long message must outlive a short one")
+	}
+}
+
+// TestFlash_DeadlineFollowsTheMessage pins that flash() actually uses
+// the per-message lifetime rather than a constant: a long message's
+// deadline lands later than a short one's issued at the same moment.
+func TestFlash_DeadlineFollowsTheMessage(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.flash("Copied")
+	short := a.statusUntil
+	a.flash(strings.Repeat("formatter said something long ", 4))
+	if !a.statusUntil.After(short.Add(time.Second)) {
+		t.Fatalf("long flash deadline %v not meaningfully past the short one's %v", a.statusUntil, short)
+	}
+}
+
+// TestFlashError_OutranksInfoWhileLive pins the priority rule: an
+// informational flash that arrives while an error flash is still up is
+// dropped, so "Copied" can't wipe "save failed" off the bar before it
+// has been read — but once the error's window closes, info flashes
+// flow again, and a fresh error always replaces whatever is up.
+func TestFlashError_OutranksInfoWhileLive(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.flashError("save failed")
+	a.flash("Copied")
+	if a.statusMsg != "save failed" || !a.statusErr {
+		t.Fatalf("info flash replaced a live error: msg=%q err=%v", a.statusMsg, a.statusErr)
+	}
+	a.flashError("also failed")
+	if a.statusMsg != "also failed" {
+		t.Fatalf("a newer error must replace the older one, got %q", a.statusMsg)
+	}
+	a.statusUntil = time.Now().Add(-time.Millisecond) // the error expired
+	a.flash("Copied")
+	if a.statusMsg != "Copied" || a.statusErr {
+		t.Fatalf("info flash blocked by an expired error: msg=%q err=%v", a.statusMsg, a.statusErr)
 	}
 }
 
@@ -794,4 +851,92 @@ func TestJobsBusy_SeesTheTreeSweep(t *testing.T) {
 		t.Fatal("the tree sweep must count as busy while its worker runs")
 	}
 	pumpUntil(t, a, "tree sweep", func() bool { return !a.jobsBusy() })
+}
+
+// TestWelcomeFlash_OnlyGreetsAnEmptySession pins the ordering New
+// relies on: the greeting runs after restoreSession and only when no
+// tab came back. A returning user with restored tabs used to be told
+// how to open a file over the five files already open, because the
+// flash fired before the restore.
+func TestWelcomeFlash_OnlyGreetsAnEmptySession(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	mkFile(t, root, "kept.go", "l1\n")
+	if err := session.Save(root, session.Project{
+		Tabs:         []session.TabState{{Path: "kept.go"}},
+		ActivePath:   "kept.go",
+		SidebarShown: true,
+		SavedAt:      time.Now(),
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	a := newTestApp(t, root)
+	a.restoreSession()
+	if a.tabs.Len() != 1 {
+		t.Fatalf("fixture: restore should reopen kept.go, got %d tabs", a.tabs.Len())
+	}
+	a.statusMsg = ""
+	a.welcomeFlash()
+	if a.statusMsg != "" {
+		t.Fatalf("a restored session must not be greeted, got %q", a.statusMsg)
+	}
+
+	fresh := newTestApp(t, t.TempDir())
+	fresh.restoreSession()
+	fresh.welcomeFlash()
+	if fresh.statusMsg != welcomeProject {
+		t.Fatalf("a fresh session should be greeted, got %q", fresh.statusMsg)
+	}
+}
+
+// TestWelcomeFlashes_NameBothInputsAndFitTheBar pins the copy: each
+// greeting names the keyboard route (Esc Esc) — a mouse-only greeting
+// is a dead end over SSH — and stays within 40 cells so it lands in
+// the status bar at minWidth instead of on a wrapped flash strip.
+func TestWelcomeFlashes_NameBothInputsAndFitTheBar(t *testing.T) {
+	for _, msg := range []string{welcomeProject, welcomeSingleFile} {
+		if !strings.Contains(msg, "Esc Esc") {
+			t.Errorf("%q never names the keyboard route to the menu", msg)
+		}
+		if n := runeLen(msg); n > minWidth {
+			t.Errorf("%q is %d cells; the status bar at minWidth holds %d", msg, n, minWidth)
+		}
+	}
+	if !strings.Contains(welcomeProject, "≡") {
+		t.Errorf("%q never names the ≡ button", welcomeProject)
+	}
+	if !strings.Contains(welcomeSingleFile, "Esc ?") {
+		t.Errorf("%q never points at the shortcut reference", welcomeSingleFile)
+	}
+}
+
+// TestNewSingleFileApp_GreetsWithTheKeys covers the single-file start,
+// which used to flash nothing but "Opened x": the greeting names the
+// menu and the shortcut reference, and it yields to the error flash
+// when the file could not be opened.
+func TestNewSingleFileApp_GreetsWithTheKeys(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "only.txt")
+	if err := os.WriteFile(target, []byte("one\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	t.Cleanup(func() { scr.Fini() })
+	scr.SetSize(120, 40)
+
+	a := newSingleFileApp(scr, target)
+	if a.statusMsg != welcomeSingleFile {
+		t.Fatalf("single-file start flashed %q, want %q", a.statusMsg, welcomeSingleFile)
+	}
+
+	// A missing path opens as a fresh buffer (that is `skiff new.txt`),
+	// so the open that fails is a directory.
+	unopenable := newSingleFileApp(scr, dir)
+	if unopenable.statusMsg == welcomeSingleFile || unopenable.statusMsg == "" {
+		t.Fatalf("a failed open must keep its error flash, got %q", unopenable.statusMsg)
+	}
 }

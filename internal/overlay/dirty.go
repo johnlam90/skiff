@@ -56,6 +56,9 @@ type Dirty struct {
 	Labels [3]string
 	// Hover is the focused button: 0 = Cancel, 1 = Discard, 2 = Save.
 	Hover int
+	// press is the click latch — see Press. The middle button is
+	// Discard, so a drag that merely crossed it used to throw work away.
+	press Press
 	Theme theme.Theme
 
 	Size  func() (w, h int)
@@ -161,16 +164,18 @@ func (d *Dirty) HandleKey(ev *tcell.EventKey) {
 	}
 }
 
-// HandleMouse: hovering a button highlights it; clicking activates; a
-// click outside cancels — same as the confirm modal.
+// HandleMouse: hovering a button highlights it; a fresh press
+// activates; a fresh press outside cancels — same as the confirm modal.
+// Motion with the button held only moves the hover.
 func (d *Dirty) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	r := d.rect()
+	fresh := d.press.Fresh(btn)
 	if x >= r.X && x < r.X+r.W && y == r.Y+5 {
 		if idx := d.buttonAtRelX(x - r.X); idx >= 0 {
 			d.Hover = idx
 		}
 	}
-	if btn&tcell.Button1 == 0 {
+	if !fresh {
 		return
 	}
 	if !r.Contains(x, y) {
@@ -192,7 +197,7 @@ func (d *Dirty) HandleMouse(x, y int, btn tcell.ButtonMask) {
 func (d *Dirty) Draw(scr tcell.Screen) {
 	r := d.rect()
 	th := d.Theme
-	DrawFrame(scr, r, d.Title, th)
+	DrawFrameHint(scr, r, d.Title, EnterHint(d.labels()[d.Hover]), th)
 
 	bg := th.LineHL
 	bodyStyle := tcell.StyleDefault.Background(bg).Foreground(th.Text)

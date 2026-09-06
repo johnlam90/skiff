@@ -199,3 +199,34 @@ func TestPrompt_PhoneWidthKeepsButtonsAndHintInside(t *testing.T) {
 		t.Fatalf("OK click at the squeezed column: got %v", *log)
 	}
 }
+
+// TestPrompt_DragFromFieldOntoOKDoesNotSubmit is the drag-activation
+// regression for the prompt. Every prompt names a file (create,
+// rename), and a press in the input field followed by a downward drag
+// delivered a Button1 event on the OK cells — which used to submit the
+// name. Only a fresh press on a button may act; the drag's motion must
+// not, must not cancel when it leaves the frame, and must still move
+// the hover so the button row reads as live.
+func TestPrompt_DragFromFieldOntoOKDoesNotSubmit(t *testing.T) {
+	r := Centered(80, 24, promptWidth, promptHeight)
+	p, log := testPrompt()
+	p.Field.SetText("name")
+
+	p.HandleMouse(r.X+5, r.Y+4, tcell.Button1) // press in the field
+	p.HandleMouse(r.X+promptBtnOKX+1, r.Y+6, tcell.Button1)
+	if len(*log) != 0 {
+		t.Fatalf("a drag onto OK submitted: %v", *log)
+	}
+	if p.Hover != 1 {
+		t.Fatal("the drag should still move the hover onto OK")
+	}
+	p.HandleMouse(r.X-1, r.Y-1, tcell.Button1)
+	if len(*log) != 0 {
+		t.Fatalf("a drag out of the frame cancelled: %v", *log)
+	}
+	p.HandleMouse(r.X+promptBtnOKX+1, r.Y+6, tcell.ButtonNone)
+	p.HandleMouse(r.X+promptBtnOKX+1, r.Y+6, tcell.Button1)
+	if len(*log) != 2 || (*log)[1] != "submit:name" {
+		t.Fatalf("a fresh press on OK after the release must submit, got %v", *log)
+	}
+}

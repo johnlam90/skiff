@@ -34,10 +34,10 @@ import (
 var preRedesignMenuActions = []string{
 	"Save", "Save & close tab", "Close tab", "Reopen closed tab",
 	"Undo", "Redo", "Revert file",
-	"Find in file", "Find in project", "Go to line", "Find file in project",
+	"Find in file", "Find in project", "Go to line…", "Find file in project",
 	"Git changes", "Diff this file", "History of this file", "Commit history",
 	"Commit changes…", "Push", "Pull", "Switch branch…", "More git actions…",
-	"New file", "Rename file", "Delete file", "Rename folder", "Delete folder",
+	"New file…", "Rename file…", "Delete file…", "Rename folder…", "Delete folder…",
 	"Undo delete", "Cut file", "Copy file", "Paste into …", "Duplicate file",
 	"Copy relative path", "Copy absolute path",
 	"Copy selection", "Cut selection", "Paste", "Toggle line comment",
@@ -56,6 +56,9 @@ var postRedesignMenuActions = []string{
 	"Git…", "File clipboard…",
 	"Go to matching bracket", "Move to previous word", "Move to next word",
 	"Resolve disk conflict…", "Refresh file tree", "Keyboard shortcuts…",
+	// The Nerd Font icons picker — the menu door detection cannot
+	// replace over SSH.
+	"Icons…",
 	// Both forms of the one toggle whose default the tree owns, so the
 	// pin doesn't quietly depend on which way that default points.
 	"Show ignored files", "Hide ignored files",
@@ -65,6 +68,25 @@ var postRedesignMenuActions = []string{
 	// The markdown preview toggle (both label forms; the row itself is
 	// visibility-gated on a markdown tab being active).
 	"Preview Markdown", "Edit Markdown",
+	// The block indent / outdent pair behind Tab / Shift+Tab over a
+	// selection. Named "shift" rather than "indent" on purpose: an Edit
+	// row whose label starts with "in" would outrank "Find in file"
+	// for the filter query the palette test pins.
+	"Shift lines right", "Shift lines left",
+	// The document-end jumps behind Ctrl+Home / Ctrl+End and Esc < / >.
+	"Go to start of file", "Go to end of file",
+	// The selection gestures behind Esc a / Esc L.
+	"Select all", "Select line",
+	// Keyboard tab switching (Esc . / Esc ,) and the close-others row.
+	"Next tab", "Previous tab", "Close other tabs",
+	// Repeat the last in-file search without the bar (Esc ;).
+	"Find next",
+	// The "More git actions…" drill-in: the verbs that used to hide in
+	// an unregistered popup the reachability walk could not see.
+	"Fetch", "Compare against…",
+	"New branch…", "Merge branch…", "Rename branch…", "Delete branch…",
+	"New worktree…", "List worktrees", "Remove worktree…",
+	"Stash changes", "Pop stash", "Undo last commit…",
 }
 
 // menuCatalog flattens every built-in row the ≡ menu can reach — the top
@@ -125,21 +147,21 @@ func drillInItemByLabel(t *testing.T, a *App, label string) menuItemDef {
 
 // TestMenuLayout_EmptySession pins the headline claim of the redesign:
 // with no tab, no repo and no custom actions the menu collapses to the
-// ten rows that can actually do something — New file, the two project
-// searches, the six view rows and Quit — and the whole modal is 18
-// cells tall, well inside an 80×24 tmux split.
+// eleven rows that can actually do something — New file, the two
+// project searches, the seven view rows and Quit — and the whole modal
+// is 20 cells tall, well inside an 80×24 tmux split.
 func TestMenuLayout_EmptySession(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.customActions = nil
 	items, dividers, h := a.menuLayout()
 
-	if h != 19 {
-		t.Errorf("modalHeight = %d, want 19", h)
+	if h != 20 {
+		t.Errorf("modalHeight = %d, want 20", h)
 	}
-	if got := len(items); got != 11 {
-		t.Errorf("item count = %d, want 11; got %v", got, menuLabels(a, items))
+	if got := len(items); got != 12 {
+		t.Errorf("item count = %d, want 12; got %v", got, menuLabels(a, items))
 	}
-	wantDiv := []int{3, 5, 8, 16}
+	wantDiv := []int{3, 5, 8, 17}
 	if len(dividers) != len(wantDiv) {
 		t.Fatalf("dividers = %v, want %v", dividers, wantDiv)
 	}
@@ -236,14 +258,14 @@ func TestMenuCatalog_Shortcuts(t *testing.T) {
 		"Revert file":            "",
 		"Find in file":           "Esc f",
 		"Find in project":        "Esc F",
-		"Go to line":             "Esc l",
+		"Go to line…":            "Esc l",
 		"Go to matching bracket": "Esc %",
 		"Move to previous word":  "Esc b",
 		"Move to next word":      "Esc e",
 		"Find file in project":   "Esc p",
-		"New file":               "Esc n",
-		"Rename file":            "",
-		"Delete file":            "",
+		"New file…":              "Esc n",
+		"Rename file…":           "",
+		"Delete file…":           "",
 		"Copy relative path":     "",
 		"Copy absolute path":     "",
 		"Copy selection":         "Esc c",
@@ -365,11 +387,16 @@ func TestMenuDrillIns_HoldEveryDemotedAction(t *testing.T) {
 			}
 		}
 	}
-	// The nine git verbs and the six file-clipboard actions are exactly
-	// what the top level is allowed to demote.
+	// The nine git verbs, the twelve extras behind "More git actions…"
+	// and the six file-clipboard actions are exactly what the top level
+	// is allowed to demote.
 	wantDemoted := []string{
 		"Git changes", "Commit changes…", "Push", "Pull", "Switch branch…",
 		"Diff this file", "History of this file", "Commit history", "More git actions…",
+		"Fetch", "Compare against…",
+		"New branch…", "Merge branch…", "Rename branch…", "Delete branch…",
+		"New worktree…", "List worktrees", "Remove worktree…",
+		"Stash changes", "Pop stash", "Undo last commit…",
 		"Cut file", "Copy file", "Duplicate file", "Paste into …",
 		"Copy relative path", "Copy absolute path",
 	}
@@ -395,8 +422,8 @@ func TestMenuLayout_WithCustomActions(t *testing.T) {
 	}
 	items, _, h := a.menuLayout()
 
-	if h != 22 { // 19 + 2 items + 1 divider
-		t.Errorf("modalHeight = %d, want 22", h)
+	if h != 23 { // 20 + 2 items + 1 divider
+		t.Errorf("modalHeight = %d, want 23", h)
 	}
 	// Custom actions should be the second-to-last and third-to-last
 	// rows, with Quit as the final row.
@@ -606,7 +633,7 @@ func TestMenuLayout_FilterCrossesGroups(t *testing.T) {
 	if len(dividers) != 1 {
 		t.Errorf("a filtered list has no group dividers, got %v", dividers)
 	}
-	for _, want := range []string{"New file", "Rename file", "Delete file", "Find in file", "File clipboard…"} {
+	for _, want := range []string{"New file…", "Rename file…", "Delete file…", "Find in file", "File clipboard…"} {
 		found := false
 		for _, l := range got {
 			if l == want {
@@ -715,5 +742,33 @@ func TestMenuNaturalWidth_GrowsForLongLabel(t *testing.T) {
 	if got := menuLabelBudget(w, row); got < runeLen(long) {
 		t.Fatalf("grown width %d still clips the label (budget %d < %d)",
 			w, got, runeLen(long))
+	}
+}
+
+// TestMenuCatalog_PromptingRowsEndWithEllipsis pins the "…" convention
+// menudef.go's header states: a row that asks before acting (a prompt,
+// a pick, a confirm) ends in an ellipsis so the user knows a click is
+// safe to explore, and a row that acts on the click does not. Both
+// halves are spelled out by hand because the catalog cannot tell a
+// prompting action from a direct one without running it.
+func TestMenuCatalog_PromptingRowsEndWithEllipsis(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	have := make(map[string]bool)
+	for _, it := range menuCatalog() {
+		have[menuCatalogLabel(a, it)] = true
+	}
+	for _, label := range []string{
+		"New file…", "Rename file…", "Delete file…", "Rename folder…", "Delete folder…",
+		"Go to line…", "Theme…", "Commit changes…", "Switch branch…",
+		"Resolve disk conflict…", "Keyboard shortcuts…", "Git…", "File clipboard…",
+	} {
+		if !have[label] {
+			t.Errorf("prompting row %q is missing its ellipsis form from the catalog", label)
+		}
+	}
+	for _, label := range []string{"Save", "Push", "Pull", "Undo", "Redo", "Revert file", "Refresh file tree"} {
+		if !have[label] {
+			t.Errorf("direct row %q should carry no ellipsis", label)
+		}
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -347,9 +348,9 @@ func TestPreviewMarkdown_DragSelectCopiesRenderedText(t *testing.T) {
 	a.menuTogglePreviewMarkdown()
 	li, y := previewLineAt(t, a, tab, "alpha beta gamma")
 	st := a.mdPreview[tab]
-	ex, _, _, _ := a.editorRect()
-	x0 := ex + 1 + strings.Index(st.lines[li], "alpha")
-	x1 := ex + 1 + strings.Index(st.lines[li], "beta") + len("beta")
+	ex, _ := a.mdPreviewGeom()
+	x0 := ex + strings.Index(st.lines[li], "alpha")
+	x1 := ex + strings.Index(st.lines[li], "beta") + len("beta")
 
 	a.handleMouse(tcell.NewEventMouse(x0, y, tcell.Button1, tcell.ModNone))
 	a.handleMouse(tcell.NewEventMouse(x1, y, tcell.Button1, tcell.ModNone))
@@ -373,9 +374,9 @@ func TestPreviewMarkdown_MultiLineDragJoins(t *testing.T) {
 	l1, y1 := previewLineAt(t, a, tab, "first words")
 	_, y2 := previewLineAt(t, a, tab, "second words")
 	st := a.mdPreview[tab]
-	ex, _, _, _ := a.editorRect()
-	x0 := ex + 1 + strings.Index(st.lines[l1], "words")
-	x1 := ex + 1 + len("second")
+	ex, _ := a.mdPreviewGeom()
+	x0 := ex + strings.Index(st.lines[l1], "words")
+	x1 := ex + len("second")
 
 	a.handleMouse(tcell.NewEventMouse(x0, y1, tcell.Button1, tcell.ModNone))
 	a.handleMouse(tcell.NewEventMouse(x1, y2, tcell.Button1, tcell.ModNone))
@@ -397,8 +398,8 @@ func TestPreviewMarkdown_SelectionHighlightAndClickClears(t *testing.T) {
 	a.menuTogglePreviewMarkdown()
 	li, y := previewLineAt(t, a, tab, "selectable")
 	st := a.mdPreview[tab]
-	ex, _, _, _ := a.editorRect()
-	x0 := ex + 1 + strings.Index(st.lines[li], "selectable")
+	ex, _ := a.mdPreviewGeom()
+	x0 := ex + strings.Index(st.lines[li], "selectable")
 
 	a.handleMouse(tcell.NewEventMouse(x0, y, tcell.Button1, tcell.ModNone))
 	a.handleMouse(tcell.NewEventMouse(x0+6, y, tcell.Button1, tcell.ModNone))
@@ -423,5 +424,97 @@ func TestPreviewMarkdown_SelectionHighlightAndClickClears(t *testing.T) {
 	cells, w, _ = scr.GetContents()
 	if _, bg, _ := cells[y*w+x0+2].Style.Decompose(); bg == a.theme.Selection {
 		t.Fatal("click should clear the highlight")
+	}
+}
+
+// TestPreviewMarkdown_ClampsMeasureAndCentres pins the wide-terminal
+// rule: on a 200-column editor the document is wrapped at
+// mdPreviewMaxWidth rather than 197 cells, painted centred in the room
+// the cap leaves, and the drag hit-test uses the same origin as the
+// paint — so select-to-copy still lands on the words under the pointer
+// when the text is not flush left.
+func TestPreviewMarkdown_ClampsMeasureAndCentres(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 200, 40)
+	a.sidebarShown = false
+	tab := seedMarkdownTab(t, a, "notes.md", strings.Repeat("word ", 60)+"\n")
+	a.menuTogglePreviewMarkdown()
+	st := a.mdPreview[tab]
+	if st.width != mdPreviewMaxWidth {
+		t.Fatalf("wrap width = %d, want the %d cap", st.width, mdPreviewMaxWidth)
+	}
+	for _, l := range st.lines {
+		if w := textdraw.Width(l); w > mdPreviewMaxWidth {
+			t.Fatalf("line %q is %d cells, over the cap", l, w)
+		}
+	}
+	ex, _, ew, _ := a.editorRect()
+	contentX, contentW := a.mdPreviewGeom()
+	if contentW != mdPreviewMaxWidth || contentX <= ex+1 || contentX+contentW >= ex+ew-1 {
+		t.Fatalf("content column x=%d w=%d is not centred inside the editor [%d,%d)", contentX, contentW, ex, ex+ew)
+	}
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+	li, y := previewLineAt(t, a, tab, "word")
+	row := screenLine(scr, y)
+	if strings.TrimSpace(row[:contentX]) != "" {
+		t.Fatalf("text painted left of the content column: %q", row)
+	}
+	if strings.Index(row, "word") != contentX {
+		t.Fatalf("first word at column %d, want the content origin %d", strings.Index(row, "word"), contentX)
+	}
+	// A drag over the third and fourth words, addressed from the shared
+	// origin, copies exactly those words.
+	x0 := contentX + strings.Index(st.lines[li], "word word word") + len("word word ")
+	x1 := x0 + len("word word")
+	a.handleMouse(tcell.NewEventMouse(x0, y, tcell.Button1, tcell.ModNone))
+	a.handleMouse(tcell.NewEventMouse(x1, y, tcell.Button1, tcell.ModNone))
+	a.handleMouse(tcell.NewEventMouse(x1, y, 0, tcell.ModNone))
+	if a.clipBuf != "word word" {
+		t.Fatalf("clipBuf = %q, want the two words under the drag", a.clipBuf)
+	}
+}
+
+// TestPreviewMarkdown_HitAtCentredOriginIsColumnZero pins the hit-test
+// against the paint on a centred document, row by row: a press on the
+// first content cell maps to column 0 of the rendered line, whether
+// that cell is prose, a code row's rail or an H1 rule — the rows the
+// heading scheme and the code rectangle added — and the glyph painted
+// there is that column's rune. A press in the centring margin left of
+// the origin clamps to column 0 rather than going negative, and one
+// three cells in lands on column 3, so select-to-copy addresses the
+// text under the pointer and not the text shifted by the margin.
+func TestPreviewMarkdown_HitAtCentredOriginIsColumnZero(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 200, 40)
+	a.sidebarShown = false
+	tab := seedMarkdownTab(t, a, "notes.md", "# Title\n\nprose line here\n\n```go\nx := 1\n```\n")
+	a.menuTogglePreviewMarkdown()
+	st := a.mdPreview[tab]
+	ex, _, _, _ := a.editorRect()
+	contentX, _ := a.mdPreviewGeom()
+	if contentX <= ex+1 {
+		t.Fatalf("content origin %d is not centred past the editor edge %d", contentX, ex)
+	}
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	for _, sub := range []string{"Title", "━━━", "prose line", "▏x := 1"} {
+		li, y := previewLineAt(t, a, tab, sub)
+		first := []rune(st.lines[li])[0]
+		if got := cells[y*w+contentX].Runes[0]; got != first {
+			t.Fatalf("%q: cell at the origin paints %q, want the line's first rune %q", sub, got, first)
+		}
+		if hit := a.mdPreviewHit(st, contentX, y); hit.line != li || hit.col != 0 {
+			t.Fatalf("%q: hit at the origin = %+v, want line %d col 0", sub, hit, li)
+		}
+		if hit := a.mdPreviewHit(st, ex, y); hit.line != li || hit.col != 0 {
+			t.Fatalf("%q: hit in the centring margin = %+v, want it clamped to col 0", sub, hit)
+		}
+		if hit := a.mdPreviewHit(st, contentX+3, y); hit.col != 3 {
+			t.Fatalf("%q: hit three cells in = col %d, want 3", sub, hit.col)
+		}
 	}
 }

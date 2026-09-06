@@ -33,6 +33,8 @@ type Popup struct {
 	Items []PopupItem
 	// Hover is the highlighted row index.
 	Hover int
+	// press is the click latch — see Press.
+	press Press
 	// At is the popup's rectangle, computed once at open by PlacePopup.
 	At    Rect
 	Theme theme.Theme
@@ -155,10 +157,12 @@ func (p *Popup) nextSelectable(from, dir int) int {
 	}
 }
 
-// HandleMouse: hovering a row highlights it; clicking activates; any
-// click outside dismisses.
+// HandleMouse: hovering a row highlights it; a fresh press activates;
+// a fresh press outside dismisses. Held-button motion only hovers, so
+// a drag out of the button that opened the popup cannot run a row.
 func (p *Popup) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	r := p.At
+	fresh := p.press.Fresh(btn)
 	row := -1
 	// Screen row → item index through the scroll offset: a row the frame
 	// windowed out occupies no cells, so hit-testing it would fire on
@@ -169,7 +173,7 @@ func (p *Popup) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	if row >= 0 && row < len(p.Items) && !p.Items[row].Divider {
 		p.Hover = row
 	}
-	if btn&tcell.Button1 == 0 {
+	if !fresh {
 		return
 	}
 	if !r.Contains(x, y) {

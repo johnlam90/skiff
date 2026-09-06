@@ -274,3 +274,31 @@ func TestDirty_WideScreenKeepsPinnedColumns(t *testing.T) {
 		t.Fatalf("pinned columns drifted: xs=%v ws=%v", xs, ws)
 	}
 }
+
+// TestDirty_DragOntoDiscardDoesNotDiscard pins the press latch on the
+// modal where it matters most: the middle button throws work away, and
+// a press on the frame followed by a drag across the button row used to
+// hit it. Held-button motion only moves the hover.
+func TestDirty_DragOntoDiscardDoesNotDiscard(t *testing.T) {
+	d, log := testDirty()
+	r := Centered(80, 24, dirtyWidth, dirtyHeight)
+	xs, _ := d.columns()
+
+	d.HandleMouse(r.X+2, r.Y+2, tcell.Button1) // press on the message
+	d.HandleMouse(r.X+xs[1]+1, r.Y+5, tcell.Button1)
+	if len(*log) != 0 {
+		t.Fatalf("a drag onto Discard fired: %v", *log)
+	}
+	if d.Hover != 1 {
+		t.Fatalf("the drag should hover Discard, got %d", d.Hover)
+	}
+	d.HandleMouse(r.X-1, r.Y, tcell.Button1)
+	if len(*log) != 0 {
+		t.Fatalf("a drag out of the frame cancelled: %v", *log)
+	}
+	d.HandleMouse(r.X+xs[1]+1, r.Y+5, tcell.ButtonNone)
+	d.HandleMouse(r.X+xs[1]+1, r.Y+5, tcell.Button1)
+	if len(*log) != 2 || (*log)[1] != "discard" {
+		t.Fatalf("a fresh press after the release must fire, got %v", *log)
+	}
+}
