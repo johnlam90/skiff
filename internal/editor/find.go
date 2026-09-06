@@ -32,19 +32,34 @@ type Match struct {
 	Width int
 }
 
+// FindOptions are the toggles a find surface can arm on top of the
+// query. MatchCase makes every query exact, where the default is
+// smart-case (exact only once the query holds an uppercase letter).
+// Whole-word and regex stay out of scope for the in-file bar — the
+// project panel has them because internal/search does.
+type FindOptions struct {
+	MatchCase bool
+}
+
 // FindAll returns every substring match of query inside buf, in document
-// order. Matching is smart-case: an all-lowercase query matches any
-// case, any uppercase letter in the query makes the match exact — so
-// "id" finds ID and id, while "ID" finds only ID. An empty query returns
-// nil — the caller is expected to clear its UI rather than show "0 of 0"
-// results. Matches do not overlap: after a hit the scanner advances past
-// the matched run, so "aaaa" with query "aa" yields two matches at
-// columns 0 and 2.
+// order, with the default options. Matching is smart-case: an
+// all-lowercase query matches any case, any uppercase letter in the
+// query makes the match exact — so "id" finds ID and id, while "ID"
+// finds only ID. An empty query returns nil — the caller is expected to
+// clear its UI rather than show "0 of 0" results. Matches do not
+// overlap: after a hit the scanner advances past the matched run, so
+// "aaaa" with query "aa" yields two matches at columns 0 and 2.
 func FindAll(buf *Buffer, query string) []Match {
+	return FindAllWith(buf, query, FindOptions{})
+}
+
+// FindAllWith is FindAll with the toggles applied: MatchCase forces an
+// exact match whatever the query's own case says.
+func FindAllWith(buf *Buffer, query string, opts FindOptions) []Match {
 	if query == "" || buf == nil {
 		return nil
 	}
-	caseSensitive := hasUpper(query)
+	caseSensitive := opts.MatchCase || hasUpper(query)
 	needle := []rune(query)
 	if len(needle) == 0 {
 		return nil
@@ -161,8 +176,13 @@ func (t *Tab) SetFindQuery(query string) {
 		t.FindIndex = -1
 		return
 	}
-	t.FindMatches = FindAll(t.Buffer, query)
+	t.FindMatches = FindAllWith(t.Buffer, query, t.findOptions())
 	t.FindIndex = FirstMatchAtOrAfter(t.FindMatches, t.Cursor)
+}
+
+// findOptions collects the tab's armed find toggles for a re-scan.
+func (t *Tab) findOptions() FindOptions {
+	return FindOptions{MatchCase: t.FindMatchCase}
 }
 
 // refreshFindMatches re-runs the active query after the buffer changed,
@@ -332,7 +352,7 @@ func (t *Tab) ReplaceCurrentMatch(repl string) bool {
 	m := t.FindMatches[t.FindIndex]
 	start := Position{Line: m.Line, Col: m.Col}
 	end := Position{Line: m.Line, Col: m.Col + m.Width}
-	repl = preserveCase(t.FindQuery, t.Buffer.Substring(start, end), repl)
+	repl = preserveCase(t.FindQuery, t.Buffer.Substring(start, end), repl, t.findOptions())
 	t.edit(undoGroupStructural, func() {
 		t.Buffer.DeleteRange(start, end)
 		after := t.Buffer.InsertString(start, repl)
@@ -348,11 +368,12 @@ func (t *Tab) ReplaceCurrentMatch(repl string) bool {
 // preserveCase adapts repl to the letter case of matched, the text a
 // smart-case query hit: all capitals give an all-capital replacement,
 // a capitalised match gives a capitalised one, and anything else — or
-// a case-sensitive query, which already spells the case it wants —
-// leaves repl as typed. A single-letter match counts as capitalised
-// rather than all-capital, so "A" → "foo" gives "Foo", not "FOO".
-func preserveCase(query, matched, repl string) string {
-	if hasUpper(query) || repl == "" {
+// a case-sensitive query, which already spells the case it wants (an
+// uppercase letter in it, or the MatchCase toggle) — leaves repl as
+// typed. A single-letter match counts as capitalised rather than
+// all-capital, so "A" → "foo" gives "Foo", not "FOO".
+func preserveCase(query, matched, repl string, opts FindOptions) string {
+	if opts.MatchCase || hasUpper(query) || repl == "" {
 		return repl
 	}
 	letters, uppers := 0, 0

@@ -575,3 +575,35 @@ func TestFindStrip_ToleratesItsTabBeingClosed(t *testing.T) {
 		t.Fatalf("the surviving tab must not inherit the closed tab's query, got %q", tabB.FindQuery)
 	}
 }
+
+// TestHandleFindKey_AltCTogglesMatchCase pins the bar's one mode
+// toggle: Alt+c arms exact-case matching on the searched tab, re-runs
+// the query so the counter follows, names the mode in the counter's
+// tail, and flips back on a second press.
+func TestHandleFindKey_AltCTogglesMatchCase(t *testing.T) {
+	a := seedFindApp(t, "id ID Id")
+	a.openFind()
+	for _, r := range "id" {
+		findBarOf(t, a).handleKey(keyEv(tcell.KeyRune, r))
+	}
+	tab := a.activeTabPtr()
+	if len(tab.FindMatches) != 3 {
+		t.Fatalf("smart-case seed: %d matches", len(tab.FindMatches))
+	}
+
+	findBarOf(t, a).handleKey(tcell.NewEventKey(tcell.KeyRune, 'c', tcell.ModAlt))
+	if !tab.FindMatchCase || len(tab.FindMatches) != 1 {
+		t.Fatalf("Alt+c should arm match case and re-search: on=%v matches=%d", tab.FindMatchCase, len(tab.FindMatches))
+	}
+	if got := findBarOf(t, a).counterText(); got != "1 of 1 · Aa" {
+		t.Fatalf("counter should name the armed mode, got %q", got)
+	}
+	if got := findBarOf(t, a).query.Text(); got != "id" {
+		t.Fatalf("Alt+c must not type into the query, got %q", got)
+	}
+
+	findBarOf(t, a).handleKey(tcell.NewEventKey(tcell.KeyRune, 'c', tcell.ModAlt))
+	if tab.FindMatchCase || len(tab.FindMatches) != 3 {
+		t.Fatalf("a second Alt+c should disarm: on=%v matches=%d", tab.FindMatchCase, len(tab.FindMatches))
+	}
+}

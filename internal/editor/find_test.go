@@ -645,8 +645,38 @@ func TestPreserveCase(t *testing.T) {
 		{"123", "123", "bar", "bar"},
 	}
 	for _, c := range cases {
-		if got := preserveCase(c.query, c.matched, c.repl); got != c.want {
+		if got := preserveCase(c.query, c.matched, c.repl, FindOptions{}); got != c.want {
 			t.Errorf("preserveCase(%q, %q, %q) = %q, want %q", c.query, c.matched, c.repl, got, c.want)
 		}
+	}
+}
+
+// TestFindAllWith_MatchCase pins the Aa toggle: with it armed a
+// lowercase query stops matching other cases, and the tab's re-scan
+// honours it — flipping the field and re-applying the query is the
+// whole toggle. Replacement under the toggle is exact, not
+// case-preserving.
+func TestFindAllWith_MatchCase(t *testing.T) {
+	buf := NewBuffer("id ID Id")
+	if got := len(FindAllWith(buf, "id", FindOptions{})); got != 3 {
+		t.Fatalf("smart-case: %d matches, want 3", got)
+	}
+	if got := len(FindAllWith(buf, "id", FindOptions{MatchCase: true})); got != 1 {
+		t.Fatalf("match-case: %d matches, want 1", got)
+	}
+
+	tab := &Tab{Buffer: NewBuffer("id ID")}
+	tab.initUndo()
+	tab.SetFindQuery("id")
+	if len(tab.FindMatches) != 2 {
+		t.Fatalf("seed: %d matches", len(tab.FindMatches))
+	}
+	tab.FindMatchCase = true
+	tab.SetFindQuery("id")
+	if len(tab.FindMatches) != 1 {
+		t.Fatalf("after arming MatchCase: %d matches, want 1", len(tab.FindMatches))
+	}
+	if got := preserveCase("id", "ID", "x", FindOptions{MatchCase: true}); got != "x" {
+		t.Fatalf("MatchCase replacement should be exact, got %q", got)
 	}
 }

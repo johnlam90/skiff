@@ -179,12 +179,18 @@ func (s *findStrip) handleMouse(int, int, tcell.ButtonMask) bool { return false 
 //	Enter                   next match, or replace when the replace
 //	                        field has the keyboard
 //	Shift+Enter             previous match, or replace-all
+//	Alt+c                   toggle match case (Alt is the tmux-safe
+//	                        modifier; see keys.go)
 //
 // Everything else is text editing and belongs to the focused
 // overlay.Field — the same split prompt.go and form.go use. Keys no
 // field claims (Up/Down, function keys) are dropped on the floor: the
 // find bar owns the keyboard while it's open.
 func (s *findStrip) handleKey(ev *tcell.EventKey) {
+	if ev.Modifiers()&tcell.ModAlt != 0 && ev.Key() == tcell.KeyRune && ev.Rune() == 'c' {
+		s.toggleMatchCase()
+		return
+	}
 	switch ev.Key() {
 	case tcell.KeyEsc:
 		s.a.closeFind()
@@ -218,6 +224,17 @@ func (s *findStrip) applyQuery() {
 	}
 	tab.SetFindQuery(s.query.Text())
 	tab.FocusCurrentMatch()
+}
+
+// toggleMatchCase flips the bar's Aa mode on the tab it searches and
+// re-runs the query so the highlights and the counter follow at once.
+func (s *findStrip) toggleMatchCase() {
+	tab := s.boundTab()
+	if tab == nil {
+		return
+	}
+	tab.FindMatchCase = !tab.FindMatchCase
+	s.applyQuery()
 }
 
 // next is the Enter-in-the-bar action: jump to the next match (with
@@ -329,9 +346,9 @@ func (s *findStrip) draw(r rect) {
 	// the input can be clipped against them, but they only get the cells
 	// left over once the input has minFieldWidth — the input outranks
 	// both, and the counter outranks the hint.
-	hint := " Enter: next · Shift+Enter: prev · Tab: replace · Esc: close "
+	hint := " Enter: next · Shift+Enter: prev · Tab: replace · Esc: close · Alt+c: case "
 	if s.replaceOpen && s.focusReplace {
-		hint = " Enter: replace · Shift+Enter: all · Tab: query · Esc: close "
+		hint = " Enter: replace · Shift+Enter: all · Tab: query · Esc: close · Alt+c: case "
 	}
 	counter := s.counterText()
 	counterCost := 0
@@ -411,8 +428,10 @@ func (s *findStrip) draw(r rect) {
 }
 
 // counterText renders the "N of M" indicator for the tab the bar
-// opened on. Returns "" when there is no query — or no tab left to
-// count against — so the renderer can skip drawing the field entirely.
+// opened on, with the Aa marker appended while match case is armed so
+// the mode is legible in text, not only as a colour. Returns "" when
+// there is no query — or no tab left to count against — so the
+// renderer can skip drawing the field entirely.
 func (s *findStrip) counterText() string {
 	if len(s.query.Value) == 0 {
 		return ""
@@ -421,10 +440,14 @@ func (s *findStrip) counterText() string {
 	if tab == nil {
 		return ""
 	}
-	if len(tab.FindMatches) == 0 {
-		return "no results"
+	text := "no results"
+	if len(tab.FindMatches) > 0 {
+		text = fmt.Sprintf("%d of %d", tab.FindIndex+1, len(tab.FindMatches))
 	}
-	return fmt.Sprintf("%d of %d", tab.FindIndex+1, len(tab.FindMatches))
+	if tab.FindMatchCase {
+		text += " · Aa"
+	}
+	return text
 }
 
 // hasNoMatches reports whether the user has typed a query that returned

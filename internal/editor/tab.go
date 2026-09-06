@@ -196,6 +196,10 @@ type Tab struct {
 	FindQuery   string
 	FindMatches []Match
 	FindIndex   int // -1 = no current match; otherwise an index into FindMatches.
+	// FindMatchCase is the bar's Aa toggle: exact-case matching even
+	// for a lowercase query. Read by SetFindQuery on every re-scan, so
+	// flipping it and re-applying the query is the whole toggle.
+	FindMatchCase bool
 
 	// findRows indexes FindMatches by buffer line so the renderer's
 	// per-cell lookup stays sub-linear; findRowsFor is the match count
