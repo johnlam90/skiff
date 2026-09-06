@@ -25,6 +25,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/icons"
+	"github.com/johnlam90/skiff/internal/textdraw"
 )
 
 // tabRect remembers where each tab was drawn so click handling can hit-test
@@ -869,44 +870,21 @@ func (a *App) flashStripRect() (x, y, w, h int) {
 }
 
 // wrapFlashLines breaks msg into at most flashStripMaxRows lines of w
-// cells, preferring a space break so words stay whole and falling back to
-// a hard break when a single run is wider than the strip. The last line
-// is ellipsised if the message still doesn't fit, because a strip that
-// silently drops its tail is the bug it exists to fix.
+// cells through the chrome's shared wrap (textdraw.WrapWords: space
+// breaks, hard breaks for an over-long run, cluster-measured). What
+// stays here is the strip's own rule: the last row is ellipsised if the
+// message still doesn't fit, because a strip that silently drops its
+// tail is the bug it exists to fix.
 func wrapFlashLines(msg string, w int) []string {
 	if w <= 0 || msg == "" {
 		return nil
 	}
-	rs := []rune(msg)
-	out := make([]string, 0, flashStripMaxRows)
-	for len(rs) > 0 {
-		if len(rs) <= w {
-			return append(out, string(rs))
-		}
-		if len(out) == flashStripMaxRows-1 {
-			return append(out, trimRunes(string(rs), w))
-		}
-		// rs[w] is the rune that would start the next row; when it is
-		// already a space the first w runes are whole words and the full
-		// row is usable. Only when it isn't do we hunt backwards for the
-		// last space that fits — and a run with none breaks hard.
-		cut := w
-		if rs[w] != ' ' {
-			for i := w; i > 0; i-- {
-				if rs[i-1] == ' ' {
-					cut = i
-					break
-				}
-			}
-		}
-		out = append(out, strings.TrimRight(string(rs[:cut]), " "))
-		rs = rs[cut:]
-		// Spaces at a wrap point are the break, not content.
-		for len(rs) > 0 && rs[0] == ' ' {
-			rs = rs[1:]
-		}
+	lines := textdraw.WrapWords(msg, w)
+	if len(lines) <= flashStripMaxRows {
+		return lines
 	}
-	return out
+	rest := strings.Join(lines[flashStripMaxRows-1:], " ")
+	return append(lines[:flashStripMaxRows-1], textdraw.ClipEllipsis(rest, w))
 }
 
 // drawFlashStrip paints the transient flash rows above the status bar,

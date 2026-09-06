@@ -29,12 +29,13 @@ package app
 
 import "fmt"
 
-// cheatSheetWidth is the column budget every authored line in this file
-// respects: the usable text width of an overlay.Info frame on a
-// minWidth-wide terminal (frame minus a border and a pad cell on each
-// side). Pinned by a test rather than eyeballed, because the whole
-// point of the overlay is to be readable in the narrow tmux pane where
-// the user has forgotten a binding.
+// cheatSheetWidth is the column budget every BINDING row respects: the
+// usable text width of an overlay.Info frame on a minWidth-wide
+// terminal (frame minus a border and a pad cell on each side). A
+// binding row is a fixed-column table line — key, then description —
+// and a table line that wraps stops being a table, so descriptions are
+// fenced to fit rather than left to Info's soft wrap. Prose is not
+// fenced: Info wraps it to whatever width it actually has.
 const cheatSheetWidth = minWidth - 4
 
 // cheatSheetLines builds the body of the shortcut overlay: two lines of
@@ -47,13 +48,15 @@ func cheatSheetLines() []string {
 	groups := leaderDisplayGroups()
 	bindings := leaderBindings()
 	help := menuHelpLines()
-	// Three intro rows, a blank + heading per group, every binding, the
-	// spacer before the ≡ section, and the section itself.
-	lines := make([]string, 0, 3+2*len(groups)+len(bindings)+1+len(help))
+	// The intro, a blank + heading per group, every binding, the spacer
+	// before the ≡ section, and the section itself. The intro is one
+	// sentence: overlay.Info wraps prose to the frame it gets, so it
+	// reads as a paragraph on a wide terminal and as three lines on a
+	// phone — pre-wrapping it to the phone's width left it as three
+	// stubby lines inside an 82-column box.
+	lines := make([]string, 0, 1+2*len(groups)+len(bindings)+1+len(help))
 	lines = append(lines,
-		"No Ctrl shortcuts — Esc is the",
-		"only leader. Tap Esc, then the key,",
-		"within half a second.")
+		"No Ctrl shortcuts — Esc is the only leader. Tap Esc, then the key, within half a second.")
 	for _, g := range groups {
 		lines = append(lines, "", g.title)
 		for _, b := range g.bindings {
@@ -67,29 +70,24 @@ func cheatSheetLines() []string {
 }
 
 // menuHelpLines is the hand-written half of the reference — the part
-// that isn't a keystroke. It covers the three things a user cannot
+// that isn't a keystroke. It covers the four things a user cannot
 // deduce by pressing keys: that ≡ and a double Esc open the same menu,
-// that the menu filters across every group at once, and that
-// right-click is a convenience rather than a door, because tmux and
-// macOS Terminal routinely swallow Button3.
+// that the menu filters across every group at once, that right-click
+// is a convenience rather than a door (tmux and macOS Terminal
+// routinely swallow Button3), and that under tmux a fast Esc s reaches
+// the editor as Alt+s — which skiff treats as the same gesture, so a
+// user who sees the leader "not working" learns it is working.
 //
-// Lines are pre-wrapped to cheatSheetWidth: overlay.Info truncates
-// rather than wraps, and a reference that loses its last word on a
-// narrow pane fails exactly where it is needed. The budget got tighter
-// when minWidth dropped to 40 — these lines are the ones a phone reads.
+// Each paragraph is one line: overlay.Info soft-wraps to the width it
+// actually has, so the same text reads as a paragraph in an 82-column
+// box and as five lines on a phone. Pre-wrapping to the phone's width
+// is what left the wide box full of stubby three-word lines.
 func menuHelpLines() []string {
 	return []string{
 		"The ≡ menu",
-		"  Click ≡ at the top-left, or tap",
-		"  Esc twice. Right-click opens it",
-		"  too, but tmux and macOS Terminal",
-		"  often swallow that — ≡ and Esc",
-		"  Esc always work.",
-		"  Type to filter every action at",
-		"  once: \"sb\" finds \"Switch",
-		"  branch…\". Enter runs the best",
-		"  match; Esc clears the filter,",
-		"  Esc again closes the menu.",
+		"  Click ≡ at the top-left, or tap Esc twice. Right-click opens it too, but tmux and macOS Terminal often swallow that — ≡ and Esc Esc always work.",
+		"  Type to filter every action at once: \"sb\" finds \"Switch branch…\". Enter runs the best match; Esc clears the filter, Esc again closes the menu.",
+		"  Under tmux a fast Esc s arrives as Alt+s; skiff treats them as the same gesture, so either spelling works.",
 	}
 }
 

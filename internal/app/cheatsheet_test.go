@@ -21,6 +21,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/overlay"
+	"github.com/johnlam90/skiff/internal/textdraw"
 )
 
 // bindingRowKey pulls the trigger rune out of a generated cheat-sheet
@@ -176,15 +177,41 @@ func TestCheatSheetLines_ExplainTheMenu(t *testing.T) {
 	}
 }
 
-// TestCheatSheetLines_FitNarrowTerminals pins the column budget. Info
-// truncates rather than wraps, and the overlay's whole job is to be
-// readable in the cramped tmux pane where someone forgot a binding, so
-// a line that only fits on a wide screen is a broken line.
-func TestCheatSheetLines_FitNarrowTerminals(t *testing.T) {
+// TestCheatSheetLines_BindingRowsFitNarrowTerminals pins the column
+// budget for the TABLE half of the sheet. Prose is soft-wrapped by
+// overlay.Info to whatever width it gets, but a binding row is a
+// fixed-column line — key, then description — and a table line that
+// wraps stops being a table. The overlay's whole job is to be readable
+// in the cramped tmux pane where someone forgot a binding, so a
+// description that only fits on a wide screen is a broken description.
+func TestCheatSheetLines_BindingRowsFitNarrowTerminals(t *testing.T) {
+	rows := 0
 	for _, l := range cheatSheetLines() {
-		if n := len([]rune(l)); n > cheatSheetWidth {
-			t.Errorf("line %q is %d cells, budget is %d", l, n, cheatSheetWidth)
+		if _, ok := bindingRowKey(l); !ok {
+			continue
 		}
+		rows++
+		if n := textdraw.Width(l); n > cheatSheetWidth {
+			t.Errorf("binding row %q is %d cells, budget is %d", l, n, cheatSheetWidth)
+		}
+	}
+	if rows == 0 {
+		t.Fatal("no binding rows found; the fence is checking nothing")
+	}
+}
+
+// TestCheatSheetLines_ProseIsNotPreWrapped pins the other half: the
+// intro and the ≡ paragraphs are authored as whole sentences (wider
+// than the phone budget) and left for Info to wrap, so on a wide
+// terminal they fill the box instead of arriving as three-word stubs.
+func TestCheatSheetLines_ProseIsNotPreWrapped(t *testing.T) {
+	lines := cheatSheetLines()
+	if textdraw.Width(lines[0]) <= cheatSheetWidth {
+		t.Fatalf("the intro %q is pre-wrapped to the phone width; Info wraps prose itself", lines[0])
+	}
+	body := strings.Join(menuHelpLines(), "\n")
+	if !strings.Contains(body, "Alt+s") || !strings.Contains(body, "tmux") {
+		t.Fatalf("the ≡ section must explain that a fast Esc s arrives as Alt+s under tmux:\n%s", body)
 	}
 }
 
