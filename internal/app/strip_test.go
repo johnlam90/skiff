@@ -240,8 +240,8 @@ func TestStripSlot_HoldsOneStripAtATime(t *testing.T) {
 	if !a.projFindOpen() || a.findBarOpen() {
 		t.Fatalf("the slot should hold the panel alone, got %T", a.strip)
 	}
-	if tab := a.activeTabPtr(); tab.FindQuery != "" || tab.FindMatches != nil {
-		t.Fatalf("the displaced find bar left its highlights behind: %q", tab.FindQuery)
+	if tab := a.activeTabPtr(); tab.FindMatches != nil {
+		t.Fatalf("the displaced find bar left its highlights behind: %d matches still lit", len(tab.FindMatches))
 	}
 }
 

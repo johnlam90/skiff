@@ -125,6 +125,11 @@ func fileMenuGroup() []menuItemDef {
 		{action: (*App).menuDeleteFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).deleteFolderLabel, visible: (*App).hasActiveSubfolder},
 		{action: (*App).menuUndoDelete, enabled: (*App).hasTrashedEntry, labelFor: (*App).undoDeleteLabel, visible: (*App).hasTrashedEntry},
 		{label: "File clipboard…", action: (*App).menuFileClipboard, enabled: (*App).hasFileClipActions, visible: (*App).hasFileClipActions},
+		// Tab switching needs a second tab to switch to, so the trio
+		// hides rather than dims on a single tab.
+		{label: "Next tab", shortcut: "Esc ]", action: (*App).menuNextTab, enabled: (*App).hasOtherTabs, visible: (*App).hasOtherTabs},
+		{label: "Previous tab", shortcut: "Esc [", action: (*App).menuPrevTab, enabled: (*App).hasOtherTabs, visible: (*App).hasOtherTabs},
+		{label: "Close other tabs", action: (*App).menuCloseOtherTabs, enabled: (*App).hasOtherTabs, visible: (*App).hasOtherTabs},
 	}
 }
 
@@ -144,6 +149,15 @@ func editMenuGroup() []menuItemDef {
 		{label: "Move line up", shortcut: "Esc k", action: (*App).menuMoveLineUp, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 		{label: "Move line down", shortcut: "Esc j", action: (*App).menuMoveLineDown, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 		{label: "Duplicate line", shortcut: "Esc d", action: (*App).menuDuplicateLine, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		// Tab / Shift+Tab run these from the keyboard; the rows exist
+		// because a terminal that swallows Shift+Tab (Backtab) leaves
+		// the menu as the only path to an outdent. "Shift", not
+		// "indent": a label starting with "in" would outrank "Find in
+		// file" in the type-to-filter for the query its test pins.
+		{label: "Shift lines right", action: (*App).menuIndentLines, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		{label: "Shift lines left", action: (*App).menuOutdentLines, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		{label: "Select all", shortcut: "Esc a", action: (*App).menuSelectAll, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		{label: "Select line", shortcut: "Esc L", action: (*App).menuSelectLine, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 	}
 }
 
@@ -162,6 +176,11 @@ func goMenuGroup() []menuItemDef {
 		{label: "Move to previous word", shortcut: "Esc b", action: (*App).menuMoveWordLeft, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 		{label: "Move to next word", shortcut: "Esc e", action: (*App).menuMoveWordRight, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 		{label: "Find file in project", shortcut: "Esc p", action: (*App).menuFindFile, enabled: (*App).hasFinder, visible: (*App).hasTree},
+		{label: "Go to start of file", shortcut: "Esc <", action: (*App).menuGoToDocStart, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		{label: "Go to end of file", shortcut: "Esc >", action: (*App).menuGoToDocEnd, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		// Dims until the tab remembers a query — the row teaches that
+		// "find next" repeats a search rather than starting one.
+		{label: "Find next", shortcut: "Esc ;", action: (*App).menuFindNext, enabled: (*App).hasFindQuery, visible: (*App).hasEditableTab},
 	}
 }
 

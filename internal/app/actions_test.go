@@ -847,3 +847,64 @@ func TestHasMatchingBracket_GatesTheMenuRow(t *testing.T) {
 		t.Fatal("no tab should disable the row")
 	}
 }
+
+// TestMenuIndentOutdentLines pins the menu pair behind Tab / Shift+Tab:
+// each row shifts the caret line one unit, and an outdent with nothing
+// to remove says so instead of silently doing nothing.
+func TestMenuIndentOutdentLines(t *testing.T) {
+	a, tab := newNavTestApp(t, "x\n")
+	tab.IndentUnit = "  "
+
+	a.menuIndentLines()
+	if got := tab.Buffer.Lines[0]; got != "  x" {
+		t.Fatalf("Indent lines gave %q", got)
+	}
+	a.menuOutdentLines()
+	if got := tab.Buffer.Lines[0]; got != "x" {
+		t.Fatalf("Outdent lines gave %q", got)
+	}
+	a.menuOutdentLines()
+	if !strings.Contains(a.statusMsg, "Nothing to outdent") {
+		t.Fatalf("a no-op outdent should flash, got %q", a.statusMsg)
+	}
+
+	empty := newTestApp(t, t.TempDir())
+	empty.menuIndentLines() // must not panic with no tab
+	empty.menuOutdentLines()
+}
+
+// TestMenuGoToDocStartEnd pins the Go rows behind Esc < / Esc >: each
+// jumps the caret to its end of the file and both are safe with no tab.
+func TestMenuGoToDocStartEnd(t *testing.T) {
+	a, tab := newNavTestApp(t, "ab\ncd")
+	a.menuGoToDocEnd()
+	if want := (editor.Position{Line: 1, Col: 2}); tab.Cursor != want {
+		t.Fatalf("Go to end of file: cursor = %v, want %v", tab.Cursor, want)
+	}
+	a.menuGoToDocStart()
+	if tab.Cursor != (editor.Position{}) {
+		t.Fatalf("Go to start of file: cursor = %v, want origin", tab.Cursor)
+	}
+	empty := newTestApp(t, t.TempDir())
+	empty.menuGoToDocStart()
+	empty.menuGoToDocEnd()
+}
+
+// TestMenuSelectAllAndLine pins the two selection rows: select-all
+// covers the buffer, select-line covers the caret's line with its
+// newline, and both are safe with no tab open.
+func TestMenuSelectAllAndLine(t *testing.T) {
+	a, tab := newNavTestApp(t, "ab\ncd\n")
+	a.menuSelectAll()
+	if got := tab.SelectionText(); got != "ab\ncd\n" {
+		t.Fatalf("Select all selected %q", got)
+	}
+	tab.MoveCursorTo(editor.Position{Line: 1, Col: 1}, false)
+	a.menuSelectLine()
+	if got := tab.SelectionText(); got != "cd\n" {
+		t.Fatalf("Select line selected %q", got)
+	}
+	empty := newTestApp(t, t.TempDir())
+	empty.menuSelectAll()
+	empty.menuSelectLine()
+}

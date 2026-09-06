@@ -689,3 +689,128 @@ func TestClampCursorWrapped(t *testing.T) {
 		t.Fatalf("anchor moved to (%d,%d) — yank-back is back", tab.ScrollY, tab.ScrollSeg)
 	}
 }
+
+// TestMoveCursorRows_StepsVisualRows is the wrap-aware caret motion:
+// Down moves to a wrapped line's next row instead of skipping the
+// paragraph, and the cell column is sticky across a short row so the
+// caret comes back to its column on the next long row.
+func TestMoveCursorRows_StepsVisualRows(t *testing.T) {
+	tab := wrapTestTab(t, "abcdefghijkl\nx\nyy")
+	tab.lastWrapW = 5 // line 0 wraps [0,5,10]
+	tab.MoveCursorTo(Position{Line: 0, Col: 1}, false)
+
+	want := []Position{{0, 6}, {0, 11}, {1, 1}, {2, 1}}
+	for i, w := range want {
+		tab.MoveCursorRows(1, false)
+		if tab.Cursor != w {
+			t.Fatalf("Down #%d: cursor = %+v, want %+v", i+1, tab.Cursor, w)
+		}
+	}
+	// Back up through the one-rune line: the sticky column survives it.
+	tab.MoveCursorRows(-1, false)
+	tab.MoveCursorRows(-1, false)
+	if tab.Cursor != (Position{Line: 0, Col: 11}) {
+		t.Fatalf("Up through a short row should restore column 1 on the long row, got %+v", tab.Cursor)
+	}
+	if !tab.cursorMoved {
+		t.Fatal("vertical motion must flag cursorMoved")
+	}
+}
+
+// TestMoveCursorRows_ClampsInsideTheRow pins the row-end rule: on a
+// non-final row the caret stops at end-1 (the boundary column paints on
+// the next row), on the final row it may sit at the line's end, and a
+// page-sized step walks that many rows across lines.
+func TestMoveCursorRows_ClampsInsideTheRow(t *testing.T) {
+	tab := wrapTestTab(t, "abcdefghijkl\nx\nyy")
+	tab.lastWrapW = 5
+	tab.MoveCursorTo(Position{Line: 0, Col: 4}, false)
+	tab.MoveCursorRows(1, false)
+	if tab.Cursor != (Position{Line: 0, Col: 9}) {
+		t.Fatalf("Down onto a non-final row: cursor = %+v, want col 9", tab.Cursor)
+	}
+	tab.MoveCursorRows(1, false)
+	if tab.Cursor != (Position{Line: 0, Col: 12}) {
+		t.Fatalf("Down onto the short final row: cursor = %+v, want the line end", tab.Cursor)
+	}
+
+	tab.MoveCursorTo(Position{}, false)
+	tab.MoveCursorRows(4, true)
+	if tab.Cursor != (Position{Line: 2, Col: 0}) || tab.Anchor != (Position{}) {
+		t.Fatalf("PgDn by 4 rows with extend: cursor %+v anchor %+v", tab.Cursor, tab.Anchor)
+	}
+	tab.MoveCursorRows(99, false)
+	if tab.Cursor != (Position{Line: 2, Col: 0}) {
+		t.Fatalf("past EOF should stop on the last row, got %+v", tab.Cursor)
+	}
+}
+
+// TestMoveCursorRows_FallsBackToLines keeps the unwrapped path (and a
+// wrap tab that has never rendered) on plain line motion.
+func TestMoveCursorRows_FallsBackToLines(t *testing.T) {
+	tab := wrapTestTab(t, "abcdefghijkl\nx\nyy")
+	tab.MoveCursorTo(Position{Line: 0, Col: 3}, false)
+	tab.MoveCursorRows(1, false)
+	if tab.Cursor != (Position{Line: 1, Col: 1}) {
+		t.Fatalf("never-rendered wrap tab should move by line, got %+v", tab.Cursor)
+	}
+	plain := wrapTestTab(t, "abcdefghijkl\nx\nyy")
+	plain.Wrap = false
+	plain.lastWrapW = 5
+	plain.MoveCursorRows(-1, false)
+	if plain.Cursor != (Position{}) {
+		t.Fatalf("unwrapped Up from line 0 should clamp, got %+v", plain.Cursor)
+	}
+}
+
+// TestMoveCursorRows_OtherMotionForgetsStickyColumn pins the sticky
+// column's scope: it belongs to a run of vertical moves, so a
+// horizontal step in between resets it to the caret's real column.
+func TestMoveCursorRows_OtherMotionForgetsStickyColumn(t *testing.T) {
+	tab := wrapTestTab(t, "abcdefghijkl\nx\nyy")
+	tab.lastWrapW = 5
+	tab.MoveCursorTo(Position{Line: 0, Col: 4}, false)
+	tab.MoveCursorRows(2, false) // sticky 4, lands at (0,12)
+	tab.MoveCursor(0, -1, false) // (0,11): sticky forgotten
+	tab.MoveCursorRows(1, false)
+	if tab.Cursor != (Position{Line: 1, Col: 1}) {
+		t.Fatalf("after a horizontal move the column should be the caret's, got %+v", tab.Cursor)
+	}
+}
+
+// TestMoveLineHomeEnd_WrapStopsAtTheRowFirst pins Home / End in wrap
+// mode: the first press reaches the visual row's edge, the second the
+// logical line's, and a caret already on the first / last row goes
+// straight to the line edge.
+func TestMoveLineHomeEnd_WrapStopsAtTheRowFirst(t *testing.T) {
+	tab := wrapTestTab(t, "abcdefghijkl")
+	tab.lastWrapW = 5
+	tab.MoveCursorTo(Position{Line: 0, Col: 7}, false)
+	tab.MoveLineHome(false)
+	if tab.Cursor.Col != 5 {
+		t.Fatalf("first Home should stop at the row start, got col %d", tab.Cursor.Col)
+	}
+	tab.MoveLineHome(false)
+	if tab.Cursor.Col != 0 {
+		t.Fatalf("second Home should reach column 0, got col %d", tab.Cursor.Col)
+	}
+
+	tab.MoveCursorTo(Position{Line: 0, Col: 7}, false)
+	tab.MoveLineEnd(true)
+	if tab.Cursor.Col != 9 || tab.Anchor.Col != 7 {
+		t.Fatalf("first End should stop at the row end and keep the anchor: cursor %d anchor %d", tab.Cursor.Col, tab.Anchor.Col)
+	}
+	tab.MoveLineEnd(false)
+	if tab.Cursor.Col != 12 {
+		t.Fatalf("second End should reach the line end, got col %d", tab.Cursor.Col)
+	}
+	tab.MoveLineHome(false)
+	if tab.Cursor.Col != 10 {
+		t.Fatalf("Home on the last row should stop at its start, got col %d", tab.Cursor.Col)
+	}
+	tab.MoveCursorTo(Position{Line: 0, Col: 3}, false)
+	tab.MoveLineHome(false)
+	if tab.Cursor.Col != 0 {
+		t.Fatalf("Home on the first row goes to column 0, got col %d", tab.Cursor.Col)
+	}
+}

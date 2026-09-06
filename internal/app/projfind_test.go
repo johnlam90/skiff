@@ -547,3 +547,46 @@ func TestMatchRuneSpans(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleProjFindKey_AltTogglesModes pins the keyboard twin of the
+// chip clicks: Alt+c / Alt+w / Alt+r flip match case, whole word and
+// regex, each restarting the sweep, and the counter's tail names the
+// armed chips so the state reads back without colour. An Alt rune with
+// no chip is left to the field.
+func TestHandleProjFindKey_AltTogglesModes(t *testing.T) {
+	a := projFindApp(t, t.TempDir())
+	a.projFind.query.SetText("alpha")
+	spawns := 0
+	inner := a.projFind.sweep.Spawn
+	a.projFind.sweep.Spawn = func(name string, fn func()) { spawns++; inner(name, fn) }
+
+	a.handleProjFindKey(tcell.NewEventKey(tcell.KeyRune, 'c', tcell.ModAlt))
+	a.handleProjFindKey(tcell.NewEventKey(tcell.KeyRune, 'r', tcell.ModAlt))
+	if !a.projFind.findMatchCase || a.projFind.findWholeWord || !a.projFind.findRegex {
+		t.Fatalf("Alt+c / Alt+r should arm case and regex: case=%v word=%v regex=%v",
+			a.projFind.findMatchCase, a.projFind.findWholeWord, a.projFind.findRegex)
+	}
+	if spawns != 2 {
+		t.Fatalf("each toggle should restart the sweep, got %d spawns", spawns)
+	}
+	if got := a.projFindModeTail(); got != " · Aa .*" {
+		t.Fatalf("mode tail = %q, want the two armed chips", got)
+	}
+	a.projFind.sweep.Invalidate()
+	pumpUntil(t, a, "sweeps", idle(&a.projFind.sweep))
+	a.projFind.findMatches = fakeMatches()
+	if got := a.projFindCounterText(); !strings.HasSuffix(got, " · Aa .*") {
+		t.Fatalf("counter should end with the armed chips, got %q", got)
+	}
+
+	a.handleProjFindKey(tcell.NewEventKey(tcell.KeyRune, 'w', tcell.ModAlt))
+	a.handleProjFindKey(tcell.NewEventKey(tcell.KeyRune, 'c', tcell.ModAlt))
+	if a.projFind.findMatchCase || !a.projFind.findWholeWord {
+		t.Fatal("Alt+w should arm whole word and a second Alt+c should disarm case")
+	}
+	if got := a.projFind.query.Text(); got != "alpha" {
+		t.Fatalf("the toggles must not type into the query, got %q", got)
+	}
+	a.projFind.sweep.Invalidate()
+	pumpUntil(t, a, "sweeps", idle(&a.projFind.sweep))
+}

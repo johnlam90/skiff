@@ -84,6 +84,13 @@ func leaderBindings() []leaderBinding {
 		{'z', (*App).menuToggleWrap, "wrap", "View"},
 		{'?', (*App).menuKeyboardShortcuts, "shortcuts", "View"},
 		{'q', (*App).menuQuit, "quit", "Quit"},
+		{'<', (*App).menuGoToDocStart, "file start", "Go"},
+		{'>', (*App).menuGoToDocEnd, "file end", "Go"},
+		{'a', (*App).menuSelectAll, "select all", "Edit"},
+		{'L', (*App).menuSelectLine, "select line", "Edit"},
+		{']', (*App).menuNextTab, "next tab", "File"},
+		{'[', (*App).menuPrevTab, "previous tab", "File"},
+		{';', (*App).menuFindNext, "find next", "Go"},
 	}
 }
 

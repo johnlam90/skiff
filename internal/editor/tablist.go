@@ -143,3 +143,29 @@ func (l *TabList) Remove(t *Tab) bool {
 	}
 	return true
 }
+
+// Next activates the tab to the right of the active one, wrapping from
+// the last tab to the first, and returns it — nil on an empty list. The
+// switch goes through Activate so the identity rule holds: the caller
+// gets the tab, never a position to store.
+func (l *TabList) Next() *Tab {
+	return l.step(1)
+}
+
+// Prev activates the tab to the left of the active one, wrapping from
+// the first tab to the last, and returns it — nil on an empty list.
+func (l *TabList) Prev() *Tab {
+	return l.step(-1)
+}
+
+// step is the shared half of Next / Prev: the wrapped neighbour at
+// delta from the active index, activated by identity.
+func (l *TabList) step(delta int) *Tab {
+	n := len(l.tabs)
+	if n == 0 {
+		return nil
+	}
+	t := l.tabs[((l.active+delta)%n+n)%n]
+	l.Activate(t)
+	return t
+}

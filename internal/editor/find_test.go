@@ -145,10 +145,25 @@ func TestTab_SetFindQuery_PicksNearestMatch(t *testing.T) {
 	tab, _ := NewTab("")
 	tab.Buffer = NewBuffer("foo\nfoo\nfoo")
 	tab.Cursor = Position{Line: 1, Col: 0}
+	tab.Anchor = tab.Cursor
 
 	tab.SetFindQuery("foo")
 	if got, want := tab.FindIndex, 1; got != want {
 		t.Fatalf("FindIndex = %d, want %d (nearest to cursor)", got, want)
+	}
+}
+
+// TestTab_SetFindQuery_MeasuresFromTheSelectionStart pins the reference
+// point: with the current hit selected (caret at its END), extending the
+// query must stay on that hit rather than skipping to the next one.
+func TestTab_SetFindQuery_MeasuresFromTheSelectionStart(t *testing.T) {
+	tab, _ := NewTab("")
+	tab.Buffer = NewBuffer("foo foo")
+	tab.SetFindQuery("fo")
+	tab.FocusCurrentMatch() // selects [0,2), caret at 2
+	tab.SetFindQuery("foo")
+	if tab.FindIndex != 0 {
+		t.Fatalf("extending the query should stay on the selected hit, got index %d", tab.FindIndex)
 	}
 }
 
@@ -181,8 +196,8 @@ func TestTab_FindNext_WrapsAndMovesCursor(t *testing.T) {
 	if tab.FindIndex != 0 {
 		t.Fatalf("expected wrap to 0, got %d", tab.FindIndex)
 	}
-	if tab.Cursor != (Position{Line: 0, Col: 0}) {
-		t.Fatalf("cursor should follow the active match, got %+v", tab.Cursor)
+	if tab.Anchor != (Position{Line: 0, Col: 0}) || tab.Cursor != (Position{Line: 0, Col: 3}) {
+		t.Fatalf("the active match should be selected, got anchor %+v cursor %+v", tab.Anchor, tab.Cursor)
 	}
 }
 
@@ -578,4 +593,167 @@ func FuzzFindAll(f *testing.F) {
 			}
 		}
 	})
+}
+
+// TestReplaceCurrentMatch_AdvancesPastAReplacementHoldingTheQuery is
+// the "foo → foo_bar" regression: the edit trailer re-ran the query and
+// kept the index, which now named the text just written, so every Enter
+// appended another "_bar" to the same spot and the counter never moved.
+// The index now walks to the first match after the replacement.
+func TestReplaceCurrentMatch_AdvancesPastAReplacementHoldingTheQuery(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("foo foo")}
+	tab.initUndo()
+	tab.SetFindQuery("foo")
+	tab.ReplaceCurrentMatch("foo_bar")
+	if got := tab.Buffer.Lines[0]; got != "foo_bar foo" {
+		t.Fatalf("after first replace: %q", got)
+	}
+	if got := tab.FindMatches[tab.FindIndex].Col; got != 8 {
+		t.Fatalf("index should point at the untouched second hit (col 8), got col %d", got)
+	}
+	tab.ReplaceCurrentMatch("foo_bar")
+	if got := tab.Buffer.Lines[0]; got != "foo_bar foo_bar" {
+		t.Fatalf("after second replace: %q", got)
+	}
+	// Both hits are replacements now; the index wraps to the first so
+	// the counter stays truthful rather than freezing.
+	if tab.FindIndex != 0 {
+		t.Fatalf("index should wrap to 0, got %d", tab.FindIndex)
+	}
+}
+
+// TestReplaceCurrentMatch_PreservesCase pins the smart-case rule: a
+// lowercase query replaces FOO with BAR and Foo with Bar, while an
+// uppercase query (an exact search) replaces exactly as typed.
+func TestReplaceCurrentMatch_PreservesCase(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("FOO Foo foo")}
+	tab.initUndo()
+	tab.SetFindQuery("foo")
+	for range 3 {
+		tab.ReplaceCurrentMatch("bar")
+	}
+	if got := tab.Buffer.Lines[0]; got != "BAR Bar bar" {
+		t.Fatalf("smart-case replace gave %q", got)
+	}
+
+	exact := &Tab{Buffer: NewBuffer("FOO")}
+	exact.initUndo()
+	exact.SetFindQuery("FOO")
+	exact.ReplaceCurrentMatch("bar")
+	if got := exact.Buffer.Lines[0]; got != "bar" {
+		t.Fatalf("an exact query must replace as typed, got %q", got)
+	}
+}
+
+// TestPreserveCase covers the helper's edges: single letters count as
+// capitalised, mixed case is left alone, and non-letters don't vote.
+func TestPreserveCase(t *testing.T) {
+	cases := []struct{ query, matched, repl, want string }{
+		{"foo", "FOO", "bar", "BAR"},
+		{"foo", "Foo", "bar", "Bar"},
+		{"foo", "foo", "bar", "bar"},
+		{"foo", "fOo", "bar", "bar"},
+		{"a", "A", "foo", "Foo"},
+		{"foo", "FOO", "", ""},
+		{"f_o", "F_O", "bar", "BAR"},
+		{"Foo", "Foo", "bar", "bar"},
+		{"123", "123", "bar", "bar"},
+	}
+	for _, c := range cases {
+		if got := preserveCase(c.query, c.matched, c.repl, FindOptions{}); got != c.want {
+			t.Errorf("preserveCase(%q, %q, %q) = %q, want %q", c.query, c.matched, c.repl, got, c.want)
+		}
+	}
+}
+
+// TestFindAllWith_MatchCase pins the Aa toggle: with it armed a
+// lowercase query stops matching other cases, and the tab's re-scan
+// honours it — flipping the field and re-applying the query is the
+// whole toggle. Replacement under the toggle is exact, not
+// case-preserving.
+func TestFindAllWith_MatchCase(t *testing.T) {
+	buf := NewBuffer("id ID Id")
+	if got := len(FindAllWith(buf, "id", FindOptions{})); got != 3 {
+		t.Fatalf("smart-case: %d matches, want 3", got)
+	}
+	if got := len(FindAllWith(buf, "id", FindOptions{MatchCase: true})); got != 1 {
+		t.Fatalf("match-case: %d matches, want 1", got)
+	}
+
+	tab := &Tab{Buffer: NewBuffer("id ID")}
+	tab.initUndo()
+	tab.SetFindQuery("id")
+	if len(tab.FindMatches) != 2 {
+		t.Fatalf("seed: %d matches", len(tab.FindMatches))
+	}
+	tab.FindMatchCase = true
+	tab.SetFindQuery("id")
+	if len(tab.FindMatches) != 1 {
+		t.Fatalf("after arming MatchCase: %d matches, want 1", len(tab.FindMatches))
+	}
+	if got := preserveCase("id", "ID", "x", FindOptions{MatchCase: true}); got != "x" {
+		t.Fatalf("MatchCase replacement should be exact, got %q", got)
+	}
+}
+
+// TestTab_ClearFindHighlights_KeepsTheQuerySuspended pins the close
+// contract: the highlights go, the query and the Aa toggle stay for
+// recall, and an edit in between does not re-scan — the suspension is
+// what keeps a closed search free. SetFindQuery lifts it.
+func TestTab_ClearFindHighlights_KeepsTheQuerySuspended(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("foo foo")}
+	tab.initUndo()
+	tab.FindMatchCase = true
+	tab.SetFindQuery("foo")
+	tab.ClearFindHighlights()
+	if tab.FindMatches != nil || tab.FindIndex != -1 || !tab.findSuspended {
+		t.Fatalf("highlights should be down and the query suspended: %d matches idx %d suspended %v",
+			len(tab.FindMatches), tab.FindIndex, tab.findSuspended)
+	}
+	if tab.FindQuery != "foo" || !tab.FindMatchCase || !tab.HasFindQuery() {
+		t.Fatal("the query and its toggle must survive a highlight clear")
+	}
+	tab.InsertRune('x')
+	if tab.FindMatches != nil {
+		t.Fatal("a suspended query must not re-scan on edit")
+	}
+	tab.SetFindQuery("foo")
+	if tab.findSuspended || len(tab.FindMatches) != 2 {
+		t.Fatalf("SetFindQuery should lift the suspension: suspended %v, %d matches", tab.findSuspended, len(tab.FindMatches))
+	}
+	tab.ClearFind()
+	if tab.FindQuery != "" || tab.findSuspended || tab.HasFindQuery() {
+		t.Fatal("ClearFind is the full reset")
+	}
+}
+
+// TestTab_FindAgain pins the bar-less repeat: live, it is FindNext;
+// suspended, it relights the query and lands on the hit after the one
+// still selected; with no query, or none that matches, it says so.
+func TestTab_FindAgain(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("foo foo foo")}
+	tab.initUndo()
+	if tab.FindAgain() {
+		t.Fatal("nothing to repeat without a query")
+	}
+	tab.SetFindQuery("foo")
+	tab.FocusCurrentMatch() // hit 0 selected
+	if !tab.FindAgain() || tab.FindIndex != 1 {
+		t.Fatalf("live FindAgain should advance, got index %d", tab.FindIndex)
+	}
+	tab.ClearFindHighlights()
+	if !tab.FindAgain() || tab.FindIndex != 2 {
+		t.Fatalf("suspended FindAgain should relight and land after the selected hit, got index %d", tab.FindIndex)
+	}
+	if tab.SelectionText() != "foo" || tab.findSuspended {
+		t.Fatalf("the hit should be selected and the search live again: %q suspended %v", tab.SelectionText(), tab.findSuspended)
+	}
+
+	gone := &Tab{Buffer: NewBuffer("bar")}
+	gone.initUndo()
+	gone.SetFindQuery("foo")
+	gone.ClearFindHighlights()
+	if gone.FindAgain() {
+		t.Fatal("a query that matches nothing reports false")
+	}
 }

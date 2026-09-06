@@ -624,8 +624,8 @@ func TestCloseAllModals_ClearsReplaceState(t *testing.T) {
 	if a.strip != nil {
 		t.Fatalf("closeAllModals must empty the strip slot, got %T", a.strip)
 	}
-	if tab := a.activeTabPtr(); tab != nil && tab.FindQuery != "" {
-		t.Fatalf("tab find highlights leaked: %q", tab.FindQuery)
+	if tab := a.activeTabPtr(); tab != nil && tab.FindMatches != nil {
+		t.Fatalf("tab find highlights leaked: %d matches still lit", len(tab.FindMatches))
 	}
 
 	a.openFind()

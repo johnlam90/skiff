@@ -93,6 +93,13 @@ func TestLeaderActionFor_BindingsFireIntendedMethods(t *testing.T) {
 		{'z', (*App).menuToggleWrap, "wrap", "View"},
 		{'?', (*App).menuKeyboardShortcuts, "shortcuts", "View"},
 		{'q', (*App).menuQuit, "quit", "Quit"},
+		{'<', (*App).menuGoToDocStart, "file start", "Go"},
+		{'>', (*App).menuGoToDocEnd, "file end", "Go"},
+		{'a', (*App).menuSelectAll, "select all", "Edit"},
+		{'L', (*App).menuSelectLine, "select line", "Edit"},
+		{']', (*App).menuNextTab, "next tab", "File"},
+		{'[', (*App).menuPrevTab, "previous tab", "File"},
+		{';', (*App).menuFindNext, "find next", "Go"},
 	}
 
 	bound := make(map[rune]leaderBinding, len(want))
@@ -524,5 +531,23 @@ func TestHandleKey_LeaderCopyCutPaste(t *testing.T) {
 	a.handleKey(keyEv(tcell.KeyRune, 'v'))
 	if got := tab.Buffer.Lines[0]; got != "worldhello " {
 		t.Fatalf("Esc-v: line = %q, want %q", got, "worldhello ")
+	}
+}
+
+// TestHandleKey_LeaderSelectAllAndLine drives Esc a and Esc L through
+// the real leader window so the two selection gestures are pinned as
+// keystrokes, not only as menu rows.
+func TestHandleKey_LeaderSelectAllAndLine(t *testing.T) {
+	a, tab := newNavTestApp(t, "ab\ncd\n")
+	a.handleKey(tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone))
+	a.handleKey(tcell.NewEventKey(tcell.KeyRune, 'a', tcell.ModNone))
+	if got := tab.SelectionText(); got != "ab\ncd\n" {
+		t.Fatalf("Esc a selected %q", got)
+	}
+	tab.MoveCursorTo(editor.Position{}, false)
+	a.handleKey(tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone))
+	a.handleKey(tcell.NewEventKey(tcell.KeyRune, 'L', tcell.ModNone))
+	if got := tab.SelectionText(); got != "ab\n" {
+		t.Fatalf("Esc L selected %q", got)
 	}
 }

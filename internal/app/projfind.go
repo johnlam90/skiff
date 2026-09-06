@@ -350,10 +350,18 @@ func (a *App) projFindClampView(rows []projFindRow) {
 
 // handleProjFindKey owns the keyboard while the panel is open, but only
 // for the keys that route rather than type: Esc closes, Enter activates
-// (or replaces), Tab grows/hops the replace field, and the arrows walk
-// the result rows. Everything else is text editing and goes to the
-// focused overlay.Field — the same split prompt.go and form.go use.
+// (or replaces), Tab grows/hops the replace field, the arrows walk the
+// result rows, and Alt+c / Alt+w / Alt+r flip the match-case,
+// whole-word and regex chips — the keyboard twin of clicking them,
+// with Alt because it is the one modifier tmux and the terminal leave
+// alone (see keys.go). Everything else is text editing and goes to
+// the focused overlay.Field — the same split prompt.go and form.go use.
 func (a *App) handleProjFindKey(ev *tcell.EventKey) {
+	if ev.Modifiers()&tcell.ModAlt != 0 && ev.Key() == tcell.KeyRune {
+		if a.projFindToggleMode(ev.Rune()) {
+			return
+		}
+	}
 	switch ev.Key() {
 	case tcell.KeyEsc:
 		a.closeProjFind()
@@ -386,6 +394,26 @@ func (a *App) handleProjFindKey(ev *tcell.EventKey) {
 		return
 	}
 	a.projFindEditKey(ev)
+}
+
+// projFindToggleMode flips the chip bound to r — c for match case, w
+// for whole word, r for regex — and re-runs the sweep. Reports false
+// for any other rune so the caller can fall through to typing.
+func (a *App) projFindToggleMode(r rune) bool {
+	var on *bool
+	switch r {
+	case 'c':
+		on = &a.projFind.findMatchCase
+	case 'w':
+		on = &a.projFind.findWholeWord
+	case 'r':
+		on = &a.projFind.findRegex
+	default:
+		return false
+	}
+	*on = !*on
+	a.projFindQueryChanged()
+	return true
 }
 
 // projFindEditKey hands a non-routing key to the focused field and
@@ -611,11 +639,11 @@ func (a *App) drawProjFindBar(r rect) {
 	// the cells left over once the input has minFieldWidth. The chips
 	// never yield — they are controls, not labels, and a control the
 	// user cannot click is worse than a reminder they cannot read.
-	hint := " Enter: open · Tab: replace · Esc: close "
+	hint := " Enter: open · Tab: replace · Esc: close · Alt+c/w/r: modes "
 	if a.projFind.replaceOpen && a.projFind.focusReplace {
-		hint = " Enter: replace line · Shift+Enter: all · Tab: query · Esc: close "
+		hint = " Enter: replace line · Shift+Enter: all · Tab: query · Esc: close · Alt+c/w/r: modes "
 	} else if a.projFind.replaceOpen {
-		hint = " Enter: open · Tab: replace field · Esc: close "
+		hint = " Enter: open · Tab: replace field · Esc: close · Alt+c/w/r: modes "
 	}
 	counter := a.projFindCounterText()
 	counterCost := 0
@@ -697,16 +725,20 @@ func (a *App) drawProjFindBar(r rect) {
 	a.projFind.query.Draw(a.screen, inputStart, by, inputWidth, barStyle, !replaceFocused)
 }
 
-// projFindCounterText summarises the sweep for the bar's right side.
+// projFindCounterText summarises the sweep for the bar's right side,
+// ending with the armed chips (see projFindModeTail) so a mode the
+// user flipped from the keyboard reads back in text, not only as the
+// chip's colour.
 func (a *App) projFindCounterText() string {
 	if len(a.projFind.query.Value) == 0 {
 		return ""
 	}
+	tail := a.projFindModeTail()
 	if a.projFind.sweep.Busy() {
-		return "searching…"
+		return "searching…" + tail
 	}
 	if len(a.projFind.findMatches) == 0 {
-		return "no results"
+		return "no results" + tail
 	}
 	files := 0
 	last := ""
@@ -720,7 +752,22 @@ func (a *App) projFindCounterText() string {
 	if a.projFind.findTruncated {
 		s += " (capped)"
 	}
-	return s
+	return s + tail
+}
+
+// projFindModeTail names the armed chips as " · Aa ⌇w .*" (only the
+// lit ones, in chip order), or "" when none is on.
+func (a *App) projFindModeTail() string {
+	var on []string
+	for _, c := range a.projFindChips(0) {
+		if *c.on {
+			on = append(on, c.label)
+		}
+	}
+	if len(on) == 0 {
+		return ""
+	}
+	return " · " + strings.Join(on, " ")
 }
 
 // matchRuneSpans returns the [start, end) rune ranges of every

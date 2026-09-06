@@ -109,6 +109,14 @@ type Tab struct {
 	ScrollSeg int
 	lastWrapW int
 
+	// Sticky cell column for wrap-mode vertical caret motion: the
+	// column a run of Up / Down / PgUp / PgDn started in, valid only
+	// while the caret still sits where the last such move left it
+	// (stickyFor). See MoveCursorRows.
+	stickyCol   int
+	stickyFor   Position
+	stickyValid bool
+
 	// ScrollbarActive is a pure presentational flag: the app sets it
 	// while the user is dragging this tab's scrollbar thumb so
 	// renderScrollbar can brighten the thumb to Accent, exactly the way
@@ -161,6 +169,15 @@ type Tab struct {
 	undoBytes     int
 	lastUndoGroup undoGroup
 	lastUndoAt    time.Time
+	// undoGroupAt is when the open coalescing group started and
+	// undoGroupOps how many edits it has absorbed; canCoalesce caps
+	// both so a continuous burst cannot slide the window forever. See
+	// undoCoalesceMaxSpan / undoCoalesceMaxOps.
+	undoGroupAt  time.Time
+	undoGroupOps int
+	// clock is the undo bookkeeping's time source, nil for time.Now.
+	// Tests inject one so the coalescing caps are pinned without sleeps.
+	clock func() time.Time
 
 	// Mode is "" for a normal text tab and imageMode (= "image") for a
 	// read-only image preview. Image tabs reuse the Tab type so the
@@ -179,6 +196,13 @@ type Tab struct {
 	FindQuery   string
 	FindMatches []Match
 	FindIndex   int // -1 = no current match; otherwise an index into FindMatches.
+	// FindMatchCase is the bar's Aa toggle: exact-case matching even
+	// for a lowercase query. Read by SetFindQuery on every re-scan, so
+	// flipping it and re-applying the query is the whole toggle.
+	FindMatchCase bool
+	// findSuspended is set by ClearFindHighlights: the query is kept
+	// for recall but no longer re-scanned on edits. See FindAgain.
+	findSuspended bool
 
 	// findRows indexes FindMatches by buffer line so the renderer's
 	// per-cell lookup stays sub-linear; findRowsFor is the match count
@@ -546,6 +570,16 @@ func (t *Tab) HasSelection() bool {
 	return t.Cursor != t.Anchor
 }
 
+// SelectionSpansLines reports whether the selection starts and ends on
+// different buffer lines. It is the gate Tab uses to choose between
+// "indent the block" and "insert an indent unit": a selection inside
+// one line is text the user is about to replace, a selection across
+// lines is a block they mean to shift.
+func (t *Tab) SelectionSpansLines() bool {
+	start, end := PosOrdered(t.Anchor, t.Cursor)
+	return start.Line != end.Line
+}
+
 // SelectionText returns the currently selected text, or "" if nothing is
 // selected. The text is always returned in document order.
 func (t *Tab) SelectionText() string {
@@ -647,6 +681,13 @@ func (t *Tab) InsertString(s string) {
 // Only "\n" is ever inserted; the file's own ending is restored by Save
 // (see Tab.LineEnding), so a CRLF file must not get a CR spliced into the
 // middle of a line here.
+//
+// The line being left is blanked when it holds nothing but whitespace —
+// which is exactly the auto-indent a previous Enter put there. Without
+// this, Enter twice inside a block wrote a whitespace-only line to
+// disk, the one thing every linter and diff flags first. The blanking
+// is part of the same edit step, so one undo still returns the buffer
+// to where it was.
 func (t *Tab) InsertNewline() {
 	if t.IsImage() {
 		return
@@ -656,7 +697,28 @@ func (t *Tab) InsertNewline() {
 	if at.Col < len(prefix) {
 		prefix = prefix[:at.Col]
 	}
-	t.InsertString("\n" + autoIndentFor(prefix, t.IndentUnit, t.Path))
+	indent := autoIndentFor(prefix, t.IndentUnit, t.Path)
+	// After the split the line left behind is exactly prefix: deleting
+	// a selection never touches the runes ahead of its start.
+	blankLeft := len(prefix) > 0 && isAllIndent(prefix)
+	t.edit(undoGroupStructural, func() {
+		t.dropSelection()
+		t.Cursor = t.Buffer.InsertString(t.Cursor, "\n"+indent)
+		t.Anchor = t.Cursor
+		if blankLeft {
+			t.Buffer.Lines[t.Cursor.Line-1] = ""
+		}
+	})
+}
+
+// isAllIndent reports whether runes is nothing but spaces and tabs.
+func isAllIndent(runes []rune) bool {
+	for _, r := range runes {
+		if r != ' ' && r != '\t' {
+			return false
+		}
+	}
+	return true
 }
 
 // InsertRune inserts a single typed character at the cursor. Coalesces
@@ -673,12 +735,75 @@ func (t *Tab) InsertRune(r rune) {
 	group := undoGroupTyping
 	if t.HasSelection() {
 		group = undoGroupStructural
+	} else if t.startsWordBreak(r) {
+		// Word-granularity undo: a space or tab typed right after a
+		// word closes the word's group, so one undo peels back a word
+		// and not the whole sentence the burst happened to hold.
+		t.breakUndoGroup()
 	}
 	t.edit(group, func() {
 		t.dropSelection()
 		t.Cursor = t.Buffer.InsertString(t.Cursor, string(r))
 		t.Anchor = t.Cursor
+		t.realignClosingBracket(r)
 	})
+}
+
+// realignClosingBracket is the de-dent half of auto-indent: a closing
+// bracket typed as the first non-blank rune of a line takes the indent
+// of the line holding its opener, so "}" after an auto-indented block
+// lands where the block started instead of one level in. It runs
+// inside InsertRune's edit step, after the rune is in the buffer, so
+// the bracket matcher can see the pair and one undo removes both the
+// rune and the re-indent. Anything else — a bracket typed after text,
+// an unmatched one, an opener — is left exactly where it was typed.
+// Deliberately no auto-close: the editor never inserts a bracket the
+// user did not type.
+func (t *Tab) realignClosingBracket(r rune) {
+	if r != ')' && r != ']' && r != '}' {
+		return
+	}
+	line := t.Cursor.Line
+	runes := t.Buffer.LineRunes(line)
+	at := t.Cursor.Col - 1 // the bracket just inserted
+	if at < 0 || at >= len(runes) || !isAllIndent(runes[:at]) {
+		return
+	}
+	m := MatchBracketAt(t.Buffer, Position{Line: line, Col: at})
+	if !m.Matched || m.Match.Line == line {
+		return
+	}
+	opener := t.Buffer.LineRunes(m.Match.Line)
+	n := 0
+	for n < len(opener) && (opener[n] == ' ' || opener[n] == '\t') {
+		n++
+	}
+	indent := string(opener[:n])
+	if indent == string(runes[:at]) {
+		return
+	}
+	t.Buffer.Lines[line] = indent + string(runes[at:])
+	t.Cursor = Position{Line: line, Col: n + 1}
+	t.Anchor = t.Cursor
+}
+
+// startsWordBreak reports whether typing r at the caret ends a word:
+// r is intra-line whitespace and the rune just before the caret is not.
+// Only that transition breaks the typing group — a run of spaces, or a
+// space at the start of a line, keeps coalescing.
+func (t *Tab) startsWordBreak(r rune) bool {
+	if r != ' ' && r != '\t' {
+		return false
+	}
+	if t.Cursor.Col <= 0 {
+		return false
+	}
+	runes := t.Buffer.LineRunes(t.Cursor.Line)
+	if t.Cursor.Col > len(runes) {
+		return false
+	}
+	prev := runes[t.Cursor.Col-1]
+	return prev != ' ' && prev != '\t'
 }
 
 // Backspace deletes the character before the cursor (or the selection if any).
@@ -792,6 +917,7 @@ func (t *Tab) MoveCursor(dLine, dCol int, extend bool) {
 		t.Anchor = cur
 	}
 	t.cursorMoved = true
+	t.stickyValid = false
 	// Cursor moved on the user's explicit command — close any open
 	// coalescing window so the next typing burst is a fresh undo step.
 	t.breakUndoGroup()
@@ -810,27 +936,61 @@ func (t *Tab) MoveCursorTo(p Position, extend bool) {
 		t.Anchor = p
 	}
 	t.cursorMoved = true
+	t.stickyValid = false
 	t.breakUndoGroup()
 }
 
-// MoveLineHome moves the cursor to column 0 of the current line.
+// MoveLineHome moves the cursor to column 0 of the current line. With
+// soft wrap on (and a rendered width to measure against) it first stops
+// at the start of the caret's visual row; a second press reaches column
+// 0. See wrapHomeCol.
 func (t *Tab) MoveLineHome(extend bool) {
-	t.Cursor.Col = 0
+	col := 0
+	if t.Wrap && t.lastWrapW > 0 {
+		col = t.wrapHomeCol(t.lastWrapW)
+	}
+	t.Cursor.Col = col
 	if !extend {
 		t.Anchor = t.Cursor
 	}
 	t.cursorMoved = true
+	t.stickyValid = false
 	t.breakUndoGroup()
 }
 
 // MoveLineEnd moves the cursor to the last column of the current line.
+// With soft wrap on it first stops at the end of the caret's visual
+// row; a second press reaches the logical line end. See wrapEndCol.
 func (t *Tab) MoveLineEnd(extend bool) {
-	t.Cursor.Col = len([]rune(t.Buffer.Lines[t.Cursor.Line]))
+	col := len(t.Buffer.LineRunes(t.Cursor.Line))
+	if t.Wrap && t.lastWrapW > 0 {
+		col = t.wrapEndCol(t.lastWrapW)
+	}
+	t.Cursor.Col = col
 	if !extend {
 		t.Anchor = t.Cursor
 	}
 	t.cursorMoved = true
+	t.stickyValid = false
 	t.breakUndoGroup()
+}
+
+// MoveDocHome moves the cursor to the very start of the buffer, keeping
+// the anchor when extend is set. Ctrl+Home and the Esc < leader.
+func (t *Tab) MoveDocHome(extend bool) {
+	if t.IsImage() {
+		return
+	}
+	t.MoveCursorTo(Position{}, extend)
+}
+
+// MoveDocEnd moves the cursor just past the last rune of the buffer,
+// keeping the anchor when extend is set. Ctrl+End and the Esc > leader.
+func (t *Tab) MoveDocEnd(extend bool) {
+	if t.IsImage() {
+		return
+	}
+	t.MoveCursorTo(t.Buffer.EndPos(), extend)
 }
 
 // JumpToLine moves the cursor to column 0 of the 1-based line n,

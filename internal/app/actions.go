@@ -596,3 +596,87 @@ func (a *App) menuQuit() {
 		func(app *App) { app.quit = true },
 	)
 }
+
+// menuIndentLines shifts the cursor line / selected block one indent
+// unit right. The same gesture as Tab over a multi-line selection; the
+// menu row is the path for terminals that never deliver Backtab, so the
+// pair stays reachable.
+func (a *App) menuIndentLines() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.IndentLines()
+	}
+}
+
+// menuOutdentLines removes one level of indentation from the cursor
+// line / selected block. Same gesture as Shift+Tab. Flashes when there
+// was nothing to remove, because a silent no-op on a row the user
+// clicked reads as a broken menu item.
+func (a *App) menuOutdentLines() {
+	a.closeMenu()
+	t := a.activeTabPtr()
+	if t == nil {
+		return
+	}
+	if !t.OutdentLines() {
+		a.flash("Nothing to outdent")
+	}
+}
+
+// menuGoToDocStart jumps the caret to the very start of the file. Also
+// on Ctrl+Home and Esc <; the menu row is where a user discovers it.
+func (a *App) menuGoToDocStart() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.MoveDocHome(false)
+	}
+}
+
+// menuGoToDocEnd jumps the caret just past the last rune of the file.
+// Also on Ctrl+End and Esc >.
+func (a *App) menuGoToDocEnd() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.MoveDocEnd(false)
+	}
+}
+
+// menuSelectAll selects the whole buffer of the active tab. Esc a is
+// the keyboard spelling; the row is where the gesture is discovered.
+func (a *App) menuSelectAll() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.SelectAll()
+	}
+}
+
+// menuSelectLine selects the caret's whole line, newline included, so
+// a following Cut removes the line. Esc L on the keyboard.
+func (a *App) menuSelectLine() {
+	a.closeMenu()
+	if t := a.activeTabPtr(); t != nil {
+		t.SelectLine()
+	}
+}
+
+// menuNextTab switches to the tab on the right, wrapping. Esc ] on the
+// keyboard; the row is for terminals where the leader gets eaten.
+func (a *App) menuNextTab() {
+	a.closeMenu()
+	a.activateNextTab()
+}
+
+// menuPrevTab switches to the tab on the left, wrapping. Esc [.
+func (a *App) menuPrevTab() {
+	a.closeMenu()
+	a.activatePrevTab()
+}
+
+// menuCloseOtherTabs closes every tab but the active one, refusing
+// with a flash when any of them has unsaved changes.
+func (a *App) menuCloseOtherTabs() {
+	a.closeMenu()
+	if n := a.closeOtherTabs(); n > 0 {
+		a.flash(fmt.Sprintf("Closed %d other tab(s)", n))
+	}
+}

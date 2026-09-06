@@ -14,6 +14,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
@@ -304,5 +305,239 @@ func TestHandleKey_AltArrowsMoveByWord(t *testing.T) {
 	a.handleKey(tcell.NewEventKey(tcell.KeyLeft, 0, tcell.ModAlt))
 	if want := (editor.Position{Line: 0, Col: 6}); tab.Cursor != want {
 		t.Fatalf("Alt+Left: cursor = %v, want %v", tab.Cursor, want)
+	}
+}
+
+// TestHandleKey_TabOverMultiLineSelectionIndents is the regression for
+// Tab deleting a selection: InsertString replaces the selection, so a
+// forty-line selection used to become one indent unit. With the
+// selection spanning lines the key now indents the block and keeps it
+// selected; inside one line it still replaces the selected text.
+func TestHandleKey_TabOverMultiLineSelectionIndents(t *testing.T) {
+	a, tab := newNavTestApp(t, "a\nb\nc\n")
+	tab.IndentUnit = "  "
+	tab.Anchor = editor.Position{Line: 0}
+	tab.Cursor = editor.Position{Line: 1, Col: 1}
+
+	a.handleKey(keyEv(tcell.KeyTab, 0))
+	if got := tab.Buffer.Lines[0] + "|" + tab.Buffer.Lines[1] + "|" + tab.Buffer.Lines[2]; got != "  a|  b|c" {
+		t.Fatalf("Tab over a block gave %q, want the block indented", got)
+	}
+	if !tab.HasSelection() {
+		t.Fatal("the selection must survive the indent")
+	}
+
+	tab.Anchor = editor.Position{Line: 2, Col: 0}
+	tab.Cursor = editor.Position{Line: 2, Col: 1}
+	a.handleKey(keyEv(tcell.KeyTab, 0))
+	if got := tab.Buffer.Lines[2]; got != "  " {
+		t.Fatalf("Tab over a one-line selection should replace it, got %q", got)
+	}
+}
+
+// TestHandleKey_BacktabOutdents gives Shift+Tab an editor meaning: it
+// outdents the caret's line with no selection and the whole block with
+// one. Before this the key had no handler at all.
+func TestHandleKey_BacktabOutdents(t *testing.T) {
+	a, tab := newNavTestApp(t, "    a\n    b\n")
+	tab.IndentUnit = "    "
+	tab.Cursor = editor.Position{Line: 0, Col: 5}
+	tab.Anchor = tab.Cursor
+
+	a.handleKey(keyEv(tcell.KeyBacktab, 0))
+	if got := tab.Buffer.Lines[0]; got != "a" {
+		t.Fatalf("Backtab on a single line gave %q, want %q", got, "a")
+	}
+	if tab.Cursor.Col != 1 {
+		t.Fatalf("cursor should follow the text left, got col %d", tab.Cursor.Col)
+	}
+
+	tab.Anchor = editor.Position{Line: 0}
+	tab.Cursor = editor.Position{Line: 1, Col: 5}
+	a.handleKey(keyEv(tcell.KeyBacktab, 0))
+	if got := tab.Buffer.Lines[1]; got != "b" {
+		t.Fatalf("Backtab over a block left line 1 as %q", got)
+	}
+}
+
+// pasteInto replays text through the bracketed-paste path the way tcell
+// delivers it: a start marker, one key per byte (CR as Enter, LF as
+// KeyLF with ModCtrl, tab as Tab), then the end marker.
+func pasteInto(a *App, text string) {
+	a.handleEvent(tcell.NewEventPaste(true))
+	for _, r := range text {
+		switch r {
+		case '\r':
+			a.handleKey(keyEv(tcell.KeyEnter, 0))
+		case '\n':
+			a.handleKey(tcell.NewEventKey(tcell.KeyLF, 0, tcell.ModCtrl))
+		case '\t':
+			a.handleKey(keyEv(tcell.KeyTab, 0))
+		default:
+			a.handleKey(keyEv(tcell.KeyRune, r))
+		}
+	}
+	a.handleEvent(tcell.NewEventPaste(false))
+}
+
+// TestHandleKey_PasteIsOneUndoStep pins the batching: a multi-line paste
+// used to insert rune by rune, snapshotting the whole buffer on every
+// newline and re-running the find query per rune. It now lands as one
+// InsertString, so one undo removes the whole paste and nothing lands
+// until the end marker.
+func TestHandleKey_PasteIsOneUndoStep(t *testing.T) {
+	a, tab := newNavTestApp(t, "")
+	a.handleEvent(tcell.NewEventPaste(true))
+	for _, r := range "one" {
+		a.handleKey(keyEv(tcell.KeyRune, r))
+	}
+	if got := tab.Buffer.Lines[0]; got != "" {
+		t.Fatalf("pasted text landed before the end marker: %q", got)
+	}
+	a.handleEvent(tcell.NewEventPaste(false))
+	pasteInto(a, "\rtwo\rthree")
+
+	if got := strings.Join(tab.Buffer.Lines, "|"); got != "one|two|three" {
+		t.Fatalf("paste landed as %q", got)
+	}
+	if !tab.Undo() || strings.Join(tab.Buffer.Lines, "|") != "one" {
+		t.Fatalf("one undo should remove the whole second paste, got %v", tab.Buffer.Lines)
+	}
+}
+
+// TestHandleKey_PasteLFOnlyKeepsNewlines covers the byte tcell used to
+// drop: a bare \n arrives as KeyLF (Ctrl+J), and a POSIX clipboard is
+// nothing but those. Each one must become a line break.
+func TestHandleKey_PasteLFOnlyKeepsNewlines(t *testing.T) {
+	a, tab := newNavTestApp(t, "")
+	pasteInto(a, "a\nb\nc")
+	if got := strings.Join(tab.Buffer.Lines, "|"); got != "a|b|c" {
+		t.Fatalf("LF-only paste landed as %q", got)
+	}
+}
+
+// TestHandleKey_PasteCRLFDoesNotDouble folds the LF of a CRLF pair into
+// the CR: a Windows clipboard must paste one newline per line, not two.
+func TestHandleKey_PasteCRLFDoesNotDouble(t *testing.T) {
+	a, tab := newNavTestApp(t, "")
+	pasteInto(a, "a\r\nb\r\n")
+	if got := strings.Join(tab.Buffer.Lines, "|"); got != "a|b|" {
+		t.Fatalf("CRLF paste landed as %q", got)
+	}
+}
+
+// TestHandleKey_PasteWithNoTabIsDiscarded keeps a paste from being held
+// for a tab that opens later: with nothing to land in, the text is
+// dropped and the buffer is empty for the next paste.
+func TestHandleKey_PasteWithNoTabIsDiscarded(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	pasteInto(a, "stray")
+	if len(a.pasteBuf) != 0 {
+		t.Fatalf("paste buffer should be empty after a paste with no tab, got %q", string(a.pasteBuf))
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "later.txt")
+	if err := os.WriteFile(target, []byte(""), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a.openFile(target)
+	pasteInto(a, "x")
+	if got := a.activeTabPtr().Buffer.Lines[0]; got != "x" {
+		t.Fatalf("the stray paste leaked into the next tab: %q", got)
+	}
+}
+
+// TestHandleKey_LFOutsidePasteIsEnter gives KeyLF an editor meaning
+// outside a paste too: Ctrl+J / a bare newline byte splits the line
+// through the same auto-indent path Enter uses.
+func TestHandleKey_LFOutsidePasteIsEnter(t *testing.T) {
+	a, tab := newNavTestApp(t, "\tx\n")
+	tab.Cursor = editor.Position{Line: 0, Col: 2}
+	tab.Anchor = tab.Cursor
+	a.handleKey(tcell.NewEventKey(tcell.KeyLF, 0, tcell.ModCtrl))
+	if got := strings.Join(tab.Buffer.Lines, "|"); got != "\tx|\t|" {
+		t.Fatalf("KeyLF outside a paste gave %q, want an auto-indented split", got)
+	}
+}
+
+// TestHandleKey_CtrlArrowsMoveByWord makes Ctrl+arrow the same word
+// motion as Alt+arrow: it is what most terminals send for word motion,
+// and a modified arrow is a motion, not a Ctrl+letter command, so it
+// collides with nothing tmux or the terminal claims.
+func TestHandleKey_CtrlArrowsMoveByWord(t *testing.T) {
+	a, tab := newNavTestApp(t, "alpha beta\n")
+	a.handleKey(tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModCtrl))
+	if want := (editor.Position{Line: 0, Col: 5}); tab.Cursor != want {
+		t.Fatalf("Ctrl+Right: cursor = %v, want %v", tab.Cursor, want)
+	}
+	a.handleKey(tcell.NewEventKey(tcell.KeyLeft, 0, tcell.ModCtrl|tcell.ModShift))
+	if got := tab.SelectionText(); got != "alpha" {
+		t.Fatalf("Ctrl+Shift+Left selected %q, want %q", got, "alpha")
+	}
+}
+
+// TestHandleKey_CtrlHomeEndReachTheDocumentEnds pins Ctrl+Home /
+// Ctrl+End as document jumps while plain Home / End stay line-local.
+func TestHandleKey_CtrlHomeEndReachTheDocumentEnds(t *testing.T) {
+	a, tab := newNavTestApp(t, "ab\ncd\nef")
+	tab.Cursor = editor.Position{Line: 1, Col: 1}
+	tab.Anchor = tab.Cursor
+	a.handleKey(tcell.NewEventKey(tcell.KeyEnd, 0, tcell.ModCtrl))
+	if want := (editor.Position{Line: 2, Col: 2}); tab.Cursor != want {
+		t.Fatalf("Ctrl+End: cursor = %v, want %v", tab.Cursor, want)
+	}
+	a.handleKey(keyEv(tcell.KeyHome, 0))
+	if want := (editor.Position{Line: 2, Col: 0}); tab.Cursor != want {
+		t.Fatalf("plain Home must stay on its line: cursor = %v, want %v", tab.Cursor, want)
+	}
+	a.handleKey(tcell.NewEventKey(tcell.KeyHome, 0, tcell.ModCtrl|tcell.ModShift))
+	if got := tab.SelectionText(); got != "ab\ncd\n" {
+		t.Fatalf("Ctrl+Shift+Home selected %q", got)
+	}
+}
+
+// TestHandleKey_ModifiedBackspaceDeleteTakeWords pins Alt/Ctrl+Backspace
+// and Alt/Ctrl+Delete as word deletes, where they used to degrade
+// silently to a single-character delete.
+func TestHandleKey_ModifiedBackspaceDeleteTakeWords(t *testing.T) {
+	a, tab := newNavTestApp(t, "alpha beta gamma\n")
+	tab.Cursor = editor.Position{Line: 0, Col: 10}
+	tab.Anchor = tab.Cursor
+	a.handleKey(tcell.NewEventKey(tcell.KeyBackspace2, 0, tcell.ModAlt))
+	if got := tab.Buffer.Lines[0]; got != "alpha  gamma" {
+		t.Fatalf("Alt+Backspace gave %q", got)
+	}
+	a.handleKey(tcell.NewEventKey(tcell.KeyDelete, 0, tcell.ModCtrl))
+	if got := tab.Buffer.Lines[0]; got != "alpha " {
+		t.Fatalf("Ctrl+Delete gave %q", got)
+	}
+}
+
+// TestHandleKey_DownStepsWrappedRows drives the arrow through the app
+// with soft wrap on: after a render has fixed the wrap width, Down
+// stays on the wrapped line and moves to its next visual row instead
+// of jumping a whole paragraph.
+func TestHandleKey_DownStepsWrappedRows(t *testing.T) {
+	long := strings.Repeat("word ", 60)
+	var body strings.Builder
+	for range 60 {
+		body.WriteString(long + "\n")
+	}
+	a, tab := newNavTestApp(t, body.String())
+	tab.SetWrap(true)
+	a.draw()
+
+	a.handleKey(keyEv(tcell.KeyDown, 0))
+	if tab.Cursor.Line != 0 || tab.Cursor.Col == 0 {
+		t.Fatalf("Down on a wrapped line should reach its next row, got %+v", tab.Cursor)
+	}
+	a.handleKey(keyEv(tcell.KeyEnd, 0))
+	if tab.Cursor.Col >= len([]rune(long)) {
+		t.Fatalf("first End should stop at the row end, not the line end: col %d", tab.Cursor.Col)
+	}
+	_, h := a.editorSize()
+	a.handleKey(keyEv(tcell.KeyPgDn, 0))
+	if tab.Cursor.Line == 0 || tab.Cursor.Line >= h-1 {
+		t.Fatalf("PgDn should move a screen of ROWS — several wrapped lines, not %d lines: got %+v", h, tab.Cursor)
 	}
 }

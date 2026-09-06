@@ -65,6 +65,19 @@ var postRedesignMenuActions = []string{
 	// The markdown preview toggle (both label forms; the row itself is
 	// visibility-gated on a markdown tab being active).
 	"Preview Markdown", "Edit Markdown",
+	// The block indent / outdent pair behind Tab / Shift+Tab over a
+	// selection. Named "shift" rather than "indent" on purpose: an Edit
+	// row whose label starts with "in" would outrank "Find in file"
+	// for the filter query the palette test pins.
+	"Shift lines right", "Shift lines left",
+	// The document-end jumps behind Ctrl+Home / Ctrl+End and Esc < / >.
+	"Go to start of file", "Go to end of file",
+	// The selection gestures behind Esc a / Esc L.
+	"Select all", "Select line",
+	// Keyboard tab switching (Esc ] / Esc [) and the close-others row.
+	"Next tab", "Previous tab", "Close other tabs",
+	// Repeat the last in-file search without the bar (Esc ;).
+	"Find next",
 }
 
 // menuCatalog flattens every built-in row the ≡ menu can reach — the top
