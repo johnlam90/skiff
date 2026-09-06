@@ -315,7 +315,7 @@ func (fo *finderOverlay) Draw(scr tcell.Screen) {
 	a := fo.app
 	r := fo.sync()
 	th := a.theme
-	overlay.DrawFrame(scr, r, "Find file", th)
+	overlay.DrawFrameHint(scr, r, "Find file", "⏎ open · "+overlay.FrameHintEsc, th)
 
 	bg := th.LineHL
 	bgStyle := tcell.StyleDefault.Background(bg).Foreground(th.Text)

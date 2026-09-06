@@ -277,7 +277,7 @@ func (g *gitLogOverlay) rect() overlay.Rect {
 // N+1 border.
 func (g *gitLogOverlay) Draw(scr tcell.Screen) {
 	r := g.sync()
-	overlay.DrawFrame(scr, r, g.title, g.app.theme)
+	overlay.DrawFrameHint(scr, r, g.title, "⏎ show · "+overlay.FrameHintEsc, g.app.theme)
 
 	// Re-clamp the WINDOW against the height sync just measured — a
 	// terminal that grew can leave the offset past the new end. This

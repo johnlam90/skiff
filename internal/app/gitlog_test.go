@@ -475,3 +475,18 @@ func TestHandleGitLogMouse_DragAcrossRowsShowsNothing(t *testing.T) {
 		t.Fatal("a fresh press on the row after the release must show it")
 	}
 }
+
+// TestDrawGitLog_HintNamesEnter pins the history's title-row hint:
+// Enter shows the highlighted commit's diff, and the frame says so
+// beside esc like every other overlay names its Enter.
+func TestDrawGitLog_HintNamesEnter(t *testing.T) {
+	a, _, _ := historyRepoApp(t)
+	a.openGitLog("History · main", "")
+	gitLogOv(t, a).Draw(a.screen)
+	a.screen.Show()
+	scr := a.screen.(tcell.SimulationScreen)
+	my := gitLogOv(t, a).rect().Y
+	if title := screenLine(scr, my+1); !strings.Contains(title, "⏎ show · esc") {
+		t.Fatalf("title row should name Enter as show: %q", title)
+	}
+}

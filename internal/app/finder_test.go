@@ -541,3 +541,16 @@ func TestFinderMouse_DragAcrossRowsOpensNothing(t *testing.T) {
 		t.Fatal("a fresh press on the row after the release must open it")
 	}
 }
+
+// TestFinderDraw_HintNamesEnter pins the finder's title-row hint: Enter
+// opens the highlighted file, and the frame says so beside esc like
+// every other overlay names its Enter.
+func TestFinderDraw_HintNamesEnter(t *testing.T) {
+	a, _ := withFinder(t)
+	a.openFinder()
+	a.draw()
+	a.screen.Show()
+	if !screenHasText(t, a, "⏎ open · esc") {
+		t.Fatal("the finder's title row should name Enter as open")
+	}
+}

@@ -882,3 +882,36 @@ func TestSkipCells(t *testing.T) {
 		t.Fatalf("offset past the end should return nothing, got %q", got)
 	}
 }
+
+// TestDrawDiffView_HintTracksTheFocusedButton pins the diff view's
+// title-row hint to what Enter does: with Open file focused the frame
+// says "open file", with Close focused (or no file to open) it says
+// "close" — the same focus-tracking contract Confirm's frame follows,
+// where a bare "esc" used to leave Enter unexplained.
+func TestDrawDiffView_HintTracksTheFocusedButton(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.openDiffView("Diff · f.txt", samplePatch(), filepath.Join(a.rootDir, "f.txt"), "f.txt")
+	d := diffOv(t, a)
+	scr := a.screen.(tcell.SimulationScreen)
+	_, my, _, _ := d.modalRect()
+	titleRow := func() string {
+		d.Draw(a.screen)
+		a.screen.Show()
+		return screenLine(scr, my+1)
+	}
+	d.hover = 1
+	if row := titleRow(); !strings.Contains(row, "⏎ open file · esc") {
+		t.Fatalf("with Open file focused the hint should say so: %q", row)
+	}
+	d.hover = 0
+	if row := titleRow(); !strings.Contains(row, "⏎ close · esc") {
+		t.Fatalf("with Close focused the hint should say so: %q", row)
+	}
+
+	a.openDiffView("Diff · f.txt", samplePatch(), "", "f.txt")
+	d = diffOv(t, a)
+	d.hover = 1 // nothing to open: Enter closes whatever the stale focus says
+	if row := titleRow(); !strings.Contains(row, "⏎ close · esc") {
+		t.Fatalf("with no file to open the hint should say close: %q", row)
+	}
+}

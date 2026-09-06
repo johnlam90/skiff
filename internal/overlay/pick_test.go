@@ -363,3 +363,22 @@ func TestPick_DragAcrossRowsDoesNotPick(t *testing.T) {
 		}
 	}
 }
+
+// TestPick_HintNamesEnter pins the title-row hint: a pick's Enter
+// chooses the highlighted row, and the frame says so beside esc, the
+// way every other prefab names its Enter — a frame that advertised
+// only esc left the user to find out by pressing.
+func TestPick_HintNamesEnter(t *testing.T) {
+	scr := simScreen(t)
+	p, _ := testPick()
+	p.Draw(scr)
+	scr.Show()
+	r := p.rect()
+	row := ""
+	for x := r.X; x < r.X+r.W; x++ {
+		row += string(cellAt(scr, x, r.Y+1))
+	}
+	if !strings.Contains(row, "⏎ pick · esc") {
+		t.Fatalf("title row should name Enter: %q", row)
+	}
+}
