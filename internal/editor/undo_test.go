@@ -45,6 +45,21 @@ func TestNewTabCapturesOriginal(t *testing.T) {
 	}
 }
 
+// TestApplySnapshot_ForgetsStickyColumn pins that restoring a snapshot
+// ends any run of vertical moves: the caret it puts back is a fresh
+// position, so a sticky column recorded before the change must not
+// steer the next Down. Guarded here directly because Undo and Redo
+// both land through applySnapshot.
+func TestApplySnapshot_ForgetsStickyColumn(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("a\nb")}
+	tab.initUndo()
+	tab.stickyValid, tab.stickyCol, tab.stickyFor = true, 3, tab.Cursor
+	tab.applySnapshot(tab.captureSnapshot())
+	if tab.stickyValid {
+		t.Fatal("applySnapshot left the sticky column valid")
+	}
+}
+
 // TestInsertRune_CoalescesIntoSingleStep types five characters in quick
 // succession and asserts there is exactly one undo entry — the burst.
 // One Undo should restore the empty buffer rather than removing chars

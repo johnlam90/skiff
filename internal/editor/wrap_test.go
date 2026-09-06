@@ -784,6 +784,33 @@ func TestMoveCursorRows_OtherMotionForgetsStickyColumn(t *testing.T) {
 	}
 }
 
+// TestMoveCursorRows_EditAndUndoForgetStickyColumn is the regression
+// fence for a stale sticky column: Down onto a short row, type, Undo
+// put the caret back at exactly the position the column was recorded
+// for, so the next Down jumped to the remembered column instead of
+// the caret's real one. An edit now ends the vertical run, and a
+// snapshot restore does too.
+func TestMoveCursorRows_EditAndUndoForgetStickyColumn(t *testing.T) {
+	tab := wrapTestTab(t, "abcdefghijkl\nmnopqrs\nyy")
+	tab.lastWrapW = 5
+	tab.MoveCursorTo(Position{Line: 0, Col: 4}, false)
+	tab.MoveCursorRows(2, false) // sticky 4, lands on the short row at (0,12)
+	if tab.Cursor != (Position{Line: 0, Col: 12}) || !tab.stickyValid {
+		t.Fatalf("setup: cursor %+v sticky %v", tab.Cursor, tab.stickyValid)
+	}
+	tab.InsertRune('z')
+	if tab.stickyValid {
+		t.Fatal("an edit must forget the sticky column")
+	}
+	if !tab.Undo() || tab.Cursor != (Position{Line: 0, Col: 12}) {
+		t.Fatalf("undo should restore the caret to (0,12), got %+v", tab.Cursor)
+	}
+	tab.MoveCursorRows(1, false)
+	if tab.Cursor != (Position{Line: 1, Col: 2}) {
+		t.Fatalf("Down after type+undo should use the caret's real column 2, got %+v", tab.Cursor)
+	}
+}
+
 // TestMoveLineHomeEnd_WrapStopsAtTheRowFirst pins Home / End in wrap
 // mode: the first press reaches the visual row's edge, the second the
 // logical line's, and a caret already on the first / last row goes
