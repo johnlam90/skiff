@@ -404,6 +404,8 @@ within half a second tap one of the keys below.
 | `Esc n`     | New file               | File  |
 | `Esc w`     | Close tab              | File  |
 | `Esc o`     | Reopen closed tab      | File  |
+| `Esc ]`     | Next tab               | File  |
+| `Esc [`     | Previous tab           | File  |
 | `Esc u`     | Undo                   | Edit  |
 | `Esc r`     | Redo                   | Edit  |
 | `Esc c`     | Copy selection         | Edit  |
@@ -413,6 +415,8 @@ within half a second tap one of the keys below.
 | `Esc k`     | Move line up           | Edit  |
 | `Esc j`     | Move line down         | Edit  |
 | `Esc d`     | Duplicate line         | Edit  |
+| `Esc a`     | Select all             | Edit  |
+| `Esc L`     | Select line            | Edit  |
 | `Esc f`     | Find in file           | Go    |
 | `Esc F`     | Find in project        | Go    |
 | `Esc l`     | Go to line             | Go    |
@@ -420,6 +424,9 @@ within half a second tap one of the keys below.
 | `Esc b`     | Move to previous word  | Go    |
 | `Esc e`     | Move to next word      | Go    |
 | `Esc %`     | Go to matching bracket | Go    |
+| `Esc <`     | Go to start of file    | Go    |
+| `Esc >`     | Go to end of file      | Go    |
+| `Esc ;`     | Find next              | Go    |
 | `Esc g`     | Git changes (the panel)| Git   |
 | `Esc t`     | Show / hide file explorer | View |
 | `Esc z`     | Wrap / unwrap long lines | View |
@@ -449,9 +456,19 @@ skiff treats the two as the same gesture, so the table works either
 way — including while the ≡ menu is up, where a bare `s` types into
 the filter instead and `Alt+s` still saves.
 
-Two motions don't need the leader at all: `Alt+←` / `Alt+→` move by
-word (`Shift` extends the selection), and `Enter` indents the new line
-to match the one it split.
+A few motions don't need the leader at all: `Alt+←` / `Alt+→` (or
+`Ctrl+←` / `Ctrl+→`) move by word, `Ctrl+Home` / `Ctrl+End` jump to the
+start and end of the file, `Alt+Backspace` / `Alt+Delete` delete a word
+(`Shift` extends the selection on every motion), `Enter` indents the
+new line to match the one it split, and with lines selected `Tab` /
+`Shift+Tab` shift the whole block one indent right or left. Home and
+End stop at the visual row's edge first when a line is wrapped, then
+at the line's.
+
+A fast double-tap of `Esc` opens the menu no matter how fast: tcell
+folds two ESC bytes that arrive together into one, so skiff rewrites
+the pair on the tty stream before tcell reads it (see
+`internal/app/esctty.go`).
 
 Everything reachable by hotkey is also reachable from the `≡` menu —
 the hotkeys are just a faster path for the actions you reach for most.
