@@ -256,3 +256,29 @@ func TestEveryThemeDiffTintsReadable(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryThemeFieldReadable is the registry fence for the one
+// surface the user types on: the custom-action form's focused field
+// paints Text over FieldBG. Through readable(), Subtle — the surface
+// it used to use — measured 3.55:1 on Offshore, 2.34 on Nord, 1.81 on
+// One Dark and 1.11 on Solarized Light under Text. Every palette must
+// now clear WCAG AA there, or its own body contrast when the palette
+// ships under 4.5 (Solarized Light's Text/BG is 4.13 by design and
+// readable() never repaints Text), and the field must stay at least
+// as readable as the raw Selection it is derived from.
+func TestEveryThemeFieldReadable(t *testing.T) {
+	for _, e := range List() {
+		th := e.Build()
+		floor := minFieldContrast
+		if body := ContrastRatio(th.Text, th.BG); body < floor {
+			floor = body
+		}
+		field := th.FieldBG()
+		if r := ContrastRatio(th.Text, field); r < floor {
+			t.Errorf("%s: Text on FieldBG %.2f < %.2f", e.ID, r, floor)
+		}
+		if ContrastRatio(th.Text, field) < ContrastRatio(th.Text, th.Selection) {
+			t.Errorf("%s: FieldBG is less readable than the Selection it derives from", e.ID)
+		}
+	}
+}
