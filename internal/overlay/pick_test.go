@@ -325,3 +325,41 @@ func TestPick_ClampsToPhoneSizedScreen(t *testing.T) {
 		}
 	}
 }
+
+// TestPick_DragAcrossRowsDoesNotPick pins the press latch on the
+// picker: a press on one row followed by held-button motion over
+// another moves the highlight (with its preview hook) but picks
+// nothing — the pick is the press, and the press already happened.
+func TestPick_DragAcrossRowsDoesNotPick(t *testing.T) {
+	p, log := testPick()
+	r := p.rect()
+	rowY := r.Y + 4
+	p.HandleMouse(r.X+3, rowY+1, tcell.ButtonNone) // hover the second row
+	p.HandleMouse(r.X+3, rowY, tcell.Button1)      // press the first: picks
+	picks := 0
+	for _, e := range *log {
+		if len(e) > 5 && e[:5] == "pick:" {
+			picks++
+		}
+	}
+	if picks != 1 {
+		t.Fatalf("the press should pick exactly once, log %v", *log)
+	}
+	p, log = testPick()
+	p.HandleMouse(r.X+2, r.Y+1, tcell.Button1) // press on the title row
+	p.HandleMouse(r.X+3, rowY, tcell.Button1)  // drag onto alpha
+	for _, e := range *log {
+		if len(e) > 5 && e[:5] == "pick:" {
+			t.Fatalf("a drag onto a row picked it: %v", *log)
+		}
+	}
+	if (*log)[len(*log)-1] != "move:alpha" {
+		t.Fatalf("the drag should still preview the row it hovers, got %v", *log)
+	}
+	p.HandleMouse(0, 0, tcell.Button1) // drag out of the frame
+	for _, e := range *log {
+		if e == "cancel" {
+			t.Fatalf("a drag out of the frame cancelled: %v", *log)
+		}
+	}
+}

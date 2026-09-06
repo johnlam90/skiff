@@ -8,6 +8,7 @@
 package overlay
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
@@ -122,15 +123,19 @@ func TestForm_MouseButtonsChevronsAndFocus(t *testing.T) {
 	f, log := testForm()
 	r := f.rect()
 
-	// Click the select's right chevron (row 1's input row).
+	// Click the select's right chevron (row 1's input row). Every click
+	// is a press and a release, as a terminal delivers it — a second
+	// Button1 event with no release between is a drag, not a click.
 	inputRow := r.Y + 3 + 1*formRowHeight + 1
 	f.HandleMouse(r.X+r.W-3-1, inputRow, tcell.Button1)
+	f.HandleMouse(r.X+r.W-3-1, inputRow, tcell.ButtonNone)
 	if f.Focus != 1 || f.Rows[1].Sel != 1 {
 		t.Fatalf("chevron click: focus=%d sel=%d", f.Focus, f.Rows[1].Sel)
 	}
 
 	// Click the first row's label to move focus back.
 	f.HandleMouse(r.X+2, r.Y+3, tcell.Button1)
+	f.HandleMouse(r.X+2, r.Y+3, tcell.ButtonNone)
 	if f.Focus != 0 {
 		t.Fatal("row click must move focus")
 	}
@@ -283,4 +288,23 @@ func rowRunes(scr tcell.SimulationScreen, x, y, n int) string {
 		out = append(out, cellAt(scr, x+i, y))
 	}
 	return string(out)
+}
+
+// TestForm_DragOntoSubmitDoesNotSubmit pins the press latch: a press on
+// a row followed by held-button motion over the Submit button is a
+// drag, and a drag never resolves the form.
+func TestForm_DragOntoSubmitDoesNotSubmit(t *testing.T) {
+	f, log := testForm()
+	r := f.rect()
+	f.HandleMouse(r.X+2, r.Y+3, tcell.Button1)
+	f.HandleMouse(r.X+r.W-formBtnW-4+1, r.Y+r.H-3, tcell.Button1)
+	if len(*log) != 0 {
+		t.Fatalf("a drag onto Submit resolved the form: %v", *log)
+	}
+	// The release re-arms the latch: the next press on Submit submits.
+	f.HandleMouse(r.X+r.W-formBtnW-4+1, r.Y+r.H-3, tcell.ButtonNone)
+	f.HandleMouse(r.X+r.W-formBtnW-4+1, r.Y+r.H-3, tcell.Button1)
+	if len(*log) != 2 || !strings.HasPrefix((*log)[1], "submit:") {
+		t.Fatalf("a fresh press after the release must submit, got %v", *log)
+	}
 }

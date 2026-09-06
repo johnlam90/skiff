@@ -73,6 +73,9 @@ type Confirm struct {
 	// Hover is the highlighted button: 0 = No (the safe default),
 	// 1 = Yes.
 	Hover int
+	// press is the click latch: buttons answer a fresh press, never
+	// the motion of a drag that started in the body. See Press.
+	press Press
 	Theme theme.Theme
 
 	// Size and Close are injected by the opener — see Prompt.
@@ -236,8 +239,11 @@ func (c *Confirm) HandleKey(ev *tcell.EventKey) {
 // HandleMouse: the wheel scrolls a multi-line body, the scroll
 // indicator's column jumps the thumb to the pressed row, hovering a
 // button highlights it, clicking activates, and clicks outside cancel.
+// Activation and dismissal answer a FRESH press only: a drag that
+// started in the body and crossed the button row used to confirm.
 func (c *Confirm) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	r := c.rect()
+	fresh := c.press.Fresh(btn)
 	if btn&tcell.WheelUp != 0 {
 		c.ScrollBy(-3)
 		return
@@ -262,9 +268,13 @@ func (c *Confirm) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	}
 	// The indicator owns its column outright — claimed before the
 	// button zones and the outside-click test so the one cell that
-	// looks like a scrollbar can never read as a dismissal.
+	// looks like a scrollbar can never read as a dismissal. It follows
+	// a drag on purpose, so it reads the raw mask, not the latch.
 	if b := c.bar(r); b.Hit(x, y) {
 		c.scroll = b.Target(y)
+		return
+	}
+	if !fresh {
 		return
 	}
 	if !r.Contains(x, y) {

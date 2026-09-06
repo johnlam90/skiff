@@ -135,10 +135,16 @@ func (a *App) ensureMenuRowVisible(idx int) {
 // row's action (if it is currently enabled). Wheel events — and the
 // scroll indicator's own column — scroll the content when the layout is
 // taller than the terminal. The filter never changes what a click does;
-// it only changes which rows are on screen.
+// it only changes which rows are on screen. A click is a FRESH press:
+// held-button motion still drags the bar's thumb but runs no row and
+// closes nothing, so a drag that wanders across the menu cannot fire
+// whatever action it crosses (see overlay.Press).
 func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
+	fresh := a.mouse.menuPress.Fresh(btn)
+	// The wheel steps by wheelLines like every other surface; a
+	// one-row step here made the menu the only list that crawled.
 	if btn&tcell.WheelUp != 0 {
-		a.syncMenuList().ScrollBy(-1)
+		a.syncMenuList().ScrollBy(-wheelLines)
 		// The rows just moved under the stationary pointer — recompute
 		// the hover so the highlight tracks what a click would now hit
 		// instead of going one row stale until the next mouse motion.
@@ -146,7 +152,7 @@ func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
 		return
 	}
 	if btn&tcell.WheelDown != 0 {
-		a.syncMenuList().ScrollBy(1)
+		a.syncMenuList().ScrollBy(wheelLines)
 		a.updateMenuHover(x, y)
 		return
 	}
@@ -161,7 +167,7 @@ func (a *App) handleMenuMouse(x, y int, btn tcell.ButtonMask) {
 		}
 		return
 	}
-	if btn&tcell.Button1 == 0 {
+	if !fresh {
 		return
 	}
 	if x < mx || x >= mx+mw || y < my || y >= my+mh {

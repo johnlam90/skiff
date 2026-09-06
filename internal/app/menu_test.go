@@ -319,6 +319,7 @@ func TestHandleMenuMouse_ClicksRowAndOutside(t *testing.T) {
 	}
 	before := a.sidebarShown
 	a.handleMenuMouse(mx+5, my+toggleRelY, tcell.Button1)
+	a.handleMenuMouse(mx+5, my+toggleRelY, tcell.ButtonNone)
 	if a.sidebarShown == before {
 		t.Fatal("expected toggle to fire")
 	}
@@ -918,6 +919,7 @@ func TestMenuClick_MapsThroughScroll(t *testing.T) {
 
 	borderY := my + mh - 1
 	a.handleMenuMouse(mx+2, borderY, tcell.Button1)
+	a.handleMenuMouse(mx+2, borderY, tcell.ButtonNone)
 	if a.quit {
 		t.Fatal("clicking the bottom border must not activate a hidden row")
 	}

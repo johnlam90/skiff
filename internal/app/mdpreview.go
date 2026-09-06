@@ -199,20 +199,17 @@ func (a *App) handleMdPreviewKey(st *mdPreviewState, ev *tcell.EventKey) bool {
 }
 
 // mdPreviewPress handles a mouse press inside the editor rect while the
-// preview is up: a click on the scrollbar column jumps; a press on the
-// content anchors a drag-selection over the RENDERED text — skiff's
-// select-to-copy works in the preview exactly as in the editor, it
-// just selects what the reader sees instead of markdown syntax.
-// Returns true when the press should arm the preview drag.
+// preview is up: a press on the content anchors a drag-selection over
+// the RENDERED text — skiff's select-to-copy works in the preview
+// exactly as in the editor, it just selects what the reader sees
+// instead of markdown syntax. Returns true when the press should arm
+// the preview drag. The scrollbar column is not content: the
+// dispatcher claims it first (mdPreviewScrollbarHit, mouse.go) so the
+// thumb gets the same press-and-drag contract as the editor's bar,
+// and a press there never starts a selection.
 func (a *App) mdPreviewPress(st *mdPreviewState, x, y int) bool {
 	ex, ey, ew, eh := a.editorRect()
-	if x < ex || x >= ex+ew || y < ey || y >= ey+eh {
-		return false
-	}
-	if x == ex+ew-1 {
-		if _, _, ok := scrollbar.Geom(len(st.lines), eh, st.scroll); ok {
-			st.scroll = scrollbar.TargetForThumb(len(st.lines), eh, y-ey)
-		}
+	if x < ex || x >= ex+ew-1 || y < ey || y >= ey+eh {
 		return false
 	}
 	pos := a.mdPreviewHit(st, x, y)

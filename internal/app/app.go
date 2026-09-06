@@ -159,6 +159,7 @@ const (
 	dragTreeScrollbar
 	dragGitPanelScrollbar
 	dragMdPreview
+	dragMdPreviewScrollbar
 )
 
 // App is the editor's top-level state holder and event-loop owner.
@@ -264,6 +265,10 @@ type App struct {
 	dragMode     dragKind // dragEditor while a drag-select is active, etc.
 	lastClick    clickRecord
 	lastTabRects []tabRect
+	// mouse is the dispatcher's cross-event memory — which buttons the
+	// previous event carried, which overlay a press landed on, how
+	// many events have arrived at all. See mouseState in mouse.go.
+	mouse mouseState
 
 	// lastShiftAt is the wall-clock time we last saw any mouse event
 	// carrying the Shift modifier. Some terminals (notably Zellij over
@@ -518,6 +523,7 @@ func New(rootDir string) (*App, error) {
 	a.refreshGitStatus()
 	a.flash("Welcome — click a file to open · click  ≡  for the menu")
 	a.startTreeRefresh()
+	a.startMouseProbe(tmuxActive(), mouseProbeDelay)
 	// Kick off the project file index in the background so that by
 	// the time the user hits Esc-p (or ≡ → Find file) the modal can
 	// open with results already in hand. On a 50k-file repo this

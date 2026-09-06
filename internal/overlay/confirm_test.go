@@ -553,3 +553,46 @@ func TestConfirm_ShortScreenKeepsButtonRowVisible(t *testing.T) {
 		t.Fatalf("modal covers the status bar row: %+v on %d rows", r, scrH)
 	}
 }
+
+// TestConfirm_DragFromBodyOntoYesDoesNotConfirm is the drag-activation
+// regression. Every Yes in the editor is destructive, and a press in
+// the scrollable body followed by a downward drag delivered a Button1
+// event on the Yes cells — which used to answer the prompt. Only a
+// fresh press on the button may; the drag's motion must not, and the
+// bar must still follow that same drag.
+func TestConfirm_DragFromBodyOntoYesDoesNotConfirm(t *testing.T) {
+	c, _ := wideBodyConfirm(t, 30)
+	var log []string
+	c.Close = func() { log = append(log, "close") }
+	c.OnYes = func() { log = append(log, "yes") }
+	c.OnCancel = func() { log = append(log, "cancel") }
+	r := c.rect()
+	_, yesX := c.buttonCols()
+	btnY := r.Y + c.buttonRow()
+
+	c.HandleMouse(r.X+2, r.Y+4, tcell.Button1) // press in the body
+	c.HandleMouse(r.X+yesX+1, btnY, tcell.Button1)
+	if len(log) != 0 {
+		t.Fatalf("a drag onto Yes answered the prompt: %v", log)
+	}
+	if c.Hover != 1 {
+		t.Fatal("the drag should still move the hover onto Yes")
+	}
+	// Dragging out of the frame is not an outside click either.
+	c.HandleMouse(r.X-1, r.Y, tcell.Button1)
+	if len(log) != 0 {
+		t.Fatalf("a drag out of the frame cancelled: %v", log)
+	}
+	// The bar keeps following a held drag: it is the one target that
+	// wants motion.
+	b := c.bar(r)
+	c.HandleMouse(b.x, b.top+b.viewH-1, tcell.Button1)
+	if c.Scroll() == 0 {
+		t.Fatal("a drag onto the bar should still scroll")
+	}
+	c.HandleMouse(r.X+yesX+1, btnY, tcell.ButtonNone)
+	c.HandleMouse(r.X+yesX+1, btnY, tcell.Button1)
+	if len(log) != 2 || log[1] != "yes" {
+		t.Fatalf("a fresh press on Yes after the release must confirm, got %v", log)
+	}
+}

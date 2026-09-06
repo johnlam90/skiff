@@ -448,6 +448,15 @@ func (a *App) gitPanelClick(x, y int) {
 				if a.gitPanelKeysOn() && !a.gitOp.Busy() {
 					a.gitPanel.onBtns, a.gitPanel.btn = true, i
 				}
+				// A glyph tier's button does not say what it does, and
+				// the press fires with no confirmation: name the verb in
+				// the status bar first, the way revealMenuRowLabel
+				// flashes a clipped menu row, so a wrong press is at
+				// least a legible one. A label that spells the verb
+				// needs no echo.
+				if !strings.Contains(b.label, b.verb) {
+					a.flash(b.verb)
+				}
 				b.action(a, sx+b.x0, sy+3)
 				return
 			}
@@ -512,11 +521,16 @@ func (a *App) gitPanelBar(sw int) (x int, ok bool) {
 // gitPanelBarHit reports whether a sidebar-local press at (x, y) landed
 // on the change list's scroll indicator. The span stops at the list's
 // last row, so the keyboard hint strip docked under it keeps its own
-// cells.
+// cells. Like the tree's bar it answers to the painted column and the
+// one to its left (filetree.ScrollbarGrabWidth): the splitter takes the
+// painted column when both want it, so the grab has to reach inward.
 func (a *App) gitPanelBarHit(x, y int) bool {
 	_, _, sw, _ := a.sidebarRect()
 	barX, ok := a.gitPanelBar(sw)
-	return ok && a.gitPanelList().Bar(barX, gitPanelListTop).Hit(x, y)
+	if !ok || x <= barX-filetree.ScrollbarGrabWidth || x > barX {
+		return false
+	}
+	return a.gitPanelList().Bar(barX, gitPanelListTop).Hit(barX, y)
 }
 
 // gitPanelScrollToBar scrolls the change list so its thumb centers on
@@ -595,15 +609,20 @@ func (a *App) gitPanelButtons(sw int) []gitPanelBtn {
 	}
 	bare := []string{"[✓]", "[↑]", "[↓]", "[⋯]"}
 
-	labels, gap := wide, 1
-	if 1+rowWidth(labels, gap) > sw {
-		labels, gap = medium, 1
-	}
-	if 1+rowWidth(labels, gap) > sw {
-		labels, gap = compact, 0
-	}
-	if 1+rowWidth(labels, gap) > sw {
-		labels, gap = bare, 0
+	// The gap never closes. The glyph tiers used to butt their buttons
+	// together to buy three cells, which turned "[✓][↑][↓][⋯]" into one
+	// run where a press one cell wide of Commit was Push — and the
+	// press fires with no readback. A row that cannot keep its gaps
+	// sheds the ⋯ instead: everything behind it is in the ≡ menu, and
+	// the three verbs stay separable.
+	const gap = gitPanelBtnGap
+	tiers := [][]string{wide, medium, compact, bare, bare[:3]}
+	labels := tiers[len(tiers)-1]
+	for _, tier := range tiers {
+		if 1+rowWidth(tier, gap) <= sw {
+			labels = tier
+			break
+		}
 	}
 
 	actions := []func(a *App, x, y int){
@@ -622,6 +641,11 @@ func (a *App) gitPanelButtons(sw int) []gitPanelBtn {
 	}
 	return out
 }
+
+// gitPanelBtnGap is the one cell that separates neighbouring buttons at
+// every tier of the ladder — see gitPanelButtons for why it never
+// drops to zero.
+const gitPanelBtnGap = 1
 
 // rowWidth sums a button row's cell width for the fit ladder.
 func rowWidth(labels []string, gap int) int {
@@ -1053,6 +1077,10 @@ func (a *App) drawGitPanelRow(sx, ry, sw int, row gitChangeRow, selected, keyFoc
 	}
 	drawAt(a.screen, sx+3, ry, gitKindLetter(row.Kind), letterStyle)
 	x := sx + 5
+	// A name wider than the panel ends in … so it reads as cut, not as
+	// a file that happens to be called that; a plain clip left
+	// "very-long-component-na" looking like the whole name.
+	name = textdraw.ClipEllipsis(name, sx+sw-x)
 	x = drawClipped(a.screen, x, ry, sx+sw-x, name, nameStyle)
 	if dir != "" {
 		drawClipped(a.screen, x+2, ry, sx+sw-(x+2), dir, mutedStyle)

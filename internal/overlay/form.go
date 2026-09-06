@@ -48,6 +48,9 @@ type Form struct {
 	Rows  []FormRow
 	// Focus is the focused row index.
 	Focus int
+	// press is the click latch — see Press. Every target here is a
+	// press target; nothing on a form follows a drag.
+	press Press
 	Theme theme.Theme
 
 	Size  func() (w, h int)
@@ -186,9 +189,9 @@ func (f *Form) HandleKey(ev *tcell.EventKey) {
 
 // HandleMouse: clicks on a row focus it, select chevrons cycle, text
 // clicks reposition the caret, the buttons resolve the form, and a
-// click outside cancels.
+// click outside cancels. Only a fresh press counts as a click.
 func (f *Form) HandleMouse(x, y int, btn tcell.ButtonMask) {
-	if btn&tcell.Button1 == 0 {
+	if !f.press.Fresh(btn) {
 		return
 	}
 	r := f.rect()
