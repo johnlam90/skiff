@@ -426,7 +426,7 @@ func (a *App) menuNewFile() {
 func (a *App) newFileLabel() string {
 	folder := a.activeFolder
 	if folder == "" || a.isProjectRoot(folder) {
-		return "New file"
+		return "New file…"
 	}
 	rel := a.relativeFolderLabel(folder)
 	// Truncate so the row never overflows the modal width — see
@@ -446,7 +446,7 @@ func (a *App) newFileLabel() string {
 		}
 		suffix = " (in " + rel + ")"
 	}
-	return "New file" + suffix
+	return "New file" + suffix + "…"
 }
 
 // relativeFolderLabel returns folder rendered relative to the project root,
@@ -533,10 +533,12 @@ func (a *App) menuRenameFolder() {
 func (a *App) renameFolderLabel() string {
 	folder := a.activeFolder
 	if folder == "" || a.isProjectRoot(folder) {
-		return "Rename folder"
+		return "Rename folder…"
 	}
 	rel := a.relativeFolderLabel(folder)
-	const maxLen = maxLabelSuffix
+	// The trailing "…" spends one cell of the suffix budget, so the whole
+	// label still fits the modalWidth interior the budget was sized for.
+	const maxLen = maxLabelSuffix - 1
 	suffix := " (" + rel + ")"
 	if runeLen(suffix) > maxLen {
 		keep := maxLen - len(" (…)")
@@ -548,7 +550,7 @@ func (a *App) renameFolderLabel() string {
 		}
 		suffix = " (" + rel + ")"
 	}
-	return "Rename folder" + suffix
+	return "Rename folder" + suffix + "…"
 }
 
 // menuDeleteFolder removes the editor's active folder (the same folder
@@ -593,10 +595,11 @@ func (a *App) menuDeleteFolder() {
 func (a *App) deleteFolderLabel() string {
 	folder := a.activeFolder
 	if folder == "" || a.isProjectRoot(folder) {
-		return "Delete folder"
+		return "Delete folder…"
 	}
 	rel := a.relativeFolderLabel(folder)
-	const maxLen = maxLabelSuffix
+	// Same one-cell allowance for the "…" as renameFolderLabel.
+	const maxLen = maxLabelSuffix - 1
 	suffix := " (" + rel + ")"
 	if runeLen(suffix) > maxLen {
 		keep := maxLen - len(" (…)")
@@ -608,7 +611,7 @@ func (a *App) deleteFolderLabel() string {
 		}
 		suffix = " (" + rel + ")"
 	}
-	return "Delete folder" + suffix
+	return "Delete folder" + suffix + "…"
 }
 
 // hasActiveSubfolder is the menu predicate shared by every "act on

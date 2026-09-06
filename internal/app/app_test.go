@@ -305,11 +305,11 @@ func TestRun_DrainsBurstAndExits(t *testing.T) {
 // project root.
 func TestNewFileLabel_Plain(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
-	if got := a.newFileLabel(); got != "New file" {
+	if got := a.newFileLabel(); got != "New file…" {
 		t.Fatalf("root label: got %q", got)
 	}
 	a.activeFolder = ""
-	if got := a.newFileLabel(); got != "New file" {
+	if got := a.newFileLabel(); got != "New file…" {
 		t.Fatalf("empty folder label: got %q", got)
 	}
 }
@@ -325,8 +325,8 @@ func TestNewFileLabel_SuffixForSubdir(t *testing.T) {
 	a := newTestApp(t, dir)
 	a.setActiveFolder(sub)
 	got := a.newFileLabel()
-	if !strings.HasPrefix(got, "New file (in ") {
-		t.Fatalf("expected 'New file (in ...)', got %q", got)
+	if !strings.HasPrefix(got, "New file (in ") || !strings.HasSuffix(got, ")…") {
+		t.Fatalf("expected 'New file (in ...)…', got %q", got)
 	}
 	if !strings.Contains(got, "alpha") {
 		t.Fatalf("expected basename in label, got %q", got)

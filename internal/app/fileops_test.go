@@ -237,7 +237,7 @@ func TestRenameFolderLabel_DynamicSuffix(t *testing.T) {
 	a := newTestApp(t, root)
 
 	a.setActiveFolder(root)
-	if got := a.renameFolderLabel(); got != "Rename folder" {
+	if got := a.renameFolderLabel(); got != "Rename folder…" {
 		t.Fatalf("root label = %q", got)
 	}
 
@@ -346,8 +346,8 @@ func TestDeleteFolderLabel_DynamicSuffix(t *testing.T) {
 	a := newTestApp(t, root)
 
 	a.setActiveFolder(root)
-	if got := a.deleteFolderLabel(); got != "Delete folder" {
-		t.Fatalf("root label = %q, want bare 'Delete folder'", got)
+	if got := a.deleteFolderLabel(); got != "Delete folder…" {
+		t.Fatalf("root label = %q, want bare 'Delete folder…'", got)
 	}
 
 	a.setActiveFolder(sub)

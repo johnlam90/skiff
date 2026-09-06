@@ -17,7 +17,12 @@
 // current session (git verbs with no repo, edit verbs with no tab) are
 // dropped by their `visible` predicate instead of rendered greyed-out,
 // because a dimmed row a user can never light up is pure scroll cost.
-// And two clusters that used to spend nine and twelve rows — the git
+// A row whose click opens a prompt, a pick or a confirm — anything that
+// asks before acting — ends in "…" (Rename file…, Go to line…, Undo
+// last commit…), and a row that acts on the click does not (Save,
+// Push, Fetch): the ellipsis is the one-glyph promise that clicking is
+// safe to explore, so a row that prompts without it is a bug, not a
+// style choice. And two clusters that used to spend nine and twelve rows — the git
 // verbs and the file-clipboard actions — collapse into one "Git…" /
 // "File clipboard…" row each that opens an overlay.Pick of the demoted
 // actions. CLAUDE.md's rule is that every action stays reachable from
@@ -119,8 +124,8 @@ func fileMenuGroup() []menuItemDef {
 		// "⚠ disk conflict" marker has been dismissed — hidden the rest
 		// of the time, which is nearly always.
 		{label: "Resolve disk conflict…", action: (*App).menuResolveDiskConflict, enabled: (*App).hasDiskConflict, visible: (*App).hasDiskConflict},
-		{label: "Rename file", action: (*App).menuRename, enabled: (*App).hasFileTab, visible: (*App).hasTab},
-		{label: "Delete file", action: (*App).menuDelete, enabled: (*App).hasFileTab, visible: (*App).hasTab},
+		{label: "Rename file…", action: (*App).menuRename, enabled: (*App).hasFileTab, visible: (*App).hasTab},
+		{label: "Delete file…", action: (*App).menuDelete, enabled: (*App).hasFileTab, visible: (*App).hasTab},
 		{action: (*App).menuRenameFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).renameFolderLabel, visible: (*App).hasActiveSubfolder},
 		{action: (*App).menuDeleteFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).deleteFolderLabel, visible: (*App).hasActiveSubfolder},
 		{action: (*App).menuUndoDelete, enabled: (*App).hasTrashedEntry, labelFor: (*App).undoDeleteLabel, visible: (*App).hasTrashedEntry},
@@ -157,7 +162,7 @@ func goMenuGroup() []menuItemDef {
 	return []menuItemDef{
 		{label: "Find in file", shortcut: "Esc f", action: (*App).menuFind, enabled: (*App).hasFindable, visible: (*App).hasTab},
 		{label: "Find in project", shortcut: "Esc F", action: (*App).menuFindInProject, enabled: (*App).hasFinder, visible: (*App).hasTree},
-		{label: "Go to line", shortcut: "Esc l", action: (*App).menuGoToLine, enabled: (*App).hasFindable, visible: (*App).hasTab},
+		{label: "Go to line…", shortcut: "Esc l", action: (*App).menuGoToLine, enabled: (*App).hasFindable, visible: (*App).hasTab},
 		{label: "Go to matching bracket", shortcut: "Esc %", action: (*App).menuGoToMatchingBracket, enabled: (*App).hasMatchingBracket, visible: (*App).hasEditableTab},
 		{label: "Move to previous word", shortcut: "Esc b", action: (*App).menuMoveWordLeft, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 		{label: "Move to next word", shortcut: "Esc e", action: (*App).menuMoveWordRight, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
