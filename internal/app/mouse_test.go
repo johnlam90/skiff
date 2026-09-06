@@ -2102,3 +2102,33 @@ func TestSplitterHit_NeighboursYieldOnTheTabAndStatusRows(t *testing.T) {
 	}
 	a.handleMouse(tcell.NewEventMouse(splitX, 0, tcell.ButtonNone, 0))
 }
+
+// TestHandleMouse_TooSmallEndsALiveDrag pins the gate's second duty:
+// a drag that was live when the window shrank under the floor must be
+// ended there, because the release that would end it is dropped with
+// every other event. Left latched, the auto-scroll ticker kept moving
+// the buffer behind the resize notice until the next press.
+func TestHandleMouse_TooSmallEndsALiveDrag(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "d.txt")
+	if err := os.WriteFile(target, []byte(strings.Repeat("line\n", 200)), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	ex, ey, _, eh := a.editorRect()
+	a.handleMouse(tcell.NewEventMouse(ex+2, ey+1, tcell.Button1, 0))
+	a.handleMouse(tcell.NewEventMouse(ex+2, ey+eh+1, tcell.Button1, 0)) // below: auto-scroll
+	if a.dragMode != dragEditor || a.autoScrollStop == nil {
+		t.Fatalf("fixture: want a live editor drag with auto-scroll, mode %d stop %v", a.dragMode, a.autoScrollStop)
+	}
+
+	resizeTestApp(t, a, minWidth-1, minHeight)
+	a.handleMouse(tcell.NewEventMouse(ex+2, ey+eh+1, tcell.ButtonNone, 0))
+	if a.dragMode != dragNone {
+		t.Fatalf("the too-small gate left dragMode = %d latched", a.dragMode)
+	}
+	if a.autoScrollStop != nil {
+		t.Fatal("the too-small gate left the auto-scroll ticker running")
+	}
+}

@@ -206,6 +206,12 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 	// them and route nothing until the window grows back.
 	if a.width < minWidth || a.height < minHeight {
 		a.lastTabRects = nil
+		// The release is dropped with everything else, so a drag that
+		// was live when the window shrank has to be ended here — left
+		// latched, its auto-scroll ticker kept moving the buffer under
+		// a notice the user could not see past, until the next press.
+		a.dragMode = dragNone
+		a.stopAutoScroll()
 		return
 	}
 	leftDown := btn&tcell.Button1 != 0
