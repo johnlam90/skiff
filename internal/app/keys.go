@@ -51,6 +51,16 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		a.strip.handleKey(ev)
 		return
 	}
+	// Pasted text bound for the editor is buffered, not typed: one
+	// InsertString on the end marker is one undo entry and one find
+	// re-scan, where per-key insertion snapshotted the whole buffer on
+	// every pasted line. Overlays and strips above still take pasted
+	// keys one at a time — a prompt's field has no batch seam and
+	// needs none.
+	if a.pasting {
+		a.bufferPasteKey(ev)
+		return
+	}
 
 	// tmux (and other multiplexers) with a non-zero escape-time coalesce
 	// a fast Esc-then-key into one Alt-modified event: Esc,s arrives as
@@ -62,7 +72,7 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 	// handled with the other arrows further down so the Git panel and
 	// the image-tab guard get their say first. They fall through here
 	// having only disarmed the leader, which is correct either way.
-	if !a.pasting && ev.Modifiers()&tcell.ModAlt != 0 {
+	if ev.Modifiers()&tcell.ModAlt != 0 {
 		a.lastEscape = time.Time{}
 		switch ev.Key() {
 		case tcell.KeyEsc:
@@ -183,30 +193,23 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 	case tcell.KeyPgDn:
 		_, h := a.editorSize()
 		tab.MoveCursor(h, 0, extend)
-	case tcell.KeyEnter:
-		// Inside a bracketed paste the source text's own indentation is
-		// already in the stream; adding the current line's on top would
-		// double every level of pasted code.
-		if a.pasting {
-			tab.InsertString("\n")
-		} else {
-			tab.InsertNewline()
-		}
+	case tcell.KeyEnter, tcell.KeyLF:
+		// A bare LF reaches tcell as KeyLF (Ctrl+J); outside a paste
+		// it is Enter by another name. Pasted newlines never get here —
+		// they are buffered above, with the source's own indentation.
+		tab.InsertNewline()
 	case tcell.KeyBackspace, tcell.KeyBackspace2:
 		tab.Backspace()
 	case tcell.KeyDelete:
 		tab.Delete()
 	case tcell.KeyTab:
-		// A Tab inside a paste is a literal \t from the source text;
-		// expanding it to IndentUnit would rewrite pasted code. Over a
-		// selection that spans lines, Tab indents the block — inserting
-		// would replace forty selected lines with one indent unit.
-		switch {
-		case a.pasting:
-			tab.InsertString("\t")
-		case tab.SelectionSpansLines():
+		// Over a selection that spans lines, Tab indents the block —
+		// inserting would replace forty selected lines with one indent
+		// unit. A pasted Tab never gets here: it is buffered as a
+		// literal \t, since expanding it would rewrite pasted code.
+		if tab.SelectionSpansLines() {
 			tab.IndentLines()
-		default:
+		} else {
 			tab.InsertString(tab.IndentUnit)
 		}
 	case tcell.KeyBacktab:
@@ -243,4 +246,48 @@ func (a *App) leaderWindowIntercept(ev *tcell.EventKey) bool {
 		}
 	}
 	return false
+}
+
+// bufferPasteKey appends one pasted key to the paste buffer as the text
+// it stands for: a rune verbatim (an Alt rune is a tmux-mangled ESC
+// byte plus the rune, and the rune is content), Enter and LF as "\n",
+// Tab as a literal tab. The LF of a CRLF pair is folded into the CR so
+// a Windows clipboard does not paste with doubled newlines. Everything
+// else — arrows, function keys — has no text form and is dropped.
+func (a *App) bufferPasteKey(ev *tcell.EventKey) {
+	wasCR := a.pasteLastCR
+	a.pasteLastCR = false
+	switch ev.Key() {
+	case tcell.KeyRune:
+		a.pasteBuf = append(a.pasteBuf, ev.Rune())
+	case tcell.KeyEnter:
+		a.pasteBuf = append(a.pasteBuf, '\n')
+		a.pasteLastCR = true
+	case tcell.KeyLF:
+		if !wasCR {
+			a.pasteBuf = append(a.pasteBuf, '\n')
+		}
+	case tcell.KeyTab:
+		a.pasteBuf = append(a.pasteBuf, '\t')
+	}
+}
+
+// applyPaste lands the buffered paste in the active tab as one
+// InsertString — one undo step, one find re-scan — and empties the
+// buffer. A paste with no tab to land in, or onto a markdown preview
+// (read-only by construction), is discarded rather than held for the
+// next tab: the user pasted into what was on screen, and delivering it
+// somewhere else later would be a surprise.
+func (a *App) applyPaste() {
+	text := string(a.pasteBuf)
+	a.pasteBuf = a.pasteBuf[:0]
+	a.pasteLastCR = false
+	if text == "" {
+		return
+	}
+	tab := a.activeTabPtr()
+	if tab == nil || a.mdPreviewFor(tab) != nil {
+		return
+	}
+	tab.InsertString(text)
 }

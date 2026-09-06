@@ -14,6 +14,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
@@ -356,5 +357,105 @@ func TestHandleKey_BacktabOutdents(t *testing.T) {
 	a.handleKey(keyEv(tcell.KeyBacktab, 0))
 	if got := tab.Buffer.Lines[1]; got != "b" {
 		t.Fatalf("Backtab over a block left line 1 as %q", got)
+	}
+}
+
+// pasteInto replays text through the bracketed-paste path the way tcell
+// delivers it: a start marker, one key per byte (CR as Enter, LF as
+// KeyLF with ModCtrl, tab as Tab), then the end marker.
+func pasteInto(a *App, text string) {
+	a.handleEvent(tcell.NewEventPaste(true))
+	for _, r := range text {
+		switch r {
+		case '\r':
+			a.handleKey(keyEv(tcell.KeyEnter, 0))
+		case '\n':
+			a.handleKey(tcell.NewEventKey(tcell.KeyLF, 0, tcell.ModCtrl))
+		case '\t':
+			a.handleKey(keyEv(tcell.KeyTab, 0))
+		default:
+			a.handleKey(keyEv(tcell.KeyRune, r))
+		}
+	}
+	a.handleEvent(tcell.NewEventPaste(false))
+}
+
+// TestHandleKey_PasteIsOneUndoStep pins the batching: a multi-line paste
+// used to insert rune by rune, snapshotting the whole buffer on every
+// newline and re-running the find query per rune. It now lands as one
+// InsertString, so one undo removes the whole paste and nothing lands
+// until the end marker.
+func TestHandleKey_PasteIsOneUndoStep(t *testing.T) {
+	a, tab := newNavTestApp(t, "")
+	a.handleEvent(tcell.NewEventPaste(true))
+	for _, r := range "one" {
+		a.handleKey(keyEv(tcell.KeyRune, r))
+	}
+	if got := tab.Buffer.Lines[0]; got != "" {
+		t.Fatalf("pasted text landed before the end marker: %q", got)
+	}
+	a.handleEvent(tcell.NewEventPaste(false))
+	pasteInto(a, "\rtwo\rthree")
+
+	if got := strings.Join(tab.Buffer.Lines, "|"); got != "one|two|three" {
+		t.Fatalf("paste landed as %q", got)
+	}
+	if !tab.Undo() || strings.Join(tab.Buffer.Lines, "|") != "one" {
+		t.Fatalf("one undo should remove the whole second paste, got %v", tab.Buffer.Lines)
+	}
+}
+
+// TestHandleKey_PasteLFOnlyKeepsNewlines covers the byte tcell used to
+// drop: a bare \n arrives as KeyLF (Ctrl+J), and a POSIX clipboard is
+// nothing but those. Each one must become a line break.
+func TestHandleKey_PasteLFOnlyKeepsNewlines(t *testing.T) {
+	a, tab := newNavTestApp(t, "")
+	pasteInto(a, "a\nb\nc")
+	if got := strings.Join(tab.Buffer.Lines, "|"); got != "a|b|c" {
+		t.Fatalf("LF-only paste landed as %q", got)
+	}
+}
+
+// TestHandleKey_PasteCRLFDoesNotDouble folds the LF of a CRLF pair into
+// the CR: a Windows clipboard must paste one newline per line, not two.
+func TestHandleKey_PasteCRLFDoesNotDouble(t *testing.T) {
+	a, tab := newNavTestApp(t, "")
+	pasteInto(a, "a\r\nb\r\n")
+	if got := strings.Join(tab.Buffer.Lines, "|"); got != "a|b|" {
+		t.Fatalf("CRLF paste landed as %q", got)
+	}
+}
+
+// TestHandleKey_PasteWithNoTabIsDiscarded keeps a paste from being held
+// for a tab that opens later: with nothing to land in, the text is
+// dropped and the buffer is empty for the next paste.
+func TestHandleKey_PasteWithNoTabIsDiscarded(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	pasteInto(a, "stray")
+	if len(a.pasteBuf) != 0 {
+		t.Fatalf("paste buffer should be empty after a paste with no tab, got %q", string(a.pasteBuf))
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "later.txt")
+	if err := os.WriteFile(target, []byte(""), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a.openFile(target)
+	pasteInto(a, "x")
+	if got := a.activeTabPtr().Buffer.Lines[0]; got != "x" {
+		t.Fatalf("the stray paste leaked into the next tab: %q", got)
+	}
+}
+
+// TestHandleKey_LFOutsidePasteIsEnter gives KeyLF an editor meaning
+// outside a paste too: Ctrl+J / a bare newline byte splits the line
+// through the same auto-indent path Enter uses.
+func TestHandleKey_LFOutsidePasteIsEnter(t *testing.T) {
+	a, tab := newNavTestApp(t, "\tx\n")
+	tab.Cursor = editor.Position{Line: 0, Col: 2}
+	tab.Anchor = tab.Cursor
+	a.handleKey(tcell.NewEventKey(tcell.KeyLF, 0, tcell.ModCtrl))
+	if got := strings.Join(tab.Buffer.Lines, "|"); got != "\tx|\t|" {
+		t.Fatalf("KeyLF outside a paste gave %q, want an auto-indented split", got)
 	}
 }

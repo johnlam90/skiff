@@ -311,8 +311,15 @@ type App struct {
 	// every key event is verbatim content from the terminal's paste
 	// buffer — never a command — so handleKey strips raw ESC bytes and
 	// suppresses the Esc leader instead of letting pasted text quit the
-	// editor or fire menu actions.
-	pasting bool
+	// editor or fire menu actions. Content bound for the editor is
+	// accumulated in pasteBuf and landed as ONE InsertString when the
+	// end marker arrives (see applyPaste), so a paste is one undo step
+	// and one find re-scan instead of one per rune. pasteLastCR
+	// remembers that the previous pasted key was a CR so the LF of a
+	// CRLF pair is folded into it rather than doubling the newline.
+	pasting     bool
+	pasteBuf    []rune
+	pasteLastCR bool
 
 	// files is the one owner of every file operation — create, rename,
 	// trash / restore, move, copy, duplicate — and of the session trash
@@ -823,10 +830,17 @@ func (a *App) handleEvent(ev tcell.Event) {
 	case *tcell.EventPaste:
 		// Bracketed-paste markers. The pasted content itself still
 		// arrives as individual key events; the flag tells handleKey
-		// to treat them as verbatim text. The leader window is
+		// to treat them as verbatim text, and the end marker is when
+		// the buffered text lands in the editor. The leader window is
 		// dropped so a paste can never complete an armed Esc.
 		a.pasting = e.Start()
 		a.lastEscape = time.Time{}
+		if a.pasting {
+			a.pasteBuf = a.pasteBuf[:0]
+			a.pasteLastCR = false
+		} else {
+			a.applyPaste()
+		}
 	case *tcell.EventMouse:
 		a.handleMouse(e)
 	case *quitRequestEvent:
