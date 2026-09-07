@@ -19,6 +19,8 @@ package editor
 import (
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/textdraw"
+
 	"github.com/johnlam90/skiff/internal/scrollbar"
 	"github.com/johnlam90/skiff/internal/theme"
 )
@@ -74,7 +76,7 @@ func (t *Tab) renderScrollbar(scr tcell.Screen, th theme.Theme, x, y, viewH int)
 		if onThumb(row) {
 			r, st = scrollbar.Thumb, thumbStyle
 		}
-		scr.SetContent(x, y+row, r, nil, st)
+		textdraw.Cell(scr, x, y+row, r, nil, st)
 	}
 	// Collapse the change map onto track rows first so the paint order
 	// (and therefore the color at a shared row) is deterministic — the
@@ -101,6 +103,6 @@ func (t *Tab) renderScrollbar(scr tcell.Screen, th theme.Theme, x, y, viewH int)
 			bg = thumbFg
 		}
 		st := tcell.StyleDefault.Background(bg).Foreground(gitLineMarkerColor(th, kind))
-		scr.SetContent(x, y+row, gitMarkGlyph, nil, st)
+		textdraw.Cell(scr, x, y+row, gitMarkGlyph, nil, st)
 	}
 }

@@ -8,7 +8,9 @@
 package editor
 
 import (
+	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
@@ -137,24 +139,7 @@ func HighlightWindow(filename string, lines []string, startLine, height int, t t
 	if height <= 0 || len(lines) == 0 {
 		return styles, 0, 0
 	}
-	if startLine < 0 {
-		startLine = 0
-	}
-	if startLine >= len(lines) {
-		startLine = len(lines) - 1
-	}
-	endLine := startLine + height
-	if endLine > len(lines) {
-		endLine = len(lines)
-	}
-	winStart := startLine - highlightLeadLines
-	if winStart < 0 {
-		winStart = 0
-	}
-	winEnd := endLine + highlightLeadLines
-	if winEnd > len(lines) {
-		winEnd = len(lines)
-	}
+	_, _, winStart, winEnd := highlightBounds(len(lines), startLine, height)
 	// Cap pathological lines exactly as HighlightVisible does. Render
 	// only ever calls HighlightWindow, so skipping the cap here left the
 	// "one minified line must not cost seconds per keystroke" guard off
@@ -171,17 +156,67 @@ func HighlightWindow(filename string, lines []string, startLine, height int, t t
 	return styles, winStart, winEnd
 }
 
-// highlightSource tokenises src and returns one style row per source line.
-func highlightSource(filename, src string, t theme.Theme) [][]tcell.Style {
-	lexer := lexers.Match(filename)
-	if lexer == nil {
-		lexer = lexers.Analyse(src)
+// highlightBounds clamps a viewport of height rows at startLine into
+// lineCount lines and returns it with the lead-padded window around it.
+// HighlightWindow and Tab.HighlightRequest share it so the synchronous
+// and background re-lex describe the same span.
+func highlightBounds(lineCount, startLine, height int) (start, end, winStart, winEnd int) {
+	if height <= 0 || lineCount == 0 {
+		return 0, 0, 0, 0
 	}
-	if lexer == nil {
-		lexer = lexers.Fallback
+	if startLine < 0 {
+		startLine = 0
+	}
+	if startLine >= lineCount {
+		startLine = lineCount - 1
+	}
+	end = min(startLine+height, lineCount)
+	return startLine, end, max(startLine-highlightLeadLines, 0), min(end+highlightLeadLines, lineCount)
+}
+
+// lexerCache remembers the lexer chosen for each filename. lexers.Match
+// walks every registered language's filename globs, which showed up as
+// a steady 7% of a keystroke when it ran on every re-tokenise; the
+// answer for a path never changes, so it is computed once. Only
+// positive matches are kept — a file with no matching lexer falls
+// through to content analysis, which depends on the text.
+var lexerCache = struct {
+	sync.Mutex
+	m map[string]chroma.Lexer
+}{m: map[string]chroma.Lexer{}}
+
+// lexerFor picks the lexer for filename, consulting the cache before
+// the registry. The returned lexer is already Coalesce-wrapped.
+func lexerFor(filename string) chroma.Lexer {
+	filename = filepath.Base(filename) // Match only ever looks at the base
+	lexerCache.Lock()
+	l, ok := lexerCache.m[filename]
+	lexerCache.Unlock()
+	if ok {
+		return l
+	}
+	l = lexers.Match(filename)
+	if l == nil {
+		return nil
 	}
 	// Coalesce merges adjacent same-type tokens; cheaper to scan in render.
-	lexer = chroma.Coalesce(lexer)
+	l = chroma.Coalesce(l)
+	lexerCache.Lock()
+	lexerCache.m[filename] = l
+	lexerCache.Unlock()
+	return l
+}
+
+// highlightSource tokenises src and returns one style row per source line.
+func highlightSource(filename, src string, t theme.Theme) [][]tcell.Style {
+	lexer := lexerFor(filename)
+	if lexer == nil {
+		l := lexers.Analyse(src)
+		if l == nil {
+			l = lexers.Fallback
+		}
+		lexer = chroma.Coalesce(l)
+	}
 
 	base := tcell.StyleDefault.Background(t.BG).Foreground(t.Text)
 

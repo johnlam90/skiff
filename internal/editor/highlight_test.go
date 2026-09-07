@@ -318,3 +318,31 @@ func TestHighlight_DegradedCommentIsDim(t *testing.T) {
 		t.Fatalf("code cell wears the comment attribute: %v", attrs)
 	}
 }
+
+// TestLexerFor_CachesPositiveMatches pins the lexer cache's two rules:
+// a filename the registry knows is resolved once and then served from
+// the cache, and a filename it does not know is never cached, so
+// content analysis still gets to look at the text every time.
+func TestLexerFor_CachesPositiveMatches(t *testing.T) {
+	lexerCache.Lock()
+	delete(lexerCache.m, "cache_probe.go")
+	delete(lexerCache.m, "cache_probe.unknownext")
+	lexerCache.Unlock()
+
+	first := lexerFor("cache_probe.go")
+	if first == nil {
+		t.Fatal("no lexer for a .go file")
+	}
+	if second := lexerFor("cache_probe.go"); second != first {
+		t.Fatal("second lookup did not come from the cache")
+	}
+	if l := lexerFor("cache_probe.unknownext"); l != nil {
+		t.Fatalf("unknown extension resolved to %v, want nil", l.Config().Name)
+	}
+	lexerCache.Lock()
+	_, cached := lexerCache.m["cache_probe.unknownext"]
+	lexerCache.Unlock()
+	if cached {
+		t.Fatal("a miss was cached; content analysis would be skipped")
+	}
+}

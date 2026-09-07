@@ -299,3 +299,90 @@ func TestWrapWords(t *testing.T) {
 		}
 	}
 }
+
+// TestCell_MatchesSetContent pins that Cell is a drop-in for
+// scr.SetContent on the three shapes the editor paints — plain ASCII, a
+// two-cell ideograph, and a base rune with a combining mark — so the
+// alloc-free path cannot drift from tcell's own cell semantics.
+func TestCell_MatchesSetContent(t *testing.T) {
+	cases := []struct {
+		r    rune
+		comb []rune
+	}{
+		{'a', nil},
+		{' ', nil},
+		{'世', nil},
+		{'e', []rune{0x301}},
+	}
+	st := tcell.StyleDefault.Foreground(tcell.ColorRed)
+	for _, c := range cases {
+		want := tcell.NewSimulationScreen("UTF-8")
+		got := tcell.NewSimulationScreen("UTF-8")
+		for _, s := range []tcell.SimulationScreen{want, got} {
+			if err := s.Init(); err != nil {
+				t.Fatal(err)
+			}
+			s.SetSize(4, 1)
+		}
+		want.SetContent(1, 0, c.r, c.comb, st)
+		Cell(got, 1, 0, c.r, c.comb, st)
+		want.Show()
+		got.Show()
+		wc, _, _ := want.GetContents()
+		gc, _, _ := got.GetContents()
+		for i := range wc {
+			if string(wc[i].Bytes) != string(gc[i].Bytes) || wc[i].Style != gc[i].Style {
+				t.Fatalf("rune %q cell %d: Cell=%q/%v SetContent=%q/%v", c.r, i, gc[i].Bytes, gc[i].Style, wc[i].Bytes, wc[i].Style)
+			}
+		}
+		want.Fini()
+		got.Fini()
+	}
+}
+
+// TestCell_ASCIIDoesNotAllocate is the reason Cell exists: a frame
+// paints ten thousand cells, and SetContent's two allocations per cell
+// were the idle frame's single largest cost.
+func TestCell_ASCIIDoesNotAllocate(t *testing.T) {
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer scr.Fini()
+	scr.SetSize(8, 2)
+	st := tcell.StyleDefault
+	if n := testing.AllocsPerRun(100, func() { Cell(scr, 1, 0, 'x', nil, st) }); n != 0 {
+		t.Fatalf("Cell allocated %v times per ASCII call, want 0", n)
+	}
+	if n := testing.AllocsPerRun(100, func() { Fill(scr, 0, 0, 8, 2, st) }); n != 0 {
+		t.Fatalf("Fill allocated %v times per call, want 0", n)
+	}
+	if n := testing.AllocsPerRun(100, func() { DrawClipped(scr, 0, 1, 8, "abc", st) }); n != 0 {
+		t.Fatalf("DrawClipped allocated %v times per call, want 0", n)
+	}
+}
+
+// TestFill_PaintsExactlyTheRect pins Fill's bounds: every cell inside
+// gets the style, the cells around it are untouched, and a degenerate
+// rect paints nothing.
+func TestFill_PaintsExactlyTheRect(t *testing.T) {
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer scr.Fini()
+	scr.SetSize(6, 4)
+	st := tcell.StyleDefault.Background(tcell.ColorBlue)
+	Fill(scr, 1, 1, 3, 2, st)
+	Fill(scr, 0, 0, 0, 4, st)
+	Fill(scr, 0, 0, 6, -1, st)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	for i, c := range cells {
+		x, y := i%w, i/w
+		inside := x >= 1 && x < 4 && y >= 1 && y < 3
+		if (c.Style == st) != inside {
+			t.Fatalf("cell (%d,%d) style %v, inside=%v", x, y, c.Style, inside)
+		}
+	}
+}

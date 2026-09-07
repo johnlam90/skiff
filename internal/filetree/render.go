@@ -74,11 +74,7 @@ func listArea(h int) (offset, height int) {
 func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 	bg := th.SidebarBG
 	bgStyle := tcell.StyleDefault.Background(bg).Foreground(th.Text)
-	for cy := y; cy < y+h; cy++ {
-		for cx := x; cx < x+w; cx++ {
-			scr.SetContent(cx, cy, ' ', nil, bgStyle)
-		}
-	}
+	textdraw.Fill(scr, x, y, w, h, bgStyle)
 
 	// Header — small all-caps label above the project name. The
 	// project name itself is also a click target: it's the only way
@@ -328,9 +324,9 @@ func drawChangeLetter(scr tcell.Screen, x, y, w int, change GitChangeKind, st tc
 	if changeLetterCells(change, w) == 0 {
 		return
 	}
-	scr.SetContent(x+w-3, y, ' ', nil, st)
-	scr.SetContent(x+w-2, y, gitChangeLetter(change), nil, st)
-	scr.SetContent(x+w-1, y, ' ', nil, st)
+	textdraw.Cell(scr, x+w-3, y, ' ', nil, st)
+	textdraw.Cell(scr, x+w-2, y, gitChangeLetter(change), nil, st)
+	textdraw.Cell(scr, x+w-1, y, ' ', nil, st)
 }
 
 // gitChangeLetter maps git status kinds to the one-cell letter drawn at

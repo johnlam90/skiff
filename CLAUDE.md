@@ -97,7 +97,18 @@ internal/editor/tab.go        Tab: path, buffer, cursor, anchor, scroll, dirty s
 internal/editor/lineops.go    Move / duplicate line-block gestures
 internal/editor/wrap.go       Soft wrap: segment math + wrap-mode render/scroll/hit-test
 internal/editor/scrollbar.go  Right-edge scrollbar + git change map
-internal/editor/highlight.go  Chroma → []tcell.Style per line
+internal/editor/highlight.go  Chroma → []tcell.Style per line; the window
+                              lex, and the per-basename lexer cache
+internal/editor/hlpatch.go    Off-loop highlighting, editor half: rebase the
+                              cached grid across an edit (row shift + rune
+                              splice) and the HighlightRequest / Run /
+                              ApplyHighlight seam the app's job drives
+internal/app/highlight.go     Off-loop highlighting, app half: the Coalesce
+                              job draw() starts after Tab.Render and the
+                              landing that hands the result to the tab
+internal/app/perf_test.go     Benchmarks (`-bench Perf`): idle frame,
+                              keystroke, wheel tick, tree frame, tree scan,
+                              startup — the ruler for any performance work
 internal/editor/indent.go     Visual-column math, indent detection, Enter auto-indent
 internal/editor/word.go       The single definition of "a word" + word-wise motion
 internal/editor/select.go     SelectAll / SelectLine — the whole-buffer and
@@ -144,6 +155,9 @@ internal/diff/                The one model of a unified diff: Parse (git
 internal/mdrender/            Markdown → pre-wrapped theme-styled lines
                               (goldmark AST walk; fenced code through
                               editor.Highlight so Chroma colors match)
+internal/textdraw/            Cell widths, clipping, and the alloc-free
+                              cell writes (Cell / Fill / DrawClipped go
+                              through tcell's Put, never SetContent)
 internal/scrollbar/           The one definition of a scrollbar: thumb
                               geometry, its click inverse, and the Track/
                               Thumb glyphs. No tcell, no theme — both the
@@ -278,6 +292,47 @@ workflow instead (see Releases).
 
 ## Design patterns to preserve
 
+### Every cell is painted once per frame, and nothing clears the screen
+`draw()` does not call `Screen.Clear()`, and `Tab.Render` lays no base
+fill under its rows: each row paints its gutter, its glyphs and its
+trailing pad, and the rows past the buffer are filled after the loop.
+A frame used to write every editor cell three times, and tcell's
+`SetContent` allocates twice and locks per call — that was most of an
+idle frame on a remote box. Two rules follow. **Hot paint paths go
+through `textdraw.Cell` / `textdraw.Fill` / `textdraw.DrawClipped`**,
+which hand tcell's `Put` a cached string (`TestCell_ASCIIDoesNotAllocate`
+is the fence); reach for `SetContent` only in a surface that paints
+rarely. **Every panel repaints its whole rect every frame**, because no
+Clear will erase last frame's glyphs for it —
+`TestDraw_PaintsEveryCell` seeds the screen with a sentinel and fails on
+any cell a layout shape leaves untouched, and
+`TestRender_PaintsEveryCell` does the same for the editor alone. A new
+panel or strip must be added to that test's shapes, and a width/height
+the app is told about must be the screen's real size (draw paints
+exactly `a.width × a.height`).
+
+### A keystroke never runs the lexer on the event loop (hlpatch.go)
+`Tab.edit` no longer sets `StyleStale`; its trailer calls
+`rebaseStyles`, which rebases the cached style grid across the mutation
+(rows shift, the edited line is spliced at the changed runes, inserted
+runes borrow the style beside them) and marks the grid *pending*
+(`hlPending`). The frame paints that approximation; `draw()` then calls
+`requestHighlight`, which copies the window's text out on the loop and
+runs Chroma on the `highlight` job (Coalesce: one lex in flight, one
+queued, never a goroutine per key). `ApplyHighlight` installs the
+landing only if the buffer generation (`hlGen`) still matches and no
+synchronous lex has happened since — a scroll past the window's edge,
+a resize, a theme change, undo/redo and reload still set `StyleStale`
+and re-lex synchronously inside `Render`, exactly as before, and that
+exact grid beats any older landing. Two things to keep: the request is
+built from a string copied on the loop (a `Buffer` is not safe to read
+from a goroutine, see `LineRunes`), and `patchStyles` refuses an edit
+that reaches outside the cached window rather than shifting rows it
+never styled — the refusal falls back to the synchronous path, so
+correctness never depends on the patch. Keystroke cost went from ~30ms
+to ~2ms on an 8000-line Go file (`BenchmarkPerfKeystroke`); the price
+is that the exact colours for the edited line land one lex later.
+
 ### `cursorMoved` flag (tab.go)
 The cursor only triggers `EnsureVisible` when something actually moved
 the cursor. Every cursor mutator sets `t.cursorMoved = true`; `Render`
@@ -289,7 +344,8 @@ on every tick" bug.
 Every text mutation goes through the unexported
 `(*Tab).edit(group, mutate)`: it pushes the undo snapshot under the
 caller's group, runs the mutation, then applies the trailer — `Dirty`,
-`StyleStale`, `cursorMoved`, and a re-run of the active find query. That
+the highlight rebase (`rebaseStyles`, see below), `cursorMoved`, and a
+re-run of the active find query. That
 trailer used to be hand-typed at ten sites and had already drifted (only
 the `Replace*` trio refreshed `FindMatches`, so typing with the find bar
 open painted the highlights one column off the text). **Don't write the

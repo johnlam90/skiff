@@ -46,8 +46,10 @@ type tabRect struct {
 // draw paints the entire screen. Called once per event in the main loop.
 // The action modal — if open — is drawn last so it sits on top of everything.
 func (a *App) draw() {
-	a.screen.Clear()
-
+	// No screen-wide Clear here: every panel paints its whole rect each
+	// frame, and TestDraw_PaintsEveryCell is the fence that keeps that
+	// true. tcell's Clear allocates once per cell, which on a 200x50
+	// terminal was a measurable slice of every idle frame.
 	if a.width < minWidth || a.height < minHeight {
 		a.drawTooSmall()
 		return
@@ -88,6 +90,10 @@ func (a *App) draw() {
 			a.drawMdPreview(tab, st, ex, ey, ew, eh)
 		} else {
 			tab.Render(a.screen, a.theme, ex, ey, ew, eh)
+			// After Render on purpose: it settles the scroll the window
+			// is built around, and a synchronous re-lex inside it
+			// retires the request.
+			a.requestHighlight(tab, eh)
 		}
 	} else {
 		a.drawEmptyEditor()
@@ -413,7 +419,7 @@ func (a *App) drawTabBar() {
 	tx, ty, tw, _ := a.tabBarRect()
 	barStyle := tcell.StyleDefault.Background(a.theme.SidebarBG).Foreground(a.theme.Muted)
 	for cx := tx; cx < tx+tw; cx++ {
-		a.screen.SetContent(cx, ty, ' ', nil, barStyle)
+		textdraw.Cell(a.screen, cx, ty, ' ', nil, barStyle)
 	}
 
 	a.drawMenuButton()
@@ -483,7 +489,7 @@ func (a *App) drawTabBar() {
 		// skipped; the badges painted in their own slots mark what's
 		// hidden.
 		for cx := max(r.X, winX); cx < min(r.X+r.Width, winEnd); cx++ {
-			a.screen.SetContent(cx, ty, ' ', nil, st)
+			textdraw.Cell(a.screen, cx, ty, ' ', nil, st)
 		}
 		tab := a.tabs.At(r.Index)
 		col := r.X + 1
@@ -498,7 +504,7 @@ func (a *App) drawTabBar() {
 			_, _, rowAttrs := st.Decompose()
 			dot := st.Foreground(a.theme.Modified).
 				Attributes(rowAttrs | a.theme.Attrs.Modified)
-			a.screen.SetContent(col, ty, '●', nil, dot)
+			textdraw.Cell(a.screen, col, ty, '●', nil, dot)
 		}
 		col += 2 // skip dirty slot.
 		// Per-language Nerd Font glyph between the dirty dot and the
@@ -529,7 +535,7 @@ func (a *App) drawTabBar() {
 			if active {
 				closeStyle = st.Foreground(a.theme.Muted)
 			}
-			a.screen.SetContent(col, ty, '×', nil, closeStyle)
+			textdraw.Cell(a.screen, col, ty, '×', nil, closeStyle)
 		}
 	}
 
@@ -687,7 +693,7 @@ func (a *App) drawSplitter() {
 	}
 	style := tcell.StyleDefault.Background(a.theme.SidebarBG).Foreground(fg)
 	for y := 0; y < a.height-1; y++ {
-		a.screen.SetContent(x, y, '│', nil, style)
+		textdraw.Cell(a.screen, x, y, '│', nil, style)
 	}
 }
 
@@ -739,16 +745,12 @@ func (a *App) drawEmptyEditor() {
 	bg := a.theme.BG
 	muted := tcell.StyleDefault.Background(bg).Foreground(a.theme.Muted)
 	bold := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text).Bold(true)
-	for cy := ey; cy < ey+eh; cy++ {
-		for cx := ex; cx < ex+ew; cx++ {
-			a.screen.SetContent(cx, cy, ' ', nil, muted)
-		}
-	}
+	textdraw.Fill(a.screen, ex, ey, ew, eh, muted)
 	cy := ey + eh/2
 	title := trimRunes("No file open", ew)
 	cx1 := ex + (ew-runeLen(title))/2
 	for i, r := range title {
-		a.screen.SetContent(cx1+i, cy-1, r, nil, bold)
+		textdraw.Cell(a.screen, cx1+i, cy-1, r, nil, bold)
 	}
 	// Hints stack downward from one row below the title. Rows that
 	// would fall outside the editor rect are dropped rather than
@@ -761,7 +763,7 @@ func (a *App) drawEmptyEditor() {
 		msg := trimRunes(hint, ew)
 		hx := ex + (ew-runeLen(msg))/2
 		for i, r := range msg {
-			a.screen.SetContent(hx+i, hy, r, nil, muted)
+			textdraw.Cell(a.screen, hx+i, hy, r, nil, muted)
 		}
 	}
 	a.screen.HideCursor()
@@ -793,7 +795,7 @@ func (a *App) drawStatusBar() {
 	style := tcell.StyleDefault.Background(bg).Foreground(fg).
 		Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar)
 	for cx := sx; cx < sx+sw; cx++ {
-		a.screen.SetContent(cx, sy, ' ', nil, style)
+		textdraw.Cell(a.screen, cx, sy, ' ', nil, style)
 	}
 
 	// Right-hand group first, so the left-side text can be clipped
@@ -1295,7 +1297,7 @@ func (a *App) drawFlashStrip() {
 	lines := wrapFlashLines(a.statusMsg, a.flashStripTextWidth())
 	for i := 0; i < h; i++ {
 		for cx := x; cx < x+w; cx++ {
-			a.screen.SetContent(cx, y+i, ' ', nil, style)
+			textdraw.Cell(a.screen, cx, y+i, ' ', nil, style)
 		}
 		if i < len(lines) {
 			drawStatusText(a.screen, x+1, y+i, w-1, lines[i], style)
@@ -1336,12 +1338,7 @@ func (a *App) tooSmallLines() []string {
 // smaller than the editor's minimum supported size.
 func (a *App) drawTooSmall() {
 	style := tcell.StyleDefault.Background(a.theme.BG).Foreground(a.theme.Error).Bold(true)
-	for cy := range a.height {
-		for cx := range a.width {
-			a.screen.SetContent(cx, cy, ' ', nil,
-				tcell.StyleDefault.Background(a.theme.BG))
-		}
-	}
+	textdraw.Fill(a.screen, 0, 0, a.width, a.height, tcell.StyleDefault.Background(a.theme.BG))
 	lines := a.tooSmallLines()
 	top := (a.height - len(lines)) / 2
 	if top < 0 {
@@ -1361,7 +1358,7 @@ func (a *App) drawTooSmall() {
 			if cx+j >= a.width {
 				break
 			}
-			a.screen.SetContent(cx+j, top+i, r, nil, style)
+			textdraw.Cell(a.screen, cx+j, top+i, r, nil, style)
 		}
 	}
 	a.screen.HideCursor()
