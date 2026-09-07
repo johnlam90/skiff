@@ -884,17 +884,11 @@ func (a *App) gitTabLabel() string {
 }
 
 // sidebarHeaderHit maps a click x-offset on the sidebar's header row to
-// the control it landed on: "collapse" for the « handle at the right
-// end, "explorer", "git", or "" for the space between and beyond. The GIT zone includes its count badge so the whole label
+// the tab it landed on: "explorer", "git", or "" for the space between
+// and beyond. The GIT zone includes its count badge so the whole label
 // is one target. Shares its geometry with drawSidebarHeader so the two
 // can't drift.
-func (a *App) sidebarHeaderHit(localX, sw int) string {
-	// The « owns the header's right end outright — tested first, so a
-	// GIT badge clipped against it on a min-width sidebar can't steal
-	// the click from a visible chevron.
-	if a.sidebarCollapseHit(localX, sw) {
-		return "collapse"
-	}
+func (a *App) sidebarHeaderHit(localX int) string {
 	eEnd := runeLen(sidebarHeaderExplorer)
 	if localX >= 0 && localX < eEnd {
 		return "explorer"
@@ -915,7 +909,6 @@ func (a *App) sidebarHeaderHit(localX, sw int) string {
 // 3.4:1, below the text bar), and the weight+brightness pair still
 // reads one of them as "current". The GIT tab only appears for git
 // projects — a plain directory keeps the original single-header look.
-// The « collapse handle sits at the row's right end (sidebartoggle.go).
 func (a *App) drawSidebarHeader(sx, sy, sw int) {
 	bg := a.theme.SidebarBG
 	active := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text).Bold(true)
@@ -937,8 +930,6 @@ func (a *App) drawSidebarHeader(sx, sy, sw int) {
 		gx := sx + runeLen(sidebarHeaderExplorer) + sidebarHeaderGap
 		drawClipped(a.screen, gx, sy, sx+sw-gx, a.gitTabLabel(), gStyle)
 	}
-	// Last, so it overpaints whatever a badge left in its cells.
-	a.drawSidebarCollapseButton(sx, sy, sw)
 }
 
 // drawGitPanel paints the Git side of the sidebar: header tabs, the
@@ -1172,9 +1163,15 @@ func (a *App) statusGitSegment() string {
 // x onto the same right-hand segment list drawStatusBar painted from —
 // one geometry, so a segment's pixels and its hit range cannot drift.
 // Segments without a click action (the Esc tag, the conflict marker)
-// are inert.
+// are inert. The left end is the one other target: the » sidebar
+// handle (sidebartoggle.go).
 func (a *App) statusBarClick(x int) {
 	sx, _, sw, _ := a.statusRect()
+	// The » at the bar's left end re-opens a collapsed sidebar.
+	if a.sidebarExpandHit(x - sx) {
+		a.menuToggleSidebar()
+		return
+	}
 	rightX := sx + sw
 	for _, seg := range a.statusRightSegments(sw) {
 		rightX -= runeLen(seg.text)

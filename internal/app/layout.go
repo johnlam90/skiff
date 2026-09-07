@@ -53,16 +53,35 @@ func (a *App) gitPanelFillsWidth() bool {
 // narrower than the sidebar block, because the rightmost column belongs
 // to the resize splitter — except when the Git panel fills the window,
 // where there is no editor to resize against and the panel takes the
-// whole block. Zero width when the sidebar is hidden.
+// whole block — and one row shorter than the editor column, because
+// the row above the status bar is the sidebar footer (sidebarFooterRect)
+// that carries the « collapse handle. Zero width when the sidebar is
+// hidden.
 func (a *App) sidebarRect() (x, y, w, h int) {
 	sw := a.sidebarW()
 	if sw <= 0 {
 		return 0, 0, 0, 0
 	}
+	h = a.height - 2
 	if a.gitPanelFillsWidth() {
-		return 0, 0, sw, a.height - 1
+		return 0, 0, sw, h
 	}
-	return 0, 0, sw - 1, a.height - 1
+	return 0, 0, sw - 1, h
+}
+
+// sidebarFooterRect is the one-row strip under the sidebar panel and
+// above the status bar, as wide as the panel: the home of the «
+// collapse handle (sidebartoggle.go). Zero width when the sidebar is
+// hidden. Taking the row out of sidebarRect rather than painting over
+// the panel's last row is what keeps the tree's last row, its
+// scrollbar and the Git panel's hint strip clear of the handle — the
+// same shape herdr's sidebar has.
+func (a *App) sidebarFooterRect() (x, y, w int) {
+	sx, _, sw, _ := a.sidebarRect()
+	if sw <= 0 {
+		return 0, 0, 0
+	}
+	return sx, a.height - 2, sw
 }
 
 // splitterX returns the x coordinate of the resize splitter column, or -1

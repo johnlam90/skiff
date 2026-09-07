@@ -14,35 +14,47 @@ import (
 	"github.com/gdamore/tcell/v2"
 )
 
-// TestSidebarToggle_ChevronFacesTheGesture pins the glyph rule: the
-// chevron points the way the panel will move when clicked — inward («)
-// while the explorer is open, outward (») once it is collapsed — so a
-// user never has to remember which state they are in.
+// TestSidebarToggle_ChevronFacesTheGesture pins the glyph rule and the
+// placement: the chevron points the way the panel will move — inward
+// («) on the sidebar's footer row while the explorer is open, outward
+// (») in the status bar's first cell once it is collapsed — so the
+// handle is always at the window's bottom-left and never has to be
+// hunted for.
 func TestSidebarToggle_ChevronFacesTheGesture(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.draw()
 	a.screen.Show()
-	sx, _, sw, _ := a.sidebarRect()
-	row := []rune(screenLine(a.screen.(tcell.SimulationScreen), 0))
-	if got := row[sx+sw-sidebarToggleWidth]; got != sidebarCollapseGlyph {
-		t.Fatalf("open sidebar: cell %d = %q, want %q in the header's last slot: %q",
-			sx+sw-sidebarToggleWidth, got, sidebarCollapseGlyph, string(row[:sw]))
+	scr := a.screen.(tcell.SimulationScreen)
+	fx, fy, fw := a.sidebarFooterRect()
+	if fy != a.height-2 {
+		t.Fatalf("footer row = %d, want the row above the status bar (%d)", fy, a.height-2)
+	}
+	row := []rune(screenLine(scr, fy))
+	if got := row[fx+fw-sidebarToggleWidth]; got != sidebarCollapseGlyph {
+		t.Fatalf("open sidebar: footer cell %d = %q, want %q: %q",
+			fx+fw-sidebarToggleWidth, got, sidebarCollapseGlyph, string(row[:fw]))
+	}
+	if strings.ContainsRune(screenLine(scr, a.height-1), sidebarExpandGlyph) {
+		t.Fatal("open sidebar must not paint the » in the status bar")
 	}
 
 	a.menuToggleSidebar()
 	a.draw()
 	a.screen.Show()
-	row = []rune(screenLine(a.screen.(tcell.SimulationScreen), 0))
-	ex, ew := a.sidebarExpandRect()
-	if ex != menuButtonWidth || ew != sidebarToggleWidth {
-		t.Fatalf("collapsed: expand slot = (%d,%d), want it right after the ≡ button (%d,%d)",
-			ex, ew, menuButtonWidth, sidebarToggleWidth)
+	if _, _, fw := a.sidebarFooterRect(); fw != 0 {
+		t.Fatalf("collapsed: footer width = %d, want 0", fw)
 	}
-	if got := row[ex]; got != sidebarExpandGlyph {
-		t.Fatalf("collapsed sidebar: cell %d = %q, want %q: %q", ex, got, sidebarExpandGlyph, string(row[:12]))
+	status := []rune(screenLine(scr, a.height-1))
+	if status[0] != sidebarExpandGlyph {
+		t.Fatalf("collapsed sidebar: status bar starts %q, want %q", string(status[:8]), sidebarExpandGlyph)
 	}
-	if strings.ContainsRune(string(row), sidebarCollapseGlyph) {
-		t.Fatalf("collapsed sidebar must not also paint the collapse chevron: %q", string(row))
+	if status[1] != ' ' {
+		t.Fatalf("the » should be followed by the readout's own pad, got %q", string(status[:8]))
+	}
+	for y := 0; y < a.height-1; y++ {
+		if strings.ContainsRune(screenLine(scr, y), sidebarCollapseGlyph) {
+			t.Fatalf("collapsed sidebar must not paint « anywhere (row %d)", y)
+		}
 	}
 }
 
@@ -53,10 +65,11 @@ func TestSidebarToggle_ChevronFacesTheGesture(t *testing.T) {
 func TestSidebarToggle_ClicksFlipThePanel(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.draw()
-	sx, _, sw, _ := a.sidebarRect()
+	fx, fy, fw := a.sidebarFooterRect()
 	a.sidebarAutoHidden = true
-	a.handleEvent(tcell.NewEventMouse(sx+sw-sidebarToggleWidth, 0, tcell.Button1, 0))
-	a.handleEvent(tcell.NewEventMouse(sx+sw-sidebarToggleWidth, 0, tcell.ButtonNone, 0))
+	x := fx + fw - sidebarToggleWidth
+	a.handleEvent(tcell.NewEventMouse(x, fy, tcell.Button1, 0))
+	a.handleEvent(tcell.NewEventMouse(x, fy, tcell.ButtonNone, 0))
 	if a.sidebarShown {
 		t.Fatal("clicking « should collapse the sidebar")
 	}
@@ -65,39 +78,65 @@ func TestSidebarToggle_ClicksFlipThePanel(t *testing.T) {
 	}
 
 	a.draw()
-	ex, _ := a.sidebarExpandRect()
-	a.handleEvent(tcell.NewEventMouse(ex, 0, tcell.Button1, 0))
-	a.handleEvent(tcell.NewEventMouse(ex, 0, tcell.ButtonNone, 0))
+	a.handleEvent(tcell.NewEventMouse(0, a.height-1, tcell.Button1, 0))
+	a.handleEvent(tcell.NewEventMouse(0, a.height-1, tcell.ButtonNone, 0))
 	if !a.sidebarShown {
 		t.Fatal("clicking » should re-open the sidebar")
 	}
 }
 
-// TestSidebarToggle_ExpandSlotShiftsTheTabStrip pins the geometry the
-// collapsed state changes: the tab strip starts after the » slot, so a
-// tab can never be painted under the chevron, and the ≡ button keeps
-// its corner (menuButtonRect is untouched — the menu is the primary
-// door and its position is documented).
-func TestSidebarToggle_ExpandSlotShiftsTheTabStrip(t *testing.T) {
+// TestSidebarToggle_FooterIsNotATreeRow pins why the footer is taken
+// out of sidebarRect rather than painted over the panel: with a tree
+// taller than the sidebar, Tree.HitTest would answer the footer row
+// with a real node, and a click beside the « would open a file the
+// user never saw. The rest of the footer has to be inert.
+func TestSidebarToggle_FooterIsNotATreeRow(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 12)
+	seedTreeFiles(t, dir, 40)
+	a.refreshTree()
+	a.draw()
+	fx, fy, _ := a.sidebarFooterRect()
+	before := a.tabs.Len()
+	a.handleEvent(tcell.NewEventMouse(fx+1, fy, tcell.Button1, 0))
+	a.handleEvent(tcell.NewEventMouse(fx+1, fy, tcell.ButtonNone, 0))
+	if a.tabs.Len() != before {
+		t.Fatal("a click on the footer's blank cells opened a tree row painted nowhere")
+	}
+	if !a.sidebarShown {
+		t.Fatal("the footer's blank cells must not toggle the sidebar")
+	}
+	if _, _, _, sh := a.sidebarRect(); sh != fy {
+		t.Fatalf("sidebar height %d should end exactly at the footer row %d", sh, fy)
+	}
+}
+
+// TestSidebarToggle_StatusTextYieldsToTheChevron: the » takes the
+// status bar's first cell, so the left readout must start after it and
+// be measured one cell shorter — otherwise the flash-strip decision
+// ("would this be truncated?") and the paint would disagree by a cell.
+func TestSidebarToggle_StatusTextYieldsToTheChevron(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
+	_, _, sw, _ := a.statusRect()
+	open := a.statusLeftMax(sw)
 	a.menuToggleSidebar()
-	if mx, _, _, _ := a.menuButtonRect(); mx != 0 {
-		t.Fatalf("≡ should stay in the corner when collapsed, got x=%d", mx)
+	if got := a.statusLeftMax(sw); got != open-1 {
+		t.Fatalf("collapsed statusLeftMax = %d, want %d (one cell for the »)", got, open-1)
 	}
-	stripX, _ := a.tabStripRegion()
-	if stripX != menuButtonWidth+sidebarToggleWidth {
-		t.Fatalf("tab strip x = %d, want %d (≡ + » slot)", stripX, menuButtonWidth+sidebarToggleWidth)
-	}
-	a.menuToggleSidebar()
-	stripX, _ = a.tabStripRegion()
-	if stripX != a.sidebarW()+menuButtonWidth {
-		t.Fatalf("with the sidebar open the strip should start right after ≡, got %d", stripX)
+	a.flash("hello")
+	a.draw()
+	a.screen.Show()
+	status := screenLine(a.screen.(tcell.SimulationScreen), a.height-1)
+	if !strings.HasPrefix(status, "» hello") {
+		t.Fatalf("status bar = %q, want the » then the flash", status)
 	}
 }
 
 // TestSidebarToggle_NoneInSingleFileMode: a session without a tree has
-// no sidebar to expand, so the collapsed-state chevron must not appear
-// — it would be a control that only flashes a refusal.
+// no sidebar to expand, so the » must not appear — it would be a
+// control that only flashes a refusal — and the status text keeps its
+// full width.
 func TestSidebarToggle_NoneInSingleFileMode(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.tree = nil
@@ -105,33 +144,12 @@ func TestSidebarToggle_NoneInSingleFileMode(t *testing.T) {
 	if ex, ew := a.sidebarExpandRect(); ex != -1 || ew != 0 {
 		t.Fatalf("single-file mode: expand slot = (%d,%d), want none", ex, ew)
 	}
-	if stripX, _ := a.tabStripRegion(); stripX != menuButtonWidth {
-		t.Fatalf("single-file tab strip x = %d, want %d", stripX, menuButtonWidth)
+	if a.sidebarExpandHit(0) {
+		t.Fatal("single-file mode: the status bar's first cell must not be a handle")
 	}
-}
-
-// TestSidebarHeaderHit_CollapseZoneBeatsTheGitBadge covers the
-// min-width collision: at 17 columns the "GIT N" label would run into
-// the chevron's cells, and the chevron must win both the paint and the
-// hit — a click on a visible « that switched panels instead would be
-// the control lying about itself.
-func TestSidebarHeaderHit_CollapseZoneBeatsTheGitBadge(t *testing.T) {
-	a, _, _ := dirtyRepoApp(t)
-	a.refreshGitStatus()
-	a.sidebarWidth = minSidebarWidth
 	a.draw()
 	a.screen.Show()
-	sx, _, sw, _ := a.sidebarRect()
-	row := []rune(screenLine(a.screen.(tcell.SimulationScreen), 0))
-	if got := row[sx+sw-sidebarToggleWidth]; got != sidebarCollapseGlyph {
-		t.Fatalf("min-width header lost its chevron: %q", string(row[:sw]))
-	}
-	for x := sw - sidebarToggleWidth - 1; x < sw; x++ {
-		if got := a.sidebarHeaderHit(x, sw); got != "collapse" {
-			t.Fatalf("hit at local x=%d = %q, want collapse", x, got)
-		}
-	}
-	if got := a.sidebarHeaderHit(runeLen(sidebarHeaderExplorer)+sidebarHeaderGap, sw); got != "git" {
-		t.Fatalf("the GIT label should still be clickable left of the chevron, got %q", got)
+	if status := screenLine(a.screen.(tcell.SimulationScreen), a.height-1); strings.ContainsRune(status, sidebarExpandGlyph) {
+		t.Fatalf("single-file status bar painted a »: %q", status)
 	}
 }

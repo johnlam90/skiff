@@ -9,15 +9,19 @@
 // show/hide toggle. The toggle itself has always existed (≡ → Hide file
 // explorer, Esc t); what was missing was a surface the eye lands on
 // without opening a menu. The handle is a chevron that points the way
-// the panel will move: « sits at the right end of the sidebar header
-// while the explorer is open, » sits just right of the ≡ button once it
-// is collapsed. Both cells route to menuToggleSidebar, so the chevron
-// can never disagree with the menu row about what a toggle means.
+// the panel will move, and it lives at the bottom-left of the window in
+// both states, the way herdr's sidebar handle does: « right-aligned on
+// the sidebar's footer row while the explorer is open, » in the status
+// bar's first cell once it is collapsed. Both route to
+// menuToggleSidebar, so the chevron can never disagree with the menu
+// row about what a toggle means.
 //
-// It is painted in Muted rather than Accent on purpose: the ≡ is the
-// loud button, this is a hint that a panel edge is there. The two
-// glyphs are Latin-1 (U+00AB / U+00BB), one cell wide everywhere, so
-// no terminal renders the handle as a box.
+// The « is painted in Muted rather than Accent on purpose: the ≡ is the
+// loud button, this is a hint that a panel edge is there. The » takes
+// the status bar's own foreground so it reads as part of the bar on
+// every palette, including the ones whose bar is a bright accent block.
+// The two glyphs are Latin-1 (U+00AB / U+00BB), one cell wide
+// everywhere, so no terminal renders the handle as a box.
 
 package app
 
@@ -28,68 +32,70 @@ import (
 )
 
 const (
-	// sidebarCollapseGlyph is the open-state handle, at the header's
-	// right edge; sidebarExpandGlyph is the collapsed-state handle,
-	// beside the ≡ button.
+	// sidebarCollapseGlyph is the open-state handle, at the footer's
+	// right edge; sidebarExpandGlyph is the collapsed-state handle, at
+	// the status bar's left edge.
 	sidebarCollapseGlyph = '«'
 	sidebarExpandGlyph   = '»'
-	// sidebarToggleWidth is the cells each handle occupies: the glyph
-	// and one pad cell, so it never touches the splitter on one side or
-	// the first tab on the other. The click target is one cell wider
-	// still (see the hit-tests), the same rule every one-cell control
-	// in the editor follows.
+	// sidebarToggleWidth is the cells the « occupies: the glyph and one
+	// pad cell, so it never touches the splitter. The » needs no pad of
+	// its own — the status text it precedes starts with one. Each click
+	// target is one cell wider than its glyph, the same rule every
+	// one-cell control in the editor follows.
 	sidebarToggleWidth = 2
 )
 
-// sidebarExpandRect returns the screen x and width of the » slot in the
-// tab bar, or (-1, 0) when there is nothing to expand: the sidebar is
+// sidebarExpandRect returns the status-bar-local x and width of the »
+// slot, or (-1, 0) when there is nothing to expand: the sidebar is
 // already open, or the session has no tree at all (single-file mode).
-// tabStripRegion starts the tabs after this slot, so the chevron and
-// the first tab cannot overlap.
+// statusLeftMax charges the left text for the slot, so the readout and
+// the handle cannot overlap.
 func (a *App) sidebarExpandRect() (x, w int) {
 	if a.sidebarShown || a.tree == nil {
 		return -1, 0
 	}
-	return a.sidebarW() + menuButtonWidth, sidebarToggleWidth
+	return 0, 1
 }
 
-// sidebarExpandHit reports whether a tab-bar press at x lands on the »
-// slot. The cell before the slot belongs to the ≡ button, so the
-// one-cell-wider allowance runs only to the right.
+// sidebarExpandHit reports whether a status-bar press at bar-local x
+// lands on the » or the pad cell after it.
 func (a *App) sidebarExpandHit(x int) bool {
 	ex, ew := a.sidebarExpandRect()
 	return ew > 0 && x >= ex && x <= ex+ew
 }
 
-// drawSidebarExpandButton paints the » in its tab-bar slot. The bar
-// row is already filled by drawTabBar; this only places the glyph.
-func (a *App) drawSidebarExpandButton() {
+// drawSidebarExpandButton paints the » at the status bar's origin in
+// the bar's own style and returns the cells it took, which is what the
+// left text is then offset by. Zero when the handle is not shown.
+func (a *App) drawSidebarExpandButton(sx, sy int, bar tcell.Style) int {
 	ex, ew := a.sidebarExpandRect()
 	if ew == 0 {
-		return
+		return 0
 	}
-	style := tcell.StyleDefault.Background(a.theme.SidebarBG).Foreground(a.theme.Muted)
-	textdraw.Cell(a.screen, ex, 0, sidebarExpandGlyph, nil, style)
+	textdraw.Cell(a.screen, sx+ex, sy, sidebarExpandGlyph, nil, bar)
+	return ew
 }
 
-// sidebarCollapseHit reports whether a header-row press at localX (an
-// offset into a header sw cells wide) lands on the « slot or the cell
+// sidebarCollapseHit reports whether a footer-row press at localX (an
+// offset into a footer sw cells wide) lands on the « slot or the cell
 // before it.
 func (a *App) sidebarCollapseHit(localX, sw int) bool {
 	start := sw - sidebarToggleWidth
 	return localX >= start-1 && localX < sw
 }
 
-// drawSidebarCollapseButton paints the « at the right end of a header
-// row sx..sx+sw. It runs after the header labels so the chevron owns
-// its cells even when a "GIT N" badge on a min-width sidebar would
-// otherwise reach them.
-func (a *App) drawSidebarCollapseButton(sx, sy, sw int) {
-	if sw < sidebarToggleWidth {
+// drawSidebarFooter paints the sidebar's footer row — a SidebarBG fill
+// with the « right-aligned — and nothing when the sidebar is hidden.
+// It repaints the whole row every frame like every other panel, since
+// nothing clears the screen for it.
+func (a *App) drawSidebarFooter() {
+	fx, fy, fw := a.sidebarFooterRect()
+	if fw <= 0 {
 		return
 	}
 	style := tcell.StyleDefault.Background(a.theme.SidebarBG).Foreground(a.theme.Muted)
-	x := sx + sw - sidebarToggleWidth
-	textdraw.Cell(a.screen, x, sy, sidebarCollapseGlyph, nil, style)
-	textdraw.Cell(a.screen, x+1, sy, ' ', nil, style)
+	textdraw.Fill(a.screen, fx, fy, fw, 1, style)
+	if fw >= sidebarToggleWidth {
+		textdraw.Cell(a.screen, fx+fw-sidebarToggleWidth, fy, sidebarCollapseGlyph, nil, style)
+	}
 }

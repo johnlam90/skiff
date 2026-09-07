@@ -613,15 +613,22 @@ func (a *App) tryTreeContextClick(x, y int) bool {
 // since the root is always shown and there's no useful "collapsed
 // root" state.
 func (a *App) sidebarClick(x, y int) {
-	sx, sy, _, _ := a.sidebarRect()
+	sx, sy, sw, _ := a.sidebarRect()
+	// Footer row: the « handle hides the sidebar; the rest of the row
+	// is inert. Tested first because Tree.HitTest only bounds its row
+	// against the flattened list, not the viewport, so a tall tree
+	// would otherwise answer the footer with the row painted nowhere.
+	if _, fy, _ := a.sidebarFooterRect(); y == fy {
+		if a.sidebarCollapseHit(x-sx, sw) {
+			a.menuToggleSidebar()
+		}
+		return
+	}
 	// Header row: the EXPLORER / GIT tabs switch which panel the
-	// sidebar shows, and the « at its right end hides the sidebar. Handled before any panel-specific hit-testing so
+	// sidebar shows. Handled before any panel-specific hit-testing so
 	// the tabs behave identically from either side.
 	if y-sy == 0 {
-		_, _, sw, _ := a.sidebarRect()
-		switch a.sidebarHeaderHit(x-sx, sw) {
-		case "collapse":
-			a.menuToggleSidebar()
+		switch a.sidebarHeaderHit(x - sx) {
 		case "explorer":
 			a.showExplorerPanel()
 		case "git":
@@ -664,19 +671,12 @@ func (a *App) setActiveFolder(path string) {
 }
 
 // tabBarClick dispatches clicks in the tab bar: the leftmost menuButtonWidth
-// cells open the action menu, the » slot after them (collapsed sidebar
-// only) re-opens the explorer; remaining cells switch or close tabs
-// based on where the click landed within their rendered geometry.
+// cells open the action menu; remaining cells switch or close tabs based on
+// where the click landed within their rendered geometry.
 func (a *App) tabBarClick(x, _ int) {
 	sw := a.sidebarW()
 	if x >= sw && x < sw+menuButtonWidth {
 		a.openMenu()
-		return
-	}
-	// The » beside the ≡ re-opens a collapsed sidebar; it sits before
-	// the strip, so it is tested before any tab geometry.
-	if a.sidebarExpandHit(x) {
-		a.menuToggleSidebar()
 		return
 	}
 	// The overflow badges scroll the strip; they sit on top of whatever

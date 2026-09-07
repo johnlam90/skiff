@@ -274,7 +274,7 @@ func TestGitTabLabel_CountsChanges(t *testing.T) {
 		t.Fatalf("dirty label = %q, want %q", got, "GIT 2")
 	}
 	countX := runeLen(sidebarHeaderExplorer) + sidebarHeaderGap + 4 // the "2"
-	if zone := a.sidebarHeaderHit(countX, defaultSidebarWidth-1); zone != "git" {
+	if zone := a.sidebarHeaderHit(countX); zone != "git" {
 		t.Fatalf("count badge should be clickable, got %q", zone)
 	}
 	a.tree.DirtyFiles = nil
@@ -289,7 +289,7 @@ func TestGitTabLabel_CountsChanges(t *testing.T) {
 func TestSidebarHeaderHit_NoGitTabOutsideRepo(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	gx := runeLen(sidebarHeaderExplorer) + sidebarHeaderGap
-	if zone := a.sidebarHeaderHit(gx, defaultSidebarWidth-1); zone != "" {
+	if zone := a.sidebarHeaderHit(gx); zone != "" {
 		t.Fatalf("non-repo GIT tab hit = %q, want none", zone)
 	}
 }
@@ -1169,16 +1169,17 @@ func TestGitPanelHint_DocumentsKeysAndNamesFocusedButton(t *testing.T) {
 // than starving the change list it exists to explain.
 func TestGitPanelHint_YieldsRowsToTheList(t *testing.T) {
 	a := keyboardGitApp(t)
-	// Sidebar height is a.height-1, so this leaves exactly one row
-	// below the panel's fixed header rows for list + hint to share.
-	a.height = gitPanelListTop + 2
+	// Sidebar height is a.height-2 (the footer row takes one), so this
+	// leaves exactly one row below the panel's fixed header rows for
+	// list + hint to share.
+	a.height = gitPanelListTop + 3
 	listH, hint := a.gitPanelBody()
 	if listH != 1 || len(hint) != 0 {
 		t.Fatalf("the one spare row belongs to the list: list %d, hint %d", listH, len(hint))
 	}
 
 	// Given room for both, the split still adds up to what's available.
-	a.height = gitPanelListTop + 8
+	a.height = gitPanelListTop + 9
 	listH, hint = a.gitPanelBody()
 	if len(hint) == 0 {
 		t.Fatal("with room to spare the hint should draw")

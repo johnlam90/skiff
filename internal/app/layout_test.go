@@ -35,7 +35,8 @@ func TestSidebarW_ShownVsHidden(t *testing.T) {
 }
 
 // TestSidebarRect checks the sidebar render rectangle reserves one cell
-// for the splitter on its right edge, and collapses to zero when hidden.
+// for the splitter on its right edge and one row for the footer (the «
+// handle's row) above the status bar, and collapses to zero when hidden.
 func TestSidebarRect(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	x, y, w, h := a.sidebarRect()
@@ -45,8 +46,11 @@ func TestSidebarRect(t *testing.T) {
 	if w != defaultSidebarWidth-1 {
 		t.Fatalf("expected w = sidebarWidth-1, got %d", w)
 	}
-	if h != a.height-1 {
-		t.Fatalf("expected h = height-1, got %d", h)
+	if h != a.height-2 {
+		t.Fatalf("expected h = height-2, got %d", h)
+	}
+	if fx, fy, fw := a.sidebarFooterRect(); fx != 0 || fy != h || fw != w {
+		t.Fatalf("footer = (%d,%d,%d), want (0,%d,%d) directly under the panel", fx, fy, fw, h, w)
 	}
 
 	a.sidebarShown = false

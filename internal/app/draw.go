@@ -72,6 +72,7 @@ func (a *App) draw() {
 			// geometry (and tests) stay untouched.
 			a.drawSidebarHeader(sx, sy, sw)
 		}
+		a.drawSidebarFooter()
 		a.drawSplitter()
 	}
 
@@ -130,13 +131,10 @@ func (a *App) iconsOn() bool {
 }
 
 // tabStripRegion returns the screen x and width of the area tabs may
-// occupy: everything in the tab bar right of the ≡ button — and, while
-// the sidebar is collapsed, right of the » slot that re-opens it.
+// occupy: everything in the tab bar right of the ≡ button.
 func (a *App) tabStripRegion() (x, w int) {
 	tx, _, tw, _ := a.tabBarRect()
 	x = a.sidebarW() + menuButtonWidth
-	_, ew := a.sidebarExpandRect()
-	x += ew
 	w = tx + tw - x
 	if w < 0 {
 		w = 0
@@ -417,8 +415,7 @@ func (a *App) layoutTabs() []tabRect {
 }
 
 // drawTabBar paints the tab bar across the top of the editor area: first
-// the menu button (≡), the » sidebar handle when the explorer is
-// collapsed, then any open tabs.
+// the menu button (≡), then any open tabs.
 func (a *App) drawTabBar() {
 	tx, ty, tw, _ := a.tabBarRect()
 	barStyle := tcell.StyleDefault.Background(a.theme.SidebarBG).Foreground(a.theme.Muted)
@@ -427,7 +424,6 @@ func (a *App) drawTabBar() {
 	}
 
 	a.drawMenuButton()
-	a.drawSidebarExpandButton()
 
 	// Shift the virtual layout by the strip scroll and remember the
 	// shifted rects — hit-testing then stays in screen coordinates. The
@@ -835,8 +831,11 @@ func (a *App) drawStatusBar() {
 		leftStyle = style.Foreground(a.theme.Error).
 			Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar | a.theme.Attrs.Error)
 	}
+	// The » sidebar handle owns the bar's first cell while the explorer
+	// is collapsed; statusLeftMax already charged the left text for it.
+	ew := a.drawSidebarExpandButton(sx, sy, style)
 	leftMax := a.statusLeftMax(sw)
-	drawStatusText(a.screen, sx, sy, leftMax, a.statusLeftText(leftMax), leftStyle)
+	drawStatusText(a.screen, sx+ew, sy, leftMax, a.statusLeftText(leftMax), leftStyle)
 }
 
 // statusRightSegment is one piece of the status bar's right-hand group.
@@ -1024,7 +1023,8 @@ func (a *App) statusRightWidth(sw int) int {
 // keeps it from visually butting up against the right-hand group.
 func (a *App) statusLeftMax(sw int) int {
 	rw := a.statusRightWidth(sw)
-	max := sw - rw
+	_, ew := a.sidebarExpandRect()
+	max := sw - rw - ew
 	if rw > 0 {
 		max--
 	}
