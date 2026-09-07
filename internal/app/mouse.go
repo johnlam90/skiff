@@ -613,7 +613,17 @@ func (a *App) tryTreeContextClick(x, y int) bool {
 // since the root is always shown and there's no useful "collapsed
 // root" state.
 func (a *App) sidebarClick(x, y int) {
-	sx, sy, _, _ := a.sidebarRect()
+	sx, sy, sw, _ := a.sidebarRect()
+	// Footer row: the « handle hides the sidebar; the rest of the row
+	// is inert. Tested first because Tree.HitTest only bounds its row
+	// against the flattened list, not the viewport, so a tall tree
+	// would otherwise answer the footer with the row painted nowhere.
+	if _, fy, _ := a.sidebarFooterRect(); y == fy {
+		if a.sidebarCollapseHit(x-sx, sw) {
+			a.menuToggleSidebar()
+		}
+		return
+	}
 	// Header row: the EXPLORER / GIT tabs switch which panel the
 	// sidebar shows. Handled before any panel-specific hit-testing so
 	// the tabs behave identically from either side.

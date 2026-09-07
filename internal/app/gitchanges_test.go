@@ -1169,16 +1169,17 @@ func TestGitPanelHint_DocumentsKeysAndNamesFocusedButton(t *testing.T) {
 // than starving the change list it exists to explain.
 func TestGitPanelHint_YieldsRowsToTheList(t *testing.T) {
 	a := keyboardGitApp(t)
-	// Sidebar height is a.height-1, so this leaves exactly one row
-	// below the panel's fixed header rows for list + hint to share.
-	a.height = gitPanelListTop + 2
+	// Sidebar height is a.height-2 (the footer row takes one), so this
+	// leaves exactly one row below the panel's fixed header rows for
+	// list + hint to share.
+	a.height = gitPanelListTop + 3
 	listH, hint := a.gitPanelBody()
 	if listH != 1 || len(hint) != 0 {
 		t.Fatalf("the one spare row belongs to the list: list %d, hint %d", listH, len(hint))
 	}
 
 	// Given room for both, the split still adds up to what's available.
-	a.height = gitPanelListTop + 8
+	a.height = gitPanelListTop + 9
 	listH, hint = a.gitPanelBody()
 	if len(hint) == 0 {
 		t.Fatal("with room to spare the hint should draw")

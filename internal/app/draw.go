@@ -72,6 +72,7 @@ func (a *App) draw() {
 			// geometry (and tests) stay untouched.
 			a.drawSidebarHeader(sx, sy, sw)
 		}
+		a.drawSidebarFooter()
 		a.drawSplitter()
 	}
 
@@ -830,8 +831,11 @@ func (a *App) drawStatusBar() {
 		leftStyle = style.Foreground(a.theme.Error).
 			Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar | a.theme.Attrs.Error)
 	}
+	// The » sidebar handle owns the bar's first cell while the explorer
+	// is collapsed; statusLeftMax already charged the left text for it.
+	ew := a.drawSidebarExpandButton(sx, sy, style)
 	leftMax := a.statusLeftMax(sw)
-	drawStatusText(a.screen, sx, sy, leftMax, a.statusLeftText(leftMax), leftStyle)
+	drawStatusText(a.screen, sx+ew, sy, leftMax, a.statusLeftText(leftMax), leftStyle)
 }
 
 // statusRightSegment is one piece of the status bar's right-hand group.
@@ -1019,7 +1023,8 @@ func (a *App) statusRightWidth(sw int) int {
 // keeps it from visually butting up against the right-hand group.
 func (a *App) statusLeftMax(sw int) int {
 	rw := a.statusRightWidth(sw)
-	max := sw - rw
+	_, ew := a.sidebarExpandRect()
+	max := sw - rw - ew
 	if rw > 0 {
 		max--
 	}

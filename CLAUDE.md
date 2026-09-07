@@ -71,6 +71,12 @@ internal/app/conflict.go      Dirty-buffer-vs-changed-file prompt (the diff
                               itself comes from internal/diff)
 internal/app/gitchanges.go    Git panel: rows, buttons, keyboard mode, hint
                               strip, and the change list's own scrollbar
+internal/app/sidebartoggle.go The «/» explorer handle, bottom-left in both
+                              states: « on the sidebar's footer row
+                              (sidebarFooterRect, taken out of
+                              sidebarRect), » in the status bar's first
+                              cell once collapsed; both route to
+                              menuToggleSidebar
 internal/app/gitstatus.go     Best-effort `git status` read behind the tree tint
 internal/app/overlays.go      Overlay stack wiring: menu adapter + dropOverlay
 internal/app/modals.go        Openers for the prefab overlays + closeAllModals

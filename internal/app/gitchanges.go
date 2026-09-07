@@ -1163,9 +1163,15 @@ func (a *App) statusGitSegment() string {
 // x onto the same right-hand segment list drawStatusBar painted from —
 // one geometry, so a segment's pixels and its hit range cannot drift.
 // Segments without a click action (the Esc tag, the conflict marker)
-// are inert.
+// are inert. The left end is the one other target: the » sidebar
+// handle (sidebartoggle.go).
 func (a *App) statusBarClick(x int) {
 	sx, _, sw, _ := a.statusRect()
+	// The » at the bar's left end re-opens a collapsed sidebar.
+	if a.sidebarExpandHit(x - sx) {
+		a.menuToggleSidebar()
+		return
+	}
 	rightX := sx + sw
 	for _, seg := range a.statusRightSegments(sw) {
 		rightX -= runeLen(seg.text)
