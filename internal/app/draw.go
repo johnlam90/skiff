@@ -130,10 +130,13 @@ func (a *App) iconsOn() bool {
 }
 
 // tabStripRegion returns the screen x and width of the area tabs may
-// occupy: everything in the tab bar right of the ≡ button.
+// occupy: everything in the tab bar right of the ≡ button — and, while
+// the sidebar is collapsed, right of the » slot that re-opens it.
 func (a *App) tabStripRegion() (x, w int) {
 	tx, _, tw, _ := a.tabBarRect()
 	x = a.sidebarW() + menuButtonWidth
+	_, ew := a.sidebarExpandRect()
+	x += ew
 	w = tx + tw - x
 	if w < 0 {
 		w = 0
@@ -414,7 +417,8 @@ func (a *App) layoutTabs() []tabRect {
 }
 
 // drawTabBar paints the tab bar across the top of the editor area: first
-// the menu button (≡), then any open tabs.
+// the menu button (≡), the » sidebar handle when the explorer is
+// collapsed, then any open tabs.
 func (a *App) drawTabBar() {
 	tx, ty, tw, _ := a.tabBarRect()
 	barStyle := tcell.StyleDefault.Background(a.theme.SidebarBG).Foreground(a.theme.Muted)
@@ -423,6 +427,7 @@ func (a *App) drawTabBar() {
 	}
 
 	a.drawMenuButton()
+	a.drawSidebarExpandButton()
 
 	// Shift the virtual layout by the strip scroll and remember the
 	// shifted rects — hit-testing then stays in screen coordinates. The

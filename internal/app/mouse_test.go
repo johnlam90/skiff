@@ -2089,11 +2089,19 @@ func TestSplitterHit_NeighboursYieldOnTheTabAndStatusRows(t *testing.T) {
 		}
 		a.handleMouse(tcell.NewEventMouse(x, a.height-1, tcell.ButtonNone, 0))
 	}
+	// The header's last cell is the « collapse handle's pad cell — a
+	// target of its own that hides the panel, so re-open it before the
+	// splitter check below, which needs a splitter to exist.
 	a.handleMouse(tcell.NewEventMouse(splitX-1, 0, tcell.Button1, 0))
 	if a.dragMode == dragSidebar {
 		t.Fatal("the sidebar header's last cell armed a sidebar drag")
 	}
 	a.handleMouse(tcell.NewEventMouse(splitX-1, 0, tcell.ButtonNone, 0))
+	if a.sidebarShown {
+		t.Fatal("the sidebar header's last cell should have collapsed the panel")
+	}
+	a.menuToggleSidebar()
+	a.draw()
 
 	// The painted column itself still grabs on every row.
 	a.handleMouse(tcell.NewEventMouse(splitX, 0, tcell.Button1, 0))

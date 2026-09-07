@@ -274,7 +274,7 @@ func TestGitTabLabel_CountsChanges(t *testing.T) {
 		t.Fatalf("dirty label = %q, want %q", got, "GIT 2")
 	}
 	countX := runeLen(sidebarHeaderExplorer) + sidebarHeaderGap + 4 // the "2"
-	if zone := a.sidebarHeaderHit(countX); zone != "git" {
+	if zone := a.sidebarHeaderHit(countX, defaultSidebarWidth-1); zone != "git" {
 		t.Fatalf("count badge should be clickable, got %q", zone)
 	}
 	a.tree.DirtyFiles = nil
@@ -289,7 +289,7 @@ func TestGitTabLabel_CountsChanges(t *testing.T) {
 func TestSidebarHeaderHit_NoGitTabOutsideRepo(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	gx := runeLen(sidebarHeaderExplorer) + sidebarHeaderGap
-	if zone := a.sidebarHeaderHit(gx); zone != "" {
+	if zone := a.sidebarHeaderHit(gx, defaultSidebarWidth-1); zone != "" {
 		t.Fatalf("non-repo GIT tab hit = %q, want none", zone)
 	}
 }
