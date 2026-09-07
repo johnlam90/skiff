@@ -439,3 +439,57 @@ func TestRender_TableInsideQuoteKeepsGutter(t *testing.T) {
 		t.Fatalf("table content missing: %q", lines)
 	}
 }
+
+// TestRenderWide_BlocksUseThePaneNotTheMeasure pins the two-width
+// contract: prose wraps at the measure while a table and a code block
+// that fit the wider pane budget keep every cell whole, and never exceed
+// that budget. Render (one width) stays the strict form.
+func TestRenderWide_BlocksUseThePaneNotTheMeasure(t *testing.T) {
+	cell := strings.Repeat("c", 60)
+	code := strings.Repeat("k", 70)
+	src := strings.Repeat("word ", 30) + "\n\n| a | b |\n|---|---|\n| " + cell + " | z |\n\n```\n" + code + "\n```\n"
+	lines, _ := RenderWide([]byte(src), 40, 100, theme.Default())
+	sawCell, sawCode := false, false
+	for _, l := range lines {
+		w := textdraw.Width(l)
+		if w > 100 {
+			t.Fatalf("line %q is %d cells, over the wide budget", l, w)
+		}
+		switch {
+		case strings.Contains(l, cell):
+			sawCell = true
+		case strings.Contains(l, code):
+			sawCode = true
+		case strings.ContainsAny(l, "│─▏"):
+			// The rest of the table (header, rule) and the code block's
+			// rail rows share the wide budget with the cells above.
+		case w > 40:
+			t.Fatalf("prose line %q is %d cells, over the 40-cell measure", l, w)
+		}
+	}
+	if !sawCell || !sawCode {
+		t.Fatalf("table cell whole=%v, code line whole=%v; both should use the wide budget", sawCell, sawCode)
+	}
+	strict, _ := Render([]byte(src), 40, theme.Default())
+	for _, l := range strict {
+		if w := textdraw.Width(l); w > 40 {
+			t.Fatalf("Render at one width let %q run to %d cells", l, w)
+		}
+	}
+}
+
+// TestRender_ThematicBreakSpansTheColumn pins the rule's width: a `---`
+// is a row of the full content width, not a fixed forty cells that
+// stops halfway across a wider column.
+func TestRender_ThematicBreakSpansTheColumn(t *testing.T) {
+	lines, _ := Render([]byte("above\n\n---\n\nbelow\n"), 72, theme.Default())
+	for _, l := range lines {
+		if strings.HasPrefix(l, "─") {
+			if l != strings.Repeat("─", 72) {
+				t.Fatalf("rule = %q (%d cells), want 72 cells", l, textdraw.Width(l))
+			}
+			return
+		}
+	}
+	t.Fatal("no rule row rendered")
+}

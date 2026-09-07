@@ -348,7 +348,7 @@ func TestPreviewMarkdown_DragSelectCopiesRenderedText(t *testing.T) {
 	a.menuTogglePreviewMarkdown()
 	li, y := previewLineAt(t, a, tab, "alpha beta gamma")
 	st := a.mdPreview[tab]
-	ex, _ := a.mdPreviewGeom()
+	ex, _, _ := a.mdPreviewGeom()
 	x0 := ex + strings.Index(st.lines[li], "alpha")
 	x1 := ex + strings.Index(st.lines[li], "beta") + len("beta")
 
@@ -374,7 +374,7 @@ func TestPreviewMarkdown_MultiLineDragJoins(t *testing.T) {
 	l1, y1 := previewLineAt(t, a, tab, "first words")
 	_, y2 := previewLineAt(t, a, tab, "second words")
 	st := a.mdPreview[tab]
-	ex, _ := a.mdPreviewGeom()
+	ex, _, _ := a.mdPreviewGeom()
 	x0 := ex + strings.Index(st.lines[l1], "words")
 	x1 := ex + len("second")
 
@@ -398,7 +398,7 @@ func TestPreviewMarkdown_SelectionHighlightAndClickClears(t *testing.T) {
 	a.menuTogglePreviewMarkdown()
 	li, y := previewLineAt(t, a, tab, "selectable")
 	st := a.mdPreview[tab]
-	ex, _ := a.mdPreviewGeom()
+	ex, _, _ := a.mdPreviewGeom()
 	x0 := ex + strings.Index(st.lines[li], "selectable")
 
 	a.handleMouse(tcell.NewEventMouse(x0, y, tcell.Button1, tcell.ModNone))
@@ -427,31 +427,45 @@ func TestPreviewMarkdown_SelectionHighlightAndClickClears(t *testing.T) {
 	}
 }
 
-// TestPreviewMarkdown_ClampsMeasureAndCentres pins the wide-terminal
-// rule: on a 200-column editor the document is wrapped at
-// mdPreviewMaxWidth rather than 197 cells, painted centred in the room
-// the cap leaves, and the drag hit-test uses the same origin as the
-// paint — so select-to-copy still lands on the words under the pointer
-// when the text is not flush left.
-func TestPreviewMarkdown_ClampsMeasureAndCentres(t *testing.T) {
+// TestPreviewMarkdown_ClampsMeasureLeftAligned pins the wide-terminal
+// rule: on a 200-column editor prose is wrapped at mdPreviewMaxWidth
+// rather than 197 cells, the column starts a fixed gutter past the
+// editor's edge rather than centred a screen-width from the sidebar,
+// tables may run out to the pane's width, and the drag hit-test uses
+// the same origin as the paint — so select-to-copy still lands on the
+// words under the pointer when the text is not flush left.
+func TestPreviewMarkdown_ClampsMeasureLeftAligned(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	resizeTestApp(t, a, 200, 40)
 	a.sidebarShown = false
-	tab := seedMarkdownTab(t, a, "notes.md", strings.Repeat("word ", 60)+"\n")
+	wideCell := strings.Repeat("x", 120)
+	src := strings.Repeat("word ", 60) + "\n\n| a | b |\n|---|---|\n| " + wideCell + " | y |\n"
+	tab := seedMarkdownTab(t, a, "notes.md", src)
 	a.menuTogglePreviewMarkdown()
 	st := a.mdPreview[tab]
 	if st.width != mdPreviewMaxWidth {
 		t.Fatalf("wrap width = %d, want the %d cap", st.width, mdPreviewMaxWidth)
 	}
+	ex, _, ew, _ := a.editorRect()
+	contentX, contentW, wideW := a.mdPreviewGeom()
+	if contentX != ex+1+mdPreviewGutter || contentW != mdPreviewMaxWidth || wideW != ew-3-mdPreviewGutter {
+		t.Fatalf("geom x=%d w=%d wide=%d, want x=%d w=%d wide=%d", contentX, contentW, wideW,
+			ex+1+mdPreviewGutter, mdPreviewMaxWidth, ew-3-mdPreviewGutter)
+	}
+	sawWideTable := false
 	for _, l := range st.lines {
-		if w := textdraw.Width(l); w > mdPreviewMaxWidth {
-			t.Fatalf("line %q is %d cells, over the cap", l, w)
+		w := textdraw.Width(l)
+		if w > wideW {
+			t.Fatalf("line %q is %d cells, over the pane budget %d", l, w, wideW)
+		}
+		if strings.Contains(l, wideCell) {
+			sawWideTable = true
+		} else if !strings.ContainsAny(l, "│─") && w > mdPreviewMaxWidth {
+			t.Fatalf("prose line %q is %d cells, over the %d measure", l, w, mdPreviewMaxWidth)
 		}
 	}
-	ex, _, ew, _ := a.editorRect()
-	contentX, contentW := a.mdPreviewGeom()
-	if contentW != mdPreviewMaxWidth || contentX <= ex+1 || contentX+contentW >= ex+ew-1 {
-		t.Fatalf("content column x=%d w=%d is not centred inside the editor [%d,%d)", contentX, contentW, ex, ex+ew)
+	if !sawWideTable {
+		t.Fatal("a table that fits the pane must not be ellipsised to the prose measure")
 	}
 	a.draw()
 	scr := a.screen.(tcell.SimulationScreen)
@@ -476,8 +490,8 @@ func TestPreviewMarkdown_ClampsMeasureAndCentres(t *testing.T) {
 	}
 }
 
-// TestPreviewMarkdown_HitAtCentredOriginIsColumnZero pins the hit-test
-// against the paint on a centred document, row by row: a press on the
+// TestPreviewMarkdown_HitAtGutteredOriginIsColumnZero pins the hit-test
+// against the paint on a document set off by the gutter, row by row: a press on the
 // first content cell maps to column 0 of the rendered line, whether
 // that cell is prose, a code row's rail or an H1 rule — the rows the
 // heading scheme and the code rectangle added — and the glyph painted
@@ -485,7 +499,7 @@ func TestPreviewMarkdown_ClampsMeasureAndCentres(t *testing.T) {
 // the origin clamps to column 0 rather than going negative, and one
 // three cells in lands on column 3, so select-to-copy addresses the
 // text under the pointer and not the text shifted by the margin.
-func TestPreviewMarkdown_HitAtCentredOriginIsColumnZero(t *testing.T) {
+func TestPreviewMarkdown_HitAtGutteredOriginIsColumnZero(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	resizeTestApp(t, a, 200, 40)
 	a.sidebarShown = false
@@ -493,9 +507,9 @@ func TestPreviewMarkdown_HitAtCentredOriginIsColumnZero(t *testing.T) {
 	a.menuTogglePreviewMarkdown()
 	st := a.mdPreview[tab]
 	ex, _, _, _ := a.editorRect()
-	contentX, _ := a.mdPreviewGeom()
-	if contentX <= ex+1 {
-		t.Fatalf("content origin %d is not centred past the editor edge %d", contentX, ex)
+	contentX, _, _ := a.mdPreviewGeom()
+	if contentX != ex+1+mdPreviewGutter {
+		t.Fatalf("content origin %d should sit one gutter past the editor edge %d", contentX, ex)
 	}
 	a.draw()
 	scr := a.screen.(tcell.SimulationScreen)

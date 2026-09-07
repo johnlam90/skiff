@@ -45,16 +45,31 @@ const (
 )
 
 // Render converts markdown source into terminal lines wrapped to width
-// cells, with one tcell.Style per rune of every line. The theme drives
-// all coloring; width under 4 is clamped so degenerate panes still get
-// output instead of a panic.
+// (prose measure and block budget alike). See RenderWide for the two-width
+// form the preview uses; this one-width form is what a caller with no
+// spare room wants, and what every existing test pins.
 func Render(src []byte, width int, th theme.Theme) ([]string, [][]tcell.Style) {
+	return RenderWide(src, width, width, th)
+}
+
+// RenderWide converts markdown source into terminal lines: prose wraps
+// at width (the measure — text past ~100 cells is hard to track from
+// one line to the next), while tables, code blocks and their rules may
+// run out to wide, the room the pane actually has. A table that fits
+// the pane is never ellipsised to satisfy the prose measure. Styles are
+// parallel to lines and carry all coloring; a width under 4 is clamped
+// so degenerate panes still get output, and wide never goes under
+// width.
+func RenderWide(src []byte, width, wide int, th theme.Theme) ([]string, [][]tcell.Style) {
 	if width < 4 {
 		width = 4
 	}
+	if wide < width {
+		wide = width
+	}
 	doc := goldmark.New(goldmark.WithExtensions(extension.GFM)).
 		Parser().Parse(gmtext.NewReader(src))
-	r := &renderer{src: src, th: th, width: width}
+	r := &renderer{src: src, th: th, width: width, wide: wide}
 	for c := doc.FirstChild(); c != nil; c = c.NextSibling() {
 		r.block(c, "", r.base())
 		r.blank()
@@ -75,6 +90,10 @@ type renderer struct {
 	src   []byte
 	th    theme.Theme
 	width int
+	// wide is the block budget: what tables, code blocks and their
+	// rules may use. At least width; larger when the pane has room the
+	// prose measure deliberately leaves unused.
+	wide int
 
 	lines  []string
 	styles [][]tcell.Style
@@ -133,7 +152,7 @@ func (r *renderer) block(n ast.Node, hang string, st tcell.Style) {
 	case *ast.CodeBlock:
 		r.codeLines(rawLines(r.src, n), nil)
 	case *ast.ThematicBreak:
-		r.emitLine(strings.Repeat("─", min(r.contentWidth(), 40)), r.dim())
+		r.emitLine(strings.Repeat("─", r.contentWidth()), r.dim())
 	case *ast.HTMLBlock:
 		// Raw HTML has no terminal rendering; show it dimmed verbatim
 		// rather than silently dropping content.
@@ -318,7 +337,7 @@ func (r *renderer) codeLines(lines []string, grid [][]tcell.Style) {
 	surface := r.th.LineHL
 	plain := tcell.StyleDefault.Background(surface).Foreground(r.th.Text)
 	rail := tcell.StyleDefault.Background(surface).Foreground(r.th.Subtle)
-	textW := r.contentWidth() - 1 // the rail's cell
+	textW := r.blockWidth() - 1 // the rail's cell
 	if textW < 1 {
 		textW = 1
 	}
@@ -454,7 +473,7 @@ func (r *renderer) table(t *extast.Table, st tcell.Style) {
 		}
 		return s
 	}
-	for total() > r.contentWidth() {
+	for total() > r.blockWidth() {
 		wi, ww := -1, floor
 		for i, w := range widths {
 			if w > ww {
@@ -487,7 +506,7 @@ func (r *renderer) table(t *extast.Table, st tcell.Style) {
 		}
 		r.emitRow(runes, sts)
 		if ri == header {
-			r.emitLine(strings.Repeat("─", min(total(), r.contentWidth())), r.dim())
+			r.emitLine(strings.Repeat("─", min(total(), r.blockWidth())), r.dim())
 		}
 	}
 }
@@ -680,6 +699,16 @@ func (r *renderer) flushBlock() {
 // wrapped text does.
 func (r *renderer) contentWidth() int {
 	w := r.width - uniseg.StringWidth(string(r.indent))
+	if w < 1 {
+		w = 1
+	}
+	return w
+}
+
+// blockWidth is the budget for a table or code block inside the current
+// indent: wide minus the indent, never under one cell.
+func (r *renderer) blockWidth() int {
+	w := r.wide - uniseg.StringWidth(string(r.indent))
 	if w < 1 {
 		w = 1
 	}

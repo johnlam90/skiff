@@ -38,6 +38,10 @@ type mdPreviewState struct {
 	lines  []string
 	styles [][]tcell.Style
 	width  int
+	// wide is the block budget the grid was rendered with; a resize
+	// that changes only the spare room past the measure still moves
+	// table and code widths, so it invalidates like width does.
+	wide   int
 	scroll int
 	// th is the theme the style grid was rendered with. The grid bakes
 	// colors in, so a theme change (the picker previews live) must
@@ -126,41 +130,43 @@ func (a *App) previewMarkdownLabel() string {
 	return "Preview Markdown"
 }
 
-// mdPreviewMaxWidth caps the preview's measure. Prose past roughly
-// eighty cells is hard to track from one line to the next; a 200-column
-// terminal used to wrap the document at 197. The document is centred
-// in whatever room the editor has beyond the cap.
-const mdPreviewMaxWidth = 80
+// mdPreviewMaxWidth caps the preview's prose measure. Text past roughly
+// a hundred cells is hard to track from one line to the next; a
+// 200-column terminal used to wrap the document at 197. Tables and code
+// blocks are not prose and may use the whole pane (mdPreviewGeom's
+// wide) — a table that fits the terminal is never ellipsised to satisfy
+// the measure.
+const mdPreviewMaxWidth = 100
+
+// mdPreviewGutter is the fixed left gutter between the editor's edge
+// and the document. The column used to be centred in the pane, which
+// on a wide terminal put the text a screen-width away from the sidebar
+// it belongs with; a small fixed gutter reads like the editor's own
+// line-number column.
+const mdPreviewGutter = 2
 
 // mdPreviewGeom returns the preview's content column: the x the text
-// starts at and the width it is wrapped to. The width is the editor
-// rect minus one column of left padding, one for the scrollbar and one
-// of right breathing room, capped at mdPreviewMaxWidth; the text is
-// centred in the room the cap leaves. This is the ONE origin the paint
-// (drawMdPreview) and the hit-test (mdPreviewHit) share, so what is
-// clicked is what was painted even when the document is centred.
-func (a *App) mdPreviewGeom() (contentX, contentW int) {
+// starts at, the width prose is wrapped to (capped at
+// mdPreviewMaxWidth), and the wider budget tables and code blocks may
+// run out to. The room is the editor rect minus one column of left
+// padding, one for the scrollbar and one of right breathing space; the
+// gutter is spent only when there is room to spare. This is the ONE
+// origin the paint (drawMdPreview) and the hit-test (mdPreviewHit)
+// share, so what is clicked is what was painted.
+func (a *App) mdPreviewGeom() (contentX, contentW, wideW int) {
 	ex, _, ew, _ := a.editorRect()
 	room := ew - 3
-	contentW = room
-	if contentW > mdPreviewMaxWidth {
-		contentW = mdPreviewMaxWidth
+	gutter := mdPreviewGutter
+	if room-gutter < mdPreviewMaxWidth/2 {
+		gutter = 0
 	}
-	if contentW < 4 {
-		contentW = 4
+	wideW = room - gutter
+	if wideW < 4 {
+		wideW = 4
 	}
-	contentX = ex + 1
-	if room > contentW {
-		contentX += (room - contentW) / 2
-	}
-	return contentX, contentW
-}
-
-// mdPreviewContentWidth is the wrap budget for the current editor rect
-// — mdPreviewGeom's width.
-func (a *App) mdPreviewContentWidth() int {
-	_, w := a.mdPreviewGeom()
-	return w
+	contentW = min(wideW, mdPreviewMaxWidth)
+	contentX = ex + 1 + gutter
+	return contentX, contentW, wideW
 }
 
 // renderMdPreview renders tab's buffer at the current width. The buffer
@@ -168,9 +174,9 @@ func (a *App) mdPreviewContentWidth() int {
 // document's own line ending is irrelevant to markdown, so the plain
 // LF join is correct here — nothing is ever written back.
 func (a *App) renderMdPreview(tab *editor.Tab) *mdPreviewState {
-	w := a.mdPreviewContentWidth()
-	lines, styles := mdrender.Render([]byte(tab.Buffer.String()), w, a.theme)
-	return &mdPreviewState{lines: lines, styles: styles, width: w, th: a.theme}
+	_, w, wide := a.mdPreviewGeom()
+	lines, styles := mdrender.RenderWide([]byte(tab.Buffer.String()), w, wide, a.theme)
+	return &mdPreviewState{lines: lines, styles: styles, width: w, wide: wide, th: a.theme}
 }
 
 // invalidateMdPreview re-renders tab's preview if one is active —
@@ -262,7 +268,7 @@ func (a *App) mdPreviewHit(st *mdPreviewState, x, y int) previewPos {
 	if line < 0 {
 		return previewPos{}
 	}
-	contentX, _ := a.mdPreviewGeom()
+	contentX, _, _ := a.mdPreviewGeom()
 	off := min(max(x-contentX, 0), ew)
 	col, acc := 0, 0
 	for _, ru := range st.lines[line] {
@@ -350,7 +356,7 @@ func (st *mdPreviewState) selRange(i int) (int, int) {
 // document is taller than the view, re-rendering first if the width
 // changed since the cache was built.
 func (a *App) drawMdPreview(tab *editor.Tab, st *mdPreviewState, x, y, w, h int) {
-	if st.width != a.mdPreviewContentWidth() || st.th != a.theme {
+	if _, w, wide := a.mdPreviewGeom(); st.width != w || st.wide != wide || st.th != a.theme {
 		fresh := a.renderMdPreview(tab)
 		fresh.scroll = st.scroll
 		*st = *fresh
@@ -367,7 +373,7 @@ func (a *App) drawMdPreview(tab *editor.Tab, st *mdPreviewState, x, y, w, h int)
 	// Text starts at the shared origin and may paint up to the
 	// scrollbar column; the wrapper already fit the budget, the clip
 	// only guards a narrower-than-cached frame mid-resize.
-	contentX, _ := a.mdPreviewGeom()
+	contentX, _, _ := a.mdPreviewGeom()
 	maxW := x + w - 1 - contentX
 	for row := 0; row < h; row++ {
 		i := st.scroll + row
