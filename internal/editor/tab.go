@@ -21,6 +21,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/atomicfile"
+	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -140,6 +141,17 @@ type Tab struct {
 	hlWinStart          int
 	hlWinEnd            int
 	lastHighlightHeight int
+	// hlPending marks Styles as a grid rebased across an edit — right
+	// enough to paint, waiting for the background re-lex (hlpatch.go).
+	// hlGen counts buffer generations so a landing result can tell
+	// whether it still describes the text; hlRequestedGen is the last
+	// generation a request went out for, so an idle frame does not
+	// re-request while one is in flight. editScratch is the reusable
+	// pre-edit line snapshot rebaseStyles diffs against.
+	hlPending      bool
+	hlGen          int
+	hlRequestedGen int
+	editScratch    []string
 
 	// Mtime is the file's modification time as of the last successful
 	// read or write. The app's periodic disk-reconcile loop compares it
@@ -611,9 +623,10 @@ func (t *Tab) SelectionText() string {
 // happen.
 func (t *Tab) edit(group undoGroup, mutate func()) {
 	t.pushUndo(group)
+	before := t.editLinesSnapshot()
 	mutate()
 	t.Dirty = true
-	t.StyleStale = true
+	t.rebaseStyles(before)
 	t.cursorMoved = true
 	// The sticky column belongs to a run of vertical moves; an edit ends
 	// the run the same way a horizontal motion does. Left valid, an
@@ -1185,28 +1198,33 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 	// near the window's edge). Inside the window, scrolling reuses the
 	// cache — re-lexing ~500 lines per wheel tick is what made
 	// scrolling crawl on remote machines.
+	// An edit inside the window does not come through here: it
+	// rebased the grid in place and asked for a background re-lex
+	// (hlpatch.go), which is what keeps a keystroke off the lexer.
 	if t.styleWindowStale(h) {
 		t.Styles, t.hlWinStart, t.hlWinEnd = HighlightWindow(t.Path, t.Buffer.Lines, t.ScrollY, h, th)
 		t.StyleStale = false
 		t.lastHighlightHeight = h
+		// This grid is exact and newer than anything in flight.
+		t.hlPending = false
+		t.hlRequestedGen = t.hlGen
 	}
 
 	bg := th.BG
 	bgStyle := tcell.StyleDefault.Background(bg).Foreground(th.Text)
 
-	// Paint the entire editor rectangle with the base background first so
-	// any cells we don't draw (short lines, blank rows) still get themed.
-	for cy := y; cy < y+h; cy++ {
-		for cx := x; cx < x+w; cx++ {
-			scr.SetContent(cx, cy, ' ', nil, bgStyle)
-		}
-	}
+	// Every cell in the rect is painted exactly once per frame: each row
+	// lays down its own gutter, glyphs and trailing pad, and the rows
+	// past the end of the buffer are filled below. A whole-rect base
+	// fill here used to precede a per-row refill and then the glyphs —
+	// three tcell writes per cell, each an allocation and a lock, which
+	// was the bulk of an idle frame on a remote box.
 
 	// Wrap mode draws its own body (wrapped rows, gutter, cursor) and
 	// shares everything above (scroll upkeep, highlight window, base
 	// paint) plus the scrollbar below with the line path.
 	if t.Wrap {
-		t.renderWrappedBody(scr, th, x, y, w, h)
+		t.renderWrappedBody(scr, th, x, y, w, h, bgStyle)
 		if barVisible {
 			t.renderScrollbar(scr, th, barX, y, h)
 		}
@@ -1223,7 +1241,8 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		contentW = 1
 	}
 
-	for row := 0; row < h; row++ {
+	row := 0
+	for ; row < h; row++ {
 		lineIdx := t.ScrollY + row
 		if lineIdx >= t.Buffer.LineCount() {
 			break
@@ -1243,25 +1262,23 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 			lineBgStyle = theme.WithAttrs(lineBgStyle.Background(lineBg), th.Attrs.CursorLine)
 		}
 
-		// Re-paint this row with its (possibly highlighted) bg.
-		for cx := x; cx < x+w; cx++ {
-			scr.SetContent(cx, cy, ' ', nil, lineBgStyle)
-		}
-
 		// Gutter / line number, right-aligned with one trailing space.
+		// The gutter's blank cells are laid down first; the number and
+		// marker overwrite the few they occupy.
+		textdraw.Fill(scr, x, cy, contentX-x, 1, lineBgStyle)
 		numStr := fmt.Sprintf("%*d", gw-1, lineIdx+1)
 		gutterStyle := tcell.StyleDefault.Background(lineBg).Foreground(th.Muted)
 		if isCursorLine {
 			gutterStyle = gutterStyle.Foreground(th.AccentSoft)
 		}
 		if marker, ok := t.GitLines[lineIdx]; ok && marker != GitLineNone {
-			scr.SetContent(x, cy, gitLineMarkerRune(marker), nil, gutterStyle.Foreground(gitLineMarkerColor(th, marker)))
+			textdraw.Cell(scr, x, cy, gitLineMarkerRune(marker), nil, gutterStyle.Foreground(gitLineMarkerColor(th, marker)))
 		}
 		for i, r := range numStr {
 			if i == 0 && t.GitLines[lineIdx] != GitLineNone {
 				continue
 			}
-			scr.SetContent(x+i, cy, r, nil, gutterStyle)
+			textdraw.Cell(scr, x+i, cy, r, nil, gutterStyle)
 		}
 
 		// Line content, with syntax styles, selection bg, and line bg.
@@ -1301,15 +1318,20 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 					// area under a wide glyph or a tab still gets the row
 					// background.
 					if cell > 0 {
-						scr.SetContent(contentX+sc, cy, ' ', nil, st)
+						textdraw.Cell(scr, contentX+sc, cy, ' ', nil, st)
 						continue
 					}
-					scr.SetContent(contentX+sc, cy, glyph, comb, st)
+					textdraw.Cell(scr, contentX+sc, cy, glyph, comb, st)
 				}
 			}
 			visualCol += width
 			runeIdx = next
 		}
+		// Pad from the last content cell to the edge with the row's own
+		// background: clusters tile the visual columns contiguously, so
+		// every cell before this point is already painted.
+		painted := min(max(visualCol-scrollVisual, 0), contentW)
+		textdraw.Fill(scr, contentX+painted, cy, x+w-contentX-painted, 1, lineBgStyle)
 
 		// Overflow affordance: paint a muted '‹' / '›' over the leftmost /
 		// rightmost content cell when the line extends past the viewport
@@ -1320,12 +1342,14 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		// corresponding to ScrollX.
 		overflowStyle := tcell.StyleDefault.Background(lineBg).Foreground(th.Muted)
 		if t.ScrollX > 0 {
-			scr.SetContent(contentX, cy, '‹', nil, overflowStyle)
+			textdraw.Cell(scr, contentX, cy, '‹', nil, overflowStyle)
 		}
 		if visualCol-scrollVisual > contentW {
-			scr.SetContent(contentX+contentW-1, cy, '›', nil, overflowStyle)
+			textdraw.Cell(scr, contentX+contentW-1, cy, '›', nil, overflowStyle)
 		}
 	}
+	// Rows past the end of the buffer carry the plain editor background.
+	textdraw.Fill(scr, x, y+row, w, h-row, bgStyle)
 
 	if barVisible {
 		t.renderScrollbar(scr, th, barX, y, h)

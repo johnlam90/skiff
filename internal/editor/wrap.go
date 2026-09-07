@@ -26,6 +26,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -360,7 +361,7 @@ func (t *Tab) hitTestWrapped(localX, localY, w, h int) (Position, bool) {
 // content rows, cursor) into (x, y, w, h). The caller has already
 // reserved the scrollbar column, painted the base background, refreshed
 // the highlight window, and normalized the anchor via clampScrollWrapped.
-func (t *Tab) renderWrappedBody(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
+func (t *Tab) renderWrappedBody(scr tcell.Screen, th theme.Theme, x, y, w, h int, bgStyle tcell.Style) {
 	bg := th.BG
 	selStart, selEnd := PosOrdered(t.Anchor, t.Cursor)
 	hasSel := t.HasSelection()
@@ -397,12 +398,12 @@ func (t *Tab) renderWrappedBody(scr tcell.Screen, th theme.Theme, x, y, w, h int
 
 		for ; seg < len(segs) && row < h; seg++ {
 			cy := y + row
-			// Re-paint this row with its (possibly highlighted) bg. The
-			// cursor-line tint covers every segment of the logical line so
-			// a wrapped cursor line still reads as one unit.
-			for cx := x; cx < x+w; cx++ {
-				scr.SetContent(cx, cy, ' ', nil, lineBgStyle)
-			}
+			// The gutter's blank cells go down first in the row's bg —
+			// the cursor-line tint covers every segment of the logical
+			// line so a wrapped cursor line still reads as one unit —
+			// and the number and marker overwrite the few they occupy.
+			// Each cell is painted once; see Render for why.
+			textdraw.Fill(scr, x, cy, contentX-x, 1, lineBgStyle)
 
 			// Gutter: line number and git marker on the line's first row
 			// only. Continuation rows keep a blank gutter, which is what
@@ -414,13 +415,13 @@ func (t *Tab) renderWrappedBody(scr tcell.Screen, th theme.Theme, x, y, w, h int
 					gutterStyle = gutterStyle.Foreground(th.AccentSoft)
 				}
 				if marker, ok := t.GitLines[line]; ok && marker != GitLineNone {
-					scr.SetContent(x, cy, gitLineMarkerRune(marker), nil, gutterStyle.Foreground(gitLineMarkerColor(th, marker)))
+					textdraw.Cell(scr, x, cy, gitLineMarkerRune(marker), nil, gutterStyle.Foreground(gitLineMarkerColor(th, marker)))
 				}
 				for i, r := range numStr {
 					if i == 0 && t.GitLines[line] != GitLineNone {
 						continue
 					}
-					scr.SetContent(x+i, cy, r, nil, gutterStyle)
+					textdraw.Cell(scr, x+i, cy, r, nil, gutterStyle)
 				}
 			}
 
@@ -443,14 +444,18 @@ func (t *Tab) renderWrappedBody(scr tcell.Screen, th theme.Theme, x, y, w, h int
 					// cluster's first cell; the rest are blanks that carry
 					// the row background under a wide glyph's second half.
 					if cell > 0 {
-						scr.SetContent(contentX+sc, cy, ' ', nil, st)
+						textdraw.Cell(scr, contentX+sc, cy, ' ', nil, st)
 						continue
 					}
-					scr.SetContent(contentX+sc, cy, glyph, comb, st)
+					textdraw.Cell(scr, contentX+sc, cy, glyph, comb, st)
 				}
 				visualCol += width
 				j = next
 			}
+			// Pad the rest of the row with its background — the segment's
+			// clusters tile the columns before it contiguously.
+			painted := min(visualCol, contentW)
+			textdraw.Fill(scr, contentX+painted, cy, x+w-contentX-painted, 1, lineBgStyle)
 
 			if isCursorLine && WrapRowOfCol(segs, t.Cursor.Col) == seg {
 				cCol := LineVisualCol(runes[start:end], t.Cursor.Col-start)
@@ -466,6 +471,9 @@ func (t *Tab) renderWrappedBody(scr tcell.Screen, th theme.Theme, x, y, w, h int
 		}
 		seg = 0
 	}
+
+	// Rows past the end of the buffer carry the plain editor background.
+	textdraw.Fill(scr, x, y+row, w, h-row, bgStyle)
 
 	if cursorX >= 0 {
 		scr.ShowCursor(cursorX, cursorY)

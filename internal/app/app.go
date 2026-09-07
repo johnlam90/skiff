@@ -376,6 +376,13 @@ type App struct {
 	// synchronous tree mutation calls so a sweep read before a delete
 	// cannot resurrect the file.
 	treeScan asyncjob.Job[treeScanResult]
+	// highlight is the background re-tokenise an edit asks for
+	// (hlpatch.go in editor): Coalesce, so a burst of keystrokes keeps
+	// ONE lex running and one follow-up queued — never a goroutine per
+	// key competing with the loop for a small remote box's core. Only
+	// the newest generation's landing is applied; ApplyHighlight
+	// drops the rest.
+	highlight asyncjob.Job[highlightResult]
 	// gitStatus is the status collection behind the tree tint and the
 	// gutters (gitstatus.go): Coalesce, textually the same burst rule
 	// as treeScan.
@@ -717,6 +724,7 @@ func newApp(scr tcell.Screen, rootDir string, tree *filetree.Tree, sidebarShown 
 // else; the field comments on App say why each one holds.
 func (a *App) wireJobs() {
 	wireJob(a, &a.treeScan, "tree-scan", asyncjob.Coalesce, a.handleTreeScan)
+	wireJob(a, &a.highlight, "highlight", asyncjob.Coalesce, a.handleHighlightDone)
 	wireJob(a, &a.gitStatus, "git-status", asyncjob.Coalesce, a.handleGitStatus)
 	wireJob(a, &a.diffLoad, "diff-load", asyncjob.Supersede, a.handleDiffLoaded)
 	wireJob(a, &a.fileOp, "file-op", asyncjob.Refuse, a.handleFileOpDone)

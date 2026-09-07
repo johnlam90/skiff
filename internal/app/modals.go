@@ -21,6 +21,8 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/textdraw"
+
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/overlay"
 )
@@ -260,11 +262,7 @@ func (a *App) openPopup(items []overlay.PopupItem, x, y int) {
 // fillRect paints a rectangle of (w x h) cells starting at (x, y) with the
 // given style.
 func fillRect(scr tcell.Screen, x, y, w, h int, st tcell.Style) {
-	for cy := y; cy < y+h; cy++ {
-		for cx := x; cx < x+w; cx++ {
-			scr.SetContent(cx, cy, ' ', nil, st)
-		}
-	}
+	textdraw.Fill(scr, x, y, w, h, st)
 }
 
 // drawButton renders a "button" — really just bracketed label — at (x, y).
@@ -278,7 +276,7 @@ func drawButton(scr tcell.Screen, x, y int, label string, modalBG tcell.Color, f
 	}
 	col := 0
 	for _, r := range label {
-		scr.SetContent(x+col, y, r, nil, st)
+		textdraw.Cell(scr, x+col, y, r, nil, st)
 		col++
 	}
 }

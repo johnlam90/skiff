@@ -76,13 +76,14 @@ func ClipEllipsis(s string, maxW int) string {
 }
 
 // DrawClipped paints s at (x, y) clipped to maxW cells and returns the
-// x just past the last cell painted. Each cluster is emitted as one
-// SetContent call — primary rune plus the cluster's remaining runes as
-// combining content — then its width is skipped, which is how tcell
-// expects wide/combined glyphs to be laid down. Drawing stops before a
-// cluster that would cross the budget; a zero-width cluster with no base
-// cell to attach to (a bare combining mark) is skipped rather than
-// overdrawing the previous cell.
+// x just past the last cell painted. Each cluster is handed to Put as
+// the substring it already is — tcell's SetContent would only rebuild
+// that same string from a rune slice, two allocations per cell that a
+// full-screen paint pays ten thousand times — then its width is
+// skipped, which is how tcell expects wide/combined glyphs to be laid
+// down. Drawing stops before a cluster that would cross the budget; a
+// zero-width cluster with no base cell to attach to (a bare combining
+// mark) is skipped rather than overdrawing the previous cell.
 func DrawClipped(scr tcell.Screen, x, y, maxW int, s string, st tcell.Style) int {
 	if maxW <= 0 {
 		return x
@@ -99,12 +100,46 @@ func DrawClipped(scr tcell.Screen, x, y, maxW int, s string, st tcell.Style) int
 		if cw == 0 {
 			continue
 		}
-		rs := []rune(cluster)
-		scr.SetContent(x, y, rs[0], rs[1:], st)
+		scr.Put(x, y, cluster, st)
 		x += cw
 		budget -= cw
 	}
 	return x
+}
+
+// asciiCell is the one-byte string for each ASCII rune, so painting a
+// space or a letter never allocates: Put wants a string, and building
+// one from a rune per cell is the allocation that dominated an idle
+// frame's profile.
+var asciiCell = func() (t [128]string) {
+	for i := range t {
+		t[i] = string(rune(i))
+	}
+	return
+}()
+
+// Cell paints one glyph plus its combining runes at (x, y). It is the
+// alloc-free stand-in for scr.SetContent: the ASCII fast path hands Put
+// a cached string, and only a non-ASCII or combined cluster builds one.
+// Semantics are SetContent's exactly — both end in CellBuffer.Put — so
+// a wide glyph still dirties the cell beside it.
+func Cell(scr tcell.Screen, x, y int, r rune, comb []rune, st tcell.Style) {
+	if r >= 0 && r < 128 && len(comb) == 0 {
+		scr.Put(x, y, asciiCell[r], st)
+		return
+	}
+	scr.Put(x, y, string(append([]rune{r}, comb...)), st)
+}
+
+// Fill paints the rectangle (x, y, w, h) with spaces in st. It is the
+// cheap way to lay a background under a panel before its text goes on
+// top; a non-positive width or height paints nothing.
+func Fill(scr tcell.Screen, x, y, w, h int, st tcell.Style) {
+	for cy := y; cy < y+h; cy++ {
+		for cx := x; cx < x+w; cx++ {
+			scr.Put(cx, cy, " ", st)
+		}
+	}
 }
 
 // WrapWords breaks s into lines of at most maxW cells, greedy at spaces

@@ -10,6 +10,8 @@ package filetree
 import (
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/textdraw"
+
 	"github.com/johnlam90/skiff/internal/scrollbar"
 	"github.com/johnlam90/skiff/internal/theme"
 )
@@ -98,6 +100,6 @@ func (t *Tree) renderScrollbar(scr tcell.Screen, th theme.Theme, x, y, listH int
 		if row >= thumbStart && row < thumbStart+thumbLen {
 			r, st = scrollbar.Thumb, thumbStyle
 		}
-		scr.SetContent(x, y+row, r, nil, st)
+		textdraw.Cell(scr, x, y+row, r, nil, st)
 	}
 }

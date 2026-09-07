@@ -856,8 +856,11 @@ func TestTab_EveryMutatorGoesThroughEdit(t *testing.T) {
 			if !tab.Dirty {
 				t.Error("Dirty not set — the tab would close without a save prompt")
 			}
-			if !tab.StyleStale {
-				t.Error("StyleStale not set — the highlight cache would paint the old text")
+			// The trailer either rebased the grid and left it pending a
+			// background re-lex, or fell back to a synchronous one; a
+			// cache still claiming to be exact would paint the old text.
+			if !tab.StyleStale && !tab.HighlightPending() {
+				t.Error("neither StyleStale nor HighlightPending set — the highlight cache would paint the old text")
 			}
 			if !tab.CanUndo() {
 				t.Error("no undo entry pushed — the edit is unrecoverable")
@@ -2908,5 +2911,58 @@ func TestTab_InsertRune_ClosingBracketDedents(t *testing.T) {
 	opener.InsertRune('{')
 	if got := opener.Buffer.Lines[0]; got != "    {" {
 		t.Fatalf("an opener is never re-indented, got %q", got)
+	}
+}
+
+// TestRender_PaintsEveryCell pins the single-paint contract: with the
+// whole-rect base fill gone, each row must lay down its own gutter,
+// glyphs and trailing pad, and the rows past the buffer's end must be
+// filled too. A sentinel style seeded before the paint catches any cell
+// the pass skips — in the line path, the wrap path, with the scrollbar
+// column reserved, and scrolled sideways past a wide glyph.
+func TestRender_PaintsEveryCell(t *testing.T) {
+	sentinel := tcell.StyleDefault.Foreground(tcell.Color123).Background(tcell.Color45)
+	th := theme.Default()
+	shapes := []struct {
+		name  string
+		text  string
+		wrap  bool
+		w, h  int
+		scrlX int
+	}{
+		{"short file, line path", "package x\n\nfunc main() {}\n", false, 40, 10, 0},
+		{"short file, wrap path", "package x\n\nfunc main() {}\n", true, 40, 10, 0},
+		{"long file with scrollbar", strings.Repeat("line of text here\n", 80), false, 40, 10, 0},
+		{"long file wrapped", strings.Repeat("a fairly long line that must wrap around the pane\n", 40), true, 30, 10, 0},
+		{"scrolled past a wide glyph", "世界 hello world 世界 more text past the edge of the pane\n", false, 30, 4, 1},
+	}
+	for _, sh := range shapes {
+		t.Run(sh.name, func(t *testing.T) {
+			scr := tcell.NewSimulationScreen("UTF-8")
+			if err := scr.Init(); err != nil {
+				t.Fatal(err)
+			}
+			defer scr.Fini()
+			scr.SetSize(sh.w+4, sh.h+4)
+			scr.Fill('#', sentinel)
+			tab, _ := NewTab("")
+			tab.Path = "x.go"
+			tab.Buffer = NewBuffer(sh.text)
+			tab.Wrap = sh.wrap
+			tab.ScrollX = sh.scrlX
+			tab.Render(scr, th, 2, 2, sh.w, sh.h)
+			scr.Show()
+			cells, cw, _ := scr.GetContents()
+			for i, c := range cells {
+				x, y := i%cw, i/cw
+				inside := x >= 2 && x < 2+sh.w && y >= 2 && y < 2+sh.h
+				if inside && c.Style == sentinel {
+					t.Fatalf("cell (%d,%d) never painted", x, y)
+				}
+				if !inside && c.Style != sentinel {
+					t.Fatalf("cell (%d,%d) outside the rect was painted", x, y)
+				}
+			}
+		})
 	}
 }

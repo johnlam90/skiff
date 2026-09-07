@@ -312,6 +312,10 @@ func TestDraw_AllPanels(t *testing.T) {
 	// Tiny window → the resize message replaces every panel. At five
 	// columns even the short label is clipped, but something legible has
 	// to land: a blank red screen says nothing at all.
+	// The screen shrinks with the app: width/height only ever come from
+	// a resize event, and draw() repaints exactly the screen it is told
+	// about rather than clearing cells that no longer exist.
+	a.screen.(tcell.SimulationScreen).SetSize(5, 5)
 	a.width, a.height = 5, 5
 	a.draw()
 	paints("tiny window", "Too s") // "Too small", clipped to 5 columns
@@ -1738,6 +1742,58 @@ func TestDraw_PrefabFramesAdvertiseEnter(t *testing.T) {
 			a.screen.Show()
 			if !screenHasText(t, a, c.want) {
 				t.Errorf("%s frame never painted %q", c.name, c.want)
+			}
+		})
+	}
+}
+
+// TestDraw_PaintsEveryCell is the fence behind draw() no longer
+// clearing the screen: every layout shape must repaint every cell each
+// frame, or a stale glyph from the previous frame survives where the
+// old Clear used to erase it. The screen is seeded with a sentinel
+// style before each paint and any cell still carrying it fails.
+func TestDraw_PaintsEveryCell(t *testing.T) {
+	sentinel := tcell.StyleDefault.Foreground(tcell.Color123).Background(tcell.Color45)
+	dir := t.TempDir()
+	goFile := filepath.Join(dir, "main.go")
+	mdFile := filepath.Join(dir, "README.md")
+	os.WriteFile(goFile, []byte("package main\n\nfunc main() {}\n"), 0o644)
+	os.WriteFile(mdFile, []byte("# Title\n\nSome *text* here.\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "tall.txt"), []byte(strings.Repeat("row\n", 200)), 0o644)
+
+	shapes := []struct {
+		name  string
+		w, h  int
+		setup func(a *App)
+	}{
+		{"empty editor", 120, 40, func(a *App) {}},
+		{"file open, line path", 120, 40, func(a *App) { a.openFile(goFile); a.activeTabPtr().Wrap = false }},
+		{"file open, wrapped", 120, 40, func(a *App) { a.openFile(goFile) }},
+		{"tall file with scrollbar", 120, 40, func(a *App) { a.openFile(filepath.Join(dir, "tall.txt")) }},
+		{"sidebar hidden", 120, 40, func(a *App) { a.openFile(goFile); a.menuToggleSidebar() }},
+		{"git panel", 120, 40, func(a *App) { a.openFile(goFile); a.showGitPanel() }},
+		{"markdown preview", 120, 40, func(a *App) { a.openFile(mdFile); a.menuTogglePreviewMarkdown() }},
+		{"find strip", 120, 40, func(a *App) { a.openFile(goFile); a.openFind() }},
+		{"flash strip", 120, 40, func(a *App) { a.openFile(goFile); a.flash("a message") }},
+		{"menu open", 120, 40, func(a *App) { a.openFile(goFile); a.openMenu() }},
+		{"minimum size", minWidth, minHeight, func(a *App) { a.openFile(goFile) }},
+		{"too small", minWidth - 1, minHeight, func(a *App) { a.openFile(goFile) }},
+	}
+	for _, sh := range shapes {
+		t.Run(sh.name, func(t *testing.T) {
+			a := newTestApp(t, dir)
+			scr := a.screen.(tcell.SimulationScreen)
+			scr.SetSize(sh.w, sh.h)
+			a.width, a.height = sh.w, sh.h
+			sh.setup(a)
+			scr.Fill('#', sentinel)
+			a.draw()
+			scr.Show()
+			cells, cw, _ := scr.GetContents()
+			for i, c := range cells {
+				if c.Style == sentinel {
+					t.Fatalf("cell (%d,%d) never painted", i%cw, i/cw)
+				}
 			}
 		})
 	}
