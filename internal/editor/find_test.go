@@ -808,3 +808,37 @@ func TestTab_FindAgain(t *testing.T) {
 		t.Fatal("a query that matches nothing reports false")
 	}
 }
+
+// TestFindAllInLines_MatchesPlainLines pins the lines-based door onto
+// the matcher: the markdown preview searches rendered lines that are
+// no Buffer, and it must get exactly the smart-case, non-overlapping,
+// rune-indexed answer FindAllWith gives a buffer of the same text.
+func TestFindAllInLines_MatchesPlainLines(t *testing.T) {
+	lines := []string{"alpha Beta gamma", "beta beta", "nothing"}
+	got := FindAllInLines(lines, "beta", FindOptions{})
+	want := []Match{{Line: 0, Col: 6, Width: 4}, {Line: 1, Col: 0, Width: 4}, {Line: 1, Col: 5, Width: 4}}
+	if len(got) != len(want) {
+		t.Fatalf("smart-case lowercase query got %d matches, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("match %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	// The same text through a Buffer must agree — one matcher, one answer.
+	buf := NewBuffer(strings.Join(lines, "\n"))
+	if viaBuf := FindAllWith(buf, "beta", FindOptions{}); len(viaBuf) != len(got) {
+		t.Fatalf("Buffer path found %d, lines path %d — the two must not disagree", len(viaBuf), len(got))
+	}
+	// An uppercase letter makes it exact.
+	if n := len(FindAllInLines(lines, "Beta", FindOptions{})); n != 1 {
+		t.Fatalf("uppercase query matched %d lines, want the one exact hit", n)
+	}
+	// MatchCase forces exact on an all-lowercase query.
+	if n := len(FindAllInLines(lines, "beta", FindOptions{MatchCase: true})); n != 2 {
+		t.Fatalf("MatchCase query matched %d, want the 2 lowercase hits", n)
+	}
+	if FindAllInLines(lines, "", FindOptions{}) != nil {
+		t.Fatal("an empty query must return nil, not an empty search")
+	}
+}

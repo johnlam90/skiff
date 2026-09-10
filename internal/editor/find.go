@@ -56,7 +56,20 @@ func FindAll(buf *Buffer, query string) []Match {
 // FindAllWith is FindAll with the toggles applied: MatchCase forces an
 // exact match whatever the query's own case says.
 func FindAllWith(buf *Buffer, query string, opts FindOptions) []Match {
-	if query == "" || buf == nil {
+	if buf == nil {
+		return nil
+	}
+	return FindAllInLines(buf.Lines, query, opts)
+}
+
+// FindAllInLines is the matcher itself, over plain lines rather than a
+// Buffer. The markdown preview searches its RENDERED lines — a []string
+// that is no buffer and never will be — and a second matcher over there
+// would be a second answer to "what does this query mean": the same
+// reason internal/search and this file share the smart-case rule. Line
+// indexes are into lines, Col and Width stay rune-indexed.
+func FindAllInLines(lines []string, query string, opts FindOptions) []Match {
+	if query == "" {
 		return nil
 	}
 	caseSensitive := opts.MatchCase || hasUpper(query)
@@ -68,7 +81,7 @@ func FindAllWith(buf *Buffer, query string, opts FindOptions) []Match {
 		lowerRunes(needle)
 	}
 	var out []Match
-	for lineIdx, raw := range buf.Lines {
+	for lineIdx, raw := range lines {
 		// Decoded here rather than through Buffer.LineRunes: the fold
 		// below writes in place and LineRunes hands out a shared slice.
 		hay := []rune(raw)
