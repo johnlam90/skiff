@@ -683,3 +683,38 @@ func TestMenuFindNext_RepeatsWithoutTheBar(t *testing.T) {
 		t.Fatal("find next must not reopen the bar")
 	}
 }
+
+// TestFindBar_RefusesReplaceOverPreview pins the read-only rule at the
+// bar's one door onto the replace field: the markdown preview is a
+// rendering with no offsets to write back through, so Tab must say so
+// instead of growing a field whose Enter could not do anything.
+func TestFindBar_RefusesReplaceOverPreview(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	seedMarkdownTab(t, a, "notes.md", "alpha word beta\n")
+	a.menuTogglePreviewMarkdown()
+	a.openFind()
+	s := a.findBar()
+	if s == nil {
+		t.Fatal("no find bar")
+	}
+	a.handleKey(keyEv(tcell.KeyTab, 0))
+	if s.replaceOpen {
+		t.Fatal("Tab must not open the replace field over a read-only preview")
+	}
+	if !strings.Contains(a.statusMsg, "read-only") {
+		t.Fatalf("expected a read-only flash, got %q", a.statusMsg)
+	}
+	// In the editor it still opens — the refusal is about the preview,
+	// not about the gesture.
+	a.menuTogglePreviewMarkdown()
+	a.handleKey(keyEv(tcell.KeyTab, 0))
+	if !s.replaceOpen {
+		t.Fatal("Tab should still grow the replace field over the buffer")
+	}
+	// Toggling back into preview retires the field rather than leaving
+	// a replacement box floating over a page it cannot edit.
+	a.menuTogglePreviewMarkdown()
+	if s.replaceOpen || s.focusReplace {
+		t.Fatal("entering preview must close the replace field")
+	}
+}

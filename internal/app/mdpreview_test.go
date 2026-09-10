@@ -532,3 +532,215 @@ func TestPreviewMarkdown_HitAtGutteredOriginIsColumnZero(t *testing.T) {
 		}
 	}
 }
+
+// typeFind opens the find bar over whatever the active tab shows and
+// types query into it, one key at a time — the gesture a user makes,
+// so the tests exercise the routing in handleKey rather than calling
+// applyQuery directly.
+func typeFind(a *App, query string) *findStrip {
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	a.handleKey(keyEv(tcell.KeyRune, 'f'))
+	for _, r := range query {
+		a.handleKey(keyEv(tcell.KeyRune, r))
+	}
+	return a.findBar()
+}
+
+// TestPreviewMarkdown_FindScrollsAndHighlightsRenderedText is the bug
+// this path exists for: Esc f over a preview used to search the hidden
+// markdown source, so the caret moved in a buffer nobody could see and
+// the rendered page never budged. The bar must search what the reader
+// sees — matching the rendered "beta", not the source's "**beta**" —
+// scroll the hit into view, and paint it on FindCurrent.
+func TestPreviewMarkdown_FindScrollsAndHighlightsRenderedText(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	body := "# Title\n\n" + strings.Repeat("filler line here\n\n", 40) + "alpha **beta** gamma\n"
+	tab := seedMarkdownTab(t, a, "notes.md", body)
+	a.menuTogglePreviewMarkdown()
+	st := a.mdPreview[tab]
+
+	s := typeFind(a, "beta")
+	if s == nil {
+		t.Fatal("Esc f must open the find bar over a preview")
+	}
+	if len(st.findMatches) != 1 {
+		t.Fatalf("preview matched %d times, want the one rendered hit", len(st.findMatches))
+	}
+	if st.scroll == 0 {
+		t.Fatal("the preview never scrolled — the hit is still off screen")
+	}
+	if tab.HasSelection() || len(tab.FindMatches) != 0 {
+		t.Fatal("searching the preview must not disturb the buffer underneath")
+	}
+
+	// The source spelling must NOT match: the reader never sees it.
+	for range "beta" {
+		a.handleKey(keyEv(tcell.KeyBackspace2, 0))
+	}
+	for _, r := range "**beta**" {
+		a.handleKey(keyEv(tcell.KeyRune, r))
+	}
+	if len(st.findMatches) != 0 {
+		t.Fatalf("the markdown source spelling matched %d times in the rendered view", len(st.findMatches))
+	}
+	if !s.hasNoMatches() {
+		t.Fatal("the counter must read the preview's misses, not the buffer's")
+	}
+}
+
+// TestPreviewMarkdown_FindPaintsMatchTints pins the visual half: every
+// hit in view carries the FindMatch tint and the current one the
+// louder FindCurrent, the same vocabulary the editor body uses.
+func TestPreviewMarkdown_FindPaintsMatchTints(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "word here\n\nword there\n")
+	a.menuTogglePreviewMarkdown()
+	typeFind(a, "word")
+	st := a.mdPreview[tab]
+	if len(st.findMatches) != 2 {
+		t.Fatalf("want 2 rendered hits, got %d", len(st.findMatches))
+	}
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	ex, _, _ := a.mdPreviewGeom()
+	_, ey, _, _ := a.editorRect()
+	bgAt := func(m editor.Match) tcell.Color {
+		y := ey + m.Line - st.scroll
+		_, bg, _ := cells[y*w+ex+m.Col].Style.Decompose()
+		return bg
+	}
+	if got := bgAt(st.findMatches[st.findIndex]); got != a.theme.FindCurrent {
+		t.Fatalf("current match bg = %v, want FindCurrent", got)
+	}
+	other := st.findMatches[(st.findIndex+1)%2]
+	if got := bgAt(other); got != a.theme.FindMatch {
+		t.Fatalf("other match bg = %v, want FindMatch", got)
+	}
+}
+
+// TestPreviewMarkdown_FindNextWrapsAndCounts pins Enter in the bar and
+// Esc ; outside it walking the rendered match list with wrap-around,
+// and the counter reporting the preview's own tally.
+func TestPreviewMarkdown_FindNextWrapsAndCounts(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "word one\n\nword two\n\nword three\n")
+	a.menuTogglePreviewMarkdown()
+	s := typeFind(a, "word")
+	st := a.mdPreview[tab]
+	if len(st.findMatches) != 3 {
+		t.Fatalf("want 3 hits, got %d", len(st.findMatches))
+	}
+	if got := s.counterText(); got != "1 of 3" {
+		t.Fatalf("counter = %q, want %q", got, "1 of 3")
+	}
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+	if st.findIndex != 1 {
+		t.Fatalf("Enter should step to hit 2, index = %d", st.findIndex)
+	}
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+	if st.findIndex != 0 {
+		t.Fatalf("Enter past the last hit should wrap, index = %d", st.findIndex)
+	}
+	// Esc closes the bar but keeps the query for the next Esc f / Esc ;.
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	if a.findBarOpen() {
+		t.Fatal("Esc should close the bar")
+	}
+	if len(st.findMatches) != 0 {
+		t.Fatal("closing the bar must take the rendered highlights down")
+	}
+	if !a.hasFindQuery() {
+		t.Fatal("the preview's query must survive for Esc ;")
+	}
+	a.menuFindNext() // the Esc ; action
+	if len(st.findMatches) != 3 {
+		t.Fatalf("Esc ; should relight the search, %d matches", len(st.findMatches))
+	}
+	// And Esc f picks the query back up rather than making the user retype.
+	a.openFind()
+	if got := a.findBar().query.Text(); got != "word" {
+		t.Fatalf("Esc f seeded %q, want the remembered %q", got, "word")
+	}
+}
+
+// TestPreviewMarkdown_FindSurvivesRerender pins the re-render seam: a
+// resize (or theme change) rebuilds the rendered lines, so the match
+// list indexes text that no longer exists. It must be recomputed, not
+// dropped — a search that silently goes dark on a resize is the same
+// "find does nothing" complaint from a different angle.
+func TestPreviewMarkdown_FindSurvivesRerender(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "alpha word beta\n\nsecond word line\n")
+	a.menuTogglePreviewMarkdown()
+	typeFind(a, "word")
+	st := a.mdPreview[tab]
+	if len(st.findMatches) != 2 {
+		t.Fatalf("want 2 hits before the resize, got %d", len(st.findMatches))
+	}
+	resizeTestApp(t, a, 70, 30)
+	a.draw()
+	if st.findQuery != "word" {
+		t.Fatalf("the query was lost across the re-render: %q", st.findQuery)
+	}
+	if len(st.findMatches) != 2 {
+		t.Fatalf("re-render left %d matches, want the search re-run to 2", len(st.findMatches))
+	}
+}
+
+// TestPreviewMarkdown_ToggleRepointsFindBar pins the other half of the
+// same bug: with the bar open, toggling between the rendered page and
+// the buffer must re-point the search at whichever surface is now on
+// screen, and never leave highlights lit on the one that isn't.
+func TestPreviewMarkdown_ToggleRepointsFindBar(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "alpha **word** beta\n")
+	a.menuTogglePreviewMarkdown()
+	typeFind(a, "word")
+	st := a.mdPreview[tab]
+	if len(st.findMatches) != 1 || len(tab.FindMatches) != 0 {
+		t.Fatalf("preview %d / buffer %d matches, want 1 / 0", len(st.findMatches), len(tab.FindMatches))
+	}
+	// Back to editing: the buffer takes the search over.
+	a.menuTogglePreviewMarkdown()
+	if a.mdPreviewFor(tab) != nil {
+		t.Fatal("preview should be off")
+	}
+	if len(tab.FindMatches) != 1 {
+		t.Fatalf("the buffer should carry the search now, %d matches", len(tab.FindMatches))
+	}
+	// And back into preview: the buffer's highlights come down.
+	a.menuTogglePreviewMarkdown()
+	if len(tab.FindMatches) != 0 {
+		t.Fatal("the buffer's highlights must not stay lit behind the rendered page")
+	}
+	if st2 := a.mdPreview[tab]; st2 == nil || len(st2.findMatches) != 1 {
+		t.Fatal("the rendered page should have picked the search back up")
+	}
+}
+
+// TestPreviewMarkdown_FindMatchCaseRoutes pins Alt+c over a preview:
+// the toggle lives on the Tab (it is the user's mode, not the
+// surface's) but must re-run the search against the rendered page.
+func TestPreviewMarkdown_FindMatchCaseRoutes(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "Word here\n\nword there\n")
+	a.menuTogglePreviewMarkdown()
+	s := typeFind(a, "word")
+	st := a.mdPreview[tab]
+	if len(st.findMatches) != 2 {
+		t.Fatalf("smart-case should match both spellings, got %d", len(st.findMatches))
+	}
+	a.handleKey(tcell.NewEventKey(tcell.KeyRune, 'c', tcell.ModAlt))
+	if !tab.FindMatchCase {
+		t.Fatal("Alt+c should arm match case on the tab")
+	}
+	if len(st.findMatches) != 1 {
+		t.Fatalf("match case should re-run over the rendered page, got %d hits", len(st.findMatches))
+	}
+	if got := s.counterText(); got != "1 of 1 · Aa" {
+		t.Fatalf("counter = %q, want the preview's tally with the Aa marker", got)
+	}
+}

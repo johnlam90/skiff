@@ -88,7 +88,10 @@ internal/app/projfind.go      Project-wide content search panel (Esc-F)
 internal/app/preview.go       Shared file-open path + preview-tab rules
 internal/app/mdpreview.go     Markdown preview mode: per-tab rendered
                               read-only view, ≡ View toggle (visible
-                              only for .md tabs), own scroll state
+                              only for .md tabs), own scroll state,
+                              own selection AND own find — Esc f over a
+                              preview searches the RENDERED lines, never
+                              the markdown source behind them
 internal/app/fileops.go       App side of file ops: the prompts/confirms, the
                               unsaved-changes gate, and applyChangeset — the ONE
                               post-op tail (repoint/close/reopen tabs, tree,

@@ -111,10 +111,43 @@ func (a *App) openFind() {
 	a.closeAllModals() // a modal (or the other strip) would eat our keystrokes
 	s := &findStrip{a: a, tab: tab}
 	a.strip = s
-	if tab.FindQuery != "" {
-		s.query.SetText(tab.FindQuery)
+	if seed := s.seedQuery(); seed != "" {
+		s.query.SetText(seed)
 		s.applyQuery()
 	}
+}
+
+// boundPreview returns the rendered markdown preview of the tab this
+// bar searches, or nil when that tab is in edit mode. This is the
+// bar's one fork: every read of a match list and every jump asks here
+// first, so the bar always acts on the surface the reader is looking
+// at rather than on the buffer hidden behind it.
+func (s *findStrip) boundPreview() *mdPreviewState {
+	return s.a.mdPreviewFor(s.boundTab())
+}
+
+// seedQuery is the query Esc f picks back up — the remembered search
+// of whichever surface the tab is showing. The two are separate
+// searches on purpose: the rendered page and the markdown source are
+// different text, so a query typed against one is not a claim about
+// the other.
+func (s *findStrip) seedQuery() string {
+	if st := s.boundPreview(); st != nil {
+		return st.findQuery
+	}
+	if tab := s.boundTab(); tab != nil {
+		return tab.FindQuery
+	}
+	return ""
+}
+
+// replaceAllowed reports whether the bar may grow its replace field.
+// Never over a markdown preview: it is a rendering with no offsets to
+// write back through, so the field's Enter could not do anything. The
+// Tab gesture asks here, and so does rebindFind when a toggle happens
+// under an open bar.
+func (s *findStrip) replaceAllowed() bool {
+	return s.boundPreview() == nil
 }
 
 // findBar returns the find bar when it is the strip that is up, else
@@ -165,9 +198,14 @@ func (s *findStrip) boundTab() *editor.Tab {
 // behind, so dropping the slot has to take it too. The query stays on
 // the tab, suspended, for the next Esc f or Esc ;.
 func (s *findStrip) close() {
-	if tab := s.boundTab(); tab != nil {
-		tab.ClearFindHighlights()
+	tab := s.boundTab()
+	if tab == nil {
+		return
 	}
+	if st := s.a.mdPreviewFor(tab); st != nil {
+		st.clearFindHighlights()
+	}
+	tab.ClearFindHighlights()
 }
 
 // handleMouse passes every event through to the editor underneath. This
@@ -205,6 +243,10 @@ func (s *findStrip) handleKey(ev *tcell.EventKey) {
 	case tcell.KeyTab:
 		// Tab grows the bar a replace field (druk's gesture) and then
 		// toggles which field owns the keyboard.
+		if !s.replaceAllowed() {
+			s.a.flash("Preview is read-only — ≡ → Edit Markdown to replace")
+			return
+		}
 		if !s.replaceOpen {
 			s.replaceOpen = true
 			s.focusReplace = true
@@ -229,6 +271,14 @@ func (s *findStrip) applyQuery() {
 	if tab == nil {
 		return
 	}
+	// Match case lives on the Tab either way: it is the user's mode,
+	// not the surface's, so it survives a toggle into the preview and
+	// back out.
+	if st := s.a.mdPreviewFor(tab); st != nil {
+		st.setFindQuery(s.query.Text(), tab.FindMatchCase)
+		s.a.ensurePreviewMatchVisible(st)
+		return
+	}
 	tab.SetFindQuery(s.query.Text())
 	tab.FocusCurrentMatch()
 }
@@ -247,13 +297,30 @@ func (s *findStrip) toggleMatchCase() {
 // next is the Enter-in-the-bar action: jump to the next match (with
 // wrap).
 func (s *findStrip) next() {
+	if st := s.boundPreview(); st != nil {
+		s.stepPreview(st, 1)
+		return
+	}
 	if tab := s.boundTab(); tab != nil {
 		tab.FindNext()
 	}
 }
 
+// stepPreview walks the rendered page's match list and scrolls the hit
+// it lands on into view — the preview half of next / prev.
+func (s *findStrip) stepPreview(st *mdPreviewState, delta int) {
+	if !st.findStep(delta) {
+		return
+	}
+	s.a.ensurePreviewMatchVisible(st)
+}
+
 // prev is the Shift-Enter action: jump to the previous match.
 func (s *findStrip) prev() {
+	if st := s.boundPreview(); st != nil {
+		s.stepPreview(st, -1)
+		return
+	}
 	if tab := s.boundTab(); tab != nil {
 		tab.FindPrev()
 	}
@@ -325,6 +392,18 @@ func (a *App) menuFindNext() {
 	if t == nil || t.IsImage() {
 		return
 	}
+	// A preview repeats its OWN search over the rendered page — the
+	// buffer's query, if it has one, names text the reader cannot see.
+	if st := a.mdPreviewFor(t); st != nil {
+		if st.findQuery == "" {
+			a.flash("No search to repeat — Esc f to start one")
+			return
+		}
+		if !a.previewFindAgain(st) {
+			a.flash(fmt.Sprintf("No matches for %q", st.findQuery))
+		}
+		return
+	}
 	if !t.HasFindQuery() {
 		a.flash("No search to repeat — Esc f to start one")
 		return
@@ -338,7 +417,13 @@ func (a *App) menuFindNext() {
 // remembers a query, live or suspended.
 func (a *App) hasFindQuery() bool {
 	t := a.activeTabPtr()
-	return t != nil && t.HasFindQuery()
+	if t == nil {
+		return false
+	}
+	if st := a.mdPreviewFor(t); st != nil {
+		return st.findQuery != ""
+	}
+	return t.HasFindQuery()
 }
 
 // draw renders the 1-row find bar into the rect layout reserved for it.
@@ -472,9 +557,13 @@ func (s *findStrip) counterText() string {
 	if tab == nil {
 		return ""
 	}
+	n, idx := len(tab.FindMatches), tab.FindIndex
+	if st := s.a.mdPreviewFor(tab); st != nil {
+		n, idx = len(st.findMatches), st.findIndex
+	}
 	text := "no results"
-	if len(tab.FindMatches) > 0 {
-		text = fmt.Sprintf("%d of %d", tab.FindIndex+1, len(tab.FindMatches))
+	if n > 0 {
+		text = fmt.Sprintf("%d of %d", idx+1, n)
 	}
 	if tab.FindMatchCase {
 		text += " · Aa"
@@ -491,5 +580,11 @@ func (s *findStrip) hasNoMatches() bool {
 		return false
 	}
 	tab := s.boundTab()
-	return tab != nil && len(tab.FindMatches) == 0
+	if tab == nil {
+		return false
+	}
+	if st := s.a.mdPreviewFor(tab); st != nil {
+		return len(st.findMatches) == 0
+	}
+	return len(tab.FindMatches) == 0
 }

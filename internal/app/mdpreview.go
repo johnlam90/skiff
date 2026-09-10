@@ -19,6 +19,7 @@ package app
 import (
 	"errors"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
@@ -54,6 +55,51 @@ type mdPreviewState struct {
 	// (theme, width, reload) drop it, which is correct — the lines it
 	// indexed no longer exist.
 	selA, selB previewPos
+
+	// findQuery / findCase / findMatches / findIndex are the preview's
+	// own search, in the same rendered coordinates as the selection.
+	// The find bar searches what the READER sees, never the markdown
+	// underneath: the source spells the rendered word "beta" as
+	// "**beta**", so a search of the buffer would miss what is on
+	// screen and hit what is not. Unlike the selection these survive a
+	// re-render — the query is re-run against the fresh lines (see
+	// carryFind), because a search that goes dark on a resize is the
+	// same "find does nothing" complaint from another angle.
+	findQuery   string
+	findCase    bool
+	findMatches []editor.Match
+	findIndex   int
+	// findSuspended mirrors Tab.findSuspended: closing the bar takes
+	// the highlights down but keeps the query, so the next Esc f seeds
+	// itself and Esc ; relights instead of making the user retype.
+	findSuspended bool
+}
+
+// previewSpan is one painted rune range on a rendered line — the
+// half-open [from,to) of a find hit, plus whether it is the current
+// one Enter jumps past.
+type previewSpan struct {
+	from, to int
+	current  bool
+}
+
+// previewLineHL is everything painted on top of a rendered line's own
+// styles: the selection range and the find hits. Bundled rather than
+// passed as five loose ints, and ordered — find beats selection, the
+// same precedence Tab.cellStyle applies in the editor body.
+type previewLineHL struct {
+	selFrom, selTo int
+	matches        []previewSpan
+}
+
+// spanAt returns the find hit covering rune index i, if any.
+func (h previewLineHL) spanAt(i int) (previewSpan, bool) {
+	for _, sp := range h.matches {
+		if i >= sp.from && i < sp.to {
+			return sp, true
+		}
+	}
+	return previewSpan{}, false
 }
 
 // previewPos is one position in the rendered document: a line index
@@ -112,6 +158,7 @@ func (a *App) menuTogglePreviewMarkdown() {
 	}
 	if a.mdPreview[tab] != nil {
 		delete(a.mdPreview, tab)
+		a.rebindFind(tab)
 		a.flash("Editing Markdown")
 		return
 	}
@@ -119,7 +166,29 @@ func (a *App) menuTogglePreviewMarkdown() {
 		a.mdPreview = map[*editor.Tab]*mdPreviewState{}
 	}
 	a.mdPreview[tab] = a.renderMdPreview(tab)
+	a.rebindFind(tab)
 	a.flash("Previewing Markdown — ≡ → Edit Markdown to edit")
+}
+
+// rebindFind re-points an open find bar at whichever surface tab now
+// shows. The bar searches the rendered page in preview mode and the
+// buffer in edit mode, so a toggle underneath it would otherwise leave
+// the query counting hits in a document nobody is looking at — the
+// same bug as Esc f doing nothing in the preview, arrived at from the
+// other side. The surface being left keeps no highlights, and the
+// replace field cannot survive into a read-only page.
+func (a *App) rebindFind(tab *editor.Tab) {
+	s := a.findBar()
+	if s == nil || s.boundTab() != tab {
+		return
+	}
+	if !s.replaceAllowed() {
+		s.replaceOpen, s.focusReplace = false, false
+	}
+	if a.mdPreviewFor(tab) != nil {
+		tab.ClearFindHighlights()
+	}
+	s.applyQuery()
 }
 
 // previewMarkdownLabel names the toggle row for the current state.
@@ -191,7 +260,125 @@ func (a *App) invalidateMdPreview(tab *editor.Tab) {
 	}
 	fresh := a.renderMdPreview(tab)
 	fresh.scroll = st.scroll
+	fresh.carryFind(st)
 	a.mdPreview[tab] = fresh
+}
+
+// setFindQuery installs a query on the rendered document and points
+// findIndex at the first hit at or after the top of the view — the
+// preview's answer to "the nearest match", where the editor uses the
+// caret and the preview has none. An empty query clears the search,
+// the same contract Tab.SetFindQuery keeps.
+func (st *mdPreviewState) setFindQuery(query string, matchCase bool) {
+	st.findQuery, st.findCase = query, matchCase
+	st.findSuspended = false
+	if query == "" {
+		st.findMatches, st.findIndex = nil, -1
+		return
+	}
+	st.findMatches = editor.FindAllInLines(st.lines, query, editor.FindOptions{MatchCase: matchCase})
+	st.findIndex = editor.FirstMatchAtOrAfter(st.findMatches, editor.Position{Line: st.scroll})
+}
+
+// clearFindHighlights takes the tints down but keeps the query, so
+// closing the bar leaves the page clean and the next Esc f still seeds
+// itself. Mirrors Tab.ClearFindHighlights exactly.
+func (st *mdPreviewState) clearFindHighlights() {
+	st.findMatches, st.findIndex = nil, -1
+	st.findSuspended = st.findQuery != ""
+}
+
+// carryFind re-runs old's search against this state's freshly rendered
+// lines. A re-render (resize, theme change, reload) replaces every
+// line, so the old match list indexes text that no longer exists;
+// dropping it instead would make a live search vanish on a resize.
+func (st *mdPreviewState) carryFind(old *mdPreviewState) {
+	if old.findQuery == "" {
+		return
+	}
+	if old.findSuspended {
+		st.findQuery, st.findCase, st.findSuspended = old.findQuery, old.findCase, true
+		st.findIndex = -1
+		return
+	}
+	st.setFindQuery(old.findQuery, old.findCase)
+}
+
+// findStep advances the current hit by delta with wrap-around, and
+// reports whether there was anything to step to.
+func (st *mdPreviewState) findStep(delta int) bool {
+	n := len(st.findMatches)
+	if n == 0 {
+		return false
+	}
+	st.findIndex = ((st.findIndex+delta)%n + n) % n
+	return true
+}
+
+// currentFindMatch returns the hit Enter jumps past, ok=false when the
+// search found nothing.
+func (st *mdPreviewState) currentFindMatch() (editor.Match, bool) {
+	if st.findIndex < 0 || st.findIndex >= len(st.findMatches) {
+		return editor.Match{}, false
+	}
+	return st.findMatches[st.findIndex], true
+}
+
+// findSpansOn returns the hits painted on rendered line i. The match
+// list is in document order, so a line's hits are a contiguous run of
+// it — found by binary search rather than by scanning every match on
+// every painted row.
+func (st *mdPreviewState) findSpansOn(i int) []previewSpan {
+	if len(st.findMatches) == 0 {
+		return nil
+	}
+	lo := sort.Search(len(st.findMatches), func(k int) bool {
+		return st.findMatches[k].Line >= i
+	})
+	var out []previewSpan
+	for k := lo; k < len(st.findMatches) && st.findMatches[k].Line == i; k++ {
+		m := st.findMatches[k]
+		out = append(out, previewSpan{from: m.Col, to: m.Col + m.Width, current: k == st.findIndex})
+	}
+	return out
+}
+
+// ensurePreviewMatchVisible scrolls the preview the least it can to
+// bring the current hit onto the screen — the preview's EnsureVisible.
+// Every query change and every next/prev runs it, because a highlight
+// the reader cannot see is exactly the bug this path exists to fix.
+func (a *App) ensurePreviewMatchVisible(st *mdPreviewState) {
+	m, ok := st.currentFindMatch()
+	if !ok {
+		return
+	}
+	_, _, _, eh := a.editorRect()
+	if eh < 1 {
+		return
+	}
+	if m.Line < st.scroll {
+		st.scroll = m.Line
+		return
+	}
+	if m.Line >= st.scroll+eh {
+		st.scroll = m.Line - eh + 1
+	}
+}
+
+// previewFindAgain is Esc ; over the rendered page: relight a search
+// the bar suspended when it closed, or step to the next hit. Reports
+// false when the remembered query has nothing to land on.
+func (a *App) previewFindAgain(st *mdPreviewState) bool {
+	if st.findSuspended {
+		st.setFindQuery(st.findQuery, st.findCase)
+	} else if !st.findStep(1) {
+		return false
+	}
+	if _, ok := st.currentFindMatch(); !ok {
+		return false
+	}
+	a.ensurePreviewMatchVisible(st)
+	return true
 }
 
 // scrollMdPreview moves the preview by delta rows, clamped at the top;
@@ -359,6 +546,7 @@ func (a *App) drawMdPreview(tab *editor.Tab, st *mdPreviewState, x, y, w, h int)
 	if _, w, wide := a.mdPreviewGeom(); st.width != w || st.wide != wide || st.th != a.theme {
 		fresh := a.renderMdPreview(tab)
 		fresh.scroll = st.scroll
+		fresh.carryFind(st)
 		*st = *fresh
 	}
 	bg := tcell.StyleDefault.Background(a.theme.BG).Foreground(a.theme.Text)
@@ -381,8 +569,9 @@ func (a *App) drawMdPreview(tab *editor.Tab, st *mdPreviewState, x, y, w, h int)
 			break
 		}
 		selFrom, selTo := st.selRange(i)
+		hl := previewLineHL{selFrom: selFrom, selTo: selTo, matches: st.findSpansOn(i)}
 		drawStyledRunes(a.screen, contentX, y+row, maxW, st.lines[i], st.styles[i],
-			selFrom, selTo, a.theme)
+			hl, a.theme)
 	}
 	if thumb, size, ok := scrollbar.Geom(len(st.lines), h, st.scroll); ok {
 		barX := x + w - 1
@@ -403,11 +592,13 @@ func (a *App) drawMdPreview(tab *editor.Tab, st *mdPreviewState, x, y, w, h int)
 // widths so CJK and emoji land where the wrapper measured them; content
 // past maxW is clipped (the wrapper already fit the budget — this only
 // guards a narrower-than-cached frame mid-resize). Runes inside the
-// half-open [selFrom, selTo) selection range repaint on the theme's
-// Selection background, with SelectionFg keeping their syntax color
-// only while it stays readable — the editor's own selection rule.
+// half-open [hl.selFrom, hl.selTo) selection range repaint on the
+// theme's Selection background, with SelectionFg keeping their syntax
+// color only while it stays readable — the editor's own selection
+// rule. Find hits repaint last and so win over the selection, exactly
+// as Tab.cellStyle orders the two in the editor body.
 func drawStyledRunes(scr tcell.Screen, x, y, maxW int, s string, sts []tcell.Style,
-	selFrom, selTo int, th theme.Theme) {
+	hl previewLineHL, th theme.Theme) {
 	col := 0
 	for i, ru := range []rune(s) {
 		w := uniseg.StringWidth(string(ru))
@@ -421,9 +612,19 @@ func drawStyledRunes(scr tcell.Screen, x, y, maxW int, s string, sts []tcell.Sty
 		if i < len(sts) {
 			st = sts[i]
 		}
-		if i >= selFrom && i < selTo {
+		if i >= hl.selFrom && i < hl.selTo {
 			fg, _, _ := st.Decompose()
 			st = st.Background(th.Selection).Foreground(th.SelectionFg(fg))
+		}
+		if sp, ok := hl.spanAt(i); ok {
+			// Same story as the editor: on a degraded palette the amber
+			// tints are gone and Attrs carries the hit — reverse for
+			// every match, reverse+bold+underline for the current one.
+			if sp.current {
+				st = theme.WithAttrs(st.Background(th.FindCurrent).Foreground(th.BG), th.Attrs.FindCurrent)
+			} else {
+				st = theme.WithAttrs(st.Background(th.FindMatch).Foreground(th.Text), th.Attrs.FindMatch)
+			}
 		}
 		scr.SetContent(x+col, y, ru, nil, st)
 		col += w
