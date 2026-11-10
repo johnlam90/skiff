@@ -141,19 +141,67 @@ func TestCreate_RefusesExisting(t *testing.T) {
 	}
 }
 
-// TestCreate_MissingParentIsActionable pins the ENOENT translation:
-// the manager never mkdirs, and the error tells the user which folder
-// to create instead of quoting the raw open(2) failure.
-func TestCreate_MissingParentIsActionable(t *testing.T) {
+// TestCreate_MakesMissingParents pins that a name spelling out folders
+// that do not exist creates them: "create it first" was advice the
+// editor gave no way to follow. The Changeset names the file first and
+// then the topmost new directory, and an existing parent adds nothing.
+func TestCreate_MakesMissingParents(t *testing.T) {
 	root := t.TempDir()
 	m := New(root)
+	target := filepath.Join(root, "a", "b", "f.txt")
 
-	_, err := m.Create(filepath.Join(root, "nope", "f.txt"))
-	if err == nil {
-		t.Fatal("expected an error for a missing parent")
+	cs, err := m.Create(target)
+	if err != nil {
+		t.Fatalf("Create with missing parents: %v", err)
 	}
-	if !strings.Contains(err.Error(), "create it first") || !strings.Contains(err.Error(), filepath.Join(root, "nope")) {
-		t.Fatalf("error should name the missing folder, got %v", err)
+	if info, err := os.Stat(target); err != nil || info.IsDir() {
+		t.Fatalf("file should exist under the new folders: %v", err)
+	}
+	want := []string{target, filepath.Join(root, "a")}
+	if len(cs.Added) != 2 || cs.Added[0] != want[0] || cs.Added[1] != want[1] {
+		t.Fatalf("Added = %v, want %v", cs.Added, want)
+	}
+
+	sibling := filepath.Join(root, "a", "b", "g.txt")
+	cs, err = m.Create(sibling)
+	if err != nil || len(cs.Added) != 1 || cs.Added[0] != sibling {
+		t.Fatalf("existing parents: cs = %+v, err = %v", cs, err)
+	}
+}
+
+// TestCreate_ParentThatIsAFileFails covers the failure mode of the
+// mkdir: a path component that is a regular file cannot become a
+// folder, and the file it names is left alone.
+func TestCreate_ParentThatIsAFileFails(t *testing.T) {
+	root := t.TempDir()
+	m := New(root)
+	mkFile(t, root, "plain", "keep me")
+
+	if _, err := m.Create(filepath.Join(root, "plain", "f.txt")); err == nil {
+		t.Fatal("expected an error creating under a regular file")
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, "plain")); string(got) != "keep me" {
+		t.Fatalf("the blocking file was modified: %q", got)
+	}
+}
+
+// TestCreate_EscapingPathMakesNoFolders pins that the root guard still
+// runs before the mkdir: a nested path that climbs out of the project
+// is refused and none of its folders are created outside the root.
+func TestCreate_EscapingPathMakesNoFolders(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "proj")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	m := New(root)
+
+	_, err := m.Create(filepath.Join(root, "..", "outside", "deep", "evil.txt"))
+	if !errors.Is(err, ErrOutsideRoot) {
+		t.Fatalf("err = %v, want ErrOutsideRoot", err)
+	}
+	if exists(filepath.Join(base, "outside")) {
+		t.Fatal("a refused create must not make folders outside the root")
 	}
 }
 

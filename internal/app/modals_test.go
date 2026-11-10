@@ -764,3 +764,19 @@ func TestOpenTreeContext_ReadsTheMenuLabels(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenInfo_ExpandsTabs pins that an Info body keeps tab indentation:
+// the chrome's clipped draw drops a raw tab, so stderr or a diff shown
+// in the report overlay used to lose its indent. The caller's slice is
+// not rewritten.
+func TestOpenInfo_ExpandsTabs(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	in := []string{"+\tindented"}
+	a.openInfo("Report", in)
+	if got := infoPrefab(t, a).Lines[0]; got != "+   indented" {
+		t.Fatalf("Info line = %q, want the tab expanded to the next stop", got)
+	}
+	if in[0] != "+\tindented" {
+		t.Fatalf("openInfo rewrote the caller's slice: %q", in[0])
+	}
+}

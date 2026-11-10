@@ -191,3 +191,34 @@ func TestBuildIndex_SkipsTrashEntries(t *testing.T) {
 		t.Fatalf("expected only real.go, got %v", paths)
 	}
 }
+
+// TestBuildIndex_GitDropsDeletedTrackedFiles is the regression test for
+// the finder listing files that are gone: `git ls-files --cached` keeps
+// a tracked path until its deletion is committed, so a file removed
+// from the working tree stayed findable and opened as an empty buffer.
+// A path with nothing on disk is dropped; its siblings stay.
+func TestBuildIndex_GitDropsDeletedTrackedFiles(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	mustWrite(t, dir, "keep.go", "package main")
+	mustWrite(t, dir, "gone.go", "package main")
+	for _, args := range [][]string{{"init", "-q"}, {"add", "-A"}} {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	if err := os.Remove(filepath.Join(dir, "gone.go")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	paths, viaGit, err := BuildIndex(dir)
+	if err != nil || !viaGit {
+		t.Fatalf("BuildIndex: viaGit=%v err=%v", viaGit, err)
+	}
+	if want := []string{"keep.go"}; !sliceEqual(paths, want) {
+		t.Fatalf("paths: got %v, want %v (the deleted tracked file must not be listed)", paths, want)
+	}
+}

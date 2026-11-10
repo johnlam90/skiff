@@ -546,6 +546,9 @@ func (a *App) menuToggleSidebar() {
 	}
 	a.sidebarShown = !a.sidebarShown
 	a.sidebarAutoHidden = false
+	// The tab strip just gained or lost the sidebar's columns; without
+	// this the active tab can sit outside the narrower strip.
+	a.ensureActiveTabVisible()
 }
 
 // sidebarToggleLabel returns the label the toggle row should display given

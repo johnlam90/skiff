@@ -477,9 +477,19 @@ func (a *App) menuGitNewBranch() {
 
 // menuGitStash stashes the working tree, new files included (-u —
 // "stash my changes" from an editor means the file just created too).
+// A tree with nothing changed is refused with its own flash.
 func (a *App) menuGitStash() {
 	a.closeMenu()
 	if !a.hasGitRepo() {
+		return
+	}
+	// On a clean tree `git stash push` exits 0 having saved nothing
+	// ("No local changes to save"), so the success flash below claimed
+	// a stash that does not exist — and the next Pop stash would pop
+	// some older one. The last snapshot already knows the tree is
+	// clean; say so and leave git alone.
+	if !a.hasGitChanges() {
+		a.flash("Nothing to stash")
 		return
 	}
 	a.runGitOp("Stash", "Stashed working tree", true, (*git.Repo).StashPush)

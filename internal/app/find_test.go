@@ -759,3 +759,88 @@ func TestFindReplace_RefusesWhenItsTabIsNotOnScreen(t *testing.T) {
 		t.Fatalf("back on its own tab the bar must replace again, got %q", got)
 	}
 }
+
+// TestBarHintThatFits pins the hint ladder: the longest tier that fits
+// beside the counter wins, the counter keeps its priority over every
+// tier, and a bar too narrow for the shortest tier shows none.
+func TestBarHintThatFits(t *testing.T) {
+	tiers := []string{"0123456789", "01234", "01"}
+	for _, c := range []struct {
+		name        string
+		spare, cost int
+		wantCounter bool
+		wantHint    string
+	}{
+		{"everything fits", 20, 5, true, "0123456789"},
+		{"counter pushes the hint down a tier", 12, 5, true, "01234"},
+		{"last tier", 8, 5, true, "01"},
+		{"counter alone", 7, 5, true, ""},
+		{"no counter, short tier", 6, 0, false, "01234"},
+		{"nothing fits", 2, 5, false, ""},
+	} {
+		gotCounter, gotHint := barHintThatFits(c.spare, c.cost, tiers)
+		if gotCounter != c.wantCounter || gotHint != c.wantHint {
+			t.Errorf("%s: barHintThatFits(%d, %d) = (%v, %q), want (%v, %q)",
+				c.name, c.spare, c.cost, gotCounter, gotHint, c.wantCounter, c.wantHint)
+		}
+	}
+}
+
+// TestFindBar_ShowsAHintAtCommonWidths is the regression test for the
+// find bar never naming its keys: at 80 columns with the sidebar open
+// the editor pane is too narrow for the full 76-cell hint, which used
+// to mean no hint at all. A shorter tier must now appear — and it must
+// still say how to leave — while a wide terminal keeps the full text.
+func TestFindBar_ShowsAHintAtCommonWidths(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(path, []byte("foo bar foo\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	for _, c := range []struct {
+		width int
+		want  string
+	}{
+		{80, "esc close"},
+		{120, "⇥ replace"},
+		{200, "Shift+Enter: prev"},
+	} {
+		a := newTestApp(t, dir)
+		resizeTestApp(t, a, c.width, 24)
+		a.openFile(path)
+		a.openFind()
+		a.draw()
+		a.screen.Show()
+		row := screenLine(a.screen.(tcell.SimulationScreen), a.stripRect().y)
+		if !strings.Contains(row, c.want) {
+			t.Errorf("width %d: find bar should hint %q, got %q", c.width, c.want, row)
+		}
+	}
+}
+
+// TestFindHintTiers_ShrinkAndKeepTheExit pins the ladders themselves:
+// each tier is strictly shorter than the one before it, and every tier
+// of both focus states still names Esc — the one key a user who reads
+// nothing else needs.
+func TestFindHintTiers_ShrinkAndKeepTheExit(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	ladders := map[string][]string{
+		"find query":   findHintTiers(false),
+		"find replace": findHintTiers(true),
+		"project":      a.projFindHintTiers(),
+	}
+	a.projFind.replaceOpen = true
+	ladders["project replace open"] = a.projFindHintTiers()
+	a.projFind.focusReplace = true
+	ladders["project replace focused"] = a.projFindHintTiers()
+	for name, tiers := range ladders {
+		for i, tier := range tiers {
+			if !strings.Contains(strings.ToLower(tier), "esc") {
+				t.Errorf("%s tier %d does not name Esc: %q", name, i, tier)
+			}
+			if i > 0 && runeLen(tier) >= runeLen(tiers[i-1]) {
+				t.Errorf("%s tier %d is not shorter than tier %d", name, i, i-1)
+			}
+		}
+	}
+}

@@ -1638,3 +1638,15 @@ func TestDrawGitPanelRow_LongNameEndsInEllipsis(t *testing.T) {
 		t.Fatalf("the name bled past the panel: %q", string(past.Runes))
 	}
 }
+
+// TestGitPanelHint_SaysCheckNotStage pins the hint's verb for Space:
+// it flips a row's commit checkbox. Skiff never stages — it never runs
+// `git add` — so "stage" promised an index the editor does not have.
+func TestGitPanelHint_SaysCheckNotStage(t *testing.T) {
+	a := keyboardGitApp(t)
+	a.gitPanel.onBtns = false
+	segs := strings.Join(a.gitPanelHintSegs(), "  ")
+	if !strings.Contains(segs, "␣ check") || strings.Contains(segs, "stage") {
+		t.Fatalf("hint = %q, want Space described as check", segs)
+	}
+}

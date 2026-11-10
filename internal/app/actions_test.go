@@ -933,25 +933,33 @@ func TestMenuRevert_FlashesNameTheNextStep(t *testing.T) {
 
 // TestSingleFileRefusals_ShareOneSentence pins that every project-only
 // surface the Esc leader can reach in single-file mode refuses with the
-// same sentence, which names the mode and the way out. They used to
-// phrase it three ways.
+// same sentence, which names the mode and the way out — and that the
+// surfaces with a name of their own (the finder, the Git panel, project
+// find) lead with it. They used to phrase it three ways.
 func TestSingleFileRefusals_ShareOneSentence(t *testing.T) {
+	const tail = "ot available in single-file mode — open a folder to use it"
+	if !strings.HasSuffix(singleFileRefusal, tail) {
+		t.Fatalf("the refusal must name the mode and the way out, got %q", singleFileRefusal)
+	}
 	for _, c := range []struct {
-		name string
-		fire func(*App)
+		name    string
+		feature string
+		fire    func(*App)
 	}{
-		{"toggle sidebar", (*App).menuToggleSidebar},
-		{"toggle gitignore", (*App).menuToggleGitignore},
-		{"finder", (*App).openFinder},
+		{"toggle sidebar", "", (*App).menuToggleSidebar},
+		{"toggle gitignore", "", (*App).menuToggleGitignore},
+		{"finder", "Find file in project", (*App).openFinder},
+		{"git panel", "Git changes", (*App).toggleGitPanel},
+		{"project find", "Find in project", (*App).openProjFind},
 	} {
 		a := newTestApp(t, t.TempDir())
 		a.tree, a.finder = nil, nil
 		c.fire(a)
-		if a.statusMsg != singleFileRefusal {
-			t.Errorf("%s: flash = %q, want %q", c.name, a.statusMsg, singleFileRefusal)
+		if !strings.HasSuffix(a.statusMsg, tail) {
+			t.Errorf("%s: flash = %q, want the shared sentence", c.name, a.statusMsg)
 		}
-		if !strings.Contains(singleFileRefusal, "open a folder") {
-			t.Fatalf("the refusal must name the way out, got %q", singleFileRefusal)
+		if c.feature != "" && !strings.HasPrefix(a.statusMsg, c.feature+": ") {
+			t.Errorf("%s: flash = %q, should lead with %q", c.name, a.statusMsg, c.feature)
 		}
 	}
 }
@@ -1032,5 +1040,24 @@ func TestMenuCopy_StillCopiesTheEditorSelection(t *testing.T) {
 	a.menuCopy()
 	if a.clipBuf != "hello\n" {
 		t.Fatalf("clipboard = %q, want the buffer selection", a.clipBuf)
+	}
+}
+
+// TestMenuToggleSidebar_KeepsActiveTabVisible pins that showing the
+// explorer re-scrolls the tab strip: the strip loses the sidebar's
+// columns, and the active tab used to be left outside what remained.
+func TestMenuToggleSidebar_KeepsActiveTabVisible(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	a.sidebarShown = false
+	openManyTabs(t, a, dir, 8)
+	a.ensureActiveTabVisible()
+	a.menuToggleSidebar()
+	if !a.sidebarShown {
+		t.Fatal("precondition: the toggle should show the sidebar")
+	}
+	if !activeTabInStrip(a) {
+		t.Fatalf("active tab left outside the strip after showing the sidebar (tabScroll=%d)", a.tabScroll)
 	}
 }

@@ -21,10 +21,10 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/johnlam90/skiff/internal/textdraw"
-
+	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/overlay"
+	"github.com/johnlam90/skiff/internal/textdraw"
 )
 
 // closeAllModals dismisses every modal in one shot and parks any in-flight
@@ -137,7 +137,15 @@ func (a *App) openInfo(title string, lines []string) {
 	if len(lines) == 0 {
 		lines = []string{"(no output captured)"}
 	}
-	n := &overlay.Info{Title: title, Lines: lines, Theme: a.theme}
+	// Info paints through the chrome's clipped draw, which drops a raw
+	// tab (zero cells to uniseg) — and what lands here is file-shaped
+	// text: a diff, a formatter's stderr, a custom action's output.
+	// Expanded into a copy, so the caller's slice is never rewritten.
+	expanded := make([]string, len(lines))
+	for i, l := range lines {
+		expanded[i] = textdraw.ExpandTabs(l, editor.TabStop)
+	}
+	n := &overlay.Info{Title: title, Lines: expanded, Theme: a.theme}
 	n.Size = func() (int, int) { return a.width, a.height }
 	n.Close = func() { a.closeAllModals() }
 	a.overlays.Open(n)

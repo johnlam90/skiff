@@ -32,6 +32,12 @@
 
 package overlay
 
+import (
+	"github.com/gdamore/tcell/v2"
+
+	"github.com/johnlam90/skiff/internal/theme"
+)
+
 // List owns the selection and the scroll offset of a window of rows.
 // It is a value type meant to be embedded: a surface declares one,
 // pushes the live row count and window height in with SetLen /
@@ -199,4 +205,20 @@ func clampIndex(i, n int) int {
 		i = 0
 	}
 	return i
+}
+
+// RowCaret is the glyph that marks a list's cursor row — the same ›
+// the Git panel puts beside its keyboard-focused row.
+const RowCaret = '›'
+
+// DrawRowCaret paints the cursor-row marker at (x, y) on bg. Every
+// list surface (Pick, the action menu, the finder) tints its cursor
+// row, but a tint is only a colour: on Offshore the Selection tint
+// over the modal surface is about 1.2:1, so the row the keyboard is on
+// was close to invisible, and on a low-colour terminal it can vanish
+// outright. The caret is the cue that does not depend on the palette.
+// Callers put it in the row's left PADDING cell — a cell that held a
+// blank — so no label, tag or hit zone moves.
+func DrawRowCaret(scr tcell.Screen, x, y int, bg tcell.Color, th theme.Theme) {
+	scr.SetContent(x, y, RowCaret, nil, tcell.StyleDefault.Background(bg).Foreground(th.Accent).Bold(true))
 }

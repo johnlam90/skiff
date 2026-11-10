@@ -166,7 +166,7 @@ func (a *App) startFileOp(kind fileOpKind, src, dstDir string) {
 
 // handleFileOpProgress keeps the user informed mid-copy.
 func (a *App) handleFileOpProgress(label string, count int64) {
-	a.flash(fmt.Sprintf("%s… %d files", gerundOf(label), count))
+	a.flash(gerundOf(label) + "… " + plural(int(count), "%d file", "%d files"))
 }
 
 // gerundOf maps an op verb to its progress form.

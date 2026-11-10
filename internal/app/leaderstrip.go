@@ -71,10 +71,13 @@ func (a *App) leaderStripVisible() bool {
 // can never be the thing that gets clipped.
 const leaderStripTailHint = "… Esc ? for all"
 
-// stripSegment is one styled run of text on a strip row.
+// stripSegment is one styled run of text on a strip row. sep marks the
+// separator that opens a binding: it is where a row may break, and it
+// is dropped when the break lands on it (see wrapStripSegments).
 type stripSegment struct {
 	text  string
 	style tcell.Style
+	sep   bool
 }
 
 // stripStyles are the three styles a leader strip row is painted in.
@@ -90,43 +93,66 @@ type stripStyles struct {
 // descriptions, and descriptions before it loses keys.
 func leaderStripForms(bindings []leaderBinding, st stripStyles) [][]stripSegment {
 	table := func(sep string) []stripSegment {
-		segs := []stripSegment{{" Esc ", st.key}}
+		segs := []stripSegment{{text: " Esc ", style: st.key}}
 		for i, b := range bindings {
 			s := sep
 			if i == 0 {
 				s = " "
 			}
 			segs = append(segs,
-				stripSegment{s, st.muted},
-				stripSegment{string(b.key), st.key},
-				stripSegment{" " + b.desc, st.base})
+				stripSegment{text: s, style: st.muted, sep: true},
+				stripSegment{text: string(b.key), style: st.key},
+				stripSegment{text: " " + b.desc, style: st.base})
 		}
 		return segs
 	}
-	keys := []stripSegment{{" Esc ", st.key}}
+	keys := []stripSegment{{text: " Esc ", style: st.key}}
 	for _, b := range bindings {
-		keys = append(keys, stripSegment{" ", st.muted}, stripSegment{string(b.key), st.key})
+		keys = append(keys,
+			stripSegment{text: " ", style: st.muted, sep: true},
+			stripSegment{text: string(b.key), style: st.key})
 	}
-	keys = append(keys, stripSegment{"  Esc ? for all", st.muted})
+	keys = append(keys,
+		stripSegment{text: "  ", style: st.muted, sep: true},
+		stripSegment{text: "Esc ? for all", style: st.muted})
 	return [][]stripSegment{table(" · "), table(" "), keys}
 }
 
-// wrapStripSegments breaks segs into rows of at most width cells,
-// moving a segment that would cross the edge onto the next row under a
-// two-cell continuation indent (the " Esc " lead's shoulder). Segments
-// are never split; a single segment wider than the row is clipped by
-// the paint, which is the one case the wrap cannot solve.
+// wrapStripSegments breaks segs into rows of at most width cells, one
+// BINDING at a time: a separator and the key and description after it
+// move to the next row together, under a two-cell continuation indent
+// (the " Esc " lead's shoulder). Wrapping segment by segment used to
+// end a row on a key with its description starting the next ("… · s" /
+// "save"), and to open a row with the orphaned " · " of the binding
+// that followed. The separator a break lands on is dropped — the row
+// edge already separates — so a continuation row starts on its key.
+// Bindings are never split; one wider than the row is clipped by the
+// paint, which is the one case the wrap cannot solve.
 func wrapStripSegments(segs []stripSegment, width int) [][]stripSegment {
 	var rows [][]stripSegment
 	var row []stripSegment
 	x := 0
-	for _, seg := range segs {
-		w := textdraw.Width(seg.text)
+	for i := 0; i < len(segs); {
+		// A unit runs from one separator up to the next.
+		j := i + 1
+		for j < len(segs) && !segs[j].sep {
+			j++
+		}
+		unit := segs[i:j]
+		i = j
+		w := 0
+		for _, seg := range unit {
+			w += textdraw.Width(seg.text)
+		}
 		if x+w > width && len(row) > 0 {
 			rows = append(rows, row)
 			row, x = nil, 2
+			if unit[0].sep {
+				w -= textdraw.Width(unit[0].text)
+				unit = unit[1:]
+			}
 		}
-		row = append(row, seg)
+		row = append(row, unit...)
 		x += w
 	}
 	if len(row) > 0 {
@@ -153,7 +179,7 @@ func leaderStripRows(bindings []leaderBinding, width, maxRows int, st stripStyle
 		}
 	}
 	rows = rows[:maxRows-1]
-	rows = append(rows, []stripSegment{{leaderStripTailHint, st.muted}})
+	rows = append(rows, []stripSegment{{text: leaderStripTailHint, style: st.muted}})
 	return rows, true
 }
 

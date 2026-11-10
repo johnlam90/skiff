@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/overlay"
 )
@@ -570,5 +571,32 @@ func TestHandleBranchList_DoesNotReplaceAnOpenPrompt(t *testing.T) {
 	a.handleBranchList(branchListResult{purpose: "switch", names: []string{"main", "dev"}}, nil)
 	if _, ok := a.overlays.Top().(*overlay.Pick); !ok {
 		t.Fatalf("over nothing the picker must still open; top = %T", a.overlays.Top())
+	}
+}
+
+// TestMenuGitStash_CleanTreeSaysNothingToStash is the regression test
+// for the false success: git exits 0 on a clean tree having stashed
+// nothing, and the editor flashed "Stashed working tree". With no dirty
+// files in the snapshot the verb must not run at all, and the flash
+// must say why; with a change present the stash runs as before.
+func TestMenuGitStash_CleanTreeSaysNothingToStash(t *testing.T) {
+	a, fake := fakeRepoApp(t)
+	a.menuGitStash()
+	if a.statusMsg != "Nothing to stash" {
+		t.Fatalf("clean tree flash = %q, want %q", a.statusMsg, "Nothing to stash")
+	}
+	if fake.Called("stash push -u") {
+		t.Fatal("stash must not run on a clean tree")
+	}
+
+	a.tree.DirtyFiles = map[string]filetree.GitChangeKind{filepath.Join(a.tree.Root.Path, "a.go"): filetree.GitChangeModified}
+	fake.Script("stash push -u", "", nil)
+	a.menuGitStash()
+	pumpUntil(t, a, "git op", idle(&a.gitOp))
+	if !fake.Called("stash push -u") {
+		t.Fatalf("a dirty tree must still stash, ran %v", fake.Calls())
+	}
+	if a.statusMsg != "Stashed working tree" {
+		t.Fatalf("dirty tree flash = %q", a.statusMsg)
 	}
 }

@@ -928,9 +928,12 @@ func (a *App) handleEvent(ev tcell.Event) {
 		a.width, a.height = a.screen.Size()
 		// The tab strip's viewport just changed width — keep the
 		// active tab on screen rather than wherever the old scroll
-		// left it.
-		a.ensureActiveTabVisible()
+		// left it. The sidebar rule runs FIRST: it can show or hide
+		// the explorer on this very resize, and a scroll computed
+		// against the old sidebar width leaves the active tab outside
+		// the strip the frame then paints.
 		a.applyResponsiveSidebar()
+		a.ensureActiveTabVisible()
 		a.screen.Sync()
 	case *tcell.EventKey:
 		a.handleKey(e)

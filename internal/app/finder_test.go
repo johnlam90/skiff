@@ -18,6 +18,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/finder"
+	"github.com/johnlam90/skiff/internal/overlay"
 )
 
 // finderOv returns the open finder overlay, failing the test when none
@@ -363,8 +364,8 @@ func TestOpenFinder_NoOpInSingleFileMode(t *testing.T) {
 	if finderIsOpen(a) {
 		t.Fatal("openFinder should not open the modal when finder is nil")
 	}
-	if a.statusMsg != singleFileRefusal {
-		t.Fatalf("expected the one single-file refusal, got %q", a.statusMsg)
+	if want := singleFileRefusalFor("Find file in project"); a.statusMsg != want {
+		t.Fatalf("flash = %q, want %q", a.statusMsg, want)
 	}
 }
 
@@ -552,5 +553,58 @@ func TestFinderDraw_HintNamesEnter(t *testing.T) {
 	a.screen.Show()
 	if !screenHasText(t, a, "⏎ open · esc") {
 		t.Fatal("the finder's title row should name Enter as open")
+	}
+}
+
+// TestFinderDraw_NoMatchesSaysSo pins the empty-result state: a query
+// nothing matches used to show a bare "0/5" over a blank list, which
+// reads as a finder still loading. The first row now says "No
+// matches"; an empty query (everything listed) never shows it.
+func TestFinderDraw_NoMatchesSaysSo(t *testing.T) {
+	a, _ := withFinder(t)
+	a.openFinder()
+	a.draw()
+	a.screen.Show()
+	if screenHasText(t, a, "No matches") {
+		t.Fatal("an unfiltered list must not claim there are no matches")
+	}
+	for _, r := range "zzzqqq" {
+		a.handleKey(keyEv(tcell.KeyRune, r))
+	}
+	if n := len(finderOv(t, a).results); n != 0 {
+		t.Fatalf("fixture: query should match nothing, got %d results", n)
+	}
+	a.draw()
+	a.screen.Show()
+	if !screenHasText(t, a, "No matches") {
+		t.Fatal("an empty result list should say No matches")
+	}
+}
+
+// TestFinderDraw_SelectedRowCarriesACaret pins the same non-colour
+// cursor cue on the finder: its selected row is tinted with the editor
+// background, a step that is hard to see on dark palettes, so the row
+// also gets the › caret in its padding cell.
+func TestFinderDraw_SelectedRowCarriesACaret(t *testing.T) {
+	a, _ := withFinder(t)
+	a.openFinder()
+	fo := finderOv(t, a)
+	a.handleKey(keyEv(tcell.KeyDown, 0))
+	a.draw()
+	a.screen.Show()
+	r := fo.sync()
+	cells, w, _ := a.screen.(tcell.SimulationScreen).GetContents()
+	for i := 0; i < fo.Visible() && fo.Scroll()+i < len(fo.results); i++ {
+		got := cells[(r.Y+4+i)*w+r.X+1].Runes[0]
+		want := ' '
+		if fo.Scroll()+i == fo.Sel() {
+			want = overlay.RowCaret
+		}
+		if got != want {
+			t.Fatalf("row %d padding cell = %q, want %q", i, got, want)
+		}
+	}
+	if fo.Sel() != 1 {
+		t.Fatalf("fixture: Down should select row 1, got %d", fo.Sel())
 	}
 }

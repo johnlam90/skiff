@@ -266,7 +266,7 @@ func TestStripRect_IsTheOneRowTheBarsPaintOn(t *testing.T) {
 	a.openProjFind()
 	a.draw()
 	scr.Show()
-	if row := screenLine(scr, a.stripRect().y); runeIndexOf([]rune(row), "Search project:") < 0 {
+	if row := screenLine(scr, a.stripRect().y); runeIndexOf([]rune(row), "Find in project:") < 0 {
 		t.Fatalf("the project-find bar is not on its reserved row: %q", row)
 	}
 }

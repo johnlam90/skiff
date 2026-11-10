@@ -1809,3 +1809,18 @@ func TestDraw_PaintsEveryCell(t *testing.T) {
 		})
 	}
 }
+
+// TestStatusLeftText_SingularLine pins the readout's grammar: a
+// one-line buffer is "1 line", not "1 lines".
+func TestStatusLeftText_SingularLine(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	openTestFile(t, a, dir, "one.txt", "only")
+	resizeTestApp(t, a, 120, 24)
+	a.statusMsg = ""
+	_, _, sw, _ := a.statusRect()
+	got := a.statusLeftText(a.statusLeftMax(sw))
+	if !strings.Contains(got, "· 1 line") || strings.Contains(got, "1 lines") {
+		t.Fatalf("readout = %q, want \"1 line\"", got)
+	}
+}

@@ -297,3 +297,21 @@ func TestList_BarHitAndScrollToBarAreInverses(t *testing.T) {
 		t.Fatal("a list that fits must not claim its padding column")
 	}
 }
+
+// TestDrawRowCaret pins the cursor-row marker: the › glyph in the
+// accent colour, bold, on the row's own background — a cue that reads
+// without any contrast between the row tint and the surface.
+func TestDrawRowCaret(t *testing.T) {
+	scr := simScreen(t)
+	th := theme.Default()
+	DrawRowCaret(scr, 3, 2, th.Selection, th)
+	scr.Show()
+	if got := cellAt(scr, 3, 2); got != RowCaret {
+		t.Fatalf("caret cell = %q, want %q", got, RowCaret)
+	}
+	cells, w, _ := scr.GetContents()
+	fg, bg, attr := cells[2*w+3].Style.Decompose()
+	if fg != th.Accent || bg != th.Selection || attr&tcell.AttrBold == 0 {
+		t.Fatalf("caret style = fg %v bg %v attr %v, want bold accent on the row tint", fg, bg, attr)
+	}
+}

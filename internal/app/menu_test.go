@@ -1620,3 +1620,45 @@ func TestOpenMenu_ReArmsTheClickLatch(t *testing.T) {
 		t.Fatal("the first click on a keyboard-opened menu must run its row")
 	}
 }
+
+// TestDrawMenu_HoveredRowCarriesACaret pins the non-colour cue on the
+// action menu's cursor row: a › in the left padding cell of the
+// highlighted row and of no other, with the ▸ chevron and the label
+// still in their columns — the Selection tint alone is close to
+// invisible on some palettes.
+func TestDrawMenu_HoveredRowCarriesACaret(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.openMenu()
+	a.menuMoveSelection(1)
+	a.drawMenu()
+	a.screen.Show()
+
+	items, _, _ := a.menuLayout()
+	mx, my, _, mh := a.menuModalRect()
+	cells, w, _ := a.screen.(tcell.SimulationScreen).GetContents()
+	runeAt := func(x, y int) rune { return cells[y*w+x].Runes[0] }
+	seen := 0
+	for i, item := range items {
+		cy := my + item.relY - a.menuList.Scroll()
+		if cy < my+menuContentY || cy > my+mh-2 {
+			continue
+		}
+		got := runeAt(mx+1, cy)
+		if i == a.hoveredMenuRow {
+			seen++
+			if got != overlay.RowCaret {
+				t.Fatalf("hovered row %d has %q in its padding cell, want the caret", i, got)
+			}
+			if runeAt(mx+2, cy) != '▸' {
+				t.Fatalf("the caret displaced the row chevron: %q", runeAt(mx+2, cy))
+			}
+			continue
+		}
+		if got == overlay.RowCaret {
+			t.Fatalf("row %d is not hovered but carries the caret", i)
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("the hovered row was not on screen (seen=%d)", seen)
+	}
+}

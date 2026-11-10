@@ -658,6 +658,9 @@ func (a *App) drawMenu() {
 			for cx := mx + 1; cx < mx+mw-1; cx++ {
 				a.screen.SetContent(cx, cy, ' ', nil, hoverStyle)
 			}
+			// The tint alone is ~1.2:1 on some palettes; the caret in
+			// the left padding cell marks the row without colour.
+			overlay.DrawRowCaret(a.screen, mx+1, cy, hoverBg, a.theme)
 			labelStyle = hoverStyle
 			chevStyle = hoverChevStyle
 			// Text, not Muted: Muted lands around 2.6:1 on the Selection

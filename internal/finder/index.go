@@ -90,7 +90,8 @@ func BuildIndex(rootDir string) ([]string, bool, error) {
 }
 
 // buildIndexGit shells out to `git ls-files` to collect every
-// tracked + untracked-not-ignored file under rootDir. -z makes git
+// tracked + untracked-not-ignored file under rootDir that is actually
+// on disk (tracked-but-deleted paths are dropped). -z makes git
 // emit null-terminated names so paths with spaces / quotes / even
 // newlines round-trip correctly. Returns an error when the
 // directory isn't a git working tree, the binary is missing, or
@@ -107,6 +108,15 @@ func buildIndexGit(rootDir string) ([]string, error) {
 		// so git ls-files reports them; they are deleted content
 		// awaiting Undo and must not be findable.
 		if strings.HasPrefix(path.Base(s), filetree.TrashPrefix) {
+			continue
+		}
+		// `ls-files --cached` lists the INDEX, so a tracked file the
+		// user deleted but has not committed is still reported. The
+		// finder then offered a path that is not on disk and opening
+		// it produced an empty buffer that asked to be saved on close.
+		// Lstat, not Stat: a dangling symlink is still an entry the
+		// tree shows, and only a path with nothing at it is dropped.
+		if _, err := os.Lstat(filepath.Join(rootDir, filepath.FromSlash(s))); err != nil {
 			continue
 		}
 		// git ls-files already emits forward-slash paths even on

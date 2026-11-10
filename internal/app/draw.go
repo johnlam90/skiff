@@ -1090,7 +1090,7 @@ func (a *App) statusReadoutTiers(tab *editor.Tab, maxW int) []string {
 		dirty = " · ●"
 	}
 	pos := fmt.Sprintf("Ln %d, Col %d", tab.Cursor.Line+1, tab.Cursor.Col+1)
-	lines := fmt.Sprintf(" · %d lines", tab.Buffer.LineCount())
+	lines := " · " + plural(tab.Buffer.LineCount(), "%d line", "%d lines")
 	full := " " + pos + lines + dirty
 	tiers := make([]string, 0, 4)
 	// The location gets whatever the full readout leaves it; a path
