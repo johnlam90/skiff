@@ -88,6 +88,8 @@ Recorded so nobody re-audits them:
   `.*` chip. Reproducible with ordinary inputs; documented in
   `projfind_test.go`'s draw test, deliberately not pinned as passing.
   Needs its own small fix + test.
-- **go-gitignore swap decision** (plan 016's findings): the `dir/name`
-  anchoring divergence justifies evaluating go-git's gitignore behind
-  the existing two-call-site seam; weigh the dependency footprint.
+- **go-gitignore swap decision** (plan 016's findings): RESOLVED — the
+  library is gone. `internal/gitignore` is a hand-port of git's own
+  pattern parser + wildmatch behind the same two call sites, fenced by
+  a differential test against `git check-ignore`; plan 016's
+  characterization corpus moved there with every row now agreeing.

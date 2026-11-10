@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	gitignore "github.com/sabhiram/go-gitignore"
+	"github.com/johnlam90/skiff/internal/gitignore"
 )
 
 // gitignoreName is the per-directory ignore file the tree honours. Only
@@ -22,12 +22,13 @@ const gitignoreName = ".gitignore"
 
 // ignoreEntry is one directory's compiled .gitignore alongside the bytes
 // it was compiled from. Keeping the source bytes lets merge skip the
-// regex compilation (go-gitignore builds one regexp per pattern line)
-// whenever a re-read hands back an unchanged file, which is every tick
-// on every project that isn't actively editing its .gitignore.
+// re-parse — and, more to the point, skip the filterEpoch bump that
+// would force a full merge of the whole subtree — whenever a re-read
+// hands back an unchanged file, which is every tick on every project
+// that isn't actively editing its .gitignore.
 type ignoreEntry struct {
 	raw []byte
-	gi  *gitignore.GitIgnore
+	gi  *gitignore.Matcher
 }
 
 // cacheIgnore refreshes the compiled matcher for dir from the bytes the
@@ -38,9 +39,8 @@ type ignoreEntry struct {
 // map's size tracks the project's real ignore-file count rather than its
 // directory count.
 //
-// Unchanged bytes reuse the compiled matcher. go-gitignore builds one
-// regexp per pattern line, and re-paying that every ten seconds for a
-// file nobody edited is the one cost here worth avoiding.
+// Unchanged bytes reuse the compiled matcher: re-parsing every ten
+// seconds a file nobody edited is the one cost here worth avoiding.
 //
 // Returns whether the matcher actually moved (created, recompiled, or
 // dropped). A move bumps filterEpoch, because this directory's matcher
@@ -64,7 +64,7 @@ func (t *Tree) cacheIgnore(dir string, raw []byte) bool {
 	}
 	t.ignoreCache[dir] = ignoreEntry{
 		raw: raw,
-		gi:  gitignore.CompileIgnoreLines(strings.Split(string(raw), "\n")...),
+		gi:  gitignore.Compile(raw),
 	}
 	t.filterEpoch++
 	return true
@@ -84,7 +84,7 @@ func (t *Tree) cachedIgnoreRaw(dir string) []byte {
 // against.
 type ignoreLevel struct {
 	prefix string
-	gi     *gitignore.GitIgnore
+	gi     *gitignore.Matcher
 }
 
 // ignoreChain returns the matchers that apply inside dir, deepest first.
@@ -98,13 +98,8 @@ type ignoreLevel struct {
 //
 // The limits, stated plainly because a half-answer is worse than none:
 // .git/info/exclude, core.excludesFile and any global excludes are git
-// configuration the tree does not read; nothing above the project root
-// is consulted; and a "!" negation in a deeper file cannot un-ignore
-// what a shallower file already ignored, because the walk stops at the
-// first level that says "ignored". Git permits that last case only when
-// no parent directory is itself excluded, and honouring it would mean
-// rebuilding cross-file pattern precedence on top of a library that
-// reports one boolean per file.
+// configuration the tree does not read, and nothing above the project
+// root is consulted.
 func (t *Tree) ignoreChain(dir string) []ignoreLevel {
 	if len(t.ignoreCache) == 0 || t.Root == nil {
 		return nil
@@ -128,6 +123,52 @@ func (t *Tree) ignoreChain(dir string) []ignoreLevel {
 	return levels
 }
 
+// chainVerdict asks the chain about one entry of the directory the
+// chain was built for. The deepest ignore file with ANY matching pattern
+// decides, and a "!" match there is a decision too — it is how
+// sub/.gitignore's `!keep.log` re-includes a file the root's `*.log`
+// excluded. That is git's precedence: patterns in a lower-level file
+// override those in a higher-level one.
+func chainVerdict(chain []ignoreLevel, name string, isDir bool) bool {
+	for _, lv := range chain {
+		switch lv.gi.Match(lv.prefix+name, isDir) {
+		case gitignore.Ignored:
+			return true
+		case gitignore.Included:
+			return false
+		}
+	}
+	return false
+}
+
+// dirExcluded reports whether dir itself, or any directory between it
+// and the project root, is gitignored.
+//
+// This is the other half of git's precedence and the reason
+// chainVerdict alone is not the answer: once a directory is excluded,
+// git never looks inside it, so nothing below can be re-included — not
+// by a "!" in a parent's file, and not by a .gitignore inside the
+// excluded directory. The tree normally gets that for free (a hidden
+// directory has no rows to filter), but an excluded directory can still
+// be on screen: a dot-directory is never hidden, and neither is one on
+// the path to an open tab. Its contents are ignored all the same.
+func (t *Tree) dirExcluded(dir string) bool {
+	if t.Root == nil {
+		return false
+	}
+	for d := dir; d != t.Root.Path; {
+		parent := filepath.Dir(d)
+		if parent == d {
+			return false // walked past the project without meeting its root
+		}
+		if chainVerdict(t.ignoreChain(parent), filepath.Base(d), true) {
+			return true
+		}
+		d = parent
+	}
+	return false
+}
+
 // filterIgnored drops the entries of dir that the project's .gitignore
 // files exclude. Returns the input untouched when filtering is off or no
 // ignore file applies, so the overwhelmingly common directory allocates
@@ -140,18 +181,20 @@ func (t *Tree) filterIgnored(dir string, entries []ScanEntry) []ScanEntry {
 	if len(chain) == 0 {
 		return entries
 	}
+	excluded := t.dirExcluded(dir)
 	pinned := t.pinnedNames(dir)
 	out := make([]ScanEntry, 0, len(entries))
 	for _, e := range entries {
-		if !ignoredByChain(chain, e, pinned) {
+		if !ignoredByChain(chain, excluded, e, pinned) {
 			out = append(out, e)
 		}
 	}
 	return out
 }
 
-// ignoredByChain reports whether e is excluded by any level of chain,
-// with two carve-outs that are the whole reason this is not a one-liner.
+// ignoredByChain reports whether e is excluded — because the directory
+// it sits in is (dirExcluded), or by the chain's own verdict — with two
+// carve-outs that are the whole reason this is not a one-liner.
 //
 // Dotfiles are never filtered. Showing .env, .github and .gitignore
 // itself is a standing decision for SSH work — they render muted, not
@@ -160,26 +203,20 @@ func (t *Tree) filterIgnored(dir string, entries []ScanEntry) []ScanEntry {
 // least acceptable one to lose. Anything under pinned is exempt too: it
 // is on the path to a file the user has open in a tab.
 //
-// Directory entries are tested with a trailing slash so a `dist/`
-// pattern — which git means as "directories only" — matches, while a
-// plain `dist` pattern still does.
-func ignoredByChain(chain []ignoreLevel, e ScanEntry, pinned map[string]struct{}) bool {
+// A symlink is matched as a file whatever it points at, because that is
+// what git sees: a `dist/` pattern — "directories only" — does not
+// exclude a symlink named dist.
+func ignoredByChain(chain []ignoreLevel, dirExcluded bool, e ScanEntry, pinned map[string]struct{}) bool {
 	if strings.HasPrefix(e.Name, ".") {
 		return false
 	}
 	if _, ok := pinned[e.Name]; ok {
 		return false
 	}
-	rel := e.Name
-	if e.IsDir {
-		rel += "/"
+	if dirExcluded {
+		return true
 	}
-	for _, lv := range chain {
-		if lv.gi.MatchesPath(lv.prefix + rel) {
-			return true
-		}
-	}
-	return false
+	return chainVerdict(chain, e.Name, e.IsDir && !e.IsLink)
 }
 
 // pinnedNames returns the immediate child names of dir that lead to a

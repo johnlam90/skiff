@@ -135,7 +135,9 @@ internal/filetree/scan.go     Off-thread disk sweep: readDir/ScanDirs on
                               and the fixed shouldHide noise list
 internal/filetree/ignore.go   .gitignore-aware filtering: HideIgnored +
                               the per-directory matcher cache, the
-                              nested-chain scoping, open-tab pins
+                              nested-chain scoping (deepest file with a
+                              match decides; nothing under an excluded
+                              directory is re-included), open-tab pins
 internal/filetree/flatten.go  Visible-row list + VS Code-style compact
                               folder chains (single-child dir runs fold
                               into one "a/b/c" row anchored on the
@@ -161,6 +163,14 @@ internal/diff/                The one model of a unified diff: Parse (git
                               No tcell, no theme, no git — the parse and
                               the pairing live once so the gutter and the
                               diff view cannot disagree
+internal/gitignore/           The one .gitignore matcher: a port of git's
+                              pattern parser + wildmatch for ONE ignore
+                              file (Match → NoMatch/Ignored/Included).
+                              No regexp, no deps. The tree and the
+                              finder's walk fallback both compile
+                              through it, and a differential test
+                              against `git check-ignore` fences it —
+                              don't swap a library back in
 internal/mdrender/            Markdown → pre-wrapped theme-styled lines
                               (goldmark AST walk; fenced code through
                               editor.Highlight so Chroma colors match)

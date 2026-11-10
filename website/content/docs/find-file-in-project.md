@@ -35,7 +35,7 @@ The result is what your fingers expect: type the beginning of the basename, get 
 Two strategies, picked automatically:
 
 - **Git repos.** Skiff shells out to `git ls-files --cached --others --exclude-standard -z` once. One fork, around 150 ms on a 50,000-file repo, and gitignore comes for free — Git already knows.
-- **Non-git projects.** A `filepath.Walk` with the `go-gitignore` library reading any `.gitignore` it finds, plus a hardcoded ignore list (`.git`, `.hg`, `.svn`, `node_modules`, `vendor`, `__pycache__`, `.venv`, `dist`, `build`, `.next`, `.cache`, `.DS_Store`).
+- **Non-git projects.** A `filepath.Walk` filtered through the project root's `.gitignore` (read with the same git-faithful matcher the file tree uses), plus a hardcoded ignore list (`.git`, `.hg`, `.svn`, `node_modules`, `vendor`, `__pycache__`, `.venv`, `dist`, `build`, `.next`, `.cache`, `.DS_Store`).
 
 The index is capped at 200,000 entries. If you have a project larger than that, the matcher will operate on the first 200k files seen — practically never an issue.
 
