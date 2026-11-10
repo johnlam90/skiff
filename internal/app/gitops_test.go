@@ -515,3 +515,60 @@ func TestGitConfirms_NameTheirVerb(t *testing.T) {
 		t.Errorf("force-remove buttons = %v", c.Labels)
 	}
 }
+
+// TestHandleGitOpDone_FailureDoesNotDestroyAnOpenPrompt: a rejected
+// push normally opens the pull-then-push offer, but not over a prompt
+// the user has started typing into since — then it is an error flash
+// carrying git's advice, and the offer waits for a re-run.
+func TestHandleGitOpDone_FailureDoesNotDestroyAnOpenPrompt(t *testing.T) {
+	a, _ := fakeRepoApp(t)
+	a.openPrompt("New file", "", "half-typed", nil)
+	a.gitDeleteTarget = "stale"
+
+	a.handleGitOpDone(gitOpResult{label: "Push"},
+		&git.OpError{Op: "Push", Advice: "origin has new commits", NonFastForward: true, Err: errors.New("exit status 1")})
+
+	if got := promptPrefab(t, a).Field.Text(); got != "half-typed" {
+		t.Fatalf("the prompt lost its text: %q", got)
+	}
+	if !strings.Contains(a.statusMsg, "Push failed") || !strings.Contains(a.statusMsg, "origin has new commits") {
+		t.Fatalf("flash = %q, want the failure and git's advice", a.statusMsg)
+	}
+	if a.gitDeleteTarget != "" {
+		t.Fatal("a flashed refusal must not leave a force-ladder target armed")
+	}
+}
+
+// TestHandleGitOpDone_FailureOverNothingStillOffersTheFix is the other
+// side of that rule: with nothing in the way, the offer opens as before.
+func TestHandleGitOpDone_FailureOverNothingStillOffersTheFix(t *testing.T) {
+	a, _ := fakeRepoApp(t)
+	a.handleGitOpDone(gitOpResult{label: "Push"},
+		&git.OpError{Op: "Push", Advice: "origin has new commits", NonFastForward: true, Err: errors.New("exit status 1")})
+	if !confirmIsOpen(a) {
+		t.Fatalf("expected the pull-then-push offer; top = %T", a.overlays.Top())
+	}
+}
+
+// TestHandleBranchList_DoesNotReplaceAnOpenPrompt: a branch list that
+// lands after the user moved on to typing somewhere else is dropped
+// with a flash, not opened over their text.
+func TestHandleBranchList_DoesNotReplaceAnOpenPrompt(t *testing.T) {
+	a, _ := fakeRepoApp(t)
+	a.openPrompt("New file", "", "half-typed", nil)
+
+	a.handleBranchList(branchListResult{purpose: "switch", names: []string{"main", "dev"}}, nil)
+
+	if got := promptPrefab(t, a).Field.Text(); got != "half-typed" {
+		t.Fatalf("the prompt lost its text: %q", got)
+	}
+	if !strings.Contains(a.statusMsg, "Branch list") {
+		t.Fatalf("flash = %q, want a note that the list was not opened", a.statusMsg)
+	}
+
+	a.closeAllModals()
+	a.handleBranchList(branchListResult{purpose: "switch", names: []string{"main", "dev"}}, nil)
+	if _, ok := a.overlays.Top().(*overlay.Pick); !ok {
+		t.Fatalf("over nothing the picker must still open; top = %T", a.overlays.Top())
+	}
+}

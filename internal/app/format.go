@@ -27,6 +27,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -619,6 +620,10 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 	// the event loop while the goroutine still reads it.
 	args := append([]string(nil), argv...)
 	a.flash(label + "…")
+	if a.formatInFlight == nil {
+		a.formatInFlight = make(map[string]int)
+	}
+	a.formatInFlight[tabPath]++
 	a.formatter.Start(func(context.Context) (formatResult, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), deadline)
 		defer cancel()
@@ -672,6 +677,14 @@ func indexNewline(s string) int {
 // never asked for this reload, so it must not cost them their undo
 // stack the way the disk-conflict prompt's explicit Reload does.
 func (a *App) handleFormatDone(r formatResult, err error) {
+	// Every landing — failure included — retires its in-flight count,
+	// or the save path would wave external changes through for the
+	// rest of the session.
+	if a.formatInFlight[r.tabPath] <= 1 {
+		delete(a.formatInFlight, r.tabPath)
+	} else {
+		a.formatInFlight[r.tabPath]--
+	}
 	if err != nil {
 		a.flash(fmt.Sprintf("%s failed: %v", r.label, err))
 		return
@@ -681,6 +694,13 @@ func (a *App) handleFormatDone(r formatResult, err error) {
 			continue
 		}
 		if tab.Dirty {
+			// The formatter's rewrite is this editor's own write, not a
+			// second writer: adopt its mtime so the next Save does not
+			// open the disk-conflict prompt over a reformat the flash
+			// below already reports.
+			if info, statErr := os.Stat(tab.Path); statErr == nil {
+				tab.Mtime = info.ModTime()
+			}
 			a.flash(fmt.Sprintf("%s ran — kept your edits (file on disk was reformatted)", r.label))
 			return
 		}

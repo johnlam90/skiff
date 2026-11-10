@@ -3217,3 +3217,34 @@ func TestReload_RefreshesFindMatches(t *testing.T) {
 		t.Fatalf("buffer %q, want %q", got, "xx Z bar Z")
 	}
 }
+
+// TestIsPreview_AnEditPinsTheTabForGood: Dirty used to be the only
+// thing pinning an edited preview tab, so the save that cleared it made
+// the file the user had just worked on replaceable by the next tree
+// click again. The edit itself now drops the preview flag.
+func TestIsPreview_AnEditPinsTheTabForGood(t *testing.T) {
+	tab := linesTab("one")
+	tab.Preview = true
+	if !tab.IsPreview() {
+		t.Fatal("precondition: an untouched preview tab is replaceable")
+	}
+
+	tab.InsertRune('x')
+	tab.Dirty = false // what a successful Save does
+
+	if tab.IsPreview() {
+		t.Fatal("an edited-then-saved tab must stay pinned")
+	}
+}
+
+// TestIsPreview_DiskGoneTabIsNotReplaceable: a tab whose file vanished
+// holds the only surviving copy of it, so the preview slot must not
+// swap it out — that would skip the close guard that says so.
+func TestIsPreview_DiskGoneTabIsNotReplaceable(t *testing.T) {
+	tab := linesTab("one")
+	tab.Preview = true
+	tab.DiskGone = true
+	if tab.IsPreview() {
+		t.Fatal("a DiskGone tab must not be replaceable")
+	}
+}

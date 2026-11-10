@@ -342,6 +342,22 @@ func (s *findStrip) enter(shift bool) {
 	if tab == nil {
 		return
 	}
+	// The bar stays pinned to the tab it opened on (ADR-0001: the mouse
+	// passes through, so the user can click another tab while it is
+	// up), and searching that tab from afar is harmless. REWRITING it
+	// is not: the user would be editing a buffer they cannot see, with
+	// the on-screen file suggesting the replace did nothing.
+	if tab != s.a.activeTabPtr() {
+		s.a.flash(fmt.Sprintf("Find is on %s — switch back to it to replace", tab.DisplayName()))
+		return
+	}
+	// The field cannot be opened over a preview (replaceAllowed), but a
+	// preview can be toggled on under an open bar by paths that do not
+	// rebind it; the page is read-only whichever way it got there.
+	if s.boundPreview() != nil {
+		s.a.flash(previewReadOnlyFlash)
+		return
+	}
 	if shift {
 		if n := tab.ReplaceAllMatches(s.replace.Text()); n > 0 {
 			s.a.flash(fmt.Sprintf("Replaced %d match(es)", n))

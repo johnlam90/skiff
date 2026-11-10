@@ -347,10 +347,17 @@ func (a *App) applyTabProbes(probes []tabProbe) {
 //     knows. Dirty is untouched: the buffer has no edits of its own, so
 //     a later delete+recreate must still be able to reload silently
 //     instead of reading as a conflict with edits that don't exist.
-//   - Disk newer, tab clean → reload the buffer silently, flash success.
-//     This is also how a DiskGone tab resolves once the file reappears.
-//   - Disk newer, tab dirty → a real conflict: prompt (Keep mine /
+//   - Disk differs, tab clean → reload the buffer silently, flash
+//     success. This is also how a DiskGone tab resolves once the file
+//     reappears.
+//   - Disk differs, tab dirty → a real conflict: prompt (Keep mine /
 //     Reload / Diff) and leave a marker on the tab until it is resolved.
+//
+// "Differs" is an mtime that is not the one the tab last saw — in
+// either direction. `mv backup f`, `cp -p` and `tar x` all install
+// bytes carrying an OLDER timestamp, and a newer-than test read every
+// one of them as "unchanged", leaving the stale buffer one Save away
+// from undoing the restore.
 //
 // The clean-tab reload uses ReloadKeepHistory, not plain Reload: the user
 // never asked for this reload (a background git checkout or `make` wrote
@@ -385,7 +392,9 @@ func (a *App) reconcileTab(tab *editor.Tab, p tabProbe) {
 	}
 	if tab.DiskGone {
 		// File reappeared. Force the mtime check below to fire so we
-		// either reload or warn about a dirty conflict.
+		// either reload or warn about a dirty conflict — the zero time
+		// equals no real file's mtime, which is all the Equal test
+		// below needs.
 		tab.DiskGone = false
 		tab.Mtime = time.Time{}
 	}
@@ -394,7 +403,7 @@ func (a *App) reconcileTab(tab *editor.Tab, p tabProbe) {
 	if !tab.Dirty {
 		a.clearDiskConflict(tab.Path)
 	}
-	if !p.mtime.After(tab.Mtime) {
+	if p.mtime.Equal(tab.Mtime) {
 		return // unchanged on disk.
 	}
 	if tab.Dirty {

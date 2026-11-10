@@ -1210,3 +1210,62 @@ func TestSortedFormatExts_IsStable(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleFormatDone_DirtyTabAdoptsTheFormattersWrite: when the
+// formatter rewrote the file under a buffer the user had already
+// started editing again, that rewrite is the editor's own. The landing
+// adopts its mtime and retires the in-flight count, so the next Save
+// goes through instead of opening the disk-conflict prompt.
+func TestHandleFormatDone_DirtyTabAdoptsTheFormattersWrite(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "main.go")
+	if err := os.WriteFile(path, []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, root)
+	tab := openTabAtPath(t, a, path)
+	tab.InsertString("// edit\n")
+	a.formatInFlight = map[string]int{path: 1}
+
+	// The formatter's rewrite, dated clear of the open's mtime.
+	if err := os.WriteFile(path, []byte("package main\n\n"), 0644); err != nil {
+		t.Fatalf("format write: %v", err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	a.handleFormatDone(formatResult{tabPath: path, label: "gofmt"}, nil)
+
+	if len(a.formatInFlight) != 0 {
+		t.Fatalf("the landing must retire its in-flight count, got %v", a.formatInFlight)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !tab.Mtime.Equal(info.ModTime()) {
+		t.Fatal("a dirty tab must adopt the formatter's mtime")
+	}
+	if !a.saveTab(tab) || a.overlays.IsOpen() {
+		t.Fatalf("the next save must go through unprompted; flash = %q, top = %T", a.statusMsg, a.overlays.Top())
+	}
+}
+
+// TestHandleFormatDone_FailureRetiresInFlightCount: a formatter that
+// errors still landed. A count left behind would switch the save
+// path's disk check off for that file for the rest of the session.
+func TestHandleFormatDone_FailureRetiresInFlightCount(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.formatInFlight = map[string]int{"/x/a.go": 2}
+
+	a.handleFormatDone(formatResult{tabPath: "/x/a.go", label: "gofmt"}, os.ErrInvalid)
+	if a.formatInFlight["/x/a.go"] != 1 {
+		t.Fatalf("one of two runs landed, count = %d", a.formatInFlight["/x/a.go"])
+	}
+	a.handleFormatDone(formatResult{tabPath: "/x/a.go", label: "gofmt"}, os.ErrInvalid)
+	if _, ok := a.formatInFlight["/x/a.go"]; ok {
+		t.Fatal("the last landing must drop the entry")
+	}
+}

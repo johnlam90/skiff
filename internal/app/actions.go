@@ -61,8 +61,16 @@ const customActionQuietRun = time.Second
 // A fast, silent action still gets nothing but a flash, because
 // stopping to dismiss a modal after every one-second formatter run is
 // its own kind of hostile.
+//
+// None of that applies while the user is in the middle of something
+// else: see landingWouldInterrupt. Then the report shrinks to a flash
+// that points at actions.log, where the full output already is.
 func (a *App) handleCustomActionDone(r customActionResult, err error) {
 	if err != nil {
+		if a.landingWouldInterrupt() {
+			a.flashError(actionInterruptedSummary("Action failed: "+r.label, strings.TrimSpace(err.Error())))
+			return
+		}
 		a.openInfo("Action failed: "+r.label, splitErrorOutput(err, r.output))
 		return
 	}
@@ -76,10 +84,50 @@ func (a *App) handleCustomActionDone(r customActionResult, err error) {
 		a.flash(r.label + " — done")
 		return
 	}
+	if a.landingWouldInterrupt() {
+		a.flash(actionInterruptedSummary(r.label+" — done", ""))
+		return
+	}
 	// refreshTreeNow ran first: openInfo takes the overlay slot, and a
 	// tree tick that reconciles a changed tab must not try to open a
 	// conflict prompt on top of the report we are about to show.
 	a.openInfo("Action done: "+r.label, body)
+}
+
+// landingWouldInterrupt reports whether opening an overlay right now
+// would destroy something the user is typing into. Every opener runs
+// closeAllModals first, which is right for a gesture — the user asked
+// for the new surface — and wrong for a background landing: a custom
+// action or a git verb finishing on its own schedule would wipe the
+// commit message, the rename prompt or the find-and-replace pair that
+// happened to be up, with no undo. A landing that finds either an
+// overlay or a docked text strip (find bar, project find) therefore
+// reports through a flash instead of opening anything.
+//
+// The strip is included here although anyModalOpen deliberately leaves
+// it out: that predicate answers "is input captured", this one answers
+// "would closeAllModals lose typed text", and dropStrip does.
+func (a *App) landingWouldInterrupt() bool {
+	return a.anyModalOpen() || a.strip != nil
+}
+
+// actionInterruptedSummary is the one-line stand-in for a custom
+// action's report when the report's modal would have interrupted the
+// user: the headline, the error's own first line when there is one, and
+// where the full output lives. The log pointer is what keeps the output
+// reachable — execCustomAction writes every run there before it lands.
+func actionInterruptedSummary(headline, detail string) string {
+	msg := headline
+	if detail != "" {
+		if i := strings.IndexByte(detail, '\n'); i >= 0 {
+			detail = detail[:i]
+		}
+		msg += " — " + detail
+	}
+	if logPath := customactions.LogPath(); logPath != "" {
+		msg += " (full output: " + logPath + ")"
+	}
+	return msg
 }
 
 // splitActionOutput formats a *successful* action's captured output for
@@ -173,6 +221,9 @@ func splitErrorOutput(runErr error, out []byte) []string {
 // menuUndo rolls the active tab back one undo step.
 func (a *App) menuUndo() {
 	a.closeMenu()
+	if a.previewRefusesEdit() {
+		return
+	}
 	t := a.activeTabPtr()
 	if t == nil {
 		return
@@ -185,6 +236,9 @@ func (a *App) menuUndo() {
 // menuRedo re-applies the most recently undone step.
 func (a *App) menuRedo() {
 	a.closeMenu()
+	if a.previewRefusesEdit() {
+		return
+	}
 	t := a.activeTabPtr()
 	if t == nil {
 		return
@@ -200,6 +254,9 @@ func (a *App) menuRedo() {
 // is recoverable with one Undo.
 func (a *App) menuRevert() {
 	a.closeMenu()
+	if a.previewRefusesEdit() {
+		return
+	}
 	t := a.activeTabPtr()
 	if t == nil {
 		return
@@ -330,27 +387,44 @@ func (a *App) menuClose() {
 	a.requestCloseTab(a.tabs.Active())
 }
 
-// menuCopy copies the current selection.
+// menuCopy copies the current selection — the editor's, or the rendered
+// page's while a markdown preview is up.
 func (a *App) menuCopy() {
 	a.closeMenu()
+	// Over a markdown preview the selection the user can see is the one
+	// dragged across the RENDERED page; the buffer's own selection is
+	// hidden behind it and would copy markdown they are not looking at.
+	if st := a.activeMdPreview(); st != nil {
+		a.copyMdPreviewSelection(st)
+		return
+	}
 	a.copySelection()
 }
 
 // menuCut cuts the current selection.
 func (a *App) menuCut() {
 	a.closeMenu()
+	if a.previewRefusesEdit() {
+		return
+	}
 	a.cutSelection()
 }
 
 // menuPaste pastes the editor's internal clipboard at the cursor.
 func (a *App) menuPaste() {
 	a.closeMenu()
+	if a.previewRefusesEdit() {
+		return
+	}
 	a.pasteClipboard()
 }
 
 // menuToggleLineComment comments or uncomments the active line selection.
 func (a *App) menuToggleLineComment() {
 	a.closeMenu()
+	if a.previewRefusesEdit() {
+		return
+	}
 	tab := a.activeTabPtr()
 	if tab == nil || tab.IsImage() {
 		return
@@ -370,6 +444,9 @@ func (a *App) menuToggleLineComment() {
 // menuMoveLineUp nudges the cursor line / selected block up one line.
 func (a *App) menuMoveLineUp() {
 	a.closeMenu()
+	if a.previewRefusesEdit() {
+		return
+	}
 	if t := a.activeTabPtr(); t != nil {
 		t.MoveLinesUp()
 	}
@@ -378,6 +455,9 @@ func (a *App) menuMoveLineUp() {
 // menuMoveLineDown nudges the cursor line / selected block down one line.
 func (a *App) menuMoveLineDown() {
 	a.closeMenu()
+	if a.previewRefusesEdit() {
+		return
+	}
 	if t := a.activeTabPtr(); t != nil {
 		t.MoveLinesDown()
 	}
@@ -386,6 +466,9 @@ func (a *App) menuMoveLineDown() {
 // menuDuplicateLine copies the cursor line / selected block below itself.
 func (a *App) menuDuplicateLine() {
 	a.closeMenu()
+	if a.previewRefusesEdit() {
+		return
+	}
 	if t := a.activeTabPtr(); t != nil {
 		t.DuplicateLines()
 	}
@@ -620,6 +703,9 @@ func (a *App) menuQuit() {
 // pair stays reachable.
 func (a *App) menuIndentLines() {
 	a.closeMenu()
+	if a.previewRefusesEdit() {
+		return
+	}
 	if t := a.activeTabPtr(); t != nil {
 		t.IndentLines()
 	}
@@ -631,6 +717,9 @@ func (a *App) menuIndentLines() {
 // clicked reads as a broken menu item.
 func (a *App) menuOutdentLines() {
 	a.closeMenu()
+	if a.previewRefusesEdit() {
+		return
+	}
 	t := a.activeTabPtr()
 	if t == nil {
 		return

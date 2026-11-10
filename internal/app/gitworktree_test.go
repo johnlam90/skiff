@@ -231,3 +231,27 @@ func TestMenuGitRemoveWorktree_ForceOffer(t *testing.T) {
 		t.Fatalf("worktree dir should be gone, stat err = %v", err)
 	}
 }
+
+// TestHandleWorktreeList_DoesNotReplaceAnOpenPrompt mirrors the branch
+// list: a worktree list landing over a prompt in use is dropped with a
+// flash, and over nothing it opens as before.
+func TestHandleWorktreeList_DoesNotReplaceAnOpenPrompt(t *testing.T) {
+	a, _ := fakeRepoApp(t)
+	wts := []git.Worktree{{Path: "/repo", Branch: "main", Main: true}}
+	a.openPrompt("New file", "", "half-typed", nil)
+
+	a.handleWorktreeList(worktreeListResult{purpose: "list", wts: wts}, nil)
+
+	if got := promptPrefab(t, a).Field.Text(); got != "half-typed" {
+		t.Fatalf("the prompt lost its text: %q", got)
+	}
+	if !strings.Contains(a.statusMsg, "Worktree list") {
+		t.Fatalf("flash = %q, want a note that the list was not opened", a.statusMsg)
+	}
+
+	a.closeAllModals()
+	a.handleWorktreeList(worktreeListResult{purpose: "list", wts: wts}, nil)
+	if !infoIsOpen(a) {
+		t.Fatalf("over nothing the list must still open; top = %T", a.overlays.Top())
+	}
+}

@@ -270,8 +270,8 @@ func TestSidebarPanelsSurviveTheMinimumHeight(t *testing.T) {
 // column except the ≡ button's, the splitter is gone, and the editor
 // rect is the blank strip under the button rather than the 11-column
 // sliver a 29-cell sidebar used to leave (every line wrapping character
-// by character). Closing the panel hands the stored width straight
-// back, and a window wide enough for both keeps the ordinary split.
+// by character). Closing the panel leaves the stored width alone, and a
+// window wide enough for both lays the ordinary split out at it.
 func TestGitPanelFillsNarrowWindow(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	resizeTestApp(t, a, 48, 16)
@@ -303,11 +303,17 @@ func TestGitPanelFillsNarrowWindow(t *testing.T) {
 		}
 	}
 
+	// Closing the panel leaves the stored preference untouched; what
+	// the 48-column window can show of it is the clamped minimum (see
+	// TestSidebarW_ClampsToTheTerminal), with the splitter on its edge.
 	a.gitPanel.active = false
-	if got := a.sidebarW(); got != 29 {
-		t.Fatalf("closing the panel should restore the stored width 29, got %d", got)
+	if a.sidebarWidth != 29 {
+		t.Fatalf("the panel must not rewrite the stored width; got %d, want 29", a.sidebarWidth)
 	}
-	if x := a.splitterX(); x != 28 {
+	if got := a.sidebarW(); got != minSidebarWidth {
+		t.Fatalf("closing the panel at 48 columns should lay out the clamped explorer (%d), got %d", minSidebarWidth, got)
+	}
+	if x := a.splitterX(); x != minSidebarWidth-1 {
 		t.Fatalf("splitter should return with the explorer, got x=%d", x)
 	}
 
@@ -315,5 +321,46 @@ func TestGitPanelFillsNarrowWindow(t *testing.T) {
 	resizeTestApp(t, a, 80, 24)
 	if got := a.sidebarW(); got != 29 {
 		t.Fatalf("at 80 columns the panel should keep the ordinary split, got sidebarW=%d", got)
+	}
+}
+
+// TestSidebarW_ClampsToTheTerminal is the off-screen-editor fix: a
+// sidebar dragged wide in a wide terminal used to keep that width when
+// the terminal shrank, leaving the editor a negative width. The layout
+// now bounds what it reads so the editor keeps minEditorAfterDrag, and
+// the stored preference is untouched so widening restores it.
+func TestSidebarW_ClampsToTheTerminal(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 200, 40)
+	a.sidebarShown = true
+	a.resizeSidebar(150)
+	if got := a.sidebarW(); got != 150 {
+		t.Fatalf("at 200 columns the dragged width stands, got %d", got)
+	}
+
+	resizeTestApp(t, a, 80, 40)
+	if got := a.sidebarW(); got != 80-minEditorAfterDrag {
+		t.Fatalf("at 80 columns sidebarW = %d, want %d", got, 80-minEditorAfterDrag)
+	}
+	if _, _, ew, _ := a.editorRect(); ew != minEditorAfterDrag {
+		t.Fatalf("editor width = %d, want the %d-column floor", ew, minEditorAfterDrag)
+	}
+	if x := a.splitterX(); x != 80-minEditorAfterDrag-1 {
+		t.Fatalf("splitter at x=%d, want it on the laid-out sidebar's edge", x)
+	}
+	if a.sidebarWidth != 150 {
+		t.Fatalf("the clamp must not rewrite the preference, got %d", a.sidebarWidth)
+	}
+
+	// Too narrow for both floors: the tree keeps its minimum, the same
+	// fallback resizeSidebar applies.
+	resizeTestApp(t, a, 50, 40)
+	if got := a.sidebarW(); got != minSidebarWidth {
+		t.Fatalf("at 50 columns sidebarW = %d, want the minimum %d", got, minSidebarWidth)
+	}
+
+	resizeTestApp(t, a, 200, 40)
+	if got := a.sidebarW(); got != 150 {
+		t.Fatalf("widening must restore the preferred width, got %d", got)
 	}
 }

@@ -187,3 +187,20 @@ func TestTabList_NextPrevWrap(t *testing.T) {
 		t.Fatal("a one-tab list switches to itself")
 	}
 }
+
+// TestTabList_InsertPreviewSparesADiskGoneTab is the list-level
+// consequence of IsPreview refusing a DiskGone tab: the next preview
+// opens beside it instead of replacing the only copy of its content.
+func TestTabList_InsertPreviewSparesADiskGoneTab(t *testing.T) {
+	var l TabList
+	gone := memTab("/p/gone.txt", true)
+	gone.DiskGone = true
+	l.Append(gone)
+
+	next := memTab("/p/next.txt", true)
+	l.InsertPreview(next)
+
+	if l.Len() != 2 || l.IndexOf(gone) != 0 || l.Active() != next {
+		t.Fatalf("the DiskGone tab was replaced: len=%d goneAt=%d", l.Len(), l.IndexOf(gone))
+	}
+}

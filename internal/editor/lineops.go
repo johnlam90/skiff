@@ -52,9 +52,28 @@ func (t *Tab) MoveLinesDown() {
 		moved := lines[last+1]
 		copy(lines[first+1:last+2], lines[first:last+1])
 		lines[first] = moved
-		t.Cursor.Line++
-		t.Anchor.Line++
+		t.Cursor = t.rideDown(t.Cursor)
+		t.Anchor = t.rideDown(t.Anchor)
 	})
+}
+
+// rideDown carries one end of the selection down a line with a block
+// MoveLinesDown just moved. The one case that is not a plain Line++ is
+// a selection ending at column 0: its caret sits on the line AFTER the
+// block (commentLineRange trims that line off), so when the block
+// reaches the bottom of the buffer there is no line left for the caret
+// to stand on. Select all on "one\ntwo\n" and then a move used to leave
+// Cursor.Line == LineCount(), one past the end, for the next render to
+// index off the buffer with. The end then lands on the end of the last
+// line instead, which selects exactly the same block: "through the end
+// of the block's last line" is what "up to column 0 of the next one"
+// meant.
+func (t *Tab) rideDown(p Position) Position {
+	p.Line++
+	if bottom := t.Buffer.LineCount() - 1; p.Line > bottom {
+		p = Position{Line: bottom, Col: len(t.Buffer.LineRunes(bottom))}
+	}
+	return p
 }
 
 // DuplicateLines inserts a copy of the selected line block directly

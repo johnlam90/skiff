@@ -67,12 +67,28 @@ func (a *App) runGitOp(label, okFlash string, touchesTree bool, op gitOp) bool {
 // explicit confirm. The routing reads the OpError's flags, never its
 // text — the git package classified the refusal when it built the
 // error.
+//
+// Every failure branch opens an overlay, so every one of them yields to
+// landingWouldInterrupt: an op finishing while the user types into a
+// prompt or the find bar reports as an error flash carrying git's
+// advice, and the follow-up offer is not made — re-running the verb
+// with nothing in the way brings it back.
 func (a *App) handleGitOpDone(r gitOpResult, err error) {
 	var opErr *git.OpError
 	errors.As(err, &opErr)
 	switch {
 	case err == nil:
 		a.flash(r.okFlash)
+	case a.landingWouldInterrupt():
+		// The force ladders key off these targets; a refusal that is
+		// only flashed must not leave one armed for an unrelated later
+		// failure to pick up.
+		a.gitDeleteTarget, a.gitWorktreeTarget = "", ""
+		detail := err.Error()
+		if opErr != nil && opErr.Advice != "" {
+			detail = opErr.Advice
+		}
+		a.flashError(r.label + " failed — " + detail)
 	case opErr != nil && opErr.NonFastForward && r.label == "Push":
 		c := a.openConfirm("Push rejected",
 			"origin has commits you don't. Pull (merge), then push?",
@@ -287,11 +303,19 @@ func (a *App) requestBranchList(purpose string) {
 
 // handleBranchList routes a collected branch list to the picker that
 // asked for it.
+//
+// A list that lands on top of something the user has since started
+// typing into is dropped with a flash rather than opened — the picker
+// was asked for a moment ago, the prompt is being used now.
 func (a *App) handleBranchList(r branchListResult, _ error) {
 	// Remembered for as long as the picker built from this list is up:
 	// its rows are plain names, and whether one is remote-tracking is a
 	// fact only the listing knows (a slash proves nothing).
 	a.remoteBranches = r.remote
+	if a.landingWouldInterrupt() {
+		a.flash("Branch list is ready — pick the action again to open it")
+		return
+	}
 	switch r.purpose {
 	case "switch":
 		a.openSwitchBranchPick(r.names)

@@ -480,9 +480,11 @@ func (t *Tab) IsImage() bool {
 // IsPreview reports whether the tab is still replaceable by the next
 // tree-click preview. A dirty buffer is never a preview — the user's
 // edits pin it implicitly, so a half-typed change can't be silently
-// swapped out from under them.
+// swapped out from under them — and neither is a DiskGone one: its
+// buffer is the only surviving copy of the file, and replacing the tab
+// in place skips the close guard that exists to say so.
 func (t *Tab) IsPreview() bool {
-	return t.Preview && !t.Dirty
+	return t.Preview && !t.Dirty && !t.DiskGone
 }
 
 // Pin makes a preview tab permanent (drops the italic, stops the
@@ -688,6 +690,11 @@ func (t *Tab) edit(group undoGroup, mutate func()) {
 	before := t.editLinesSnapshot()
 	mutate()
 	t.Dirty = true
+	// An edit pins a preview tab for good. Dirty alone only pinned it
+	// until the save cleared the flag, at which point the file the user
+	// had just worked on went back to being replaced by the next tree
+	// click.
+	t.Preview = false
 	t.rebaseStyles(before)
 	// The bracket cache used to learn of edits through StyleStale, which
 	// an edit inside the highlight window no longer sets — deleting a

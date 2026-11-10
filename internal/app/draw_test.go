@@ -1362,7 +1362,11 @@ func TestTabChevrons_DropCountsOnACrampedStrip(t *testing.T) {
 		t.Fatalf("precondition: want tabs hidden both ways, got %d/%d", nl, nr)
 	}
 	// Squeeze the strip until the badges no longer earn their counts.
-	a.sidebarWidth = a.width - menuButtonWidth - minVisibleTabCells - 1
+	// The squeeze is the terminal itself: sidebarW clamps the explorer
+	// so the editor keeps minEditorAfterDrag columns, which means a wide
+	// sidebar can no longer starve the strip — only a narrow window can.
+	a.sidebarShown = false
+	a.width = menuButtonWidth + minVisibleTabCells + 1
 	left, right := a.tabChevrons()
 	if left.Label != "‹" || right.Label != "›" {
 		t.Fatalf("cramped strip badges = %q / %q, want the bare chevrons",

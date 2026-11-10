@@ -51,8 +51,13 @@ func (a *App) requestWorktreeList(purpose string) {
 }
 
 // handleWorktreeList routes a collected list to the flow that asked for
-// it.
+// it — unless the user has started typing into another surface since,
+// in which case it is dropped with a flash (landingWouldInterrupt).
 func (a *App) handleWorktreeList(r worktreeListResult, _ error) {
+	if a.landingWouldInterrupt() {
+		a.flash("Worktree list is ready — pick the action again to open it")
+		return
+	}
 	switch r.purpose {
 	case "list":
 		a.openWorktreeList(r.wts)

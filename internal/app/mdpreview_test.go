@@ -801,3 +801,104 @@ func TestDrawPreviewMarkdown_PaintsWholeClusters(t *testing.T) {
 		}
 	}
 }
+
+// TestPreviewMarkdown_EditVerbsAreRefused is the read-only contract on
+// the paths the menu's hidden rows never covered: every Esc-leader edit
+// verb, plus Revert and the shift-lines pair, dispatched straight at the
+// action. Each must leave the hidden markdown source byte-for-byte
+// alone and flash the read-only notice.
+func TestPreviewMarkdown_EditVerbsAreRefused(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "# Title\n\n  one\ntwo\n")
+	// Give every verb something it WOULD do: an edit to undo and revert,
+	// a selection to cut, a clipboard to paste.
+	tab.InsertString("typed ")
+	tab.Undo()
+	tab.Redo()
+	tab.SelectAll()
+	a.clipBuf = "clip"
+	a.menuTogglePreviewMarkdown()
+	want := tab.Buffer.String()
+
+	verbs := map[string]func(*App){
+		"Revert":      (*App).menuRevert,
+		"Shift right": (*App).menuIndentLines,
+		"Shift left":  (*App).menuOutdentLines,
+	}
+	for _, r := range "vxdjk/ur" {
+		verbs["Esc "+string(r)] = leaderActionFor(r)
+	}
+	for name, verb := range verbs {
+		a.statusMsg = ""
+		verb(a)
+		if got := tab.Buffer.String(); got != want {
+			t.Fatalf("%s edited the source behind the preview:\n got %q\nwant %q", name, got, want)
+		}
+		if a.statusMsg != previewReadOnlyFlash {
+			t.Fatalf("%s: flash = %q, want the read-only notice", name, a.statusMsg)
+		}
+	}
+	if a.mdPreviewFor(tab) == nil {
+		t.Fatal("a refused edit must leave the preview up")
+	}
+}
+
+// TestPreviewMarkdown_MutatingRowsHideCopyAndFindStay pins the menu
+// side: rows that write the buffer are dropped while the preview is up
+// (hide, don't dim), and the read-only ones — copy, find — are not.
+func TestPreviewMarkdown_MutatingRowsHideCopyAndFindStay(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	seedMarkdownTab(t, a, "notes.md", "# Title\n\nhello\n")
+	a.menuTogglePreviewMarkdown()
+
+	shown := map[string]bool{}
+	for _, group := range builtinMenuGroups() {
+		for _, it := range group {
+			if it.label != "" {
+				shown[it.label] = it.visible == nil || it.visible(a)
+			}
+		}
+	}
+	for _, label := range []string{
+		"Undo", "Redo", "Cut selection", "Paste", "Toggle line comment",
+		"Move line up", "Move line down", "Duplicate line",
+		"Shift lines right", "Shift lines left", "Revert file",
+	} {
+		if vis, ok := shown[label]; !ok || vis {
+			t.Errorf("%q must be hidden over a preview (found=%v visible=%v)", label, ok, vis)
+		}
+	}
+	for _, label := range []string{"Copy selection", "Find in file", "Select all"} {
+		if !shown[label] {
+			t.Errorf("%q must stay available over a preview", label)
+		}
+	}
+}
+
+// TestPreviewMarkdown_MenuCopyTakesTheRenderedSelection keeps copy
+// working in the preview and pointed at what the reader selected: the
+// rendered text, not the buffer selection hidden behind the page.
+func TestPreviewMarkdown_MenuCopyTakesTheRenderedSelection(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "# Title\n\nhello **beta** world\n")
+	tab.SelectAll()
+	a.menuTogglePreviewMarkdown()
+	st := a.mdPreviewFor(tab)
+	if a.hasCopyableSelection() {
+		t.Fatal("no rendered selection yet: the Copy row must not light up off the hidden one")
+	}
+	line := findPreviewLine(a, tab, "beta")
+	if line < 0 {
+		t.Fatal("precondition: the rendered page should contain the word")
+	}
+	st.selA = previewPos{line: line, col: 0}
+	st.selB = previewPos{line: line, col: len([]rune(st.lines[line]))}
+	if !a.hasCopyableSelection() {
+		t.Fatal("a rendered selection must enable the Copy row")
+	}
+
+	a.menuCopy()
+	if a.clipBuf != st.lines[line] {
+		t.Fatalf("clipboard = %q, want the rendered line %q", a.clipBuf, st.lines[line])
+	}
+}

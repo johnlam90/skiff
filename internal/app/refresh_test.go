@@ -816,3 +816,102 @@ func TestHandleCustomActionDone_StillReindexesFinder(t *testing.T) {
 	}
 	pumpUntil(t, a, "tree scan", idle(&a.treeScan))
 }
+
+// TestReconcile_OlderMtimeReplacementReloads is the `mv backup f` case:
+// the replacement carries an OLDER mtime than the one the tab saw. The
+// old newer-than test read that as "unchanged" and left the stale
+// buffer one Save away from undoing the restore.
+func TestReconcile_OlderMtimeReplacementReloads(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "restored.txt")
+	if err := os.WriteFile(target, []byte("current\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+
+	if err := os.WriteFile(target, []byte("from backup\n"), 0644); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	past := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(target, past, past); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	a.reconcileOpenTabsWithDisk()
+	if got := tab.Buffer.Lines[0]; got != "from backup" {
+		t.Fatalf("an older-dated replacement must reload the clean tab, buffer = %q", got)
+	}
+}
+
+// TestReconcile_OlderMtimeConflictPromptsOncePerRevision is the dirty
+// half of the same change, and the guard on the once-per-revision memo:
+// the prompt opens for the older-dated file, and a dismissed prompt is
+// not re-opened by the next tick now that "differs" replaced "newer".
+func TestReconcile_OlderMtimeConflictPromptsOncePerRevision(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "restored.txt")
+	if err := os.WriteFile(target, []byte("current\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	a.activeTabPtr().InsertString("edit ")
+
+	if err := os.WriteFile(target, []byte("from backup\n"), 0644); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	past := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(target, past, past); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	a.reconcileOpenTabsWithDisk()
+	if !dirtyIsOpen(a) {
+		t.Fatalf("a dirty tab over an older-dated replacement must prompt; top = %T", a.overlays.Top())
+	}
+	a.closeAllModals()
+	a.reconcileOpenTabsWithDisk()
+	if a.overlays.IsOpen() {
+		t.Fatal("the same disk revision must not prompt twice")
+	}
+}
+
+// TestReconcile_ReappearedFileReloadsWhateverItsMtime pins the DiskGone
+// path against the Equal test: a file that comes back is reloaded even
+// when it comes back with the very mtime the tab last saw (a `mv` away
+// and back), because the reappearance zeroes the tab's memo first.
+func TestReconcile_ReappearedFileReloadsWhateverItsMtime(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "gone.txt")
+	if err := os.WriteFile(target, []byte("before\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	seen := tab.Mtime
+
+	if err := os.Remove(target); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	a.reconcileOpenTabsWithDisk()
+	if !tab.DiskGone {
+		t.Fatal("precondition: the tab should be marked DiskGone")
+	}
+	if err := os.WriteFile(target, []byte("after\n"), 0644); err != nil {
+		t.Fatalf("recreate: %v", err)
+	}
+	if err := os.Chtimes(target, seen, seen); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	a.reconcileOpenTabsWithDisk()
+	if tab.DiskGone {
+		t.Fatal("the file is back; DiskGone must clear")
+	}
+	if got := tab.Buffer.Lines[0]; got != "after" {
+		t.Fatalf("the reappeared file must be reloaded, buffer = %q", got)
+	}
+}

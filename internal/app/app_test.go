@@ -940,3 +940,28 @@ func TestNewSingleFileApp_GreetsWithTheKeys(t *testing.T) {
 		t.Fatalf("a failed open must keep its error flash, got %q", unopenable.statusMsg)
 	}
 }
+
+// TestFitToScreen_BringsTheRestoredActiveTabIntoTheStrip: a restored
+// session activates its tab in New, before the terminal's size is
+// known, so the strip's scroll was never fitted and the active tab sat
+// off its right edge until the first resize. fitToScreen is the step
+// Run takes once the size is real.
+func TestFitToScreen_BringsTheRestoredActiveTabIntoTheStrip(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	openManyTabs(t, a, dir, 12)
+	// The state restoreSession leaves behind: last tab active, strip
+	// scroll still at its zero value.
+	a.tabScroll = 0
+
+	a.fitToScreen()
+
+	rects := a.layoutTabs()
+	r := rects[a.tabs.ActiveIndex()]
+	winX, winW := a.tabWindow()
+	left := winX + a.tabScroll
+	if r.X < left || r.X+r.Width > left+winW {
+		t.Fatalf("active tab [%d,%d) is outside the strip window [%d,%d)", r.X, r.X+r.Width, left, left+winW)
+	}
+}

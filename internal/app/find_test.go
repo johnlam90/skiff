@@ -417,14 +417,21 @@ func TestDrawFindBar_HidesTheCaretWhenTheBarHasNoRoomAtAll(t *testing.T) {
 	scr := a.screen.(tcell.SimulationScreen)
 	scr.SetSize(60, 24)
 	a.width, a.height = 60, 24
-	// A sidebar dragged this wide leaves the bar too narrow for even the
-	// "Find:" label plus one cell of input, while the editor beside it
-	// is still wide enough to render — and to park the hardware cursor
-	// on its own caret, which is the cursor that must not survive.
-	a.sidebarShown, a.sidebarWidth = true, 52
 	a.openFind()
 
+	// A full frame first, so the hardware cursor is parked and visible
+	// — that is the cursor that must not survive. Then the bar is
+	// handed a rect too narrow for even the "Find:" label plus one cell
+	// of input. The layout cannot produce that rect any more (sidebarW
+	// keeps the editor at minEditorAfterDrag and draw refuses to paint
+	// under minWidth), so the strip is driven directly: the bail is the
+	// strip's own contract with whatever rect it is given.
 	a.draw()
+	scr.Show()
+	if _, _, visible := scr.GetCursor(); !visible {
+		t.Fatal("precondition: a bar with room shows its caret")
+	}
+	a.findBar().draw(rect{x: 52, y: 22, w: 8, h: 1})
 	scr.Show()
 
 	if cx, cy, visible := scr.GetCursor(); visible {
@@ -716,5 +723,39 @@ func TestFindBar_RefusesReplaceOverPreview(t *testing.T) {
 	a.menuTogglePreviewMarkdown()
 	if s.replaceOpen || s.focusReplace {
 		t.Fatal("entering preview must close the replace field")
+	}
+}
+
+// TestFindReplace_RefusesWhenItsTabIsNotOnScreen: the bar stays pinned
+// to the tab it opened on (ADR-0001), so after a click onto another tab
+// Enter in the replace field used to rewrite a buffer the user could
+// not see. Replace and replace-all now refuse with a flash until that
+// tab is active again; walking the matches is still allowed.
+func TestFindReplace_RefusesWhenItsTabIsNotOnScreen(t *testing.T) {
+	a, tabA, tabB := seedTwoTabApp(t)
+	a.tabs.ActivateAt(a.tabs.IndexOf(tabA))
+	typeFind(a, "foo")
+	a.handleKey(keyEv(tcell.KeyTab, 0))
+	a.handleKey(keyEv(tcell.KeyRune, 'X'))
+	// What a tab-strip click does while the bar passes the mouse through.
+	a.tabs.ActivateAt(a.tabs.IndexOf(tabB))
+
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+	a.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModShift))
+
+	if got := tabA.Buffer.Lines[0]; got != "foo bar foo" {
+		t.Fatalf("replace edited the off-screen tab: %q", got)
+	}
+	if got := tabB.Buffer.Lines[0]; got != "foo baz" {
+		t.Fatalf("replace edited the on-screen tab the bar is not bound to: %q", got)
+	}
+	if !strings.Contains(a.statusMsg, "a.txt") || !strings.Contains(a.statusMsg, "switch back") {
+		t.Fatalf("flash = %q, want it to name the bound tab and the way back", a.statusMsg)
+	}
+
+	a.tabs.ActivateAt(a.tabs.IndexOf(tabA))
+	a.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModShift))
+	if got := tabA.Buffer.Lines[0]; got != "X bar X" {
+		t.Fatalf("back on its own tab the bar must replace again, got %q", got)
 	}
 }

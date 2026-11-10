@@ -138,6 +138,10 @@ func (a *App) reloadConflictedTab(tab *editor.Tab) {
 		a.flash(fmt.Sprintf("%s reload failed: %v", name, err))
 		return
 	}
+	// A markdown preview is a cached rendering of the buffer; every
+	// other reload path re-renders it, and without this one the preview
+	// kept showing the edits the user had just thrown away.
+	a.invalidateMdPreview(tab)
 	a.clearDiskConflict(tab.Path)
 	a.flash(name + " reloaded from disk")
 }

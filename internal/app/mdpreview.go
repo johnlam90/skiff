@@ -138,6 +138,27 @@ func (a *App) hasMarkdownTab() bool {
 	return a.activeMarkdownTab() != nil
 }
 
+// previewReadOnlyFlash is the one sentence every refused edit flashes
+// while a markdown preview is up — a typed key, an Esc-leader edit verb,
+// a paste. It names the way out by its menu row because the toggle has
+// no leader key of its own.
+const previewReadOnlyFlash = "Preview is read-only — ≡ → Edit Markdown to edit"
+
+// previewRefusesEdit is the guard every buffer-mutating action runs
+// first: with the active tab showing its rendered preview it flashes
+// previewReadOnlyFlash and reports true, and the caller must not touch
+// the buffer. The menu already hides these rows (hasMutableTab), but
+// the Esc leader dispatches straight to the action — and an edit landing
+// in the markdown source hidden behind the page is invisible until the
+// user toggles back and finds text they never saw change.
+func (a *App) previewRefusesEdit() bool {
+	if a.activeMdPreview() == nil {
+		return false
+	}
+	a.flash(previewReadOnlyFlash)
+	return true
+}
+
 // mdPreviewState returns the active preview for tab, nil-safe against
 // the lazily created map.
 func (a *App) mdPreviewFor(t *editor.Tab) *mdPreviewState {
@@ -412,7 +433,7 @@ func (a *App) handleMdPreviewKey(st *mdPreviewState, ev *tcell.EventKey) bool {
 	case tcell.KeyEnd:
 		st.scroll = len(st.lines)
 	default:
-		a.flash("Preview is read-only — ≡ → Edit Markdown to edit")
+		a.flash(previewReadOnlyFlash)
 	}
 	return true
 }
