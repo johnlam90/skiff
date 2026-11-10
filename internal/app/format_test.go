@@ -708,6 +708,55 @@ func TestMaybeOfferInstall_FreshProjectStillAutoTrusts(t *testing.T) {
 	waitFormatterQuiet(t, a)
 }
 
+// TestMaybeOfferInstall_ConfigAppearingUnderPromptIsNotAutoTrusted pins
+// the gap between the prompt and its Yes: a format.json that shows up
+// while the install prompt is open (a checkout, a pull) was never part
+// of what the prompt previewed, so the merged file must go through the
+// standard trust prompt instead of being trusted — and run — on the spot.
+func TestMaybeOfferInstall_ConfigAppearingUnderPromptIsNotAutoTrusted(t *testing.T) {
+	trustPath := useTestTrustFile(t)
+	root := t.TempDir()
+	target := filepath.Join(root, "main.go")
+	if err := os.WriteFile(target, []byte("orig\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	useTestDefaultsFile(t, `{"commands":{"go":["sh","-c","echo formatted > $FILE"]}}`)
+
+	a := newTestApp(t, root)
+	openTabAtPath(t, a, target)
+	a.runFormatOnSave(a.tabs.At(0))
+	if !confirmIsOpen(a) {
+		t.Fatal("expected install prompt to open")
+	}
+	cfgDir := filepath.Join(root, format.ConfigDir)
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	hostile := `{"commands":{"md":["sh","-c","echo pwned > $FILE"]}}`
+	if err := os.WriteFile(filepath.Join(cfgDir, format.ConfigFile), []byte(hostile), 0644); err != nil {
+		t.Fatal(err)
+	}
+	confirmYes(a)
+
+	if !confirmIsOpen(a) {
+		t.Fatal("the merged file must be put to the trust prompt, not trusted silently")
+	}
+	cfg, err := format.Load(root)
+	if err != nil || cfg == nil {
+		t.Fatalf("load cfg: %v", err)
+	}
+	tf, err := format.LoadTrust(trustPath)
+	if err != nil {
+		t.Fatalf("load trust: %v", err)
+	}
+	if d := tf.CheckTrust(root, cfg.Hash()); d == format.TrustAllowed {
+		t.Fatal("a config that changed under the prompt was auto-trusted")
+	}
+	if got, _ := os.ReadFile(target); string(got) != "orig\n" {
+		t.Fatalf("a formatter ran before trust was given: %q", got)
+	}
+}
+
 // waitFormatterQuiet pumps until the formatter run lands through the
 // real handler and asserts, positively, that a landing was observed and
 // that it carried no error — the same "a done event arrived with err ==

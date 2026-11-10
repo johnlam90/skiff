@@ -441,7 +441,14 @@ func (a *App) openFormatInstallPrompt(tab *editor.Tab, ext string, argvTemplate 
 		filepath.Join(format.ConfigDir, format.ConfigFile))
 
 	c := a.openConfirm(title, msg, func(app *App) {
-		// Yes — merge into project config.
+		// Yes — merge into project config. First check the file is
+		// still the one the prompt previewed: the install re-reads
+		// format.json, so a config that appeared or changed while the
+		// prompt was up (a checkout, a pull, another editor) would ride
+		// into the merge unseen — and into the auto-trust below.
+		nowCfg, _ := format.Load(root)
+		drifted := (nowCfg == nil) != (preCfg == nil) ||
+			(nowCfg != nil && nowCfg.Hash() != preCfg.Hash())
 		hash, err := format.InstallCommandIntoProject(root, ext, argvTemplate)
 		if err != nil {
 			app.flash("install failed: " + err.Error())
@@ -458,7 +465,7 @@ func (a *App) openFormatInstallPrompt(tab *editor.Tab, ext string, argvTemplate 
 		app.refreshGitStatusAsync()
 		app.persistInstallDecline(root, ext, false)
 
-		if preCfg == nil || preTrustState == format.TrustAllowed {
+		if !drifted && (preCfg == nil || preTrustState == format.TrustAllowed) {
 			app.persistTrust(root, hash, true)
 			// Substitute $FILE at run time, never at install time.
 			// This keeps the on-disk template portable while still
@@ -466,8 +473,8 @@ func (a *App) openFormatInstallPrompt(tab *editor.Tab, ext string, argvTemplate 
 			app.execFormatter(tabPath, substituteFile(argvTemplate, tabPath))
 			return
 		}
-		// A pre-existing, never-reviewed config rides along in the
-		// merge. This Yes only covers the entry this prompt showed
+		// A pre-existing, never-reviewed config (or one that changed
+		// under the prompt) rides along in the merge. This Yes only covers the entry this prompt showed
 		// alongside it — the standard trust prompt has to ask about
 		// the merged file on its own terms before anything runs.
 		freshCfg, err := format.Load(root)
