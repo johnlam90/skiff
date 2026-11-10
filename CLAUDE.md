@@ -675,9 +675,12 @@ job calls `test.yml` (`workflow_call`) and gates everything below on
 it — a red suite can never publish:
 
 1. Reads `internal/version/version.go`.
-2. **If that file was edited in the pushed commit**, the version is used
-   as-is (manual major/minor bump). **Otherwise** the patch is
+2. **If that version has no tag yet**, it was set by hand (a manual
+   major/minor bump) and is used as-is. **Otherwise** the patch is
    auto-bumped, committed back to main with `[skip ci]`, and pushed.
+   The test is the VALUE, not "did the commit touch the file": a
+   comment or copyright edit to `version.go` is an ordinary patch
+   release.
 3. Tags `v<x.y.z>`.
 4. GoReleaser cross-compiles, attaches archives to a GitHub Release,
    and writes `Formula/skiff.rb` back into this repo (using the
@@ -688,10 +691,19 @@ If you're touching the workflow or `.goreleaser.yml`, make sure both
 auto-commits keep their `[skip ci]` markers — without them the workflow
 loops forever.
 
-A failed GoReleaser run (API blip, upload timeout) is re-runnable: the tag
-step records that the tag already exists and the next step deletes the
-half-published release object (never the tag) before GoReleaser retries.
-"Re-run failed jobs" on the Actions run is the whole recovery.
+A failed run is re-runnable at any point. A re-run finds the
+`Release vX [skip ci]` commit its first attempt already pushed and
+resumes from it instead of bumping again; if the tag exists it must
+point at the commit being released (anything else stops the run), and
+only then is the half-published release object deleted (never the tag)
+before GoReleaser retries. "Re-run failed jobs" on the Actions run is
+the whole recovery.
+
+A run that main has moved past stands down: when a newer real commit is
+already on main (at the start, or by the time the bump is pushed) the
+newer push's run releases both, so the older one exits green without
+tagging. Bot commits (`[skip ci]`, e.g. the previous release's formula)
+are simply rebased over.
 
 ## What NOT to add
 
