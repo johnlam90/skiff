@@ -65,9 +65,9 @@ func (p *Popup) maxScroll() int {
 }
 
 // ensureHoverVisible scrolls the window so the highlighted row is on
-// screen. Keyboard navigation is the only thing that moves the window: a
-// popup has no wheel handler, and an item the arrows can reach but the
-// frame never shows is an action the user cannot run.
+// screen after keyboard navigation: an item the arrows can reach but
+// the frame never shows is an action the user cannot run. The wheel
+// moves the window on its own (scrollBy) and leaves the highlight be.
 func (p *Popup) ensureHoverVisible() {
 	if p.Hover < p.scroll {
 		p.scroll = p.Hover
@@ -77,6 +77,20 @@ func (p *Popup) ensureHoverVisible() {
 	}
 	if p.scroll > p.maxScroll() {
 		p.scroll = p.maxScroll()
+	}
+	if p.scroll < 0 {
+		p.scroll = 0
+	}
+}
+
+// scrollBy moves the row window by delta, clamped to [0, maxScroll] —
+// the wheel's verb. It does not touch Hover: the pointer is still where
+// it was, and the next motion event re-hovers whatever row slid under
+// it, exactly as the wheel behaves over a Pick.
+func (p *Popup) scrollBy(delta int) {
+	p.scroll += delta
+	if max := p.maxScroll(); p.scroll > max {
+		p.scroll = max
 	}
 	if p.scroll < 0 {
 		p.scroll = 0
@@ -159,10 +173,22 @@ func (p *Popup) nextSelectable(from, dir int) int {
 
 // HandleMouse: hovering a row highlights it; a fresh press activates;
 // a fresh press outside dismisses. Held-button motion only hovers, so
-// a drag out of the button that opened the popup cannot run a row.
+// a drag out of the button that opened the popup cannot run a row. The
+// wheel scrolls the row window three rows a notch, like every other
+// list overlay here: on a terminal too short for the frame, the rows
+// behind the ▼ marker must not be keyboard-only in a mouse-first
+// editor. It is a no-op when every row fits (maxScroll is zero).
 func (p *Popup) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	r := p.At
 	fresh := p.press.Fresh(btn)
+	if btn&tcell.WheelUp != 0 {
+		p.scrollBy(-3)
+		return
+	}
+	if btn&tcell.WheelDown != 0 {
+		p.scrollBy(3)
+		return
+	}
 	row := -1
 	// Screen row → item index through the scroll offset: a row the frame
 	// windowed out occupies no cells, so hit-testing it would fire on

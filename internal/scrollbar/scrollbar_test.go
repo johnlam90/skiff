@@ -125,3 +125,25 @@ func TestGlyphsFillTheCell(t *testing.T) {
 		}
 	}
 }
+
+// TestGeomOneRowViewportHasNoBar pins the degenerate viewport: with a
+// single visible row the "always leave some track" clamp used to cut
+// the thumb to zero rows, so Geom said ok with nothing to draw but
+// track and TargetForThumb mapped every click to offset 0 — a bar that
+// could not be dragged. One row has no room for a thumb AND a track,
+// so there is no bar; two rows is the smallest viewport that has one.
+func TestGeomOneRowViewportHasNoBar(t *testing.T) {
+	if _, length, ok := Geom(50, 1, 10); ok || length != 0 {
+		t.Fatalf("one-row viewport must report no bar, got len=%d ok=%v", length, ok)
+	}
+	if got := TargetForThumb(50, 1, 0); got != 0 {
+		t.Fatalf("no bar means no scroll target, got %d", got)
+	}
+	start, length, ok := Geom(50, 2, 48)
+	if !ok || length != 1 || start != 1 {
+		t.Fatalf("two-row viewport at the end: start=%d len=%d ok=%v, want a 1-row thumb on the last row", start, length, ok)
+	}
+	if got := TargetForThumb(50, 2, 1); got != 48 {
+		t.Fatalf("clicking the last of two rows should reach max scroll 48, got %d", got)
+	}
+}

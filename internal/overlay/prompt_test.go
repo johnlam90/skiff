@@ -230,3 +230,17 @@ func TestPrompt_DragFromFieldOntoOKDoesNotSubmit(t *testing.T) {
 		t.Fatalf("a fresh press on OK after the release must submit, got %v", *log)
 	}
 }
+
+// TestPrompt_FieldClickCountsCells pins click-to-caret through wide
+// text: the prompt hands the field a CELL offset, so a click on the
+// third ideograph of "日本語" (cells 4-5) puts the caret before it at
+// rune 2 — the old rune-per-cell arithmetic put it past the end.
+func TestPrompt_FieldClickCountsCells(t *testing.T) {
+	r := Centered(80, 24, promptWidth, promptHeight)
+	p, _ := testPrompt()
+	p.Field.SetText("日本語")
+	p.HandleMouse(r.X+3+4, r.Y+4, tcell.Button1)
+	if p.Field.Cursor != 2 {
+		t.Fatalf("click on the third glyph: cursor %d, want 2", p.Field.Cursor)
+	}
+}

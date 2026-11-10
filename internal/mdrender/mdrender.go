@@ -23,6 +23,7 @@ package mdrender
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/yuin/goldmark"
@@ -522,14 +523,21 @@ func fitCell(c styledCell, w int, pad tcell.Style) ([]rune, []tcell.Style) {
 		sts = append(sts, c.styles...)
 		used = c.width
 	} else {
-		for i, ru := range c.runes {
-			rw := uniseg.StringWidth(string(ru))
-			if used+rw > w-1 {
+		// Whole clusters only, measured as clusters — the same unit
+		// the cell's width was captured in (appendCluster), so a cut
+		// can neither split a ZWJ sequence nor miscount it.
+		i := 0
+		for rest := string(c.runes); rest != ""; {
+			cluster, tail, cw, _ := uniseg.FirstGraphemeClusterInString(rest, -1)
+			if used+cw > w-1 {
 				break
 			}
-			runes = append(runes, ru)
-			sts = append(sts, c.styles[i])
-			used += rw
+			n := utf8.RuneCountInString(cluster)
+			runes = append(runes, c.runes[i:i+n]...)
+			sts = append(sts, c.styles[i:i+n]...)
+			used += cw
+			i += n
+			rest = tail
 		}
 		runes = append(runes, '…')
 		sts = append(sts, pad.Foreground(tcell.ColorDefault).Dim(true))
@@ -583,8 +591,14 @@ func (r *renderer) startLine() {
 
 // append adds text in one style, greedy-word-wrapping at the width.
 // Words wider than a whole line fall back to per-cluster hard wrap so a
-// long URL can't force an overflow.
+// long URL can't force an overflow. A raw tab in prose becomes a space
+// on the way in: uniseg measures a tab at zero cells, so one let through
+// took no room in the wrap and no cell in the paint, and "col1\tcol2"
+// rendered as the single word "col1col2". Markdown gives an interior
+// tab no more meaning than a space (code blocks, where it has one, go
+// through codeLines and expand to tab stops instead).
 func (r *renderer) append(s string, st tcell.Style) {
+	s = strings.ReplaceAll(s, "\t", " ")
 	r.startLine()
 	for _, word := range splitKeepSpaces(s) {
 		w := uniseg.StringWidth(word)
@@ -595,36 +609,35 @@ func (r *renderer) append(s string, st tcell.Style) {
 				continue // a wrap swallows the breaking space
 			}
 		}
-		if w > r.width-len(r.indent) {
-			for _, ru := range word {
-				r.appendRune(ru, st, true)
-			}
-			continue
-		}
-		for _, ru := range word {
-			r.appendRune(ru, st, false)
+		for rest := word; rest != ""; {
+			cluster, tail, cw, _ := uniseg.FirstGraphemeClusterInString(rest, -1)
+			r.appendCluster(cluster, cw, st)
+			rest = tail
 		}
 	}
 }
 
-// appendRune adds one rune; hardWrap flushes mid-word when the next
-// cluster would overflow (code lines, oversized words).
-func (r *renderer) appendRune(ru rune, st tcell.Style, hardWrap bool) {
+// appendCluster adds one grapheme cluster, w cells wide, flushing first
+// when it would overflow the budget — the hard wrap that breaks an
+// oversized word, and the backstop for soft content that reaches the
+// edge with no wrap opportunity. The unit is the cluster, never the
+// rune: summing per-rune widths counts a ZWJ family emoji as six cells
+// where the terminal paints two and an emoji + variation selector as
+// one where it paints two, so the wrapper and the preview's painter
+// (which hands whole clusters to the cell buffer) would disagree about
+// where a line ends. A flush can therefore never land inside a cluster
+// either. Every rune of the cluster carries the same style, keeping the
+// one-style-per-rune grid the painter indexes.
+func (r *renderer) appendCluster(cluster string, w int, st tcell.Style) {
 	r.startLine()
-	w := uniseg.StringWidth(string(ru))
 	if r.curW+w > r.width {
-		if !hardWrap && len(r.cur) >= r.width {
-			// Soft content past the budget without a wrap opportunity:
-			// flush anyway rather than overflow.
-			r.flush()
-			r.startLine()
-		} else {
-			r.flush()
-			r.startLine()
-		}
+		r.flush()
+		r.startLine()
 	}
-	r.cur = append(r.cur, ru)
-	r.curSt = append(r.curSt, st)
+	for _, ru := range cluster {
+		r.cur = append(r.cur, ru)
+		r.curSt = append(r.curSt, st)
+	}
 	r.curW += w
 }
 

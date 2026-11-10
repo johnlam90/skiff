@@ -744,3 +744,60 @@ func TestPreviewMarkdown_FindMatchCaseRoutes(t *testing.T) {
 		t.Fatalf("counter = %q, want the preview's tally with the Aa marker", got)
 	}
 }
+
+// TestDrawPreviewMarkdown_PaintsWholeClusters pins the painter's unit
+// against the audit's line: a raw tab, a decomposed é and a ZWJ family.
+// Painting rune by rune skipped every zero-width rune, so the accent
+// vanished ("cafe"), the family came out as three separate people, and
+// the tab — zero cells to uniseg — fused "col1col2". Each cluster must
+// land whole in its own cell(s), at the width the wrapper measured, and
+// a click must map back to the rune under the pointer.
+func TestDrawPreviewMarkdown_PaintsWholeClusters(t *testing.T) {
+	const family = "👨‍👩‍👧"
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "col1\tcol2 café "+family+" end\n")
+	a.menuTogglePreviewMarkdown()
+	st := a.mdPreview[tab]
+	li, y := previewLineAt(t, a, tab, "col1")
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	contentX, _, _ := a.mdPreviewGeom()
+	cell := func(off int) string { return string(cells[y*w+contentX+off].Runes) }
+
+	// "col1 col2 café 👨‍👩‍👧 end": cells 0-3 col1, 4 the space the tab
+	// became, 5-8 col2, 9 space, 10-13 café (é one cell), 14 space,
+	// 15-16 the family, 17 space, 18-20 end.
+	if got := cell(3) + cell(4) + cell(5); got != "1 c" {
+		t.Fatalf("tab should paint as one space between the words, got %q", got)
+	}
+	if got := cell(13); got != "é" {
+		t.Fatalf("cell 13 holds %q, want the e with its combining accent", got)
+	}
+	if got := cell(15); got != family {
+		t.Fatalf("cell 15 holds %q, want the whole ZWJ family in one cluster", got)
+	}
+	if got := cell(18) + cell(19) + cell(20); got != "end" {
+		t.Fatalf("text after the family painted %q at cells 18-20, want \"end\"", got)
+	}
+	if got, want := textdraw.Width(st.lines[li]), 21; got != want {
+		t.Fatalf("rendered line %q measures %d cells, want %d", st.lines[li], got, want)
+	}
+
+	// The hit-test is the painter's inverse: the cell "end" starts on
+	// maps to its rune index, and either cell of the family maps to the
+	// family's first rune — never to a column inside the cluster.
+	runes := []rune(st.lines[li])
+	endCol := len(runes) - 3
+	if hit := a.mdPreviewHit(st, contentX+18, y); hit.line != li || hit.col != endCol {
+		t.Fatalf("hit on \"end\" = %+v, want line %d col %d", hit, li, endCol)
+	}
+	famCol := strings.Index(st.lines[li], family)
+	famCol = len([]rune(st.lines[li][:famCol]))
+	for _, off := range []int{15, 16} {
+		if hit := a.mdPreviewHit(st, contentX+off, y); hit.col != famCol {
+			t.Fatalf("hit on family cell %d = col %d, want its first rune %d", off, hit.col, famCol)
+		}
+	}
+}

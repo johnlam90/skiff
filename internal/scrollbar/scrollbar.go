@@ -40,9 +40,12 @@ const (
 // viewport scrolled to scrollY: proportional length (min 1 row, always
 // leaving some track), start clamped to the track. ok=false means the
 // content fits and no bar should draw — a full-height thumb carries no
-// information and is pure noise.
+// information and is pure noise. A one-row viewport is refused too: the
+// thumb must leave some track, so on a single row it would clamp to
+// zero rows — a bar that paints only track, whose every click maps back
+// to offset 0. No bar is honest; an undraggable one is not.
 func Geom(total, viewH, scrollY int) (thumbStart, thumbLen int, ok bool) {
-	if viewH <= 0 || total <= viewH {
+	if viewH < 2 || total <= viewH {
 		return 0, 0, false
 	}
 	thumbLen = viewH * viewH / total

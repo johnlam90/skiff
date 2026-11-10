@@ -493,3 +493,77 @@ func TestRender_ThematicBreakSpansTheColumn(t *testing.T) {
 	}
 	t.Fatal("no rule row rendered")
 }
+
+// TestRender_ProseTabBecomesASpace pins the tab fix: uniseg measures a
+// tab at zero cells, so a raw tab let through prose took no room in the
+// wrap and no cell in the paint — "col1\tcol2" rendered as the fused
+// word "col1col2". Prose tabs come out as a space; no rendered prose
+// line may still carry one.
+func TestRender_ProseTabBecomesASpace(t *testing.T) {
+	lines, styles := Render([]byte("col1\tcol2 and `a\tb` end\n"), 60, theme.Default())
+	i := findLine(lines, "col1")
+	if i < 0 {
+		t.Fatalf("paragraph missing from %q", lines)
+	}
+	if strings.ContainsRune(lines[i], '\t') {
+		t.Fatalf("raw tab survived into the rendered line %q", lines[i])
+	}
+	if !strings.Contains(lines[i], "col1 col2") || !strings.Contains(lines[i], "a b") {
+		t.Fatalf("tab should separate the words with a space, got %q", lines[i])
+	}
+	if got, want := len(styles[i]), len([]rune(lines[i])); got != want {
+		t.Fatalf("style grid has %d entries for %d runes", got, want)
+	}
+}
+
+// TestRender_WrapMeasuresClusters pins the wrapper's unit. Summing
+// per-rune widths gets both directions wrong: an emoji + variation
+// selector is 1 cell by runes and 2 as painted (lines overflowed the
+// budget), and a ZWJ family is 6 by runes and 2 as painted (lines broke
+// after one where three fit). Measured as clusters, a run of hearts
+// hard-wraps inside the budget without ever splitting a heart from its
+// selector, and three families share a 10-cell line.
+func TestRender_WrapMeasuresClusters(t *testing.T) {
+	const heart = "❤️"
+	lines, styles := Render([]byte(strings.Repeat(heart, 8)+"\n"), 6, theme.Default())
+	for i, l := range lines {
+		if w := textdraw.Width(l); w > 6 {
+			t.Fatalf("line %q is %d cells, budget 6", l, w)
+		}
+		if strings.HasPrefix(l, "️") {
+			t.Fatalf("line %q starts with a variation selector torn off its heart", l)
+		}
+		if got, want := len(styles[i]), len([]rune(l)); got != want {
+			t.Fatalf("style grid has %d entries for %d runes", got, want)
+		}
+	}
+	if got := strings.Join(lines, ""); got != strings.Repeat(heart, 8) {
+		t.Fatalf("wrapped hearts lost content: %q", got)
+	}
+
+	const family = "👨‍👩‍👧"
+	lines, _ = Render([]byte(strings.Repeat(family+" ", 3)+"\n"), 10, theme.Default())
+	if len(lines) != 1 || lines[0] != family+" "+family+" "+family {
+		t.Fatalf("three 2-cell families fit one 10-cell line, got %q", lines)
+	}
+}
+
+// TestRender_TableCellTruncatesWholeClusters pins fitCell's unit: a cut
+// column keeps whole clusters only, so a shrunken cell never ends in
+// half a ZWJ family, and every row still fits the budget.
+func TestRender_TableCellTruncatesWholeClusters(t *testing.T) {
+	const family = "👨‍👩‍👧"
+	src := "| a | b |\n|---|---|\n| " + strings.Repeat(family, 12) + " | x |\n"
+	lines, _ := Render([]byte(src), 20, theme.Default())
+	i := findLine(lines, "👨")
+	if i < 0 {
+		t.Fatalf("table row missing from %q", lines)
+	}
+	if w := textdraw.Width(lines[i]); w > 20 {
+		t.Fatalf("row %q is %d cells, budget 20", lines[i], w)
+	}
+	cut := lines[i][:strings.Index(lines[i], "…")]
+	if strings.TrimRight(cut, " ") != strings.Repeat(family, strings.Count(cut, "👧")) {
+		t.Fatalf("truncation split a family: %q", cut)
+	}
+}

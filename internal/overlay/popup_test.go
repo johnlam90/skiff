@@ -317,3 +317,66 @@ func TestPopup_DragOntoRowDoesNotActivate(t *testing.T) {
 		t.Fatalf("a drag out of the frame must not close again, got %v", *log)
 	}
 }
+
+// TestPopup_WheelScrollsWindowedRows pins the mouse path to the rows
+// behind the ▼ marker: on a terminal too short for the frame the wheel
+// must move the window (three rows a notch, like Pick and Info), clamp
+// at both ends, leave the highlight alone, and keep a click honest —
+// the row under the pointer after a scroll is the one that runs.
+func TestPopup_WheelScrollsWindowedRows(t *testing.T) {
+	p := gitExtrasShapedPopup()
+	r := p.At
+	if p.maxScroll() == 0 {
+		t.Fatalf("precondition: 13 items in a %d-row frame should window", r.H)
+	}
+	p.HandleMouse(r.X+r.W+5, r.Y, tcell.WheelDown)
+	if p.scroll != 3 {
+		t.Fatalf("one wheel notch should scroll 3 rows, got %d", p.scroll)
+	}
+	if p.Hover != 0 {
+		t.Fatalf("the wheel must not move the highlight, Hover=%d", p.Hover)
+	}
+	for range 10 {
+		p.HandleMouse(r.X+4, r.Y+1, tcell.WheelDown)
+	}
+	if p.scroll != p.maxScroll() {
+		t.Fatalf("wheel should clamp at maxScroll %d, got %d", p.maxScroll(), p.scroll)
+	}
+
+	scr := simScreen(t)
+	scr.SetSize(40, 10)
+	p.Draw(scr)
+	scr.Show()
+	lastY := r.Y + r.H - 2
+	if got := rowRunes(scr, r.X+4, lastY, 9); got != "action 12" {
+		t.Fatalf("bottom row painted %q, want the last action", got)
+	}
+	fired := -1
+	for i := range p.Items {
+		p.Items[i].OnPick = func() { fired = i }
+	}
+	p.HandleMouse(r.X+4, lastY, tcell.Button1)
+	if fired != len(p.Items)-1 {
+		t.Fatalf("click on the wheeled-to bottom row fired item %d", fired)
+	}
+
+	for range 10 {
+		p.HandleMouse(r.X+4, r.Y+1, tcell.WheelUp)
+	}
+	if p.scroll != 0 {
+		t.Fatalf("wheel up should clamp at 0, got %d", p.scroll)
+	}
+}
+
+// TestPopup_WheelIsInertWhenEverythingFits is the no-regression half:
+// an ordinary popup has nothing to scroll, so the wheel neither moves
+// the window nor closes or activates anything — even with the pointer
+// outside the frame, where a press would dismiss.
+func TestPopup_WheelIsInertWhenEverythingFits(t *testing.T) {
+	p, log := testPopup()
+	p.HandleMouse(12, 6, tcell.WheelDown)
+	p.HandleMouse(0, 0, tcell.WheelUp)
+	if p.scroll != 0 || len(*log) != 0 {
+		t.Fatalf("wheel on a fitting popup: scroll=%d log=%v", p.scroll, *log)
+	}
+}

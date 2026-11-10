@@ -152,19 +152,12 @@ func (p *Prompt) HandleMouse(x, y int, btn tcell.ButtonMask) {
 			}
 		}
 	}
-	// Click in the input field — move the cursor to the clicked rune.
+	// Click in the input field — move the cursor to the clicked cluster.
 	if y == r.Y+4 {
 		fieldStart := r.X + 3
 		fieldEnd := r.X + r.W - 3
 		if x >= fieldStart && x < fieldEnd {
-			target := p.Field.Scroll() + (x - fieldStart)
-			if target < 0 {
-				target = 0
-			}
-			if target > len(p.Field.Value) {
-				target = len(p.Field.Value)
-			}
-			p.Field.Cursor = target
+			p.Field.ClickAt(x - fieldStart)
 		}
 	}
 }
