@@ -50,6 +50,12 @@ func (o *opRun) run(args ...string) error {
 // paths list is refused rather than passed on — an unscoped `add -A`
 // would stage the whole tree, the opposite of what a checkbox column
 // means.
+//
+// A merge in progress is the one exception to the path scope: git
+// refuses a partial commit there ("cannot do a partial commit during a
+// merge"), and the merge can only be concluded by committing the whole
+// index. The paths are still staged first — that is what marks a
+// conflicted file resolved — and the commit then runs unscoped.
 func (r *Repo) Commit(paths []string, message string) error {
 	if len(paths) == 0 {
 		return newOpError("Commit", "nothing to commit: no paths selected", nil)
@@ -58,7 +64,16 @@ func (r *Repo) Commit(paths []string, message string) error {
 	if err := o.run(append([]string{"add", "-A", "--"}, paths...)...); err != nil {
 		return err
 	}
+	if r.merging() {
+		return o.run("commit", "-m", message)
+	}
 	return o.run(append([]string{"commit", "-m", message, "--"}, paths...)...)
+}
+
+// merging reports whether a merge is waiting to be concluded.
+func (r *Repo) merging() bool {
+	_, err := r.read("rev-parse", "--verify", "--quiet", "MERGE_HEAD")
+	return err == nil
 }
 
 // pushArgs decides the push's shape: plain when an upstream exists,

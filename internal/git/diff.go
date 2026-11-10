@@ -25,9 +25,14 @@ import (
 	"github.com/johnlam90/skiff/internal/diff"
 )
 
-// diffPrefixArgs pins the a/ b/ header prefixes the parser attributes
-// paths from.
-var diffPrefixArgs = []string{"--src-prefix=a/", "--dst-prefix=b/"}
+// diffShapeArgs pins the output to the one shape the parser reads,
+// whatever the user's git config says: no external diff driver
+// (diff.external = difftastic prints its own format), no colour
+// (color.ui = always wraps every line in escapes), no textconv, and the
+// a/ b/ header prefixes paths are attributed from. Without the first
+// three a configured-but-ordinary setup parsed as an empty patch with no
+// error — blank gutter, "No git diff available".
+var diffShapeArgs = []string{"--no-ext-diff", "--no-color", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/"}
 
 // Diff returns the working tree's changes against base ("" means HEAD)
 // with context lines of surrounding context, narrowed to paths when any
@@ -46,7 +51,7 @@ func (r *Repo) Diff(base string, context int, paths ...string) (diff.Patch, erro
 		return diff.Patch{}, err
 	}
 	args := []string{"diff", "--unified=" + strconv.Itoa(context)}
-	args = append(args, diffPrefixArgs...)
+	args = append(args, diffShapeArgs...)
 	args = append(args, ref, "--")
 	args = append(args, paths...)
 	out, err := r.read(args...)
@@ -70,7 +75,7 @@ func (r *Repo) DiffUntracked(path string, context int) (diff.File, error) {
 		path = rel
 	}
 	args := []string{"diff", "--no-index", "--unified=" + strconv.Itoa(context)}
-	args = append(args, diffPrefixArgs...)
+	args = append(args, diffShapeArgs...)
 	args = append(args, "--", os.DevNull, path)
 	out, err := r.read(args...)
 	if err != nil && len(out) == 0 {

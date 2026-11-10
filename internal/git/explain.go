@@ -98,6 +98,9 @@ func explain(output string) string {
 	case strings.Contains(low, "not possible to fast-forward") ||
 		strings.Contains(low, "divergent branches"):
 		return "local and origin have diverged — pull needs a merge"
+	case strings.Contains(low, "unmerged files") ||
+		strings.Contains(low, "unresolved conflict"):
+		return "conflicts are still unresolved — fix every marked file, tick them all, then commit"
 	case strings.Contains(low, "conflict"):
 		return "merge conflict — fix the marked files, then commit"
 	case strings.Contains(low, "nothing to commit"):

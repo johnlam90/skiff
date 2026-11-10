@@ -23,15 +23,15 @@ import (
 // command.
 func TestDiff_Argv(t *testing.T) {
 	f := &Fake{}
-	f.Script("diff --unified=0 --src-prefix=a/ --dst-prefix=b/ HEAD -- /r/a.go /r/b.go", "", nil)
+	f.Script("diff --unified=0 --no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD -- /r/a.go /r/b.go", "", nil)
 	if _, err := OpenWith("/r", f).Diff("", 0, "/r/a.go", "/r/b.go"); err != nil {
 		t.Fatalf("diff: %v", err)
 	}
-	f.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD~1 --", "", nil)
+	f.Script("diff --unified=3 --no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD~1 --", "", nil)
 	if _, err := OpenWith("/r", f).Diff("HEAD~1", 3); err != nil {
 		t.Fatalf("whole-tree diff: %v", err)
 	}
-	if got := joinedCalls(f); len(got) != 2 || !f.Called("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD~1 --") {
+	if got := joinedCalls(f); len(got) != 2 || !f.Called("diff --unified=3 --no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD~1 --") {
 		t.Fatalf("argv = %v", got)
 	}
 }
@@ -141,7 +141,7 @@ func TestDiffUntracked_RealGit(t *testing.T) {
 // so a scripted app test and real git agree on the command.
 func TestDiffUntracked_Argv(t *testing.T) {
 	f := &Fake{}
-	want := "diff --no-index --unified=3 --src-prefix=a/ --dst-prefix=b/ -- " + os.DevNull + " new.txt"
+	want := "diff --no-index --unified=3 --no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/ -- " + os.DevNull + " new.txt"
 	f.Script(want, strings.Join([]string{
 		"diff --git a/new.txt b/new.txt",
 		"new file mode 100644",

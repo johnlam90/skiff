@@ -405,7 +405,7 @@ func TestActivateGitChangeRow_FromScriptedFake(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	target := filepath.Join(a.rootDir, "f.txt")
 	fake := &git.Fake{}
-	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target, strings.Join([]string{
+	fake.Script("diff --unified=3 --no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target, strings.Join([]string{
 		"diff --git a/f.txt b/f.txt",
 		"index 0000000..1111111 100644",
 		"--- a/f.txt",
@@ -427,8 +427,8 @@ func TestActivateGitChangeRow_FromScriptedFake(t *testing.T) {
 	a.closeAllModals()
 
 	fresh := filepath.Join(a.rootDir, "new.txt")
-	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+fresh, "", nil)
-	fake.Script("diff --no-index --unified=3 --src-prefix=a/ --dst-prefix=b/ -- "+os.DevNull+" new.txt", strings.Join([]string{
+	fake.Script("diff --unified=3 --no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD -- "+fresh, "", nil)
+	fake.Script("diff --no-index --unified=3 --no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/ -- "+os.DevNull+" new.txt", strings.Join([]string{
 		"diff --git a/new.txt b/new.txt",
 		"new file mode 100644",
 		"--- /dev/null",

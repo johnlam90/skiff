@@ -666,7 +666,7 @@ func TestRequestDiff_PostsEventWithoutBlocking(t *testing.T) {
 	a.openFile(target)
 
 	fake := &git.Fake{}
-	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target, strings.Join(sampleDiff(), "\n")+"\n", nil)
+	fake.Script("diff --unified=3 --no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target, strings.Join(sampleDiff(), "\n")+"\n", nil)
 	a.gitRunner = fake
 
 	a.menuDiffFile()

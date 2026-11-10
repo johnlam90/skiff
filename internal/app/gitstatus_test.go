@@ -271,7 +271,7 @@ func TestRefreshGitStatus_FromScriptedFake(t *testing.T) {
 	fake.Script("rev-list --left-right --count @{upstream}...HEAD", "1\t2\n", nil)
 	fake.Script("status --porcelain -z", " M f.txt\x00", nil)
 	fake.Script("symbolic-ref --short HEAD", "scripted\n", nil)
-	fake.Script("diff --unified=0 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target, strings.Join([]string{
+	fake.Script("diff --unified=0 --no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target, strings.Join([]string{
 		"diff --git a/f.txt b/f.txt",
 		"index 0000000..1111111 100644",
 		"--- a/f.txt",

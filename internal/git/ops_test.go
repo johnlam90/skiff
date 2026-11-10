@@ -106,7 +106,7 @@ func TestCommit_ArgvAndEmptyPaths(t *testing.T) {
 	if err := OpenWith("/r", f).Commit([]string{"/r/a.go", "/r/b.go"}, "msg"); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	want := []string{"add -A -- /r/a.go /r/b.go", "commit -m msg -- /r/a.go /r/b.go"}
+	want := []string{"add -A -- /r/a.go /r/b.go", "rev-parse --verify --quiet MERGE_HEAD", "commit -m msg -- /r/a.go /r/b.go"}
 	if got := joinedCalls(f); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("argv = %v, want %v", got, want)
 	}
@@ -279,6 +279,42 @@ func TestSwitch_TrackingRule(t *testing.T) {
 	}
 	if got := head(t, dir); got != "feature" {
 		t.Fatalf("second switch should reuse local feature, on %q", got)
+	}
+}
+
+// TestCommit_ConcludesAMerge pins the merge exception: after a
+// conflicted merge, staging the resolved file and committing must
+// succeed. A path-scoped commit there is what git calls a partial
+// commit and refuses, which left the editor's own "fix the marked files,
+// then commit" advice impossible to follow.
+func TestCommit_ConcludesAMerge(t *testing.T) {
+	dir := initRepo(t)
+	f := filepath.Join(dir, "f.txt")
+	write := func(s string) {
+		t.Helper()
+		if err := os.WriteFile(f, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("base\n")
+	gitT(t, dir, "add", "-A")
+	gitT(t, dir, "commit", "-q", "-m", "base")
+	gitT(t, dir, "checkout", "-q", "-b", "other")
+	write("theirs\n")
+	gitT(t, dir, "commit", "-q", "-am", "theirs")
+	gitT(t, dir, "checkout", "-q", "main")
+	write("ours\n")
+	gitT(t, dir, "commit", "-q", "-am", "ours")
+	r := Open(dir)
+	if err := r.Merge("other"); err == nil {
+		t.Fatal("merge should conflict")
+	}
+	write("resolved\n")
+	if err := r.Commit([]string{f}, "resolve"); err != nil {
+		t.Fatalf("commit during merge: %v", err)
+	}
+	if r.merging() {
+		t.Fatal("the merge should be concluded")
 	}
 }
 

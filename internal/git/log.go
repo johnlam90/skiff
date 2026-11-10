@@ -82,7 +82,8 @@ func (r *Repo) Show(hash, path string) (diff.Patch, error) {
 	if err != nil {
 		return diff.Patch{}, err
 	}
-	args := []string{"show", "--format=", "--src-prefix=a/", "--dst-prefix=b/", hash, "--"}
+	args := append([]string{"show", "--format="}, diffShapeArgs...)
+	args = append(args, hash, "--")
 	if path != "" {
 		args = append(args, path)
 	}

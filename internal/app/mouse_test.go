@@ -321,7 +321,7 @@ func TestOpenGitHunkAt_RequestsDiffOffThread(t *testing.T) {
 	tab.GitLines = map[int]editor.GitLineChange{0: editor.GitLineModified}
 
 	fake := &git.Fake{}
-	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target,
+	fake.Script("diff --unified=3 --no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target,
 		"@@ -1 +1 @@\n-hell\n+hello\n", nil)
 	a.gitRunner = fake
 
@@ -1813,7 +1813,7 @@ func TestSplitterHit_GrabsItsNeighbours(t *testing.T) {
 	tab := a.activeTabPtr()
 	tab.GitLines = map[int]editor.GitLineChange{0: editor.GitLineModified}
 	fake := &git.Fake{}
-	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target,
+	fake.Script("diff --unified=3 --no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target,
 		"@@ -1 +1 @@\n-hell\n+hello\n", nil)
 	a.gitRunner = fake
 	a.handleMouse(tcell.NewEventMouse(splitX+1, ey, tcell.Button1, 0))
@@ -2265,7 +2265,7 @@ func TestGutterMarkerAt_IsWrapAware(t *testing.T) {
 	}
 
 	fake := &git.Fake{}
-	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target,
+	fake.Script("diff --unified=3 --no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target,
 		"@@ -2 +2 @@\n-change\n+changed\n", nil)
 	a.gitRunner = fake
 	if a.openGitHunkAt(tab, 0, 1) {
