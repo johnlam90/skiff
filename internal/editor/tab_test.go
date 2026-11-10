@@ -17,11 +17,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -1646,18 +1648,18 @@ func TestTab_Render_CombiningMarkRidesItsBase(t *testing.T) {
 }
 
 // TestTab_Render_PanKeepsWideGlyphsWhole pins horizontal panning over
-// wide text: the pan starts at a cluster boundary, so the leftmost column
-// can never show the tail half of a glyph whose head scrolled off. Cell 0
-// carries the '‹' overflow hint (it always covers the first content cell,
-// wide or not); everything after it must be the untouched remainder of the
-// line at its true cell offsets.
+// wide text. ScrollX is a cell offset, so a one-cell pan cuts 日 in half:
+// the half still on screen must paint as a blank (here under the '‹'
+// overflow hint, which always covers the first content cell), never as a
+// half glyph, and the rest of the line keeps its true cell offsets — one
+// cell left of where it was, not two.
 func TestTab_Render_PanKeepsWideGlyphsWhole(t *testing.T) {
 	scr := newSimScreen(t, 20, 3)
 	defer scr.Fini()
 
 	tab, _ := NewTab("")
 	tab.Buffer = NewBuffer("日本語x")
-	tab.ScrollX = 1 // pan 日 off the left edge
+	tab.ScrollX = 1 // one cell: the left half of 日 is off the edge
 	tab.cursorMoved = false
 
 	tab.Render(scr, theme.Default(), 0, 0, 20, 3)
@@ -1665,7 +1667,7 @@ func TestTab_Render_PanKeepsWideGlyphsWhole(t *testing.T) {
 
 	cells, _, _ := scr.GetContents()
 	contentX := gutterWidthFor(tab.Buffer.LineCount()) + 1
-	want := []string{"‹", " ", "語", "", "x"}
+	want := []string{"‹", "本", "", "語", "", "x"}
 	for off, w := range want {
 		got := string(cells[contentX+off].Runes)
 		if got != w {
@@ -1756,13 +1758,10 @@ func TestTab_EnsureVisible_PansByCells(t *testing.T) {
 	runes := tab.Buffer.LineRunes(0)
 	contentW := viewW - gutterWidthFor(tab.Buffer.LineCount()) - 1
 	cursorVisual := LineVisualCol(runes, tab.Cursor.Col)
-	scrollVisual := LineVisualCol(runes, tab.ScrollX)
+	scrollVisual := tab.ScrollX // a cell offset, not a rune index
 	if cursorVisual < scrollVisual || cursorVisual >= scrollVisual+contentW {
 		t.Fatalf("caret at cell %d is outside the panned window [%d,%d)",
 			cursorVisual, scrollVisual, scrollVisual+contentW)
-	}
-	if got := ClusterStart(runes, tab.ScrollX); got != tab.ScrollX {
-		t.Errorf("ScrollX %d is inside a cluster starting at %d", tab.ScrollX, got)
 	}
 }
 
@@ -2964,5 +2963,257 @@ func TestRender_PaintsEveryCell(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// rowText reads the content cells of one rendered row back as a string,
+// starting at the first content column, so a test can compare what two
+// rows show at the same screen columns.
+func rowText(scr tcell.SimulationScreen, tab *Tab, row, n int) string {
+	cells, w, _ := scr.GetContents()
+	contentX := gutterWidthFor(tab.Buffer.LineCount()) + 1
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		c := cells[row*w+contentX+i]
+		if len(c.Runes) == 0 {
+			b.WriteRune(' ')
+			continue
+		}
+		b.WriteRune(c.Runes[0])
+	}
+	return b.String()
+}
+
+// TestTab_Render_PanShiftsEveryRowBySameCells pins that a horizontal pan
+// is one cell offset for the whole viewport. ScrollX used to be a rune
+// index converted per line, so a row starting with a tab (four cells for
+// one rune) or a wide glyph slid further left than a plain row and the
+// file's indentation collapsed the moment the view panned right.
+func TestTab_Render_PanShiftsEveryRowBySameCells(t *testing.T) {
+	scr := newSimScreen(t, 30, 5)
+	defer scr.Fini()
+
+	tab, _ := NewTab("")
+	// Four rows whose text sits at the same cells: 4 cells of lead-in
+	// (spaces / a tab / two wide glyphs / plain letters), then "abcdef".
+	tab.Buffer = NewBuffer("    abcdef\n\tabcdef\n日本abcdef\nxxxxabcdef")
+	tab.ScrollX = 2
+	tab.cursorMoved = false
+
+	tab.Render(scr, theme.Default(), 0, 0, 30, 5)
+	scr.Show()
+
+	// Cell 0 is the '‹' hint on every row; cells 1.. must agree: one cell
+	// of lead-in left, then the letters, on all four rows.
+	for row := 0; row < 4; row++ {
+		got := rowText(scr, tab, row, 8)
+		if tail := string([]rune(got)[2:]); tail != "abcdef" {
+			t.Errorf("row %d shows %q after the pan, want the letters at cells 2-7", row, got)
+		}
+	}
+	// The tab row's surviving cells are blanks, not a shifted glyph.
+	if got := []rune(rowText(scr, tab, 1, 8))[1]; got != ' ' {
+		t.Errorf("cell under the cut tab holds %q, want a blank", got)
+	}
+}
+
+// TestTab_HitTest_UsesCellPan pins the click side of the same contract:
+// with the view panned N cells, a click on screen cell c lands on the
+// rune covering line cell N+c on every row — including a row whose first
+// rune is a tab, where a rune-indexed pan put the click four cells off.
+func TestTab_HitTest_UsesCellPan(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("    abcdef\n\tabcdef")}
+	tab.ScrollX = 2
+	contentX := gutterWidthFor(tab.Buffer.LineCount()) + 1
+
+	// Screen cell 2 is line cell 4: the 'a' on both rows.
+	p, ok := tab.HitTest(contentX+2, 0, 40, 5)
+	if !ok || p != (Position{Line: 0, Col: 4}) {
+		t.Errorf("space-indented row: got %+v ok=%v, want col 4", p, ok)
+	}
+	p, ok = tab.HitTest(contentX+2, 1, 40, 5)
+	if !ok || p != (Position{Line: 1, Col: 1}) {
+		t.Errorf("tab-indented row: got %+v ok=%v, want col 1 (the a after the tab)", p, ok)
+	}
+}
+
+// TestTab_EnsureVisible_PanIsInCells pins EnsureVisible's arithmetic on a
+// line with a tab: the caret's CELL must fall inside [ScrollX,
+// ScrollX+contentW), and moving the caret back left of the pan pulls
+// ScrollX to the caret's cell rather than to a rune index.
+func TestTab_EnsureVisible_PanIsInCells(t *testing.T) {
+	tab := &Tab{Buffer: NewBuffer("\t\t" + strings.Repeat("x", 60))}
+	const viewW = 25
+	contentW := viewW - gutterWidthFor(1) - 1
+
+	tab.Cursor = Position{Line: 0, Col: 40} // cell 8 + 38 = 46
+	tab.EnsureVisible(viewW, 5)
+	if want := 46 - contentW + 1; tab.ScrollX != want {
+		t.Fatalf("ScrollX = %d, want %d (caret cell 46 on the last visible cell)", tab.ScrollX, want)
+	}
+
+	tab.Cursor = Position{Line: 0, Col: 1} // after the first tab: cell 4
+	tab.EnsureVisible(viewW, 5)
+	if tab.ScrollX != 4 {
+		t.Fatalf("ScrollX = %d, want 4 (the caret's cell)", tab.ScrollX)
+	}
+}
+
+// TestPaintRowCells_StopsAtRightEdge pins that painting a row costs the
+// viewport, not the line: the walk must stop once it is past the right
+// edge and report that more remains. Walking a minified megabyte line to
+// its end styled every cluster for cells nobody could see. The stopping
+// column is the assertion — a wall-clock bound would only be flaky.
+func TestPaintRowCells_StopsAtRightEdge(t *testing.T) {
+	scr := newSimScreen(t, 40, 3)
+	defer scr.Fini()
+	th := theme.Default()
+	tab := &Tab{Buffer: NewBuffer(strings.Repeat("x", 1_000_000))}
+	tab.ScrollX = 100
+
+	end, more := tab.paintRowCells(scr, th, rowPaint{
+		runes: tab.Buffer.LineRunes(0), x: 0, y: 0, w: 20, lineBg: th.BG,
+	})
+	if !more {
+		t.Fatal("a line running past the edge must report more")
+	}
+	if end != 120 {
+		t.Fatalf("walk stopped at cell %d, want 120 (ScrollX 100 + width 20)", end)
+	}
+}
+
+// TestPaintRowCells_OverflowOnlyWhenCellsRemain pins the '›' hint's
+// input at the boundary: a line that exactly fills the width has nothing
+// more, one more cell does, and a trailing zero-width rune (which needs
+// no cell) does not count as overflow on its own.
+func TestPaintRowCells_OverflowOnlyWhenCellsRemain(t *testing.T) {
+	scr := newSimScreen(t, 40, 3)
+	defer scr.Fini()
+	th := theme.Default()
+	cases := []struct {
+		name string
+		text string
+		more bool
+	}{
+		{"exact fit", "0123456789", false},
+		{"one cell over", "0123456789a", true},
+		{"zero-width tail", "0123456789\u200b", false},
+		{"short line", "abc", false},
+	}
+	for _, c := range cases {
+		tab := &Tab{Buffer: NewBuffer(c.text)}
+		_, more := tab.paintRowCells(scr, th, rowPaint{
+			runes: tab.Buffer.LineRunes(0), w: 10, lineBg: th.BG,
+		})
+		if more != c.more {
+			t.Errorf("%s: more = %v, want %v", c.name, more, c.more)
+		}
+	}
+}
+
+// TestTab_Render_WideGlyphStraddlingRightEdgeShowsOverflow pins the one
+// overflow case paintRowCells does not report through `more`: the LAST
+// cluster is a wide glyph with only one cell left for it. Nothing
+// remains after it, but half of it is off screen, so the '›' still has
+// to appear.
+func TestTab_Render_WideGlyphStraddlingRightEdgeShowsOverflow(t *testing.T) {
+	const w = 20
+	scr := newSimScreen(t, w, 3)
+	defer scr.Fini()
+
+	tab, _ := NewTab("")
+	contentW := w - gutterWidthFor(1) - 1
+	tab.Buffer = NewBuffer(strings.Repeat("x", contentW-1) + "日")
+	tab.cursorMoved = false
+	tab.Render(scr, theme.Default(), 0, 0, w, 3)
+	scr.Show()
+
+	cells, _, _ := scr.GetContents()
+	if got := cells[w-1].Runes; len(got) == 0 || got[0] != '›' {
+		t.Fatalf("last cell holds %q, want the overflow hint", string(got))
+	}
+}
+
+// TestNewTab_RefusesFIFO pins that opening a named pipe is refused from
+// the stat instead of blocking. A FIFO with no writer never returns from
+// open(2), and NewTab runs on the event loop, so one click on a pipe in
+// the tree froze the editor for good. The open runs on a goroutine here
+// only so a regression fails the test instead of hanging the suite.
+func TestNewTab_RefusesFIFO(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pipe")
+	if err := exec.Command("mkfifo", path).Run(); err != nil {
+		t.Skipf("cannot create a FIFO here: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := NewTab(path)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrNotRegularFile) {
+			t.Fatalf("err = %v, want ErrNotRegularFile", err)
+		}
+	case <-time.After(5 * time.Second):
+		// Unblock the stuck reader so the goroutine does not outlive the
+		// test, then report.
+		if f, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
+			f.Close()
+		}
+		t.Fatal("NewTab blocked on a FIFO")
+	}
+}
+
+// TestNewTab_RefusesDirectory pins the same gate for the commonest
+// non-regular path, which needs no special filesystem support to build.
+func TestNewTab_RefusesDirectory(t *testing.T) {
+	if _, err := NewTab(t.TempDir()); !errors.Is(err, ErrNotRegularFile) {
+		t.Fatalf("err = %v, want ErrNotRegularFile", err)
+	}
+}
+
+// TestReadCapped_StopsOneByteOverTheLimit pins the second half of the
+// size guard: the read itself is bounded, so a file whose stat size
+// understates it (procfs reports 0, a log grows after the stat) still
+// cannot be pulled in whole — the caller sees limit+1 bytes and refuses.
+func TestReadCapped_StopsOneByteOverTheLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "big.txt")
+	if err := os.WriteFile(path, []byte(strings.Repeat("a", 100)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b, err := readCapped(path, 10)
+	if err != nil || len(b) != 11 {
+		t.Fatalf("read %d bytes, err %v; want 11 (limit+1)", len(b), err)
+	}
+	b, err = readCapped(path, 1000)
+	if err != nil || len(b) != 100 {
+		t.Fatalf("read %d bytes, err %v; want the whole 100-byte file", len(b), err)
+	}
+}
+
+// TestReload_RefreshesFindMatches pins that a reload from disk re-runs
+// the live find query. The matches used to keep the old text's offsets,
+// and Replace All then spliced the new text at them.
+func TestReload_RefreshesFindMatches(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f.txt")
+	if err := os.WriteFile(path, []byte("foo bar foo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tab, err := NewTab(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tab.SetFindQuery("foo")
+	if err := os.WriteFile(path, []byte("xx foo bar foo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := tab.ReloadKeepHistory(); err != nil {
+		t.Fatal(err)
+	}
+	if n := tab.ReplaceAllMatches("Z"); n != 2 {
+		t.Fatalf("replaced %d, want 2", n)
+	}
+	if got := tab.Buffer.String(); got != "xx Z bar Z" {
+		t.Fatalf("buffer %q, want %q", got, "xx Z bar Z")
 	}
 }

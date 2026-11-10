@@ -208,6 +208,14 @@ func (b *Buffer) DeleteRange(a, c Position) Position {
 	head := string(aRunes[:a.Col])
 	tail := string(cRunes[c.Col:])
 
+	// A delete inside one line changes one string and no line indexes, so
+	// it is written in place. Rebuilding the whole slice here made every
+	// Backspace O(lines), and Replace All O(matches x lines).
+	if a.Line == c.Line {
+		b.Lines[a.Line] = head + tail
+		return a
+	}
+
 	out := make([]string, 0, len(b.Lines)-(c.Line-a.Line))
 	out = append(out, b.Lines[:a.Line]...)
 	out = append(out, head+tail)

@@ -543,3 +543,32 @@ func FuzzBufferInsertDelete(f *testing.F) {
 		}
 	})
 }
+
+// TestBuffer_DeleteRange_SameLineEditsInPlace pins the same-line fast
+// path: a delete inside one line rewrites that one string and leaves the
+// line slice alone. Rebuilding the slice per call made Backspace O(lines)
+// and Replace All O(matches x lines); the backing array's identity is
+// the deterministic stand-in for that cost.
+func TestBuffer_DeleteRange_SameLineEditsInPlace(t *testing.T) {
+	b := NewBuffer("one\nhello world\nthree")
+	before := &b.Lines[0]
+	got := b.DeleteRange(Position{Line: 1, Col: 5}, Position{Line: 1, Col: 11})
+	if got != (Position{Line: 1, Col: 5}) {
+		t.Fatalf("returned %+v", got)
+	}
+	if b.String() != "one\nhello\nthree" {
+		t.Fatalf("buffer %q", b.String())
+	}
+	if &b.Lines[0] != before {
+		t.Fatal("a same-line delete reallocated the line slice")
+	}
+	// The decode cache must not serve the old line back.
+	if string(b.LineRunes(1)) != "hello" {
+		t.Fatalf("LineRunes(1) = %q after the delete", string(b.LineRunes(1)))
+	}
+	// A cross-line delete still joins the lines.
+	b.DeleteRange(Position{Line: 0, Col: 3}, Position{Line: 1, Col: 0})
+	if b.String() != "onehello\nthree" {
+		t.Fatalf("cross-line delete: %q", b.String())
+	}
+}

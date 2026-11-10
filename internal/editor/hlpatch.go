@@ -93,9 +93,12 @@ func (t *Tab) HighlightRequest(viewH int) (HighlightRequest, bool) {
 // used. A result is dropped when the buffer has been edited since the
 // request (its generation moved on) or when Render already re-lexed
 // synchronously in the meantime — a scroll past the window's edge —
-// because that grid is exact and newer.
+// because that grid is exact and newer. It is also dropped while
+// StyleStale is set: something asked for a synchronous re-lex (undo,
+// reload, a theme change) that Render has not run yet, and installing
+// an older landing here would clear the flag and cancel it.
 func (t *Tab) ApplyHighlight(res HighlightResult) bool {
-	if !t.hlPending || res.Gen != t.hlGen || t.Buffer == nil {
+	if !t.hlPending || t.StyleStale || res.Gen != t.hlGen || t.Buffer == nil {
 		return false
 	}
 	if res.WinEnd > t.Buffer.LineCount() {

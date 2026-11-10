@@ -113,11 +113,15 @@ func RuneColAtVisual(runes []rune, targetVisualCol int) int {
 // when the user presses Tab. The algorithm in priority order:
 //
 //  1. Walk every line; classify lines that start with whitespace as either
-//     tab-indented or space-indented. Count both.
+//     tab-indented or space-indented. Count both. Block-comment
+//     continuation lines (" * text", " */") are skipped: their one
+//     leading space is alignment under the "/**", not a level of
+//     indentation, and counting it made every JSDoc'd file one-space.
 //  2. If tab-indented lines outnumber space-indented ones, return "\t".
 //  3. If space-indented wins, return that many spaces (using the smallest
 //     non-zero leading-space count as the indent width — that matches what
-//     "infer" tools in other editors do).
+//     "infer" tools in other editors do), unless that smallest count is a
+//     lone one-space outlier (see spaceIndentWidth).
 //  4. With no signal, fall back to the path's extension: ".go" / Makefiles /
 //     ".tsv" default to tabs (those file types either require or strongly
 //     prefer tabs); everything else defaults to four spaces.
@@ -127,7 +131,7 @@ func RuneColAtVisual(runes []rune, targetVisualCol int) int {
 func DetectIndent(lines []string, path string) string {
 	tabLines := 0
 	spaceLines := 0
-	smallestSpaceWidth := 0 // 0 = "no space-indented line seen yet"
+	widths := map[int]int{} // leading-space count → how many lines have it
 
 	for _, line := range lines {
 		if line == "" {
@@ -137,23 +141,58 @@ func DetectIndent(lines []string, path string) string {
 		case '\t':
 			tabLines++
 		case ' ':
-			spaceLines++
 			n := leadingSpaces(line)
-			if n > 0 && (smallestSpaceWidth == 0 || n < smallestSpaceWidth) {
-				smallestSpaceWidth = n
+			if n < len(line) && line[n] == '*' {
+				continue // block-comment continuation, not indentation
 			}
+			spaceLines++
+			widths[n]++
 		}
 	}
 
 	if tabLines > spaceLines && tabLines > 0 {
 		return "\t"
 	}
-	if spaceLines > 0 && smallestSpaceWidth > 0 {
-		return strings.Repeat(" ", smallestSpaceWidth)
+	if w := spaceIndentWidth(widths); w > 0 {
+		return strings.Repeat(" ", w)
 	}
 
 	// No signal — pick a sensible default by file extension.
 	return defaultIndentForPath(path)
+}
+
+// spaceIndentWidth picks the indent width from a histogram of leading-
+// space counts: the smallest count seen, or 0 for an empty histogram.
+//
+// The one exception is a lone one-space line. A single stray space — a
+// wrapped string, an aligned continuation, a typo — would otherwise set
+// the Tab key to one space for the whole file. It is discarded only when
+// the evidence against it is unanimous: exactly one such line, at least
+// two other space-indented lines, and every other width a multiple of
+// the next-smallest one. A file genuinely indented by one space has odd
+// widths among its deeper lines and keeps its answer.
+func spaceIndentWidth(widths map[int]int) int {
+	smallest, next, others := 0, 0, 0
+	for w, n := range widths {
+		if smallest == 0 || w < smallest {
+			smallest = w
+		}
+		if w > 1 {
+			others += n
+			if next == 0 || w < next {
+				next = w
+			}
+		}
+	}
+	if smallest != 1 || widths[1] != 1 || others < 2 {
+		return smallest
+	}
+	for w := range widths {
+		if w > 1 && w%next != 0 {
+			return smallest
+		}
+	}
+	return next
 }
 
 // leadingSpaces counts the number of leading ' ' bytes in s, stopping at

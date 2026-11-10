@@ -225,8 +225,12 @@ func scanBracketBackward(buf *Buffer, from Position, open, closing rune) (Positi
 // calls it too, so the cache is what keeps a menu that is redrawn every
 // frame from re-scanning the buffer for each row.
 //
-// StyleStale is the buffer-changed signal: every mutator in the package
-// sets it, and Render clears it in the same pass that re-tokenises.
+// Two signals say the buffer changed. edit and bufferReplaced (undo,
+// redo, revert, reload) clear bracketCached outright — an edit inside
+// the highlight window rebases the style grid instead of setting
+// StyleStale, so that flag alone misses every ordinary keystroke.
+// StyleStale stays in the key for the writers that bypass both, such as
+// a caller swapping Tab.Buffer wholesale.
 func (t *Tab) refreshBracketMatch() {
 	if t.bracketCached && t.bracketFor == t.Cursor && !t.StyleStale {
 		return

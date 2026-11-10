@@ -842,3 +842,83 @@ func TestFindAllInLines_MatchesPlainLines(t *testing.T) {
 		t.Fatal("an empty query must return nil, not an empty search")
 	}
 }
+
+// TestReplaceAllMatches_ManyLines pins Replace All at scale: 50k
+// matching lines complete and every one is rewritten. The old
+// implementation reallocated the whole line slice twice per match, which
+// is quadratic and took over ten seconds here. No clock is consulted —
+// the line slice keeping its backing array is the deterministic proof
+// that no per-match rebuild happened.
+func TestReplaceAllMatches_ManyLines(t *testing.T) {
+	const n = 50_000
+	tab := newScratchTab(strings.Repeat("foo bar foo\n", n))
+	tab.SetFindQuery("foo")
+	if len(tab.FindMatches) != 2*n {
+		t.Fatalf("matches = %d, want %d", len(tab.FindMatches), 2*n)
+	}
+	before := &tab.Buffer.Lines[0]
+	if got := tab.ReplaceAllMatches("quux"); got != 2*n {
+		t.Fatalf("replaced %d, want %d", got, 2*n)
+	}
+	if &tab.Buffer.Lines[0] != before {
+		t.Fatal("Replace All rebuilt the line slice")
+	}
+	for _, i := range []int{0, 1, n / 2, n - 1} {
+		if tab.Buffer.Lines[i] != "quux bar quux" {
+			t.Fatalf("line %d = %q", i, tab.Buffer.Lines[i])
+		}
+	}
+	if len(tab.Buffer.Lines) != n+1 || tab.Buffer.Lines[n] != "" {
+		t.Fatalf("line count changed: %d", len(tab.Buffer.Lines))
+	}
+	if !tab.Undo() || tab.Buffer.Lines[n-1] != "foo bar foo" {
+		t.Fatal("Replace All must stay one undoable step")
+	}
+}
+
+// TestReplaceAllMatches_MultiMatchLines pins the per-line rebuild's
+// correctness where it is easiest to get wrong: several hits on one
+// line, adjacent hits, replacements longer and shorter than the query,
+// multi-byte text around the hits, and case following per hit.
+func TestReplaceAllMatches_MultiMatchLines(t *testing.T) {
+	cases := []struct{ name, text, query, repl, want string }{
+		{"adjacent hits", "aaaa", "aa", "b", "bb"},
+		{"growing", "a-a-a", "a", "xyz", "xyz-xyz-xyz"},
+		{"shrinking to nothing", "foofoo foo", "foo", "", " "},
+		{"wide text around hits", "日foo本foo語", "foo", "é", "日é本é語"},
+		{"case follows each hit", "FOO Foo foo", "foo", "bar", "BAR Bar bar"},
+		{"several lines", "x foo\nfoo foo\nnone\nfoo", "foo", "y", "x y\ny y\nnone\ny"},
+		{"replacement contains the query", "foo foo", "foo", "foofoo", "foofoo foofoo"},
+	}
+	for _, c := range cases {
+		tab := newScratchTab(c.text)
+		tab.SetFindQuery(c.query)
+		want := len(tab.FindMatches)
+		if got := tab.ReplaceAllMatches(c.repl); got != want {
+			t.Errorf("%s: replaced %d, want %d", c.name, got, want)
+		}
+		if got := tab.Buffer.String(); got != c.want {
+			t.Errorf("%s: buffer %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestReplaceAllMatches_SkipsSpansThatNoLongerFit pins the defensive
+// half: FindMatches is exported, and a span that points past the text
+// (a caller wrote the list, or the buffer moved under it) is skipped
+// rather than spliced or allowed to panic.
+func TestReplaceAllMatches_SkipsSpansThatNoLongerFit(t *testing.T) {
+	tab := newScratchTab("foo bar")
+	tab.SetFindQuery("foo")
+	tab.FindMatches = []Match{
+		{Line: 0, Col: 0, Width: 3},
+		{Line: 0, Col: 5, Width: 30}, // runs off the end of the line
+		{Line: 9, Col: 0, Width: 3},  // no such line
+	}
+	if got := tab.ReplaceAllMatches("Z"); got != 1 {
+		t.Fatalf("replaced %d, want 1", got)
+	}
+	if got := tab.Buffer.String(); got != "Z bar" {
+		t.Fatalf("buffer %q, want %q", got, "Z bar")
+	}
+}

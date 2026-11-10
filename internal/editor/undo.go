@@ -126,7 +126,9 @@ func (t *Tab) captureSnapshot() snapshot {
 
 // applySnapshot replaces the buffer with s. It also re-copies the lines
 // so the live buffer doesn't share storage with the history entry —
-// otherwise the next edit would silently rewrite the past.
+// otherwise the next edit would silently rewrite the past. The swap
+// bypasses edit, so it ends in bufferReplaced: the find matches, the
+// bracket cache and the highlight generation all described the old text.
 func (t *Tab) applySnapshot(s snapshot) {
 	lines := make([]string, len(s.Lines))
 	copy(lines, s.Lines)
@@ -141,6 +143,7 @@ func (t *Tab) applySnapshot(s snapshot) {
 	// A restored caret is a new position, not a continuation of the
 	// vertical run the sticky column was measured in — see Tab.edit.
 	t.stickyValid = false
+	t.bufferReplaced()
 }
 
 // initUndo seeds the original-state snapshot used by RevertFile and the
