@@ -512,9 +512,10 @@ type App struct {
 	// mutation gate is the gitOp job above.
 	gitCommitChecks   map[string]bool
 	diffPanelRow      int
-	gitDeleteTarget   string // branch mid-delete, for the force-delete offer
-	gitWorktreeTarget string // worktree mid-remove, for the force-remove offer
-	diffBase          string // compare-against ref; "" = HEAD (the default)
+	gitDeleteTarget   string          // branch mid-delete, for the force-delete offer
+	remoteBranches    map[string]bool // which names in the last branch listing are remote-tracking
+	gitWorktreeTarget string          // worktree mid-remove, for the force-remove offer
+	diffBase          string          // compare-against ref; "" = HEAD (the default)
 
 	// The diff viewer is a bespoke overlay (diffview.go's diffOverlay)
 	// that owns its transient state. diffBase and diffPanelRow stay here:

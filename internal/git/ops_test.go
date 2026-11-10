@@ -282,6 +282,33 @@ func TestSwitch_TrackingRule(t *testing.T) {
 	}
 }
 
+// TestSwitch_LocalBranchWithSlash pins that a slash does not make a ref
+// remote-tracking: switching to local "feature/login" lands on it, where
+// it used to run `checkout -b login --track feature/login` and leave
+// HEAD on a brand-new branch. WorktreeAdd shares the rule.
+func TestSwitch_LocalBranchWithSlash(t *testing.T) {
+	dir := initRepo(t)
+	gitT(t, dir, "branch", "feature/login")
+	gitT(t, dir, "branch", "feature/wt")
+	r := Open(dir)
+	if err := r.Switch("feature/login"); err != nil {
+		t.Fatalf("switch: %v", err)
+	}
+	if got := head(t, dir); got != "feature/login" {
+		t.Fatalf("HEAD on %q, want feature/login", got)
+	}
+	if r.BranchExists("login") {
+		t.Fatal("switch created a stray local branch \"login\"")
+	}
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := r.WorktreeAdd(wt, "feature/wt", false); err != nil {
+		t.Fatalf("worktree add: %v", err)
+	}
+	if got := head(t, wt); got != "feature/wt" {
+		t.Fatalf("worktree HEAD on %q, want feature/wt", got)
+	}
+}
+
 // TestSwitch_ArgvShapes pins the checkout argv for each spelling through
 // the Fake: the existence probe decides between reuse and create, and
 // every ref is followed by `--`.

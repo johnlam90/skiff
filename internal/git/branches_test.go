@@ -24,12 +24,16 @@ func TestParseBranches_CapturedOutput(t *testing.T) {
 		" \x00refs/remotes/origin/HEAD\x00refs/remotes/origin/main\n" +
 		" \x00refs/remotes/origin/main\x00\n" +
 		" \x00refs/remotes/origin/remote-only\x00\n"
-	got := parseBranches(out)
+	list := parseBranches(out)
+	got := list.Names
 	want := []string{"main", "fix-HEADER", "zeta", "origin/remote-only"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("parseBranches = %v, want %v", got, want)
 	}
-	if got := parseBranches(""); len(got) != 0 {
+	if len(list.Remote) != 1 || !list.Remote["origin/remote-only"] {
+		t.Fatalf("Remote = %v, want only origin/remote-only", list.Remote)
+	}
+	if got := parseBranches("").Names; len(got) != 0 {
 		t.Fatalf("no refs should parse to no names, got %v", got)
 	}
 }
@@ -47,9 +51,14 @@ func TestBranches_RealGit(t *testing.T) {
 	gitT(t, dir, "checkout", "-q", "main")
 	gitT(t, dir, "branch", "-q", "-D", "remote-only")
 
-	names, err := Open(dir).Branches()
+	gitT(t, dir, "branch", "feature/login")
+	list, err := Open(dir).Branches()
 	if err != nil {
 		t.Fatalf("branches: %v", err)
+	}
+	names := list.Names
+	if list.Remote["feature/login"] || !list.Remote["origin/remote-only"] {
+		t.Fatalf("a slash must not make a local branch remote: %v", list.Remote)
 	}
 	if names[0] != "main" {
 		t.Fatalf("current branch should lead, got %v", names)

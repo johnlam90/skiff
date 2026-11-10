@@ -19,6 +19,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -100,6 +101,28 @@ func (a *App) findOpenTab(abs string) (*editor.Tab, bool) {
 	return nil, false
 }
 
+// syncCleanTab reloads a clean tab whose file changed on disk since the
+// tab last read it. The sweep reads disk, but an open file is rewritten
+// through its buffer and re-saved — and the 10s reconcile may not have
+// run yet, so without this a replace applied the change to the OLDER
+// buffer and the save silently overwrote whatever a `git pull` or
+// another editor had just written. After the reload VerifyLine does the
+// rest: lines that still read as recorded are rewritten, drifted ones
+// are skipped. A dirty tab is left alone — its replace never saves, and
+// the reconcile's conflict prompt owns that case.
+func (a *App) syncCleanTab(tab *editor.Tab) {
+	if tab.Dirty {
+		return
+	}
+	info, err := os.Stat(tab.Path)
+	if err != nil || !info.ModTime().After(tab.Mtime) {
+		return
+	}
+	if tab.ReloadKeepHistory() == nil {
+		a.invalidateMdPreview(tab)
+	}
+}
+
 // applyMatchesToTab rewrites a tab's matched lines in one undo step,
 // verifying each line against what the sweep recorded first. Matches are
 // per-occurrence, but staging never mutates tab.Buffer.Lines until the
@@ -173,6 +196,7 @@ func (a *App) projReplaceRowApply(row projFindRow) {
 	opts := a.projReplaceOpts()
 	abs := filepath.Join(a.rootDir, filepath.FromSlash(m.Path))
 	if tab, wasClean := a.findOpenTab(abs); tab != nil {
+		a.syncCleanTab(tab)
 		occ, skipped := applyMatchAtTab(tab, m, query, repl, opts)
 		if occ > 0 && wasClean {
 			if err := tab.Save(); err != nil {
@@ -248,6 +272,7 @@ func (a *App) doProjReplaceAll(matches []search.Match, query, repl string, opts 
 		if tab, wasClean := a.findOpenTab(abs); tab != nil {
 			if _, seen := byTab[tab]; !seen {
 				tabClean[tab] = wasClean
+				a.syncCleanTab(tab)
 			}
 			byTab[tab] = append(byTab[tab], m)
 			continue

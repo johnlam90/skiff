@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -279,5 +280,44 @@ func TestProjReplaceAll_ReportsBufferSaveFailure(t *testing.T) {
 	}
 	if !strings.Contains(a.statusMsg, "save failed") {
 		t.Fatalf("report must say the save failed, not just count successes: %q", a.statusMsg)
+	}
+}
+
+// TestProjReplace_StaleCleanTabKeepsExternalWrite pins the reload before
+// the buffer route: a clean tab whose file was rewritten on disk after
+// the tab read it (the 10s reconcile has not run yet) must not have its
+// older buffer saved over the newer file. Both the single-row and the
+// replace-all path are covered, including a CRLF file — whose open-tab
+// matches used to be skipped wholesale because the sweep recorded "\r".
+func TestProjReplace_StaleCleanTabKeepsExternalWrite(t *testing.T) {
+	for _, all := range []bool{false, true} {
+		root := t.TempDir()
+		p := mkFile(t, root, "a.txt", "old value\r\n")
+		a := projFindApp(t, root)
+		a.openFile(p)
+		tab := a.activeTabPtr()
+		// Backdate the tab rather than sleeping past mtime granularity.
+		tab.Mtime = tab.Mtime.Add(-time.Minute)
+		if err := os.WriteFile(p, []byte("old value\r\nexternal line\r\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		ms, _ := search.Search(root, []string{"a.txt"}, "old", search.DefaultOptions())
+		if len(ms) != 1 {
+			t.Fatalf("sweep found %d matches, want 1", len(ms))
+		}
+		a.projFind.query.SetText("old")
+		a.projFind.replace.SetText("new")
+		a.projFind.findMatches = ms
+		if all {
+			a.projReplaceConfirmAll()
+			confirmYes(a)
+			pumpUntil(t, a, "replace", idle(&a.projReplace))
+		} else {
+			a.projReplaceRowApply(projFindRow{Path: "a.txt", MatchIdx: 0})
+		}
+		data, _ := os.ReadFile(p)
+		if want := "new value\r\nexternal line\r\n"; string(data) != want {
+			t.Fatalf("all=%v: disk = %q, want %q", all, data, want)
+		}
 	}
 }

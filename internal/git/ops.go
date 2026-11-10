@@ -121,8 +121,10 @@ func (r *Repo) Fetch() error {
 // Switch checks out ref. A remote-tracking spelling ("origin/fix")
 // follows the tracking rule: the first switch creates local "fix"
 // tracking origin/fix, later ones just move to "fix" — checking out
-// origin/fix directly would only detach HEAD. The existence probe runs
-// here, inside the verb. Every ref is followed by `--`; the `-b` value
+// origin/fix directly would only detach HEAD. A slash alone does not
+// make a ref remote-tracking: a local branch named "feature/login" is
+// checked out as itself, which is why the exact-name probe comes first.
+// The existence probes run here, inside the verb. Every ref is followed by `--`; the `-b` value
 // sits in a position no separator protects, so SafeRef covers it.
 func (r *Repo) Switch(ref string) error {
 	ref, err := SafeRef(ref)
@@ -137,6 +139,9 @@ func (r *Repo) Switch(ref string) error {
 	local := ref[i+1:]
 	if _, err := SafeRef(local); err != nil {
 		return err
+	}
+	if r.BranchExists(ref) {
+		return o.run("checkout", ref, "--")
 	}
 	if r.BranchExists(local) {
 		return o.run("checkout", local, "--")

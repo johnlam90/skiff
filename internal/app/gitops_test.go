@@ -325,7 +325,7 @@ func TestGitMergeBranchEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("branches: %v", err)
 	}
-	names := otherNames(all, a.gitSnap.Branch, false)
+	names := a.otherNames(all.Names, a.gitSnap.Branch, false)
 	idx := -1
 	for i, n := range names {
 		if n == "feature" {
@@ -363,7 +363,7 @@ func TestGitDeleteBranchForceOffer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("branches: %v", err)
 	}
-	names := otherNames(all, a.gitSnap.Branch, true)
+	names := a.otherNames(all.Names, a.gitSnap.Branch, true)
 	if len(names) != 1 || names[0] != "orphan" {
 		t.Fatalf("local candidates: %v", names)
 	}
