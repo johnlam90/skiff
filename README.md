@@ -390,6 +390,12 @@ when it has been running under tmux for ten seconds without a single
 mouse event and flashes that hint once; the keyboard path (`Esc ?`)
 works regardless.
 
+Copying to your local clipboard from inside tmux needs one more
+setting on tmux 3.3 and newer: `set -g allow-passthrough on`. Skiff
+wraps its OSC 52 copy in tmux's passthrough envelope, and since 3.3
+tmux silently drops passthrough sequences unless that option is on —
+the copy still lands inside Skiff, it just never reaches the terminal.
+
 ### Hotkeys
 
 Skiff deliberately avoids `Ctrl+`-style shortcuts (they fight `tmux`,

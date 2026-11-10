@@ -430,3 +430,26 @@ func TestFieldBG_LowColorPassesSelectionThrough(t *testing.T) {
 		t.Fatalf("low-color FieldBG = %v, want Selection %v untouched", got, th.Selection)
 	}
 }
+
+// TestStatusError_ReadableOnEveryTheme fences the status bar's failure
+// colours across the whole registry: whichever shape StatusError picks,
+// the text clears the status floor against its background. Before it,
+// Error-on-StatusBG was 1.05:1 on the default theme — an invisible
+// error message.
+func TestStatusError_ReadableOnEveryTheme(t *testing.T) {
+	for _, e := range List() {
+		th := e.Build()
+		fg, bg := th.StatusError()
+		if got := ContrastRatio(fg, bg); got < minStatusContrast {
+			t.Errorf("%s: status error contrast %.2f, want >= %.1f", e.ID, got, minStatusContrast)
+		}
+		if bg != th.StatusBG && bg != th.Error {
+			t.Errorf("%s: status error background is neither the bar nor Error", e.ID)
+		}
+	}
+	// A palette whose Error already reads on the bar keeps it untouched.
+	off, _ := ByID("offshore")
+	if fg, bg := off.StatusError(); fg != off.Error || bg != off.StatusBG {
+		t.Errorf("offshore: readable Error was rewritten to %v on %v", fg, bg)
+	}
+}

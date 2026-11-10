@@ -824,7 +824,7 @@ func themeOffshore() Theme {
 		SynKeyword:  tcell.NewRGBColor(0xc0, 0x99, 0xff),
 		SynString:   tcell.NewRGBColor(0xec, 0xc4, 0x8d),
 		SynNumber:   tcell.NewRGBColor(0xf7, 0x8c, 0x6c),
-		SynComment:  tcell.NewRGBColor(0x62, 0x79, 0xa3),
+		SynComment:  tcell.NewRGBColor(0x7a, 0x8d, 0xb1), // 5.5:1 on BG, 4.9:1 on the caret line (was 4.2 / 3.7)
 		SynFunction: tcell.NewRGBColor(0x82, 0xaa, 0xff),
 		SynType:     tcell.NewRGBColor(0x7f, 0xdb, 0xca),
 		SynBuiltin:  tcell.NewRGBColor(0xee, 0x6d, 0x85),

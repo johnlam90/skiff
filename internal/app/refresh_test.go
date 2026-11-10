@@ -671,6 +671,41 @@ func TestRefreshTreeAsync_WritesSessionOffThread(t *testing.T) {
 	}
 }
 
+// TestRefreshTreeAsync_QuietTickLeavesSessionAlone pins that an
+// unchanged session is not rewritten: a second tick with nothing moved
+// must leave whatever is on disk — here, a session another skiff on the
+// same project saved in between — untouched, and a real change must
+// write again.
+func TestRefreshTreeAsync_QuietTickLeavesSessionAlone(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	target := filepath.Join(root, "s.txt")
+	if err := os.WriteFile(target, []byte("one\ntwo\nthree\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, root)
+	a.openFile(target)
+	a.refreshTreeAsync()
+	pumpUntil(t, a, "tree scan", idle(&a.treeScan))
+
+	other := session.Project{SidebarWidth: 77, SavedAt: time.Now()}
+	if err := session.Save(root, other); err != nil {
+		t.Fatalf("other instance save: %v", err)
+	}
+	a.refreshTreeAsync()
+	pumpUntil(t, a, "tree scan", idle(&a.treeScan))
+	if p, _ := session.Load(root); p.SidebarWidth != 77 {
+		t.Fatalf("an idle tick overwrote the session: %+v", p)
+	}
+
+	a.activeTabPtr().MoveCursorTo(editor.Position{Line: 2}, false)
+	a.refreshTreeAsync()
+	pumpUntil(t, a, "tree scan", idle(&a.treeScan))
+	if p, _ := session.Load(root); len(p.Tabs) != 1 || p.Tabs[0].Line != 2 {
+		t.Fatalf("a changed session must be written: %+v", p)
+	}
+}
+
 // findTreeChild returns the root-level tree node named name, or nil.
 func findTreeChild(a *App, name string) *filetree.Node {
 	for _, c := range a.tree.Root.Children {

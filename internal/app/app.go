@@ -31,6 +31,7 @@ import (
 	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/overlay"
+	"github.com/johnlam90/skiff/internal/session"
 	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 )
@@ -510,12 +511,16 @@ type App struct {
 	// checkbox set (absent = checked) and the panel row the open diff
 	// came from (-1 = diff not from the panel). The one-at-a-time
 	// mutation gate is the gitOp job above.
-	gitCommitChecks   map[string]bool
-	diffPanelRow      int
-	gitDeleteTarget   string          // branch mid-delete, for the force-delete offer
-	remoteBranches    map[string]bool // which names in the last branch listing are remote-tracking
-	gitWorktreeTarget string          // worktree mid-remove, for the force-remove offer
-	diffBase          string          // compare-against ref; "" = HEAD (the default)
+	gitCommitChecks map[string]bool
+	diffPanelRow    int
+	gitDeleteTarget string          // branch mid-delete, for the force-delete offer
+	remoteBranches  map[string]bool // which names in the last branch listing are remote-tracking
+	// sessionSaved is the session payload the refresh tick last handed
+	// to the store (SavedAt unset) — the tick skips the write while a
+	// fresh capture still equals it.
+	sessionSaved      session.Project
+	gitWorktreeTarget string // worktree mid-remove, for the force-remove offer
+	diffBase          string // compare-against ref; "" = HEAD (the default)
 
 	// The diff viewer is a bespoke overlay (diffview.go's diffOverlay)
 	// that owns its transient state. diffBase and diffPanelRow stay here:

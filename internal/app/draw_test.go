@@ -961,27 +961,34 @@ func TestDrawStatusBar_LowColorUsesAttributes(t *testing.T) {
 }
 
 // TestDrawStatusBar_ErrorFlashPaintsInErrorColour pins the visual half
-// of flashError: a failure report on the bar takes the palette's Error
-// foreground (the disk-conflict marker's treatment), where a plain
-// flash keeps StatusFg — so the two kinds are told apart at a glance.
+// of flashError: a failure report on the bar takes the theme's
+// StatusError pairing (the disk-conflict marker's treatment), where a
+// plain flash keeps StatusFg — so the two kinds are told apart at a
+// glance, and the error stays readable against the bar (Error itself is
+// 1.05:1 over the default theme's status background).
 func TestDrawStatusBar_ErrorFlashPaintsInErrorColour(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	resizeTestApp(t, a, 80, 24)
 	scr := a.screen.(tcell.SimulationScreen)
-	cellFg := func() tcell.Color {
+	cell := func() (tcell.Color, tcell.Color) {
 		a.drawStatusBar()
 		scr.Show()
 		cells, w, _ := scr.GetContents()
-		fg, _, _ := cells[(a.height-1)*w+1].Style.Decompose()
-		return fg
+		fg, bg, _ := cells[(a.height-1)*w+1].Style.Decompose()
+		return fg, bg
 	}
 	a.flash("Copied")
-	if got := cellFg(); got != a.theme.StatusFg {
+	if got, _ := cell(); got != a.theme.StatusFg {
 		t.Fatalf("info flash fg = %v, want StatusFg %v", got, a.theme.StatusFg)
 	}
 	a.flashError("save failed")
-	if got := cellFg(); got != a.theme.Error {
-		t.Fatalf("error flash fg = %v, want Error %v", got, a.theme.Error)
+	wantFg, wantBg := a.theme.StatusError()
+	fg, bg := cell()
+	if fg != wantFg || bg != wantBg {
+		t.Fatalf("error flash = %v on %v, want %v on %v", fg, bg, wantFg, wantBg)
+	}
+	if got := theme.ContrastRatio(fg, bg); got < 3 {
+		t.Fatalf("error flash contrast %.2f — unreadable on the bar", got)
 	}
 }
 

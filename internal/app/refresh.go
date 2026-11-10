@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 
 	"github.com/johnlam90/skiff/internal/customactions"
@@ -242,9 +243,16 @@ func (a *App) refreshTreeAsync() {
 	// remember, hence the nil.
 	var snap *session.Project
 	if a.tree != nil {
-		p := a.captureSession()
-		p.SavedAt = time.Now()
-		snap = &p
+		// Written only when something changed. Rewriting an identical
+		// file every tick is a temp write, two fsyncs and a rename per
+		// ten seconds for nothing — and it let an idle skiff in another
+		// pane overwrite, within one tick, the session the instance the
+		// user actually worked in had just saved on quit.
+		if p := a.captureSession(); !reflect.DeepEqual(p, a.sessionSaved) {
+			a.sessionSaved = p
+			p.SavedAt = time.Now()
+			snap = &p
+		}
 	}
 	root := a.rootDir
 	a.treeScan.Start(func(context.Context) (treeScanResult, error) {

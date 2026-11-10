@@ -209,13 +209,7 @@ func SetTheme(path, id string) error {
 	if path == "" {
 		return errors.New("no config path available")
 	}
-	raw := map[string]any{}
-	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
-		// A malformed file is overwritten rather than failed on — the
-		// user just picked a theme; keeping it beats preserving JSON
-		// that was already broken.
-		_ = json.Unmarshal(data, &raw)
-	}
+	raw := readRaw(path)
 	raw["theme"] = id
 	return writeRaw(path, raw)
 }
@@ -228,12 +222,7 @@ func SetIcons(path string, mode IconsMode) error {
 	if path == "" {
 		return errors.New("no config path available")
 	}
-	raw := map[string]any{}
-	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
-		// Same tradeoff as SetTheme: a malformed file is overwritten —
-		// keeping the user's fresh choice beats preserving broken JSON.
-		_ = json.Unmarshal(data, &raw)
-	}
+	raw := readRaw(path)
 	raw["icons"] = string(mode)
 	return writeRaw(path, raw)
 }
@@ -265,12 +254,7 @@ func setOnOff(path, key string, on bool) error {
 	if path == "" {
 		return errors.New("no config path available")
 	}
-	raw := map[string]any{}
-	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
-		// Same tradeoff as SetTheme: a malformed file is overwritten —
-		// keeping the user's fresh choice beats preserving broken JSON.
-		_ = json.Unmarshal(data, &raw)
-	}
+	raw := readRaw(path)
 	if on {
 		raw[key] = "on"
 	} else {
@@ -279,15 +263,41 @@ func setOnOff(path, key string, on bool) error {
 	return writeRaw(path, raw)
 }
 
+// readRaw loads the config file's keys for a read-modify-write. A
+// missing or empty file is an empty map. A malformed file is also an
+// empty map — the user just made a choice, and keeping it beats failing
+// on JSON that was already broken — but the broken bytes are first
+// copied aside to "<path>.bad": one trailing comma used to cost every
+// other key in the file the next time a theme was picked.
+func readRaw(path string) map[string]any {
+	raw := map[string]any{}
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return raw
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		_ = atomicfile.Write(path+".bad", data, 0600)
+		return map[string]any{}
+	}
+	return raw
+}
+
 // writeRaw marshals the merged key map back to disk. The write goes
 // through atomicfile because config.json is read-modify-written on
 // every theme/wrap toggle: a truncated file would silently reset the
 // user's preferences (and drop any key a newer skiff had written)
-// rather than fail loudly.
+// rather than fail loudly. An existing file is replaced the way a
+// user's own file is — through its symlink and with its permission bits
+// — so a config.json linked into a dotfiles repo stays a link and a
+// 0600 file stays 0600; only a first write creates it (0644, with any
+// missing parent directory).
 func writeRaw(path string, raw map[string]any) error {
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return atomicfile.Replace(path, data)
 	}
 	return atomicfile.Write(path, data, 0644)
 }

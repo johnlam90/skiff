@@ -543,3 +543,54 @@ func TestLoadReportsIconsSet(t *testing.T) {
 		t.Fatal("Defaults() must not claim the user chose")
 	}
 }
+
+// TestSet_KeepsSymlinkAndMode pins that a toggle writes THROUGH a
+// symlinked config (a dotfiles repo) instead of replacing the link with
+// a regular file, and keeps a private file private.
+func TestSet_KeepsSymlinkAndMode(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "dotfiles", "config.json")
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(`{"wrap":"on"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "config.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	if err := SetTheme(link, "offshore"); err != nil {
+		t.Fatalf("SetTheme: %v", err)
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("config.json is no longer a symlink (%v)", err)
+	}
+	data, _ := os.ReadFile(target)
+	if !strings.Contains(string(data), "offshore") || !strings.Contains(string(data), "wrap") {
+		t.Fatalf("link target = %s, want theme written and wrap kept", data)
+	}
+	if info, _ := os.Stat(target); info.Mode().Perm() != 0600 {
+		t.Fatalf("mode = %v, want 0600 preserved", info.Mode().Perm())
+	}
+}
+
+// TestSet_MalformedFileIsBackedUp pins the safety net under the
+// "overwrite broken JSON" tradeoff: the user's fresh choice is written,
+// and the bytes it replaced survive beside it as config.json.bad.
+func TestSet_MalformedFileIsBackedUp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	broken := `{"theme":"nord","wrap":"on",}`
+	if err := os.WriteFile(path, []byte(broken), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetIcons(path, IconsOn); err != nil {
+		t.Fatalf("SetIcons: %v", err)
+	}
+	if got, _ := os.ReadFile(path + ".bad"); string(got) != broken {
+		t.Fatalf("backup = %q, want the original bytes", got)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("the rewritten config should load: %v", err)
+	}
+}

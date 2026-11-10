@@ -32,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/johnlam90/skiff/internal/atomicfile"
@@ -220,6 +221,10 @@ func pruneSessions(keep string) {
 	// is actually over the cap; the common case exits here.
 	files := make([]string, 0, len(entries))
 	for _, e := range entries {
+		if staleTempFile(e) {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+			continue
+		}
 		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 			continue
 		}
@@ -252,6 +257,23 @@ func pruneSessions(keep string) {
 		}
 		_ = os.Remove(filepath.Join(dir, s.name))
 	}
+}
+
+// tempFileGrace is how old an atomic-write temp file must be before a
+// save sweeps it. A live write's temp exists for milliseconds; an hour
+// can only be the leftover of a crash or a kill mid-write.
+const tempFileGrace = time.Hour
+
+// staleTempFile reports whether e is an abandoned atomicfile temp
+// (".<name>.json.tmp-<random>"). Nothing else ever removed them: the
+// pruner only looked at ".json", so each crash mid-save left one behind
+// for good.
+func staleTempFile(e os.DirEntry) bool {
+	if e.IsDir() || !strings.HasPrefix(e.Name(), ".") || !strings.Contains(e.Name(), ".json.tmp-") {
+		return false
+	}
+	info, err := e.Info()
+	return err == nil && time.Since(info.ModTime()) > tempFileGrace
 }
 
 // migrateLegacyStore converts the old single-file sessions.json into one

@@ -282,3 +282,19 @@ func TestEveryThemeFieldReadable(t *testing.T) {
 		}
 	}
 }
+
+// TestOffshore_CommentsClearAA pins the Offshore comment colour at body
+// text contrast on both surfaces it is read on: the editor background
+// and the caret line. Comments are prose, and at 3.7:1 on the caret
+// line they were the dimmest text in the palette.
+func TestOffshore_CommentsClearAA(t *testing.T) {
+	th, ok := ByID("offshore")
+	if !ok {
+		t.Fatal("offshore theme missing")
+	}
+	for name, bg := range map[string]tcell.Color{"BG": th.BG, "LineHL": th.LineHL} {
+		if got := ContrastRatio(th.SynComment, bg); got < 4.5 {
+			t.Errorf("SynComment on %s = %.2f, want >= 4.5", name, got)
+		}
+	}
+}
