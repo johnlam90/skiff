@@ -386,8 +386,19 @@ func TestTrash_CrossDeviceInRepoUsesGitDir(t *testing.T) {
 		t.Fatalf("Trash: %v", err)
 	}
 	stored := m.trashed[0].stored
-	if filepath.Dir(stored) != filepath.Join(root, ".git", gitTrashName) {
-		t.Fatalf("stored = %q, want it under .git/%s", stored, gitTrashName)
+	if filepath.Dir(filepath.Dir(stored)) != filepath.Join(root, ".git", gitTrashName) {
+		t.Fatalf("stored = %q, want it in a session folder under .git/%s", stored, gitTrashName)
+	}
+	// A second skiff on the same repo deleting a same-named file must
+	// not overwrite this one's entry: both number from zero.
+	other := New(root)
+	other.rename = m.rename
+	twin := mkFile(t, root, "other/doomed.txt", "y")
+	if _, err := other.Trash(twin); err != nil {
+		t.Fatalf("second instance Trash: %v", err)
+	}
+	if other.trashed[0].stored == stored {
+		t.Fatal("two instances stored into the same path")
 	}
 	entries, _ := os.ReadDir(filepath.Join(root, "sub"))
 	if len(entries) != 0 {
@@ -400,6 +411,10 @@ func TestTrash_CrossDeviceInRepoUsesGitDir(t *testing.T) {
 		t.Fatalf("restored content = %q", got)
 	}
 	m.EmptyTrash()
+	if !exists(filepath.Join(root, ".git", gitTrashName)) {
+		t.Fatal("the shared folder must survive while another instance still holds entries")
+	}
+	other.EmptyTrash()
 	if exists(filepath.Join(root, ".git", gitTrashName)) {
 		t.Fatal("EmptyTrash should remove the emptied .git trash folder")
 	}

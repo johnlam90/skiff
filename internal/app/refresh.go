@@ -335,9 +335,28 @@ func (a *App) applyTabProbes(probes []tabProbe) {
 			continue
 		}
 		if p, ok := byPath[tab.Path]; ok {
-			a.reconcileTab(tab, p)
+			a.reconcileTab(tab, freshProbe(tab, p))
 		}
 	}
+}
+
+// freshProbe guards against a probe that went stale in flight. The sweep
+// stats on its goroutine; a save or a formatter reload that lands before
+// the result is applied leaves the probe holding the PREVIOUS mtime.
+// Now that "changed" means "differs" rather than "is newer", that stale
+// value would read as an external change — a needless reload, or a
+// spurious conflict prompt over a tab the user just saved. So a probe
+// that disagrees with the tab is re-statted here, on the loop, before
+// anyone acts on it: one Stat, and only for a tab that looks changed.
+func freshProbe(tab *editor.Tab, p tabProbe) tabProbe {
+	if p.err != nil || p.mtime.Equal(tab.Mtime) {
+		return p
+	}
+	info, err := os.Stat(tab.Path)
+	if err != nil {
+		return tabProbe{path: p.path, err: err}
+	}
+	return tabProbe{path: p.path, mtime: info.ModTime()}
 }
 
 // reconcileTab decides what one open tab should do about what a Stat

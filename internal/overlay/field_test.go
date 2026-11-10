@@ -270,3 +270,20 @@ func TestField_ClickAtMapsCellsToClusterBoundaries(t *testing.T) {
 		t.Fatalf("click on the cell after e+accent: cursor %d, want 2 (never between e and its mark)", f.Cursor)
 	}
 }
+
+// TestField_LongValueStaysCheap pins the bounded segmenter window: the
+// cluster helpers must not convert the whole tail on every call, or a
+// long paste into a prompt or the find bar makes each frame quadratic
+// (a 2000-rune burst froze the first draw for seconds). Counting
+// allocations keeps the test off the clock.
+func TestField_LongValueStaysCheap(t *testing.T) {
+	var f Field
+	f.SetText(strings.Repeat("a", 20000))
+	allocBytes := testing.AllocsPerRun(20, func() { f.clusterEnd(0) })
+	if allocBytes > 4 {
+		t.Fatalf("clusterEnd allocated %v times on a long value", allocBytes)
+	}
+	if end, w := f.clusterEnd(0); end != 1 || w != 1 {
+		t.Fatalf("clusterEnd(0) = %d,%d, want 1,1", end, w)
+	}
+}

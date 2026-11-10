@@ -115,7 +115,9 @@ func (a *App) syncCleanTab(tab *editor.Tab) {
 		return
 	}
 	info, err := os.Stat(tab.Path)
-	if err != nil || !info.ModTime().After(tab.Mtime) {
+	// Differs, not "is newer": a restored backup (`cp -p`, `mv`, `tar x`)
+	// carries an OLDER mtime — the same rule reconcileTab applies.
+	if err != nil || info.ModTime().Equal(tab.Mtime) {
 		return
 	}
 	if tab.ReloadKeepHistory() == nil {

@@ -107,6 +107,9 @@ type Manager struct {
 	// deletes never litters $TMPDIR. "" until then, or when MkdirTemp
 	// failed and every entry fell back to an in-place sibling.
 	trashDir string
+	// gitTrash is this session's own folder under .git/skiff-trash, the
+	// fallback when trashDir is on another filesystem. "" until needed.
+	gitTrash string
 	// trashed is the restore stack, newest last.
 	trashed []trashEntry
 	// seq numbers stored trash entries so two deletes of the same

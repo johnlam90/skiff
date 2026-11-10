@@ -78,10 +78,22 @@ func (m *Manager) gitTrashDir() string {
 	if info, err := os.Lstat(gitDir); err != nil || !info.IsDir() {
 		return ""
 	}
-	dir := filepath.Join(gitDir, gitTrashName)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if m.gitTrash != "" {
+		return m.gitTrash
+	}
+	parent := filepath.Join(gitDir, gitTrashName)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return ""
 	}
+	// A folder of this session's own: entry names are numbered per
+	// process, so two skiffs on one repo sharing a flat folder would
+	// both write "0-index.ts" — and one's Undo delete would restore the
+	// other's file.
+	dir, err := os.MkdirTemp(parent, "s-")
+	if err != nil {
+		return ""
+	}
+	m.gitTrash = dir
 	return dir
 }
 
@@ -139,8 +151,12 @@ func (m *Manager) EmptyTrash() {
 		_ = os.RemoveAll(m.trashDir)
 		m.trashDir = ""
 	}
+	if m.gitTrash != "" {
+		_ = os.RemoveAll(m.gitTrash)
+		m.gitTrash = ""
+	}
 	// Remove, not RemoveAll: another skiff on the same repo may still be
-	// holding entries in the shared .git trash folder.
+	// holding its own session folder under the shared parent.
 	_ = os.Remove(filepath.Join(m.root, ".git", gitTrashName))
 	m.trashed = nil
 }

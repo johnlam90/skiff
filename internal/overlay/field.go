@@ -47,6 +47,11 @@ func (f *Field) Text() string { return string(f.Value) }
 // that hit-test clicks inside the field.
 func (f *Field) Scroll() int { return f.scroll }
 
+// clusterWindow is how many runes clusterEnd hands the segmenter. The
+// longest clusters in real text (ZWJ emoji sequences, stacked combining
+// marks) are well under it; a pathological longer one is merely split.
+const clusterWindow = 64
+
 // clusterEnd returns the rune index just past the grapheme cluster that
 // starts at rune index i, plus that cluster's width in cells. uniseg is
 // the engine tcell's cell buffer resolves widths with, so the field's
@@ -56,7 +61,15 @@ func (f *Field) clusterEnd(i int) (end, width int) {
 	if i >= len(f.Value) {
 		return len(f.Value), 0
 	}
-	cluster, _, w, _ := uniseg.FirstGraphemeClusterInString(string(f.Value[i:]), -1)
+	// Only a bounded window is converted: one cluster never needs the
+	// whole tail, and converting it on every call made each frame
+	// quadratic in the field's length — a long paste into the find bar
+	// froze the editor for seconds.
+	tail := f.Value[i:]
+	if len(tail) > clusterWindow {
+		tail = tail[:clusterWindow]
+	}
+	cluster, _, w, _ := uniseg.FirstGraphemeClusterInString(string(tail), -1)
 	n := len([]rune(cluster))
 	if n == 0 {
 		// Defensive: a non-empty string always yields a cluster, but a

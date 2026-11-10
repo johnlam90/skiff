@@ -915,3 +915,30 @@ func TestReconcile_ReappearedFileReloadsWhateverItsMtime(t *testing.T) {
 		t.Fatalf("the reappeared file must be reloaded, buffer = %q", got)
 	}
 }
+
+// TestApplyTabProbes_StaleProbeAfterSaveIsIgnored pins the re-stat: a
+// probe taken before a save carries the previous mtime, and with
+// "changed" meaning "differs" it would read as an external write —
+// reloading a tab the user just saved, or prompting a conflict over
+// edits typed since. The tab must be left exactly as it is.
+func TestApplyTabProbes_StaleProbeAfterSaveIsIgnored(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "a.txt")
+	if err := os.WriteFile(p, []byte("one\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestApp(t, root)
+	a.openFile(p)
+	tab := a.activeTabPtr()
+	stale := tabProbe{path: p, mtime: tab.Mtime.Add(-time.Minute)}
+	tab.InsertString("typed since the save ")
+
+	a.applyTabProbes([]tabProbe{stale})
+
+	if a.anyModalOpen() {
+		t.Fatal("a stale probe raised a conflict prompt")
+	}
+	if !tab.Dirty || !strings.HasPrefix(tab.Buffer.Lines[0], "typed since") {
+		t.Fatalf("the tab was disturbed: dirty=%v line=%q", tab.Dirty, tab.Buffer.Lines[0])
+	}
+}
