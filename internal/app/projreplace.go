@@ -230,9 +230,9 @@ func (a *App) projReplaceConfirmAll() {
 	for _, m := range a.projFind.findMatches {
 		files[m.Path] = true
 	}
-	msg := fmt.Sprintf(
-		"Replace %d match(es) in %d file(s)? Files change on disk — commit or stash first if unsure.",
-		len(a.projFind.findMatches), len(files))
+	msg := plural(len(a.projFind.findMatches), "Replace %d match", "Replace %d matches") +
+		plural(len(files), " in %d file", " in %d files") +
+		"? Files change on disk — commit or stash first if unsure."
 	if a.projFind.findRegex {
 		msg += " Regex replacements expand $1 / ${name} groups ($$ for a literal $)."
 	}
@@ -317,7 +317,7 @@ func (a *App) handleProjReplaceDone(r projReplaceResult, _ error) {
 	occ := r.rep.Replaced + r.bufOcc
 	files := r.rep.Files + r.bufFiles
 	skipped := r.rep.Skipped + r.bufSkip
-	msg := fmt.Sprintf("Replaced %d in %d file(s)", occ, files)
+	msg := fmt.Sprintf("Replaced %d", occ) + plural(files, " in %d file", " in %d files")
 	if skipped > 0 {
 		msg += fmt.Sprintf(" (%d skipped — changed since search)", skipped)
 	}

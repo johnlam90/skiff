@@ -786,6 +786,6 @@ func (a *App) menuPrevTab() {
 func (a *App) menuCloseOtherTabs() {
 	a.closeMenu()
 	if n := a.closeOtherTabs(); n > 0 {
-		a.flash(fmt.Sprintf("Closed %d other tab(s)", n))
+		a.flash(plural(n, "Closed %d other tab", "Closed %d other tabs"))
 	}
 }

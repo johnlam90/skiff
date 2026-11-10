@@ -400,7 +400,7 @@ func (s *findStrip) enter(shift bool) {
 	}
 	if shift {
 		if n := tab.ReplaceAllMatches(s.replace.Text()); n > 0 {
-			s.a.flash(fmt.Sprintf("Replaced %d match(es)", n))
+			s.a.flash(plural(n, "Replaced %d match", "Replaced %d matches"))
 		}
 		return
 	}

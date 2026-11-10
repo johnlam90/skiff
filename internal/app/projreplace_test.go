@@ -211,7 +211,7 @@ func TestProjReplaceAll_MixedRouting(t *testing.T) {
 	}
 
 	a.projReplaceConfirmAll()
-	if c := confirmPrefab(t, a); !strings.Contains(c.Message, "3 match(es) in 3 file(s)") {
+	if c := confirmPrefab(t, a); !strings.Contains(c.Message, "3 matches in 3 files") {
 		t.Fatalf("confirm: %q", c.Message)
 	}
 	confirmYes(a)
@@ -232,7 +232,7 @@ func TestProjReplaceAll_MixedRouting(t *testing.T) {
 	if string(data) != "edited since\n" {
 		t.Fatalf("drifted file must be skipped: %q", data)
 	}
-	if !strings.Contains(a.statusMsg, "Replaced 2 in 2 file(s)") ||
+	if !strings.Contains(a.statusMsg, "Replaced 2 in 2 files") ||
 		!strings.Contains(a.statusMsg, "1 skipped") {
 		t.Fatalf("report flash: %q", a.statusMsg)
 	}

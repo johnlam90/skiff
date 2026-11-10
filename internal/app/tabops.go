@@ -441,7 +441,7 @@ func (a *App) closeOtherTabs() int {
 		others = append(others, tab)
 	}
 	if unsaved > 0 {
-		a.flash(fmt.Sprintf("%d other tab(s) have unsaved changes — save or close them first", unsaved))
+		a.flash(plural(unsaved, "%d other tab has", "%d other tabs have") + " unsaved changes — save or close them first")
 		return 0
 	}
 	for _, tab := range others {
