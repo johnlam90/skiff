@@ -220,8 +220,13 @@ func (m *Manager) Rename(path, newName string) (Changeset, error) {
 	if np == p {
 		return Changeset{}, nil
 	}
-	if _, err := os.Lstat(np); err == nil {
-		return Changeset{}, fmt.Errorf("a file named %q already exists", newName)
+	if taken, err := os.Lstat(np); err == nil {
+		// On a case-insensitive filesystem (macOS) "README.md" already
+		// "exists" when the file is readme.md — it is the same file, and
+		// a case-only rename of it is a real rename, not a clobber.
+		if old, oerr := os.Lstat(p); oerr != nil || !os.SameFile(old, taken) {
+			return Changeset{}, fmt.Errorf("a file named %q already exists", newName)
+		}
 	}
 	if err := m.rename(p, np); err != nil {
 		return Changeset{}, err

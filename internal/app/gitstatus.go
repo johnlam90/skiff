@@ -32,6 +32,7 @@ import (
 
 	"github.com/johnlam90/skiff/internal/diff"
 	"github.com/johnlam90/skiff/internal/editor"
+	"github.com/johnlam90/skiff/internal/filemanager"
 	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/git"
 )
@@ -72,6 +73,7 @@ func collectGitStatus(repo *git.Repo, base string, tabPaths []string, skipStatus
 	res := gitStatusResult{tabLines: map[string]map[int]editor.GitLineChange{}}
 	if !skipStatus {
 		res.st = repo.Status(base)
+		dropTrashEntries(res.st.Files)
 		res.isDir = statDirtyDirs(res.st.Files)
 	}
 	switch len(tabPaths) {
@@ -82,6 +84,22 @@ func collectGitStatus(repo *git.Repo, base string, tabPaths []string, skipStatus
 		batchGitLineChanges(res.tabLines, repo, base, res.st.Root, tabPaths)
 	}
 	return res
+}
+
+// dropTrashEntries removes the session trash's in-place fallback entries
+// (a TrashPrefix name anywhere on the path) from a status map. To git
+// they are ordinary untracked files; to the user they are deleted, so
+// they must not tint the tree, appear in the git panel, or — being
+// checked by default there — ride along into a commit.
+func dropTrashEntries(files map[string]git.ChangeKind) {
+	for p := range files {
+		for _, part := range strings.Split(filepath.ToSlash(p), "/") {
+			if strings.HasPrefix(part, filemanager.TrashPrefix) {
+				delete(files, p)
+				break
+			}
+		}
+	}
 }
 
 // batchGitLineChanges fills dst with gutter line changes for every path

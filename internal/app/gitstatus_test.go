@@ -1024,3 +1024,18 @@ func TestCollectGitStatus_CarriesIsDirForUntrackedDirs(t *testing.T) {
 		t.Fatal("a deleted path must never be flagged as a directory")
 	}
 }
+
+// TestDropTrashEntries pins that the session trash's in-place fallback
+// names never reach the tree tint or the git panel: git reports them as
+// untracked files, and a row checked by default would be committed.
+func TestDropTrashEntries(t *testing.T) {
+	files := map[string]git.ChangeKind{
+		"/r/keep.go":                         git.ChangeModified,
+		"/r/.skifftrash-0-gone.go":           git.ChangeAdded,
+		"/r/sub/.skifftrash-3-dir/inner.txt": git.ChangeAdded,
+	}
+	dropTrashEntries(files)
+	if len(files) != 1 || files["/r/keep.go"] != git.ChangeModified {
+		t.Fatalf("files = %v, want only keep.go", files)
+	}
+}
