@@ -744,3 +744,161 @@ func TestPreviewMarkdown_FindMatchCaseRoutes(t *testing.T) {
 		t.Fatalf("counter = %q, want the preview's tally with the Aa marker", got)
 	}
 }
+
+// TestDrawPreviewMarkdown_PaintsWholeClusters pins the painter's unit
+// against the audit's line: a raw tab, a decomposed é and a ZWJ family.
+// Painting rune by rune skipped every zero-width rune, so the accent
+// vanished ("cafe"), the family came out as three separate people, and
+// the tab — zero cells to uniseg — fused "col1col2". Each cluster must
+// land whole in its own cell(s), at the width the wrapper measured, and
+// a click must map back to the rune under the pointer.
+func TestDrawPreviewMarkdown_PaintsWholeClusters(t *testing.T) {
+	const family = "👨‍👩‍👧"
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "col1\tcol2 café "+family+" end\n")
+	a.menuTogglePreviewMarkdown()
+	st := a.mdPreview[tab]
+	li, y := previewLineAt(t, a, tab, "col1")
+	a.draw()
+	scr := a.screen.(tcell.SimulationScreen)
+	scr.Show()
+	cells, w, _ := scr.GetContents()
+	contentX, _, _ := a.mdPreviewGeom()
+	cell := func(off int) string { return string(cells[y*w+contentX+off].Runes) }
+
+	// "col1 col2 café 👨‍👩‍👧 end": cells 0-3 col1, 4 the space the tab
+	// became, 5-8 col2, 9 space, 10-13 café (é one cell), 14 space,
+	// 15-16 the family, 17 space, 18-20 end.
+	if got := cell(3) + cell(4) + cell(5); got != "1 c" {
+		t.Fatalf("tab should paint as one space between the words, got %q", got)
+	}
+	if got := cell(13); got != "é" {
+		t.Fatalf("cell 13 holds %q, want the e with its combining accent", got)
+	}
+	if got := cell(15); got != family {
+		t.Fatalf("cell 15 holds %q, want the whole ZWJ family in one cluster", got)
+	}
+	if got := cell(18) + cell(19) + cell(20); got != "end" {
+		t.Fatalf("text after the family painted %q at cells 18-20, want \"end\"", got)
+	}
+	if got, want := textdraw.Width(st.lines[li]), 21; got != want {
+		t.Fatalf("rendered line %q measures %d cells, want %d", st.lines[li], got, want)
+	}
+
+	// The hit-test is the painter's inverse: the cell "end" starts on
+	// maps to its rune index, and either cell of the family maps to the
+	// family's first rune — never to a column inside the cluster.
+	runes := []rune(st.lines[li])
+	endCol := len(runes) - 3
+	if hit := a.mdPreviewHit(st, contentX+18, y); hit.line != li || hit.col != endCol {
+		t.Fatalf("hit on \"end\" = %+v, want line %d col %d", hit, li, endCol)
+	}
+	famCol := strings.Index(st.lines[li], family)
+	famCol = len([]rune(st.lines[li][:famCol]))
+	for _, off := range []int{15, 16} {
+		if hit := a.mdPreviewHit(st, contentX+off, y); hit.col != famCol {
+			t.Fatalf("hit on family cell %d = col %d, want its first rune %d", off, hit.col, famCol)
+		}
+	}
+}
+
+// TestPreviewMarkdown_EditVerbsAreRefused is the read-only contract on
+// the paths the menu's hidden rows never covered: every Esc-leader edit
+// verb, plus Revert and the shift-lines pair, dispatched straight at the
+// action. Each must leave the hidden markdown source byte-for-byte
+// alone and flash the read-only notice.
+func TestPreviewMarkdown_EditVerbsAreRefused(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "# Title\n\n  one\ntwo\n")
+	// Give every verb something it WOULD do: an edit to undo and revert,
+	// a selection to cut, a clipboard to paste.
+	tab.InsertString("typed ")
+	tab.Undo()
+	tab.Redo()
+	tab.SelectAll()
+	a.clipBuf = "clip"
+	a.menuTogglePreviewMarkdown()
+	want := tab.Buffer.String()
+
+	verbs := map[string]func(*App){
+		"Revert":      (*App).menuRevert,
+		"Shift right": (*App).menuIndentLines,
+		"Shift left":  (*App).menuOutdentLines,
+	}
+	for _, r := range "vxdjk/ur" {
+		verbs["Esc "+string(r)] = leaderActionFor(r)
+	}
+	for name, verb := range verbs {
+		a.statusMsg = ""
+		verb(a)
+		if got := tab.Buffer.String(); got != want {
+			t.Fatalf("%s edited the source behind the preview:\n got %q\nwant %q", name, got, want)
+		}
+		if a.statusMsg != previewReadOnlyFlash {
+			t.Fatalf("%s: flash = %q, want the read-only notice", name, a.statusMsg)
+		}
+	}
+	if a.mdPreviewFor(tab) == nil {
+		t.Fatal("a refused edit must leave the preview up")
+	}
+}
+
+// TestPreviewMarkdown_MutatingRowsHideCopyAndFindStay pins the menu
+// side: rows that write the buffer are dropped while the preview is up
+// (hide, don't dim), and the read-only ones — copy, find — are not.
+func TestPreviewMarkdown_MutatingRowsHideCopyAndFindStay(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	seedMarkdownTab(t, a, "notes.md", "# Title\n\nhello\n")
+	a.menuTogglePreviewMarkdown()
+
+	shown := map[string]bool{}
+	for _, group := range builtinMenuGroups() {
+		for _, it := range group {
+			if it.label != "" {
+				shown[it.label] = it.visible == nil || it.visible(a)
+			}
+		}
+	}
+	for _, label := range []string{
+		"Undo", "Redo", "Cut selection", "Paste", "Toggle line comment",
+		"Move line up", "Move line down", "Duplicate line",
+		"Shift lines right", "Shift lines left", "Revert file",
+	} {
+		if vis, ok := shown[label]; !ok || vis {
+			t.Errorf("%q must be hidden over a preview (found=%v visible=%v)", label, ok, vis)
+		}
+	}
+	for _, label := range []string{"Copy selection", "Find in file", "Select all"} {
+		if !shown[label] {
+			t.Errorf("%q must stay available over a preview", label)
+		}
+	}
+}
+
+// TestPreviewMarkdown_MenuCopyTakesTheRenderedSelection keeps copy
+// working in the preview and pointed at what the reader selected: the
+// rendered text, not the buffer selection hidden behind the page.
+func TestPreviewMarkdown_MenuCopyTakesTheRenderedSelection(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "# Title\n\nhello **beta** world\n")
+	tab.SelectAll()
+	a.menuTogglePreviewMarkdown()
+	st := a.mdPreviewFor(tab)
+	if a.hasCopyableSelection() {
+		t.Fatal("no rendered selection yet: the Copy row must not light up off the hidden one")
+	}
+	line := findPreviewLine(a, tab, "beta")
+	if line < 0 {
+		t.Fatal("precondition: the rendered page should contain the word")
+	}
+	st.selA = previewPos{line: line, col: 0}
+	st.selB = previewPos{line: line, col: len([]rune(st.lines[line]))}
+	if !a.hasCopyableSelection() {
+		t.Fatal("a rendered selection must enable the Copy row")
+	}
+
+	a.menuCopy()
+	if a.clipBuf != st.lines[line] {
+		t.Fatalf("clipboard = %q, want the rendered line %q", a.clipBuf, st.lines[line])
+	}
+}

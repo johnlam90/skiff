@@ -51,8 +51,13 @@ func (a *App) requestWorktreeList(purpose string) {
 }
 
 // handleWorktreeList routes a collected list to the flow that asked for
-// it.
+// it — unless the user has started typing into another surface since,
+// in which case it is dropped with a flash (landingWouldInterrupt).
 func (a *App) handleWorktreeList(r worktreeListResult, _ error) {
+	if a.landingWouldInterrupt() {
+		a.flash("Worktree list is ready — pick the action again to open it")
+		return
+	}
 	switch r.purpose {
 	case "list":
 		a.openWorktreeList(r.wts)
@@ -88,27 +93,26 @@ func (a *App) openWorktreeBranchPick(names []string) {
 		}
 	}
 	items := []listPickItem{{Label: "New branch…", Tag: "from HEAD"}}
-	items = append(items, branchPickItems(candidates, "")...)
+	items = append(items, a.branchPickItems(candidates, "")...)
 	a.openListPick("New worktree — branch", items,
 		func(app *App, i int) {
-			var newBranch string
 			if i == 0 {
-				newBranch = "new"
-			} else {
-				newBranch = candidates[i-1]
+				app.askWorktreePath("", true)
+				return
 			}
-			app.askWorktreePath(newBranch)
+			app.askWorktreePath(candidates[i-1], false)
 		}, nil, nil)
 }
 
 // askWorktreePath prompts for the worktree path, defaulting to a sibling
-// directory next to the main checkout. A "new" branch gets one more
-// prompt for its name before the command is built.
-func (a *App) askWorktreePath(branch string) {
+// directory next to the main checkout. A new branch gets one more
+// prompt for its name before the command is built — carried as a flag,
+// not a magic name, so an existing branch called "new" is just a branch.
+func (a *App) askWorktreePath(branch string, create bool) {
 	a.openPrompt("New worktree — path", "directory to create", a.defaultWorktreePath(),
 		func(app *App, path string) {
 			path = strings.TrimSpace(path)
-			if branch == "new" {
+			if create {
 				app.openPrompt("New worktree — branch name", "created from "+app.gitSnap.Branch, "",
 					func(app2 *App, name string) {
 						app2.doGitNewWorktree(path, name, true)
@@ -149,7 +153,7 @@ func (a *App) doGitNewWorktree(path, branch string, newBranch bool) {
 		return
 	}
 	if !newBranch {
-		if _, ok := a.safeRef(localBranchName(branch)); !ok {
+		if _, ok := a.safeRef(a.localBranchName(branch)); !ok {
 			return
 		}
 	}

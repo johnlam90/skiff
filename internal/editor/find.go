@@ -490,12 +490,16 @@ func preserveCase(query, matched, repl string, opts FindOptions) string {
 }
 
 // ReplaceAllMatches swaps every match for repl as ONE undo step and
-// returns how many were replaced. Matches are applied last-to-first so
-// earlier spans stay valid while later ones are rewritten. Each hit
-// takes the same case-following replacement ReplaceCurrentMatch would
-// give it (see preserveCase), so replace-all and Enter-until-done
-// leave the same text — "FOO Foo foo" → "BAR Bar bar" either way,
-// where inserting repl verbatim used to flatten it to "bar bar bar".
+// returns how many were replaced. Each hit takes the same case-following
+// replacement ReplaceCurrentMatch would give it (see preserveCase), so
+// replace-all and Enter-until-done leave the same text — "FOO Foo foo"
+// → "BAR Bar bar" either way, where inserting repl verbatim used to
+// flatten it to "bar bar bar".
+//
+// Each affected line is rebuilt exactly once, from one decode. The
+// first version ran a Buffer delete + insert per match, and each of
+// those reallocated the whole line slice and re-decoded the line: 40k
+// matching lines held the event loop for fourteen seconds.
 func (t *Tab) ReplaceAllMatches(repl string) int {
 	if t.IsImage() || len(t.FindMatches) == 0 {
 		return 0
@@ -504,17 +508,51 @@ func (t *Tab) ReplaceAllMatches(repl string) int {
 	// so t.FindMatches stops describing the spans this call swapped.
 	matches := t.FindMatches
 	opts := t.findOptions()
+	replaced := 0
 	t.edit(undoGroupStructural, func() {
-		for i := len(matches) - 1; i >= 0; i-- {
-			m := matches[i]
-			start := Position{Line: m.Line, Col: m.Col}
-			end := Position{Line: m.Line, Col: m.Col + m.Width}
-			cased := preserveCase(t.FindQuery, t.Buffer.Substring(start, end), repl, opts)
-			t.Buffer.DeleteRange(start, end)
-			t.Buffer.InsertString(start, cased)
+		// FindAll emits matches in document order, so one line's hits
+		// are a contiguous run sorted by column.
+		for i := 0; i < len(matches); {
+			j := i
+			for j < len(matches) && matches[j].Line == matches[i].Line {
+				j++
+			}
+			replaced += t.replaceOnLine(matches[i:j], repl, opts)
+			i = j
 		}
 	})
-	return len(matches)
+	return replaced
+}
+
+// replaceOnLine rewrites one buffer line with every match in ms (all on
+// that line, ascending by column) swapped for repl, and returns how many
+// it swapped. A span that does not fit the line as it is now — out of
+// range, or overlapping the one before it — is left alone rather than
+// spliced at coordinates that no longer mean anything.
+func (t *Tab) replaceOnLine(ms []Match, repl string, opts FindOptions) int {
+	line := ms[0].Line
+	if line < 0 || line >= len(t.Buffer.Lines) {
+		return 0
+	}
+	runes := []rune(t.Buffer.Lines[line])
+	var out strings.Builder
+	prev, n := 0, 0
+	for _, m := range ms {
+		end := m.Col + m.Width
+		if m.Col < prev || m.Width <= 0 || end > len(runes) {
+			continue
+		}
+		out.WriteString(string(runes[prev:m.Col]))
+		out.WriteString(preserveCase(t.FindQuery, string(runes[m.Col:end]), repl, opts))
+		prev = end
+		n++
+	}
+	if n == 0 {
+		return 0
+	}
+	out.WriteString(string(runes[prev:]))
+	t.Buffer.Lines[line] = out.String()
+	return n
 }
 
 // ReplaceLines swaps whole lines (0-based index → new content) as ONE

@@ -11,6 +11,7 @@
 package app
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,6 +152,21 @@ func TestOpenFile_BinaryFlashesInsteadOfFreezing(t *testing.T) {
 	}
 	if !strings.Contains(a.statusMsg, "binary") {
 		t.Fatalf("flash should name the problem, got %q", a.statusMsg)
+	}
+	// The editor's refusal already leads with the name; the flash used
+	// to prefix it again ("Couldn't open x: x: looks like a binary file").
+	if want := "Couldn't open bundle.zip: looks like a binary file"; a.statusMsg != want {
+		t.Fatalf("flash = %q, want %q (the file named once)", a.statusMsg, want)
+	}
+}
+
+// TestOpenFailure_KeepsReasonsThatDoNotRepeatTheName covers the other
+// shape: an error that does not lead with the base name is passed
+// through whole, so the trim can never eat part of a real reason.
+func TestOpenFailure_KeepsReasonsThatDoNotRepeatTheName(t *testing.T) {
+	got := openFailure("/p/sub", errors.New("read /p/sub: is a directory"))
+	if want := "Couldn't open sub: read /p/sub: is a directory"; got != want {
+		t.Fatalf("openFailure = %q, want %q", got, want)
 	}
 }
 

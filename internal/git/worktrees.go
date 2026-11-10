@@ -98,6 +98,8 @@ func (r *Repo) WorktreeAdd(path, branch string, create bool) error {
 	if create {
 		return o.run("worktree", "add", path, "-b", branch, "--")
 	}
+	// Same rule as Switch: a local "feature/login" is not a
+	// remote-tracking spelling just because it has a slash.
 	i := strings.IndexByte(branch, '/')
 	if i < 0 {
 		return o.run("worktree", "add", path, branch, "--")
@@ -105,6 +107,9 @@ func (r *Repo) WorktreeAdd(path, branch string, create bool) error {
 	local := branch[i+1:]
 	if _, err := SafeRef(local); err != nil {
 		return err
+	}
+	if r.BranchExists(branch) {
+		return o.run("worktree", "add", path, branch, "--")
 	}
 	if r.BranchExists(local) {
 		return o.run("worktree", "add", path, local, "--")

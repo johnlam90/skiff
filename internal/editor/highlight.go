@@ -225,7 +225,10 @@ func highlightSource(filename, src string, t theme.Theme) [][]tcell.Style {
 	lines := strings.Split(src, "\n")
 	styles := baseStyleGrid(lines, base)
 
-	iter, err := lexer.Tokenise(nil, src)
+	// Chroma normalises a lone CR to LF before lexing, which would add a
+	// line break the buffer does not have and land every later token one
+	// row down. A space keeps the rune count, so columns still line up.
+	iter, err := lexer.Tokenise(nil, strings.ReplaceAll(src, "\r", " "))
 	if err != nil {
 		return styles
 	}

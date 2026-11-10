@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -93,7 +94,13 @@ type Tab struct {
 	Cursor  Position // Where new typed text appears.
 	Anchor  Position // Selection anchor; equals Cursor when nothing is selected.
 	ScrollY int      // Index of the first visible line.
-	ScrollX int      // Index of the first visible column (rune-indexed). Always 0 with Wrap on.
+	// ScrollX is the horizontal pan in CELLS: the visual column shown at
+	// the left edge of the content area, the same number for every row.
+	// It is deliberately not a rune index — a rune index converts to a
+	// different cell offset on each line (tabs, wide glyphs), which made
+	// rows pan by different amounts and collapsed indentation. Always 0
+	// with Wrap on.
+	ScrollX int
 	Dirty   bool
 
 	// LineEnding is the convention the file had on disk. The buffer
@@ -322,9 +329,18 @@ func detectLineEnding(data []byte) LineEnding {
 	return LineEndingLF
 }
 
+// ErrNotRegularFile marks a refusal to open something that is not a
+// plain file — a FIFO, a device node, a socket, a directory. Reading one
+// into a buffer is never what a click meant, and several of them never
+// return: a FIFO with no writer blocks in open(2) forever, and the read
+// runs on the event loop.
+var ErrNotRegularFile = errors.New("not a regular file")
+
 // readTextFile is the single gate every text buffer fills through: it
 // stats path against maxOpenBytes before reading (the guard must not be
-// paid for by the read), reads, and refuses content looksBinary rejects.
+// paid for by the read), refuses anything that is not a regular file,
+// reads no more than the cap whatever the stat claimed, and refuses
+// content looksBinary rejects.
 // A missing file returns empty data and a zero mtime — NewTab treats that
 // as a brand-new buffer; Reload's callers stat again via reloadFromDisk
 // and error earlier since a reload target that vanished is itself a
@@ -336,16 +352,25 @@ func readTextFile(path string) (data []byte, mtime time.Time, err error) {
 	// a missing file leaves it as the zero value, which callers handle
 	// explicitly.
 	if info, statErr := os.Stat(path); statErr == nil {
+		// Checked before the open, not after: opening a FIFO is the call
+		// that blocks, so the refusal has to come from the stat.
+		if !info.Mode().IsRegular() {
+			return nil, time.Time{}, fmt.Errorf("%s: %w", filepath.Base(path), ErrNotRegularFile)
+		}
 		if info.Size() > maxOpenBytes {
-			return nil, time.Time{}, fmt.Errorf("%s is %s (limit %s): %w",
-				filepath.Base(path), mibString(info.Size()), mibString(maxOpenBytes),
-				ErrFileTooLarge)
+			return nil, time.Time{}, tooLargeError(path, info.Size())
 		}
 		mtime = info.ModTime()
 	}
-	b, readErr := os.ReadFile(path)
+	b, readErr := readCapped(path, maxOpenBytes)
 	if readErr != nil && !os.IsNotExist(readErr) {
 		return nil, time.Time{}, readErr
+	}
+	if int64(len(b)) > maxOpenBytes {
+		// The stat's size was a lie or went stale — /proc files report 0,
+		// and a log can grow between the stat and the read. The reader
+		// stopped one byte past the cap, so the size is only a floor.
+		return nil, time.Time{}, tooLargeError(path, int64(len(b)))
 	}
 	if looksBinary(b) {
 		// A text buffer must never load binary content: every
@@ -363,6 +388,27 @@ func readTextFile(path string) (data []byte, mtime time.Time, err error) {
 		return nil, time.Time{}, fmt.Errorf("%s: %w", filepath.Base(path), ErrNotUTF8)
 	}
 	return b, mtime, nil
+}
+
+// tooLargeError builds the ErrFileTooLarge refusal for a file of size
+// bytes, shared by the stat guard and the capped read so both name the
+// file and the limit the same way.
+func tooLargeError(path string, size int64) error {
+	return fmt.Errorf("%s is %s (limit %s): %w",
+		filepath.Base(path), mibString(size), mibString(maxOpenBytes), ErrFileTooLarge)
+}
+
+// readCapped reads path but never more than limit+1 bytes, so a file
+// whose stat size understates it cannot be pulled into memory whole.
+// The one extra byte is how the caller tells "exactly at the cap" from
+// "over it".
+func readCapped(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, limit+1))
 }
 
 // NewTab opens path and returns a Tab. If the file does not exist, the tab
@@ -434,9 +480,11 @@ func (t *Tab) IsImage() bool {
 // IsPreview reports whether the tab is still replaceable by the next
 // tree-click preview. A dirty buffer is never a preview — the user's
 // edits pin it implicitly, so a half-typed change can't be silently
-// swapped out from under them.
+// swapped out from under them — and neither is a DiskGone one: its
+// buffer is the only surviving copy of the file, and replacing the tab
+// in place skips the close guard that exists to say so.
 func (t *Tab) IsPreview() bool {
-	return t.Preview && !t.Dirty
+	return t.Preview && !t.Dirty && !t.DiskGone
 }
 
 // Pin makes a preview tab permanent (drops the italic, stops the
@@ -496,7 +544,8 @@ func (t *Tab) Save() error {
 // a failure, not a fresh start. Cursor and anchor are clamped to the new
 // content (so the user keeps roughly their place instead of getting
 // snapped to line 0); ScrollY is left alone and gets clamped on the next
-// render. Dirty is cleared and the syntax cache is invalidated. It does
+// render. Dirty is cleared and every cache over the old text is
+// invalidated (bufferReplaced). It does
 // NOT touch undo history — that decision belongs to the caller, which is
 // why Reload and ReloadKeepHistory both wrap this and differ only in what
 // they do to the stacks afterwards.
@@ -517,7 +566,22 @@ func (t *Tab) reloadFromDisk() error {
 	t.Mtime = mtime
 	t.StyleStale = true
 	t.cursorMoved = true
+	t.bufferReplaced()
 	return nil
+}
+
+// bufferReplaced is the shared tail of the paths that swap the whole
+// buffer WITHOUT going through edit — undo, redo, revert and a reload
+// from disk. Everything that caches an answer about the old text has to
+// hear about it: the highlight generation moves on so a background lex
+// still in flight for the old text is refused when it lands, the
+// bracket-pair cache is dropped, and the find query is re-run so
+// FindMatches stops naming offsets in text that is gone (Replace splices
+// at those offsets — stale ones rewrote the wrong characters).
+func (t *Tab) bufferReplaced() {
+	t.hlGen++
+	t.bracketCached = false
+	t.refreshFindMatches()
 }
 
 // Reload re-reads the file from disk into the buffer and resets undo
@@ -607,9 +671,9 @@ func (t *Tab) SelectionText() string {
 // edit is the one seam every text mutation goes through. It records the
 // pre-state for undo under group, runs mutate, then applies the trailer
 // the rest of the editor reads: the buffer differs from disk (Dirty), the
-// highlight cache no longer describes it (StyleStale), the caret needs
-// scrolling back into view (cursorMoved), and the find match list has to
-// be re-run against the new text. That trailer used to be hand-typed at
+// highlight cache no longer describes it (rebaseStyles), the bracket-pair
+// cache is void, the caret needs scrolling back into view (cursorMoved),
+// and the find match list has to be re-run against the new text. That trailer used to be hand-typed at
 // ten call sites and had already drifted — only the Replace* trio
 // refreshed the matches, so typing with the find bar open painted the
 // highlights at stale offsets.
@@ -626,7 +690,16 @@ func (t *Tab) edit(group undoGroup, mutate func()) {
 	before := t.editLinesSnapshot()
 	mutate()
 	t.Dirty = true
+	// An edit pins a preview tab for good. Dirty alone only pinned it
+	// until the save cleared the flag, at which point the file the user
+	// had just worked on went back to being replaced by the next tree
+	// click.
+	t.Preview = false
 	t.rebaseStyles(before)
+	// The bracket cache used to learn of edits through StyleStale, which
+	// an edit inside the highlight window no longer sets — deleting a
+	// paren left its partner lit and "Go to matching bracket" enabled.
+	t.bracketCached = false
 	t.cursorMoved = true
 	// The sticky column belongs to a run of vertical moves; an edit ends
 	// the run the same way a horizontal motion does. Left valid, an
@@ -1122,25 +1195,16 @@ func (t *Tab) EnsureVisible(viewW, viewH int) {
 	if t.Cursor.Line >= t.ScrollY+viewH {
 		t.ScrollY = t.Cursor.Line - viewH + 1
 	}
-	// Horizontal scrolling is measured in cells, not runes: ScrollX is a
-	// rune index, but "is the caret off the right edge" is a question
-	// about the cells between them, and a line of CJK answers it very
-	// differently from a line of ASCII. RuneColAtVisual turns the target
-	// cell back into a rune index, which lands on a cluster boundary by
-	// construction so the pan never starts mid-character.
-	runes := t.Buffer.LineRunes(t.Cursor.Line)
-	cursorVisual := LineVisualCol(runes, t.Cursor.Col)
-	scrollVisual := LineVisualCol(runes, t.ScrollX)
-	if cursorVisual < scrollVisual {
-		t.ScrollX = RuneColAtVisual(runes, cursorVisual)
-	} else if cursorVisual >= scrollVisual+contentW {
-		sx := RuneColAtVisual(runes, cursorVisual-contentW+1)
-		// A wide glyph straddling the new left edge would leave the caret
-		// one cell past the right edge; start at the next cluster instead.
-		if LineVisualCol(runes, sx)+contentW <= cursorVisual {
-			sx = NextCluster(runes, sx)
-		}
-		t.ScrollX = sx
+	// Horizontal scrolling is measured in cells: ScrollX is the visual
+	// column at the left edge, and "is the caret off the right edge" is
+	// a question about cells — a line of CJK answers it very differently
+	// from a line of ASCII. The pan may land mid-glyph on some row (it is
+	// one offset for all of them); Render blanks the visible half.
+	cursorVisual := LineVisualCol(t.Buffer.LineRunes(t.Cursor.Line), t.Cursor.Col)
+	if cursorVisual < t.ScrollX {
+		t.ScrollX = cursorVisual
+	} else if cursorVisual >= t.ScrollX+contentW {
+		t.ScrollX = cursorVisual - contentW + 1
 	}
 	if t.ScrollY < 0 {
 		t.ScrollY = 0
@@ -1282,51 +1346,17 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		}
 
 		// Line content, with syntax styles, selection bg, and line bg.
-		// We walk from the start of the line so tab stops anchor to col 0
-		// — a tab one cell into the line still expands to the next stop,
-		// not the next-stop-from-the-scroll-offset — and we walk by
-		// grapheme cluster so a combining mark rides in its base's cell
-		// instead of claiming one of its own. Clipping is done in visual
-		// cells rather than rune indices, which is what stops a wide glyph
-		// straddling the left edge from painting its right half as a
-		// half-character: cell 0 falls off, cell 1 paints a blank.
 		runes := t.Buffer.LineRunes(lineIdx)
 		var styles []tcell.Style
 		if lineIdx < len(t.Styles) {
 			styles = t.Styles[lineIdx]
 		}
-		scrollVisual := LineVisualCol(runes, t.ScrollX)
-		visualCol := 0 // visual cell offset from the start of the LINE
-		for runeIdx := 0; runeIdx < len(runes); {
-			next, width := ClusterAt(runes, runeIdx, visualCol)
-			if visualCol+width > scrollVisual {
-				st := t.cellStyle(th, styles, lineIdx, runeIdx, lineBg, hasSel, selStart, selEnd)
-				glyph, comb := runes[runeIdx], runes[runeIdx+1:next]
-				if glyph == '\t' {
-					glyph, comb = ' ', nil
-				}
-				for cell := 0; cell < width; cell++ {
-					sc := visualCol - scrollVisual + cell
-					if sc < 0 {
-						continue
-					}
-					if sc >= contentW {
-						break
-					}
-					// The cluster's first cell carries the glyph and its
-					// combining marks; padding cells carry a space so the
-					// area under a wide glyph or a tab still gets the row
-					// background.
-					if cell > 0 {
-						textdraw.Cell(scr, contentX+sc, cy, ' ', nil, st)
-						continue
-					}
-					textdraw.Cell(scr, contentX+sc, cy, glyph, comb, st)
-				}
-			}
-			visualCol += width
-			runeIdx = next
-		}
+		visualCol, more := t.paintRowCells(scr, th, rowPaint{
+			runes: runes, styles: styles, lineIdx: lineIdx,
+			x: contentX, y: cy, w: contentW, lineBg: lineBg,
+			hasSel: hasSel, selStart: selStart, selEnd: selEnd,
+		})
+		scrollVisual := t.ScrollX
 		// Pad from the last content cell to the edge with the row's own
 		// background: clusters tile the visual columns contiguously, so
 		// every cell before this point is already painted.
@@ -1337,14 +1367,13 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		// rightmost content cell when the line extends past the viewport
 		// in that direction. Without this hint a terminal user has no way
 		// to tell that more content exists off-screen — there's no
-		// scrollbar to clue them in. visualCol now equals the total
-		// visual width of the line; scrollVisual is the visual cell
-		// corresponding to ScrollX.
+		// scrollbar to clue them in. visualCol is where the row's paint
+		// stopped; `more` says clusters remain past the right edge.
 		overflowStyle := tcell.StyleDefault.Background(lineBg).Foreground(th.Muted)
 		if t.ScrollX > 0 {
 			textdraw.Cell(scr, contentX, cy, '‹', nil, overflowStyle)
 		}
-		if visualCol-scrollVisual > contentW {
+		if more || visualCol-scrollVisual > contentW {
 			textdraw.Cell(scr, contentX+contentW-1, cy, '›', nil, overflowStyle)
 		}
 	}
@@ -1357,17 +1386,89 @@ func (t *Tab) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 
 	// Position the hardware cursor at its visual column (so a cursor
 	// past a tab lands at the tab's *end* cell, not just rune-Col cells
-	// to the right of ScrollX).
+	// to the right of the pan).
 	cy := y + (t.Cursor.Line - t.ScrollY)
 	cursorRunes := t.Buffer.LineRunes(t.Cursor.Line)
 	cursorVisual := LineVisualCol(cursorRunes, t.Cursor.Col)
-	scrollVisual := LineVisualCol(cursorRunes, t.ScrollX)
-	cx := contentX + (cursorVisual - scrollVisual)
+	cx := contentX + (cursorVisual - t.ScrollX)
 	if cy >= y && cy < y+h && cx >= contentX && cx < contentX+contentW {
 		scr.ShowCursor(cx, cy)
 	} else {
 		scr.HideCursor()
 	}
+}
+
+// rowPaint is one non-wrap row's worth of arguments to paintRowCells:
+// the line's runes and cached styles, the content rect's origin and
+// width, and the row-level styling inputs cellStyle needs.
+type rowPaint struct {
+	runes            []rune
+	styles           []tcell.Style
+	lineIdx          int
+	x, y, w          int
+	lineBg           tcell.Color
+	hasSel           bool
+	selStart, selEnd Position
+}
+
+// paintRowCells paints the visible glyph cells of one non-wrap row and
+// returns the visual column the walk stopped at plus whether clusters
+// with cells of their own remain past the right edge (what the '›'
+// overflow hint needs to know).
+//
+// The walk starts at the line's first rune so tab stops anchor to column
+// 0 — a tab one cell into the line still expands to the next stop, not
+// the next-stop-from-the-scroll-offset — and goes by grapheme cluster so
+// a combining mark rides in its base's cell instead of claiming one of
+// its own. Clipping is done in visual cells against ScrollX, the same
+// cell offset on every row: a wide glyph or tab straddling the left edge
+// drops the cells that fell off and paints the rest blank rather than
+// shifting the row or showing half a character.
+//
+// It stops at the right edge instead of walking to the end of the line.
+// Styling every cluster of a minified 3MB line cost hundreds of
+// milliseconds a frame for cells that were never painted.
+func (t *Tab) paintRowCells(scr tcell.Screen, th theme.Theme, p rowPaint) (visualCol int, more bool) {
+	scrollVisual := t.ScrollX
+	for runeIdx := 0; runeIdx < len(p.runes); {
+		next, width := ClusterAt(p.runes, runeIdx, visualCol)
+		if visualCol-scrollVisual >= p.w && width > 0 {
+			// Past the edge with a cluster that would have needed a cell.
+			// A zero-width straggler does not count: it paints nothing,
+			// so it must not raise the overflow hint on its own.
+			return visualCol, true
+		}
+		if visualCol+width > scrollVisual {
+			st := t.cellStyle(th, p.styles, p.lineIdx, runeIdx, p.lineBg, p.hasSel, p.selStart, p.selEnd)
+			glyph, comb := p.runes[runeIdx], p.runes[runeIdx+1:next]
+			if glyph == '\t' {
+				glyph, comb = ' ', nil
+			}
+			for cell := 0; cell < width; cell++ {
+				sc := visualCol - scrollVisual + cell
+				if sc < 0 {
+					continue
+				}
+				if sc >= p.w {
+					break
+				}
+				// The cluster's first cell carries the glyph and its
+				// combining marks; padding cells carry a space so the
+				// area under a wide glyph or a tab still gets the row
+				// background. That is also what a glyph straddling the
+				// left edge comes out as: its first cell is off screen
+				// (sc < 0), so only blanks are left to paint.
+				if cell > 0 {
+					textdraw.Cell(scr, p.x+sc, p.y, ' ', nil, st)
+					continue
+				}
+				textdraw.Cell(scr, p.x+sc, p.y, glyph, comb, st)
+			}
+		}
+		visualCol += width
+		runeIdx = next
+	}
+	return visualCol, false
 }
 
 // cellStyle resolves the final style for the rune at (lineIdx, runeIdx):
@@ -1468,11 +1569,11 @@ func (t *Tab) HitTest(localX, localY, w, h int) (Position, bool) {
 		return Position{Line: line, Col: 0}, true
 	}
 	runes := []rune(t.Buffer.Lines[line])
-	// Convert the click's screen column back to a rune column. With tabs
-	// expanding to multi-cell tab stops we can't just subtract ScrollX
-	// from localX — we have to walk the runes counting visual cells.
-	scrollVisual := LineVisualCol(runes, t.ScrollX)
-	targetVisual := scrollVisual + (localX - contentX)
+	// Convert the click's screen column back to a rune column. ScrollX
+	// is already in cells, so the clicked cell is a plain sum — but with
+	// tabs and wide glyphs spanning several cells the way back to a rune
+	// is a walk over the line counting visual cells.
+	targetVisual := t.ScrollX + (localX - contentX)
 	col := RuneColAtVisual(runes, targetVisual)
 	if col > len(runes) {
 		col = len(runes)
@@ -1536,7 +1637,7 @@ func (t *Tab) ClampCursorToView(viewH int) {
 	}
 }
 
-// ScrollH moves the viewport horizontally by delta rune-columns (negative
+// ScrollH moves the viewport horizontally by delta cells (negative
 // = left). Clamped at zero; the right side is naturally bounded by
 // Render's contentW window — scrolling past the longest visible line just
 // shows blank space, which is fine. Lives next to Scroll so the app's

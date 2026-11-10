@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 
 	"github.com/johnlam90/skiff/internal/customactions"
@@ -242,9 +243,16 @@ func (a *App) refreshTreeAsync() {
 	// remember, hence the nil.
 	var snap *session.Project
 	if a.tree != nil {
-		p := a.captureSession()
-		p.SavedAt = time.Now()
-		snap = &p
+		// Written only when something changed. Rewriting an identical
+		// file every tick is a temp write, two fsyncs and a rename per
+		// ten seconds for nothing — and it let an idle skiff in another
+		// pane overwrite, within one tick, the session the instance the
+		// user actually worked in had just saved on quit.
+		if p := a.captureSession(); !reflect.DeepEqual(p, a.sessionSaved) {
+			a.sessionSaved = p
+			p.SavedAt = time.Now()
+			snap = &p
+		}
 	}
 	root := a.rootDir
 	a.treeScan.Start(func(context.Context) (treeScanResult, error) {
@@ -327,9 +335,28 @@ func (a *App) applyTabProbes(probes []tabProbe) {
 			continue
 		}
 		if p, ok := byPath[tab.Path]; ok {
-			a.reconcileTab(tab, p)
+			a.reconcileTab(tab, freshProbe(tab, p))
 		}
 	}
+}
+
+// freshProbe guards against a probe that went stale in flight. The sweep
+// stats on its goroutine; a save or a formatter reload that lands before
+// the result is applied leaves the probe holding the PREVIOUS mtime.
+// Now that "changed" means "differs" rather than "is newer", that stale
+// value would read as an external change — a needless reload, or a
+// spurious conflict prompt over a tab the user just saved. So a probe
+// that disagrees with the tab is re-statted here, on the loop, before
+// anyone acts on it: one Stat, and only for a tab that looks changed.
+func freshProbe(tab *editor.Tab, p tabProbe) tabProbe {
+	if p.err != nil || p.mtime.Equal(tab.Mtime) {
+		return p
+	}
+	info, err := os.Stat(tab.Path)
+	if err != nil {
+		return tabProbe{path: p.path, err: err}
+	}
+	return tabProbe{path: p.path, mtime: info.ModTime()}
 }
 
 // reconcileTab decides what one open tab should do about what a Stat
@@ -339,10 +366,17 @@ func (a *App) applyTabProbes(probes []tabProbe) {
 //     knows. Dirty is untouched: the buffer has no edits of its own, so
 //     a later delete+recreate must still be able to reload silently
 //     instead of reading as a conflict with edits that don't exist.
-//   - Disk newer, tab clean → reload the buffer silently, flash success.
-//     This is also how a DiskGone tab resolves once the file reappears.
-//   - Disk newer, tab dirty → a real conflict: prompt (Keep mine /
+//   - Disk differs, tab clean → reload the buffer silently, flash
+//     success. This is also how a DiskGone tab resolves once the file
+//     reappears.
+//   - Disk differs, tab dirty → a real conflict: prompt (Keep mine /
 //     Reload / Diff) and leave a marker on the tab until it is resolved.
+//
+// "Differs" is an mtime that is not the one the tab last saw — in
+// either direction. `mv backup f`, `cp -p` and `tar x` all install
+// bytes carrying an OLDER timestamp, and a newer-than test read every
+// one of them as "unchanged", leaving the stale buffer one Save away
+// from undoing the restore.
 //
 // The clean-tab reload uses ReloadKeepHistory, not plain Reload: the user
 // never asked for this reload (a background git checkout or `make` wrote
@@ -377,7 +411,9 @@ func (a *App) reconcileTab(tab *editor.Tab, p tabProbe) {
 	}
 	if tab.DiskGone {
 		// File reappeared. Force the mtime check below to fire so we
-		// either reload or warn about a dirty conflict.
+		// either reload or warn about a dirty conflict — the zero time
+		// equals no real file's mtime, which is all the Equal test
+		// below needs.
 		tab.DiskGone = false
 		tab.Mtime = time.Time{}
 	}
@@ -386,7 +422,7 @@ func (a *App) reconcileTab(tab *editor.Tab, p tabProbe) {
 	if !tab.Dirty {
 		a.clearDiskConflict(tab.Path)
 	}
-	if !p.mtime.After(tab.Mtime) {
+	if p.mtime.Equal(tab.Mtime) {
 		return // unchanged on disk.
 	}
 	if tab.Dirty {

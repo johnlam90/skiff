@@ -27,6 +27,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -441,7 +442,14 @@ func (a *App) openFormatInstallPrompt(tab *editor.Tab, ext string, argvTemplate 
 		filepath.Join(format.ConfigDir, format.ConfigFile))
 
 	c := a.openConfirm(title, msg, func(app *App) {
-		// Yes — merge into project config.
+		// Yes — merge into project config. First check the file is
+		// still the one the prompt previewed: the install re-reads
+		// format.json, so a config that appeared or changed while the
+		// prompt was up (a checkout, a pull, another editor) would ride
+		// into the merge unseen — and into the auto-trust below.
+		nowCfg, _ := format.Load(root)
+		drifted := (nowCfg == nil) != (preCfg == nil) ||
+			(nowCfg != nil && nowCfg.Hash() != preCfg.Hash())
 		hash, err := format.InstallCommandIntoProject(root, ext, argvTemplate)
 		if err != nil {
 			app.flash("install failed: " + err.Error())
@@ -458,7 +466,7 @@ func (a *App) openFormatInstallPrompt(tab *editor.Tab, ext string, argvTemplate 
 		app.refreshGitStatusAsync()
 		app.persistInstallDecline(root, ext, false)
 
-		if preCfg == nil || preTrustState == format.TrustAllowed {
+		if !drifted && (preCfg == nil || preTrustState == format.TrustAllowed) {
 			app.persistTrust(root, hash, true)
 			// Substitute $FILE at run time, never at install time.
 			// This keeps the on-disk template portable while still
@@ -466,8 +474,8 @@ func (a *App) openFormatInstallPrompt(tab *editor.Tab, ext string, argvTemplate 
 			app.execFormatter(tabPath, substituteFile(argvTemplate, tabPath))
 			return
 		}
-		// A pre-existing, never-reviewed config rides along in the
-		// merge. This Yes only covers the entry this prompt showed
+		// A pre-existing, never-reviewed config (or one that changed
+		// under the prompt) rides along in the merge. This Yes only covers the entry this prompt showed
 		// alongside it — the standard trust prompt has to ask about
 		// the merged file on its own terms before anything runs.
 		freshCfg, err := format.Load(root)
@@ -612,6 +620,10 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 	// the event loop while the goroutine still reads it.
 	args := append([]string(nil), argv...)
 	a.flash(label + "…")
+	if a.formatInFlight == nil {
+		a.formatInFlight = make(map[string]int)
+	}
+	a.formatInFlight[tabPath]++
 	a.formatter.Start(func(context.Context) (formatResult, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), deadline)
 		defer cancel()
@@ -665,6 +677,14 @@ func indexNewline(s string) int {
 // never asked for this reload, so it must not cost them their undo
 // stack the way the disk-conflict prompt's explicit Reload does.
 func (a *App) handleFormatDone(r formatResult, err error) {
+	// Every landing — failure included — retires its in-flight count,
+	// or the save path would wave external changes through for the
+	// rest of the session.
+	if a.formatInFlight[r.tabPath] <= 1 {
+		delete(a.formatInFlight, r.tabPath)
+	} else {
+		a.formatInFlight[r.tabPath]--
+	}
 	if err != nil {
 		a.flash(fmt.Sprintf("%s failed: %v", r.label, err))
 		return
@@ -674,6 +694,13 @@ func (a *App) handleFormatDone(r formatResult, err error) {
 			continue
 		}
 		if tab.Dirty {
+			// The formatter's rewrite is this editor's own write, not a
+			// second writer: adopt its mtime so the next Save does not
+			// open the disk-conflict prompt over a reformat the flash
+			// below already reports.
+			if info, statErr := os.Stat(tab.Path); statErr == nil {
+				tab.Mtime = info.ModTime()
+			}
 			a.flash(fmt.Sprintf("%s ran — kept your edits (file on disk was reformatted)", r.label))
 			return
 		}

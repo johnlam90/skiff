@@ -933,25 +933,33 @@ func TestMenuRevert_FlashesNameTheNextStep(t *testing.T) {
 
 // TestSingleFileRefusals_ShareOneSentence pins that every project-only
 // surface the Esc leader can reach in single-file mode refuses with the
-// same sentence, which names the mode and the way out. They used to
-// phrase it three ways.
+// same sentence, which names the mode and the way out — and that the
+// surfaces with a name of their own (the finder, the Git panel, project
+// find) lead with it. They used to phrase it three ways.
 func TestSingleFileRefusals_ShareOneSentence(t *testing.T) {
+	const tail = "ot available in single-file mode — open a folder to use it"
+	if !strings.HasSuffix(singleFileRefusal, tail) {
+		t.Fatalf("the refusal must name the mode and the way out, got %q", singleFileRefusal)
+	}
 	for _, c := range []struct {
-		name string
-		fire func(*App)
+		name    string
+		feature string
+		fire    func(*App)
 	}{
-		{"toggle sidebar", (*App).menuToggleSidebar},
-		{"toggle gitignore", (*App).menuToggleGitignore},
-		{"finder", (*App).openFinder},
+		{"toggle sidebar", "", (*App).menuToggleSidebar},
+		{"toggle gitignore", "", (*App).menuToggleGitignore},
+		{"finder", "Find file in project", (*App).openFinder},
+		{"git panel", "Git changes", (*App).toggleGitPanel},
+		{"project find", "Find in project", (*App).openProjFind},
 	} {
 		a := newTestApp(t, t.TempDir())
 		a.tree, a.finder = nil, nil
 		c.fire(a)
-		if a.statusMsg != singleFileRefusal {
-			t.Errorf("%s: flash = %q, want %q", c.name, a.statusMsg, singleFileRefusal)
+		if !strings.HasSuffix(a.statusMsg, tail) {
+			t.Errorf("%s: flash = %q, want the shared sentence", c.name, a.statusMsg)
 		}
-		if !strings.Contains(singleFileRefusal, "open a folder") {
-			t.Fatalf("the refusal must name the way out, got %q", singleFileRefusal)
+		if c.feature != "" && !strings.HasPrefix(a.statusMsg, c.feature+": ") {
+			t.Errorf("%s: flash = %q, should lead with %q", c.name, a.statusMsg, c.feature)
 		}
 	}
 }
@@ -969,5 +977,87 @@ func TestPlural(t *testing.T) {
 		if got := plural(c.n, "%d file", "%d files"); got != c.want {
 			t.Errorf("plural(%d) = %q, want %q", c.n, got, c.want)
 		}
+	}
+}
+
+// TestHandleCustomActionDone_DoesNotDestroyAnOpenPrompt is the landing
+// rule: an action finishing on its own schedule must not tear down the
+// prompt the user is typing into. The report shrinks to a flash that
+// still says what happened and where the full output is.
+func TestHandleCustomActionDone_DoesNotDestroyAnOpenPrompt(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	a := newTestApp(t, t.TempDir())
+	a.openPrompt("Commit message", "", "half-typed", nil)
+
+	a.handleCustomActionDone(customActionResult{
+		label:  "Deploy",
+		output: []byte("boom\n"),
+	}, fmt.Errorf("exit status 1"))
+
+	if got := promptPrefab(t, a).Field.Text(); got != "half-typed" {
+		t.Fatalf("the prompt lost its text: %q", got)
+	}
+	if !strings.Contains(a.statusMsg, "Action failed: Deploy") || !strings.Contains(a.statusMsg, "exit status 1") {
+		t.Fatalf("flash = %q, want the failure summarised", a.statusMsg)
+	}
+	if !strings.Contains(a.statusMsg, customactions.LogPath()) {
+		t.Fatalf("flash = %q, want it to point at the log holding the output", a.statusMsg)
+	}
+
+	// A chatty success takes the same route.
+	a.statusErr = false
+	a.handleCustomActionDone(customActionResult{label: "Lint", output: []byte("3 warnings\n")}, nil)
+	if !promptIsOpen(a) {
+		t.Fatalf("a successful landing replaced the prompt; top = %T", a.overlays.Top())
+	}
+	if !strings.Contains(a.statusMsg, "Lint — done") {
+		t.Fatalf("flash = %q, want the success summarised", a.statusMsg)
+	}
+}
+
+// TestHandleCustomActionDone_DoesNotCloseTheFindBar covers the strip:
+// openInfo runs closeAllModals, which drops the find bar and the
+// replacement text typed into it.
+func TestHandleCustomActionDone_DoesNotCloseTheFindBar(t *testing.T) {
+	a := seedFindApp(t, "foo\n")
+	typeFind(a, "foo")
+
+	a.handleCustomActionDone(customActionResult{label: "Deploy"}, fmt.Errorf("exit status 1"))
+
+	if a.findBar() == nil {
+		t.Fatal("a background landing closed the find bar")
+	}
+	if a.overlays.IsOpen() {
+		t.Fatalf("no overlay should open over the bar; top = %T", a.overlays.Top())
+	}
+}
+
+// TestMenuCopy_StillCopiesTheEditorSelection guards the edit-mode path
+// through menuCopy's new preview fork.
+func TestMenuCopy_StillCopiesTheEditorSelection(t *testing.T) {
+	a, tab := newNavTestApp(t, "hello\n")
+	tab.SelectAll()
+	a.menuCopy()
+	if a.clipBuf != "hello\n" {
+		t.Fatalf("clipboard = %q, want the buffer selection", a.clipBuf)
+	}
+}
+
+// TestMenuToggleSidebar_KeepsActiveTabVisible pins that showing the
+// explorer re-scrolls the tab strip: the strip loses the sidebar's
+// columns, and the active tab used to be left outside what remained.
+func TestMenuToggleSidebar_KeepsActiveTabVisible(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	resizeTestApp(t, a, 80, 24)
+	a.sidebarShown = false
+	openManyTabs(t, a, dir, 8)
+	a.ensureActiveTabVisible()
+	a.menuToggleSidebar()
+	if !a.sidebarShown {
+		t.Fatal("precondition: the toggle should show the sidebar")
+	}
+	if !activeTabInStrip(a) {
+		t.Fatalf("active tab left outside the strip after showing the sidebar (tabScroll=%d)", a.tabScroll)
 	}
 }

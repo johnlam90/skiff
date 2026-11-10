@@ -333,3 +333,43 @@ func TestBracketCellStyle_KeepsBackground(t *testing.T) {
 		}
 	}
 }
+
+// TestRefreshBracketMatch_InvalidatedByEdit pins that an edit drops the
+// cached pair. The cache keyed on the cursor plus StyleStale, and an edit
+// inside the highlight window stopped setting StyleStale when the lexer
+// moved off the loop — so deleting "(" under a caret that did not move
+// left ")" lit and "Go to matching bracket" enabled for a pair that no
+// longer existed.
+func TestRefreshBracketMatch_InvalidatedByEdit(t *testing.T) {
+	scr := newSimScreen(t, 40, 5)
+	defer scr.Fini()
+	th := theme.Default()
+
+	tab := newScratchTab("(a)")
+	tab.Render(scr, th, 0, 0, 40, 5)
+	if !tab.HasMatchingBracket() {
+		t.Fatal("caret on ( should see its partner")
+	}
+	tab.Delete() // buffer is now "a)" with the caret still at 0:0
+	tab.Render(scr, th, 0, 0, 40, 5)
+	if tab.HasMatchingBracket() {
+		t.Fatal("the ( is gone; the cached pair must be too")
+	}
+}
+
+// TestRefreshBracketMatch_InvalidatedByUndo pins the same for the paths
+// that swap the buffer without edit: an undo that restores the paren at
+// an unchanged caret has to be seen.
+func TestRefreshBracketMatch_InvalidatedByUndo(t *testing.T) {
+	tab := newScratchTab("(a)")
+	tab.StyleStale = false // as after a render: only the cache flags speak
+	tab.Delete()
+	if tab.HasMatchingBracket() {
+		t.Fatal("no bracket under the caret after the delete")
+	}
+	tab.Undo()
+	tab.StyleStale = false
+	if !tab.HasMatchingBracket() {
+		t.Fatal("undo restored the (; the cached miss must not survive it")
+	}
+}

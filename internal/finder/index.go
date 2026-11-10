@@ -18,7 +18,7 @@ package finder
 //
 //  2. Manual walk + gitignore. For non-git projects (or when git
 //     itself is missing) we walk the filesystem with filepath.Walk
-//     and filter through go-gitignore plus a small hardcoded
+//     and filter through internal/gitignore plus a small hardcoded
 //     ignore set so dot-dirs and node_modules don't blow up the
 //     result count.
 //
@@ -35,11 +35,9 @@ import (
 	"sort"
 	"strings"
 
-	gitignore "github.com/sabhiram/go-gitignore"
-
 	"github.com/johnlam90/skiff/internal/filetree"
-
 	"github.com/johnlam90/skiff/internal/git"
+	"github.com/johnlam90/skiff/internal/gitignore"
 )
 
 // hardcodedIgnores is the floor we apply in the *fallback* path —
@@ -92,7 +90,8 @@ func BuildIndex(rootDir string) ([]string, bool, error) {
 }
 
 // buildIndexGit shells out to `git ls-files` to collect every
-// tracked + untracked-not-ignored file under rootDir. -z makes git
+// tracked + untracked-not-ignored file under rootDir that is actually
+// on disk (tracked-but-deleted paths are dropped). -z makes git
 // emit null-terminated names so paths with spaces / quotes / even
 // newlines round-trip correctly. Returns an error when the
 // directory isn't a git working tree, the binary is missing, or
@@ -109,6 +108,15 @@ func buildIndexGit(rootDir string) ([]string, error) {
 		// so git ls-files reports them; they are deleted content
 		// awaiting Undo and must not be findable.
 		if strings.HasPrefix(path.Base(s), filetree.TrashPrefix) {
+			continue
+		}
+		// `ls-files --cached` lists the INDEX, so a tracked file the
+		// user deleted but has not committed is still reported. The
+		// finder then offered a path that is not on disk and opening
+		// it produced an empty buffer that asked to be saved on close.
+		// Lstat, not Stat: a dangling symlink is still an entry the
+		// tree shows, and only a path with nothing at it is dropped.
+		if _, err := os.Lstat(filepath.Join(rootDir, filepath.FromSlash(s))); err != nil {
 			continue
 		}
 		// git ls-files already emits forward-slash paths even on
@@ -173,7 +181,12 @@ func buildIndexWalk(rootDir string) ([]string, error) {
 		// Normalise to forward slashes so the scorer and renderer
 		// don't have to care about the host OS.
 		rel = filepath.ToSlash(rel)
-		if ig != nil && ig.MatchesPath(rel) {
+		// One Match per entry is the whole of git's rule here: an
+		// excluded directory is skipped below, so nothing under it is
+		// ever asked about — which is also why a "!" pattern cannot
+		// re-include a file inside one, exactly as in git. A symlink
+		// reports IsDir false, and git too matches it as a file.
+		if ig.Match(rel, d.IsDir()) == gitignore.Ignored {
 			if d.IsDir() {
 				return fs.SkipDir
 			}
@@ -209,14 +222,14 @@ var errStopWalking = errors.New("finder: index entry limit reached")
 
 // loadProjectGitignore reads <rootDir>/.gitignore (if present) and
 // returns a compiled matcher. Returns nil when the file is missing
-// or unreadable — the caller treats nil as "no gitignore rules
-// beyond the hardcoded set."
-func loadProjectGitignore(rootDir string) *gitignore.GitIgnore {
+// or unreadable — a nil Matcher matches nothing, i.e. "no gitignore
+// rules beyond the hardcoded set." It is the same matcher the file
+// tree filters with, so the two surfaces read a pattern the same way.
+func loadProjectGitignore(rootDir string) *gitignore.Matcher {
 	path := filepath.Join(rootDir, ".gitignore")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
-	lines := strings.Split(string(data), "\n")
-	return gitignore.CompileIgnoreLines(lines...)
+	return gitignore.Compile(data)
 }

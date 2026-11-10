@@ -386,3 +386,29 @@ func TestFill_PaintsExactlyTheRect(t *testing.T) {
 		}
 	}
 }
+
+// TestExpandTabs pins the tab rule every content-showing chrome surface
+// shares: a tab advances to the next multiple of the stop measured in
+// CELLS from the start of the string (so a wide glyph before it counts
+// two), a string without tabs is returned as-is, and a non-positive
+// stop is refused rather than divided by.
+func TestExpandTabs(t *testing.T) {
+	cases := []struct {
+		in   string
+		stop int
+		want string
+	}{
+		{"plain", 4, "plain"},
+		{"\tx", 4, "    x"},
+		{"\t\tx", 4, "        x"},
+		{"ab\tx", 4, "ab  x"},
+		{"abcd\tx", 4, "abcd    x"},
+		{"日\tx", 4, "日  x"},
+		{"\tx", 0, "\tx"},
+	}
+	for _, c := range cases {
+		if got := ExpandTabs(c.in, c.stop); got != c.want {
+			t.Errorf("ExpandTabs(%q, %d) = %q, want %q", c.in, c.stop, got, c.want)
+		}
+	}
+}

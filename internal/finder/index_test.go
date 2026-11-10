@@ -63,6 +63,37 @@ func TestBuildIndex_FallbackHonoursGitignore(t *testing.T) {
 	}
 }
 
+// TestBuildIndex_FallbackReadsPatternsLikeGit pins that the walk
+// fallback filters through the same git-faithful matcher as the file
+// tree, on the pattern shapes the old regexp-translating library got
+// wrong: a pattern with an inner slash is anchored to the root (so
+// `src/gen` must not swallow a/src/gen), `+` is a literal byte, a bare
+// `/` matches nothing rather than everything, and a negation re-includes
+// a file — but never one inside a directory that is itself excluded.
+func TestBuildIndex_FallbackReadsPatternsLikeGit(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, dir, ".gitignore", "src/gen\na+b\n/\n*.log\n!keep.log\nout/\n!out/keep.log\n")
+	mustWrite(t, dir, "src/gen/made.go", "x")
+	mustWrite(t, dir, "a/src/gen/hand.go", "x")
+	mustWrite(t, dir, "a+b", "x")
+	mustWrite(t, dir, "aab", "x")
+	mustWrite(t, dir, "app.log", "x")
+	mustWrite(t, dir, "keep.log", "x")
+	mustWrite(t, dir, "out/keep.log", "x")
+
+	paths, viaGit, err := BuildIndex(dir)
+	if err != nil {
+		t.Fatalf("BuildIndex: %v", err)
+	}
+	if viaGit {
+		t.Fatal("a plain directory must take the walk fallback")
+	}
+	want := []string{".gitignore", "a/src/gen/hand.go", "aab", "keep.log"}
+	if !sliceEqual(paths, want) {
+		t.Fatalf("paths: got %v, want %v", paths, want)
+	}
+}
+
 // TestBuildIndex_GitFastPath confirms the fast path runs when the
 // directory is a real git repo. We `git init` the tempdir, drop
 // in two tracked-ish files, and assert the index reports `viaGit`
@@ -158,5 +189,36 @@ func TestBuildIndex_SkipsTrashEntries(t *testing.T) {
 	}
 	if len(paths) != 1 || paths[0] != "real.go" {
 		t.Fatalf("expected only real.go, got %v", paths)
+	}
+}
+
+// TestBuildIndex_GitDropsDeletedTrackedFiles is the regression test for
+// the finder listing files that are gone: `git ls-files --cached` keeps
+// a tracked path until its deletion is committed, so a file removed
+// from the working tree stayed findable and opened as an empty buffer.
+// A path with nothing on disk is dropped; its siblings stay.
+func TestBuildIndex_GitDropsDeletedTrackedFiles(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	mustWrite(t, dir, "keep.go", "package main")
+	mustWrite(t, dir, "gone.go", "package main")
+	for _, args := range [][]string{{"init", "-q"}, {"add", "-A"}} {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	if err := os.Remove(filepath.Join(dir, "gone.go")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	paths, viaGit, err := BuildIndex(dir)
+	if err != nil || !viaGit {
+		t.Fatalf("BuildIndex: viaGit=%v err=%v", viaGit, err)
+	}
+	if want := []string{"keep.go"}; !sliceEqual(paths, want) {
+		t.Fatalf("paths: got %v, want %v (the deleted tracked file must not be listed)", paths, want)
 	}
 }

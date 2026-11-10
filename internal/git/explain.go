@@ -98,6 +98,9 @@ func explain(output string) string {
 	case strings.Contains(low, "not possible to fast-forward") ||
 		strings.Contains(low, "divergent branches"):
 		return "local and origin have diverged — pull needs a merge"
+	case strings.Contains(low, "unmerged files") ||
+		strings.Contains(low, "unresolved conflict"):
+		return "conflicts are still unresolved — fix every marked file, tick them all, then commit"
 	case strings.Contains(low, "conflict"):
 		return "merge conflict — fix the marked files, then commit"
 	case strings.Contains(low, "nothing to commit"):
@@ -106,6 +109,17 @@ func explain(output string) string {
 		return "no stash to pop"
 	case strings.Contains(low, "no upstream branch"):
 		return "this branch has no upstream yet"
+	// Before the network case on purpose: with no remote configured git
+	// treats the name as a path, prints "'origin' does not appear to be
+	// a git repository" and THEN the same "Could not read from remote
+	// repository" a dropped connection gives. Blaming the network for a
+	// repo that was never given a remote sends the user to the wrong
+	// fix.
+	case strings.Contains(low, "'origin' does not appear to be a git repository") ||
+		strings.Contains(low, "no configured push destination") ||
+		strings.Contains(low, "no remote repository specified") ||
+		strings.Contains(low, "no such remote"):
+		return "no remote named origin is configured — add one with git remote add origin <url>"
 	case strings.Contains(low, "could not read from remote") ||
 		strings.Contains(low, "could not resolve host") ||
 		strings.Contains(low, "authentication failed") ||

@@ -17,7 +17,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // TestUniqueDestPath_Ladder pins the collision ladder: a free name is
@@ -452,5 +454,40 @@ func TestCopy_OffMainLoopIsRaceFree(t *testing.T) {
 	wg.Wait()
 	if !exists(filepath.Join(dest, "a.txt")) {
 		t.Fatal("copy should have landed")
+	}
+}
+
+// TestUniqueDestPath_Dotfile pins the dotfile ladder: ".env" has no stem
+// as far as filepath.Ext is concerned, and the copy used to be named
+// " copy.env" — leading space, not hidden, outside `.env*` ignore rules.
+func TestUniqueDestPath_Dotfile(t *testing.T) {
+	dir := t.TempDir()
+	mkFile(t, dir, ".env", "x")
+	if got := uniqueDestPath(dir, ".env", false); got != filepath.Join(dir, ".env copy") {
+		t.Fatalf("dotfile collision: got %q", got)
+	}
+}
+
+// TestDuplicate_FolderWithFIFOFailsInsteadOfHanging pins that a named
+// pipe inside a copied folder is an error, not an Open that blocks
+// forever and wedges the file-op job for the session.
+func TestDuplicate_FolderWithFIFOFailsInsteadOfHanging(t *testing.T) {
+	root := t.TempDir()
+	mkFile(t, root, "d/a.txt", "x")
+	if err := syscall.Mkfifo(filepath.Join(root, "d", "pipe"), 0o644); err != nil {
+		t.Skip("mkfifo unavailable:", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := New(root).Duplicate(filepath.Join(root, "d"), nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("copying a FIFO should be refused")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Duplicate blocked on the FIFO")
 	}
 }

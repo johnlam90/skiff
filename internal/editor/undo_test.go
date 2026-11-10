@@ -17,6 +17,7 @@ package editor
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -796,5 +797,40 @@ func TestCanCoalesce_Caps(t *testing.T) {
 	tab.undoGroupOps = undoCoalesceMaxOps
 	if tab.canCoalesce(undoGroupTyping, tab.now()) {
 		t.Fatal("the op cap must close the group")
+	}
+}
+
+// TestUndo_RefreshesFindMatches pins that undo, redo and revert re-run
+// the live find query. They swap the buffer without going through edit,
+// so FindMatches kept the pre-undo coordinates and Replace All spliced
+// the restored text two columns off: "foo bar foo" came out "foZar foZ".
+func TestUndo_RefreshesFindMatches(t *testing.T) {
+	tab := newScratchTab("foo bar foo")
+	tab.SetFindQuery("foo")
+	tab.MoveCursorTo(Position{}, false)
+	tab.InsertString("xx")
+	if !tab.Undo() {
+		t.Fatal("nothing to undo")
+	}
+	want := []Match{{Line: 0, Col: 0, Width: 3}, {Line: 0, Col: 8, Width: 3}}
+	if !reflect.DeepEqual(tab.FindMatches, want) {
+		t.Fatalf("after undo: matches %+v, want %+v", tab.FindMatches, want)
+	}
+
+	if !tab.Redo() {
+		t.Fatal("nothing to redo")
+	}
+	if tab.FindMatches[0].Col != 2 {
+		t.Fatalf("after redo: first match at col %d, want 2", tab.FindMatches[0].Col)
+	}
+
+	if !tab.RevertFile() {
+		t.Fatal("nothing to revert")
+	}
+	if n := tab.ReplaceAllMatches("Z"); n != 2 {
+		t.Fatalf("replaced %d, want 2", n)
+	}
+	if got := tab.Buffer.String(); got != "Z bar Z" {
+		t.Fatalf("buffer %q, want %q", got, "Z bar Z")
 	}
 }

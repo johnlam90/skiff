@@ -12,10 +12,12 @@
 #      never tags and never publishes. Calling the workflow (rather than
 #      copying its steps, or trusting a separate run that happens to be
 #      green) keeps one definition of "green" for PRs and releases.
-#   1. Determines the next version. If the pushed commit hand-edited
-#      internal/version/version.go (you bumped major/minor manually), the
-#      workflow uses that version as-is. Otherwise it auto-bumps the patch
-#      number, commits the change back to main with [skip ci], and pushes.
+#   1. Determines the next version. If internal/version/version.go names
+#      a version that has no tag yet (you bumped major/minor manually),
+#      the workflow uses that version as-is. Otherwise it auto-bumps the
+#      patch number, commits the change back to main with [skip ci], and
+#      pushes. A re-run resumes the bump it already pushed; a run that
+#      main has moved past stands down for the newer one.
 #   2. Tags v<x.y.z> and pushes the tag.
 #   3. Runs goreleaser to cross-compile binaries (linux/darwin/windows ×
 #      amd64/arm64), package them, attach them to a GitHub Release, and
@@ -69,9 +71,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          # Full history so the workflow can inspect HEAD~1 for the
-          # "did this commit hand-edit version.go?" check, and so
-          # goreleaser sees prior tags for changelog generation.
+          # Full history and tags: the version step asks which versions
+          # are already tagged and what main holds past this commit, and
+          # goreleaser reads prior tags for changelog generation.
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -83,11 +85,54 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Decide whether to auto-bump or accept a hand-edited version.
+      # Decide what this run releases. Three questions, in order:
+      #
+      #   1. Is this a re-run of a run that already pushed its bump? Then
+      #      main already holds "Release vX [skip ci]" directly on top of
+      #      this commit (only other [skip ci] commits in between). Check
+      #      that commit out and finish releasing vX — bumping again would
+      #      build a second commit with the same parent, and its push is
+      #      rejected as non-fast-forward, so "Re-run failed jobs" could
+      #      never recover an auto-bumped release.
+      #   2. Has main moved on with real commits? Then the newer push has
+      #      its own run, and that run releases this commit too. Stand
+      #      down instead of fighting it for the push.
+      #   3. Otherwise: a version whose tag does not exist yet was set by
+      #      hand (a major/minor bump) and is used as-is; one tagged on
+      #      this very commit is a re-run of exactly that; a version
+      #      tagged anywhere else gets its patch bumped.
+      #
+      # "Hand-edited" is decided by the VALUE (is it tagged yet?), never
+      # by whether the commit touched version.go: a comment or copyright
+      # edit to that file used to resolve to the already-released version,
+      # find its tag, and delete the live release as a "retry".
       - name: Determine version
         id: version
         run: |
           set -euo pipefail
+
+          git fetch --quiet --tags origin main
+
+          for c in $(git rev-list --reverse HEAD..origin/main); do
+            subject=$(git log -1 --format=%s "$c")
+            [[ "$subject" == *"[skip ci]" ]] || break
+            if [[ "$subject" =~ ^Release\ v([0-9]+\.[0-9]+\.[0-9]+)\ \[skip\ ci\]$ ]]; then
+              echo "This commit was already bumped to v${BASH_REMATCH[1]} ($c) — resuming that release."
+              git checkout --quiet --detach "$c"
+              echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+              echo "bumped=false"               >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          # Captured first, then grepped: with pipefail, a grep that exits
+          # on its first hit can SIGPIPE `git log` and turn "yes" into "no".
+          ahead=$(git log --format=%s HEAD..origin/main)
+          if [[ -n "$ahead" ]] && grep -qv '\[skip ci\]$' <<<"$ahead"; then
+            echo "main has newer commits — their run releases this one too. Nothing to do."
+            echo "SKIP_RELEASE=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
 
           CURRENT=$(sed -nE 's/.*const Version = "([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' internal/version/version.go)
           if [[ -z "$CURRENT" ]]; then
@@ -95,11 +140,14 @@ jobs:
             exit 1
           fi
 
-          # If the pushed commit changed version.go, treat that as a
-          # manual major/minor bump and use the value as-is. Otherwise
-          # auto-bump the patch.
-          if git diff --name-only HEAD~1..HEAD 2>/dev/null | grep -qx 'internal/version/version.go'; then
-            echo "Version was manually edited to $CURRENT — using as-is."
+          if ! git rev-parse -q --verify "refs/tags/v$CURRENT" >/dev/null; then
+            echo "v$CURRENT is not tagged yet — a hand-set version, using as-is."
+            echo "version=$CURRENT"  >> "$GITHUB_OUTPUT"
+            echo "bumped=false"      >> "$GITHUB_OUTPUT"
+          elif [[ "$(git rev-parse "v$CURRENT^{commit}")" == "$(git rev-parse HEAD)" ]]; then
+            # The tag is on this very commit: a re-run of a hand-set
+            # version whose publish failed. Finish it, don't bump past it.
+            echo "v$CURRENT is already tagged on this commit — resuming that release."
             echo "version=$CURRENT"  >> "$GITHUB_OUTPUT"
             echo "bumped=false"      >> "$GITHUB_OUTPUT"
           else
@@ -115,8 +163,14 @@ jobs:
       # Commit the bumped version.go back to main. The [skip ci] marker
       # in the commit message tells GitHub Actions not to re-run this
       # workflow (which would loop forever).
+      #
+      # main can have moved since checkout — the previous release's
+      # formula commit lands late, and a PR can merge mid-run. Bot commits
+      # are rebased over; a real commit means a newer run owns the release
+      # (see step above), so this one stands down rather than tagging code
+      # its own test gate never saw.
       - name: Commit version bump
-        if: steps.version.outputs.bumped == 'true'
+        if: env.SKIP_RELEASE != 'true' && steps.version.outputs.bumped == 'true'
         run: |
           set -euo pipefail
           NEW="${{ steps.version.outputs.version }}"
@@ -127,17 +181,42 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add internal/version/version.go
           git commit -m "Release v$NEW [skip ci]"
-          git push origin HEAD:main
+
+          for attempt in 1 2 3; do
+            git fetch --quiet origin main
+            ahead=$(git log --format=%s HEAD~1..origin/main)
+            if [[ -n "$ahead" ]] && grep -qv '\[skip ci\]$' <<<"$ahead"; then
+              echo "main gained new commits mid-run — their run releases this one too. Nothing to do."
+              echo "SKIP_RELEASE=true" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            git rebase --quiet origin/main
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "Push attempt $attempt was rejected — retrying."
+            sleep 3
+          done
+          echo "Could not push the version bump to main." >&2
+          exit 1
 
       # Always create + push the tag (even when version was hand-edited
-      # — that's the whole point of accepting it as-is).
+      # — that's the whole point of accepting it as-is). An existing tag
+      # is only ever a retry when it points at the commit this run is
+      # about to release; anything else is a mix-up, and the run stops
+      # before the step below can delete a release that is fine.
       - name: Tag release
         id: tag
+        if: env.SKIP_RELEASE != 'true'
         run: |
           set -euo pipefail
           NEW="${{ steps.version.outputs.version }}"
           if git rev-parse -q --verify "refs/tags/v$NEW" >/dev/null; then
-            echo "Tag v$NEW already exists — release will retry against it."
+            if [[ "$(git rev-parse "v$NEW^{commit}")" != "$(git rev-parse HEAD)" ]]; then
+              echo "Tag v$NEW exists but points at a different commit than this run's — refusing to touch its release." >&2
+              exit 1
+            fi
+            echo "Tag v$NEW already exists on this commit — release will retry against it."
             echo "tag_existed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -154,9 +233,11 @@ jobs:
       # during) publish — GoReleaser refuses to recreate a release that
       # already exists. Clear the half-published release object (never
       # the tag, which GoReleaser needs to still be there) so the retry
-      # below can recreate it cleanly.
+      # below can recreate it cleanly. The tag step has already proved
+      # the tag is on this run's commit, so what is deleted here is
+      # rebuilt from the same source a few steps later.
       - name: Clear half-published release on retry
-        if: steps.tag.outputs.tag_existed == 'true'
+        if: env.SKIP_RELEASE != 'true' && steps.tag.outputs.tag_existed == 'true'
         run: |
           set -euo pipefail
           NEW="${{ steps.version.outputs.version }}"
@@ -169,12 +250,14 @@ jobs:
       # job's OIDC token for a short-lived cert — no key material to manage
       # or leak.
       - name: Install cosign
+        if: env.SKIP_RELEASE != 'true'
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       # Pinned exactly, like the staticcheck version test.yml pins: the
       # tool that builds every shipped binary must not float on "latest"
       # and silently change what we ship on release day.
       - name: Run GoReleaser
+        if: env.SKIP_RELEASE != 'true'
         uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
           version: v2.18.0
@@ -189,6 +272,7 @@ jobs:
       # via the repo's Attestations UI/API rather than shipped as a
       # release asset.
       - name: Attest build provenance
+        if: env.SKIP_RELEASE != 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: |

@@ -666,7 +666,7 @@ func TestRequestDiff_PostsEventWithoutBlocking(t *testing.T) {
 	a.openFile(target)
 
 	fake := &git.Fake{}
-	fake.Script("diff --unified=3 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target, strings.Join(sampleDiff(), "\n")+"\n", nil)
+	fake.Script("diff --unified=3 --no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target, strings.Join(sampleDiff(), "\n")+"\n", nil)
 	a.gitRunner = fake
 
 	a.menuDiffFile()
@@ -913,5 +913,118 @@ func TestDrawDiffView_HintTracksTheFocusedButton(t *testing.T) {
 	d.hover = 1 // nothing to open: Enter closes whatever the stale focus says
 	if row := titleRow(); !strings.Contains(row, "⏎ close · esc") {
 		t.Fatalf("with no file to open the hint should say close: %q", row)
+	}
+}
+
+// tabbedPatch is a Go-shaped diff whose lines are tab-indented — the
+// input both layouts used to render flush-left.
+func tabbedPatch() diff.Patch {
+	return patchOf(
+		"diff --git a/f.go b/f.go",
+		"--- a/f.go",
+		"+++ b/f.go",
+		"@@ -1,3 +1,3 @@",
+		" func f() {",
+		"-\told()",
+		"+\t\tnewer()",
+		" }",
+	)
+}
+
+// TestDrawDiffView_TabsIndentInBothLayouts is the regression test for
+// diffs dropping every tab: uniseg measures a tab as zero cells and
+// both paint paths skipped zero-width clusters, so Go code rendered
+// flush-left. A tab must now advance to the next tab stop — one tab is
+// four cells of indent, two are eight — in the side-by-side columns and
+// in the unified body alike.
+func TestDrawDiffView_TabsIndentInBothLayouts(t *testing.T) {
+	for _, width := range []int{70, 160} {
+		a := newTestApp(t, t.TempDir())
+		resizeTestApp(t, a, width, 24)
+		a.openDiffView("Diff · f.go", tabbedPatch(), "", "f.go")
+		d := diffOv(t, a)
+		d.Draw(a.screen)
+		a.screen.Show()
+		scr := a.screen.(tcell.SimulationScreen)
+		_, my, _, _ := d.modalRect()
+		body := ""
+		for i := 0; i < d.visibleRows() && i < d.bodyCount(); i++ {
+			body += screenLine(scr, my+3+i) + "\n"
+		}
+		if d.sideBySide() {
+			// The gutter is "  2  ": number, then two cells before the text.
+			if !strings.Contains(body, "2      old()") || !strings.Contains(body, "2          newer()") {
+				t.Fatalf("width %d: side-by-side lost the tab indent:\n%s", width, body)
+			}
+			continue
+		}
+		if !strings.Contains(body, "-    old()") || !strings.Contains(body, "+        newer()") {
+			t.Fatalf("width %d: unified body lost the tab indent:\n%s", width, body)
+		}
+	}
+}
+
+// TestDrawDiffView_TabsScrollByCells checks a tab keeps its stops under
+// horizontal scroll in the side-by-side layout: scrolling two cells
+// into a four-cell tab leaves two cells of indent, not zero (the tab
+// skipped whole) and not four (the tab re-measured from the scroll
+// edge).
+func TestDrawDiffView_TabsScrollByCells(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, 160, 24)
+	a.openDiffView("Diff · f.go", tabbedPatch(), "", "f.go")
+	d := diffOv(t, a)
+	if !d.sideBySide() {
+		t.Fatal("fixture should be wide enough for two columns")
+	}
+	d.scrollX = 2
+	d.Draw(a.screen)
+	a.screen.Show()
+	scr := a.screen.(tcell.SimulationScreen)
+	_, my, _, _ := d.modalRect()
+	body := ""
+	for i := 0; i < d.bodyCount(); i++ {
+		body += screenLine(scr, my+3+i) + "\n"
+	}
+	if !strings.Contains(body, "2    old()") || !strings.Contains(body, "2        newer()") {
+		t.Fatalf("a half-scrolled tab should leave exactly two cells of indent:\n%s", body)
+	}
+}
+
+// TestDiffLongestLine_CountsExpandedTabs pins the sideways-scroll bound
+// in cells: a tab-indented line is as wide as it paints, not as its
+// rune count, or the scroll stops short of the line's tail.
+func TestDiffLongestLine_CountsExpandedTabs(t *testing.T) {
+	rows := []diff.Row{{Left: "\t\tx", Right: "y"}}
+	if got := diffLongestLine(nil, rows); got != 9 {
+		t.Fatalf("diffLongestLine = %d, want 9 (two tab stops + one rune)", got)
+	}
+}
+
+// TestDiffModalRect_LeavesTheStatusRowAtMinimumSize is the regression
+// test for the diff view filling a 40x10 terminal: its body floor of
+// three rows plus seven of chrome is all ten rows, so the status bar —
+// where "Loading diff…" and the result of closing are reported — was
+// covered. The frame must end above the last row and still show the
+// buttons and a scrollable body.
+func TestDiffModalRect_LeavesTheStatusRowAtMinimumSize(t *testing.T) {
+	a := minSizeApp(t, minWidth, minHeight)
+	a.openDiffView("Diff · f.go", tabbedPatch(), "", "f.go")
+	d := diffOv(t, a)
+	_, my, _, mh := d.modalRect()
+	if my < 0 || my+mh > a.height-1 {
+		t.Fatalf("diff modal rows %d..%d cover the status row of a %d-row screen", my, my+mh-1, a.height)
+	}
+	if d.visibleRows() < 2 {
+		t.Fatalf("visibleRows = %d, want at least 2", d.visibleRows())
+	}
+	a.draw()
+	a.screen.Show()
+	if !screenHasText(t, a, "[ Close ]") {
+		t.Fatal("the Close button must still be painted at the minimum size")
+	}
+	d.scrollBy(1000)
+	if d.scroll+d.visibleRows() != d.bodyCount() {
+		t.Fatalf("scroll %d + %d visible does not reach the last of %d rows", d.scroll, d.visibleRows(), d.bodyCount())
 	}
 }

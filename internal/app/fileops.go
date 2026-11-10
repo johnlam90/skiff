@@ -27,7 +27,9 @@
 package app
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -214,10 +216,9 @@ func (a *App) undoDeleteLabel() string {
 // doCreateFile creates an empty file inside parent at the relative path
 // name, refreshes everything, and opens the new file in a tab. Errors
 // are surfaced as a flash. name may contain path separators so the user
-// can drop a file into a subdirectory ("subdir/foo.go") — but the
-// parent directories must already exist; the manager never silently
-// mkdirs, to avoid creating folders the user didn't realise they were
-// making.
+// can drop a file into a subdirectory ("subdir/foo.go"); folders on the
+// way that do not exist yet are created by the manager, because typing
+// them out is the only way this editor has to ask for one.
 //
 // A name that climbs out of parent via "../" is refused outright — a
 // deliberate UX narrowing, not an oversight: the prompt promised "in
@@ -238,13 +239,41 @@ func (a *App) doCreateFile(parent, name string) {
 	}
 	cs, err := a.files.Create(target)
 	if err != nil {
-		a.applyChangeset(filemanager.Changeset{})
-		a.flash(fmt.Sprintf("Create failed: %v", err))
+		// cs still names any folders the failed create left behind.
+		a.applyChangeset(cs)
+		a.flash(a.createFailure(target, err))
 		return
 	}
 	a.applyChangeset(cs)
 	a.openFile(target)
 	a.flash(fmt.Sprintf("Created %s", name))
+}
+
+// createFailure words a failed New file for the status bar. The raw
+// error is open(2)'s — "open /abs/…/main.go: file exists" — which leads
+// with a syscall name and an absolute path nobody typed. The common
+// case, a name already taken, gets a plain sentence naming the
+// project-relative path; anything else keeps the OS reason but against
+// that same relative path.
+func (a *App) createFailure(target string, err error) string {
+	if errors.Is(err, fs.ErrExist) {
+		return a.projectRel(target) + " already exists"
+	}
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return fmt.Sprintf("Couldn't create %s: %v", a.projectRel(pe.Path), pe.Err)
+	}
+	return fmt.Sprintf("Couldn't create %s: %v", a.projectRel(target), err)
+}
+
+// projectRel renders path relative to the project root for a message,
+// falling back to the basename when it does not lie under the root —
+// an absolute path in a flash is mostly prefix the user already knows.
+func (a *App) projectRel(path string) string {
+	if rel, ok := relFromRoot(path, a.rootDir); ok && rel != "." {
+		return filepath.ToSlash(rel)
+	}
+	return filepath.Base(path)
 }
 
 // doRename gives the file or folder at oldPath the sibling name newName
@@ -263,6 +292,12 @@ func (a *App) doRename(oldPath, newName string) {
 	if err != nil {
 		a.applyChangeset(filemanager.Changeset{})
 		a.flash(fmt.Sprintf("Rename failed: %v", err))
+		return
+	}
+	if cs.Empty() {
+		// The prompt pre-fills the current name, so an unedited submit
+		// lands here: nothing moved, and "Renamed to x" would be a lie.
+		a.flash("Name unchanged")
 		return
 	}
 	a.applyChangeset(cs)
@@ -475,7 +510,7 @@ func (a *App) menuRename() {
 	old := tab.Path
 	a.openPrompt(
 		"Rename file",
-		"in "+filepath.Dir(old),
+		"in "+a.relativeFolderLabel(filepath.Dir(old)),
 		filepath.Base(old),
 		func(app *App, value string) {
 			app.doRename(old, value)
@@ -532,7 +567,7 @@ func (a *App) menuRenameFolder() {
 	old := folder
 	a.openPrompt(
 		"Rename folder",
-		"in "+filepath.Dir(old),
+		"in "+a.relativeFolderLabel(filepath.Dir(old)),
 		filepath.Base(old),
 		func(app *App, value string) {
 			app.doRename(old, value)
@@ -655,7 +690,7 @@ func ctxNewFile(a *App, n *filetree.Node) {
 	}
 	a.openPrompt(
 		"New file",
-		"in "+parent,
+		"in "+a.relativeFolderLabel(parent),
 		"",
 		func(app *App, value string) {
 			app.doCreateFile(parent, value)
@@ -674,7 +709,7 @@ func ctxRename(a *App, n *filetree.Node) {
 	old := n.Path
 	a.openPrompt(
 		"Rename",
-		"in "+filepath.Dir(old),
+		"in "+a.relativeFolderLabel(filepath.Dir(old)),
 		n.Name,
 		func(app *App, value string) {
 			app.doRename(old, value)

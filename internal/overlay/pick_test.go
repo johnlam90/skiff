@@ -382,3 +382,36 @@ func TestPick_HintNamesEnter(t *testing.T) {
 		t.Fatalf("title row should name Enter: %q", row)
 	}
 }
+
+// TestPick_CursorRowCarriesACaret is the regression test for the faint
+// cursor row: the selected row must be marked by a glyph, not by its
+// tint alone, in the frame's left padding cell — and only that row, so
+// the caret follows the cursor and leaves the ● column and the labels
+// where they were.
+func TestPick_CursorRowCarriesACaret(t *testing.T) {
+	scr := simScreen(t)
+	p, _ := testPick()
+	caretRows := func() []int {
+		p.Draw(scr)
+		scr.Show()
+		r := p.rect()
+		var rows []int
+		for i := 0; i < len(p.Items); i++ {
+			if cellAt(scr, r.X+1, r.Y+4+i) == RowCaret {
+				rows = append(rows, i)
+			}
+		}
+		return rows
+	}
+	if got := caretRows(); len(got) != 1 || got[0] != p.Sel() {
+		t.Fatalf("caret on rows %v, want only the cursor row %d", got, p.Sel())
+	}
+	p.HandleKey(key(tcell.KeyDown, 0))
+	if got := caretRows(); len(got) != 1 || got[0] != p.Sel() {
+		t.Fatalf("after Down: caret on rows %v, want only the cursor row %d", got, p.Sel())
+	}
+	r := p.rect()
+	if got := cellAt(scr, r.X+2, r.Y+5); got != '●' {
+		t.Fatalf("the current-item marker moved or was overwritten: %q", got)
+	}
+}

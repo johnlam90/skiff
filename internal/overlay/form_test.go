@@ -357,3 +357,17 @@ func TestForm_FocusedFieldIsReadableOnEveryPalette(t *testing.T) {
 		}
 	}
 }
+
+// TestForm_FieldClickCountsCells pins the form's click-to-caret through
+// wide text, the same contract as the prompt's: the click is a cell
+// offset into the field, so the third ideograph's cells (4-5) map to
+// rune 2.
+func TestForm_FieldClickCountsCells(t *testing.T) {
+	f, _ := testForm()
+	f.Rows[0].Field.SetText("日本語")
+	r := f.rect()
+	f.HandleMouse(r.X+3+4, r.Y+4, tcell.Button1)
+	if got := f.Rows[0].Field.Cursor; got != 2 {
+		t.Fatalf("click on the third glyph: cursor %d, want 2", got)
+	}
+}

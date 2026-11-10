@@ -31,7 +31,11 @@ import (
 func (a *App) captureSession() session.Project {
 	p := session.Project{
 		SidebarWidth: a.sidebarWidth,
-		SidebarShown: a.sidebarShown,
+		// An explorer the narrow-terminal rule hid is still one the user
+		// wants: sidebarAutoHidden is "put it back when there is room",
+		// and a session saved inside a narrow tmux split must not turn
+		// that into "the user closed it" for every later, wider launch.
+		SidebarShown: a.sidebarShown || a.sidebarAutoHidden,
 	}
 	for i, t := range a.tabs.Tabs() {
 		if t.Path == "" {

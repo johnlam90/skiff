@@ -564,3 +564,94 @@ func TestHandleKey_DownStepsWrappedRows(t *testing.T) {
 		t.Fatalf("PgDn should move a screen of ROWS — several wrapped lines, not %d lines: got %+v", h, tab.Cursor)
 	}
 }
+
+// TestHandleKey_PasteCannotDriveTheDirtyModal is the data-loss half of
+// the paste fix: "\tf\r" pasted over the unsaved-changes modal used to
+// walk focus to Discard and press it. Pasted Tab and Enter are text,
+// and a modal with no text field has nothing to do with text.
+func TestHandleKey_PasteCannotDriveTheDirtyModal(t *testing.T) {
+	a := seedDirtyApp(t)
+	tab := a.activeTabPtr()
+	a.requestCloseTab(tab)
+
+	pasteInto(a, "\tf\r")
+
+	d := dirtyPrefab(t, a)
+	if d.Hover != 0 {
+		t.Fatalf("a pasted Tab moved the modal's focus to button %d", d.Hover)
+	}
+	if a.tabs.IndexOf(tab) < 0 || !tab.Dirty {
+		t.Fatal("a pasted Enter must not discard the tab")
+	}
+}
+
+// TestHandleKey_PasteIntoReplaceFieldDoesNotReplace is the find-bar
+// half: "X\nY\n" pasted into the replace field used to run a
+// replacement per newline. The breaks between runes become one space
+// and the trailing one is dropped; the buffer is untouched.
+func TestHandleKey_PasteIntoReplaceFieldDoesNotReplace(t *testing.T) {
+	a := seedFindApp(t, "foo foo\n")
+	typeFind(a, "foo")
+	a.handleKey(keyEv(tcell.KeyTab, 0)) // open + focus the replace field
+
+	pasteInto(a, "X\nY\n")
+
+	s := findBarOf(t, a)
+	if got := s.replace.Text(); got != "X Y" {
+		t.Fatalf("replace field = %q, want the pasted text with one space for the break", got)
+	}
+	if got := a.activeTabPtr().Buffer.Lines[0]; got != "foo foo" {
+		t.Fatalf("a paste executed a replacement: buffer = %q", got)
+	}
+	if !s.focusReplace {
+		t.Fatal("a pasted Tab must not swap the bar's focus")
+	}
+}
+
+// TestHandleKey_PasteIntoPromptIsPlainText pins the surface rule in
+// full on a prompt: leading and trailing breaks vanish, a CRLF or a tab
+// between runes is a single space, an Alt-mangled rune arrives as the
+// rune, and nothing submits or cancels the prompt.
+func TestHandleKey_PasteIntoPromptIsPlainText(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	submitted := false
+	a.openPrompt("Name", "", "", func(*App, string) { submitted = true })
+
+	a.handleEvent(tcell.NewEventPaste(true))
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+	a.handleKey(keyEv(tcell.KeyRune, 'a'))
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+	a.handleKey(tcell.NewEventKey(tcell.KeyLF, 0, tcell.ModCtrl))
+	a.handleKey(tcell.NewEventKey(tcell.KeyRune, 'b', tcell.ModAlt))
+	a.handleKey(keyEv(tcell.KeyTab, 0))
+	a.handleKey(keyEv(tcell.KeyRune, 'c'))
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+	a.handleEvent(tcell.NewEventPaste(false))
+
+	p := promptPrefab(t, a)
+	if got := p.Field.Text(); got != "a b c" {
+		t.Fatalf("prompt field = %q, want %q", got, "a b c")
+	}
+	if submitted {
+		t.Fatal("a pasted Enter must not submit the prompt")
+	}
+}
+
+// TestHandleKey_PasteOverPreviewSaysWhy: a paste onto a markdown
+// preview is still discarded, but no longer silently — the flash names
+// the mode and the way out.
+func TestHandleKey_PasteOverPreviewSaysWhy(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "# Title\n")
+	a.menuTogglePreviewMarkdown()
+
+	pasteInto(a, "pasted")
+
+	if got := tab.Buffer.String(); got != "# Title\n" {
+		t.Fatalf("a paste reached the previewed buffer: %q", got)
+	}
+	if a.statusMsg != previewReadOnlyFlash {
+		t.Fatalf("flash = %q, want the read-only notice", a.statusMsg)
+	}
+}

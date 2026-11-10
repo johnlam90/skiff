@@ -153,7 +153,9 @@ func fileMenuGroup() []menuItemDef {
 		{label: "Save & close tab", action: (*App).menuSaveAndClose, enabled: (*App).hasSavableTab, visible: (*App).hasTab},
 		{label: "Close tab", shortcut: "Esc w", action: (*App).menuClose, enabled: (*App).hasTab, visible: (*App).hasTab},
 		{label: "Reopen closed tab", shortcut: "Esc o", action: (*App).menuReopenTab, enabled: (*App).hasClosedTab, visible: (*App).hasClosedTab},
-		{label: "Revert file", action: (*App).menuRevert, enabled: (*App).hasRevert, visible: (*App).hasTab},
+		// Hidden over a markdown preview with the rest of the mutating
+		// rows: reverting rewrites the buffer behind a read-only page.
+		{label: "Revert file", action: (*App).menuRevert, enabled: (*App).hasRevert, visible: (*App).hasRevertableTab},
 		// Only route back to the resolution prompt once the status bar's
 		// "⚠ disk conflict" marker has been dismissed — hidden the rest
 		// of the time, which is nearly always.
@@ -177,24 +179,29 @@ func fileMenuGroup() []menuItemDef {
 // user scans for when they want undo, paste or a line gesture. Every
 // row needs an editable (non-image) tab to mean anything, so the whole
 // group disappears on an empty editor or an image preview.
+//
+// The rows that WRITE the buffer carry hasMutableTab instead: a markdown
+// preview is read-only, so over one they drop out (hide, don't dim —
+// the row cannot light up until the user leaves the preview) and the
+// group shrinks to copy and the two selection rows.
 func editMenuGroup() []menuItemDef {
 	return []menuItemDef{
-		{label: "Undo", shortcut: "Esc u", action: (*App).menuUndo, enabled: (*App).hasUndo, visible: (*App).hasEditableTab},
-		{label: "Redo", shortcut: "Esc r", action: (*App).menuRedo, enabled: (*App).hasRedo, visible: (*App).hasEditableTab},
-		{label: "Copy selection", shortcut: "Esc c", action: (*App).menuCopy, enabled: (*App).hasSelection, visible: (*App).hasEditableTab},
-		{label: "Cut selection", shortcut: "Esc x", action: (*App).menuCut, enabled: (*App).hasSelection, visible: (*App).hasEditableTab},
-		{label: "Paste", shortcut: "Esc v", action: (*App).menuPaste, enabled: (*App).hasClipboard, visible: (*App).hasEditableTab},
-		{label: "Toggle line comment", shortcut: "Esc /", action: (*App).menuToggleLineComment, enabled: (*App).hasCommentableTab, visible: (*App).hasEditableTab},
-		{label: "Move line up", shortcut: "Esc k", action: (*App).menuMoveLineUp, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
-		{label: "Move line down", shortcut: "Esc j", action: (*App).menuMoveLineDown, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
-		{label: "Duplicate line", shortcut: "Esc d", action: (*App).menuDuplicateLine, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		{label: "Undo", shortcut: "Esc u", action: (*App).menuUndo, enabled: (*App).hasUndo, visible: (*App).hasMutableTab},
+		{label: "Redo", shortcut: "Esc r", action: (*App).menuRedo, enabled: (*App).hasRedo, visible: (*App).hasMutableTab},
+		{label: "Copy selection", shortcut: "Esc c", action: (*App).menuCopy, enabled: (*App).hasCopyableSelection, visible: (*App).hasEditableTab},
+		{label: "Cut selection", shortcut: "Esc x", action: (*App).menuCut, enabled: (*App).hasSelection, visible: (*App).hasMutableTab},
+		{label: "Paste", shortcut: "Esc v", action: (*App).menuPaste, enabled: (*App).hasClipboard, visible: (*App).hasMutableTab},
+		{label: "Toggle line comment", shortcut: "Esc /", action: (*App).menuToggleLineComment, enabled: (*App).hasCommentableTab, visible: (*App).hasMutableTab},
+		{label: "Move line up", shortcut: "Esc k", action: (*App).menuMoveLineUp, enabled: (*App).hasMutableTab, visible: (*App).hasMutableTab},
+		{label: "Move line down", shortcut: "Esc j", action: (*App).menuMoveLineDown, enabled: (*App).hasMutableTab, visible: (*App).hasMutableTab},
+		{label: "Duplicate line", shortcut: "Esc d", action: (*App).menuDuplicateLine, enabled: (*App).hasMutableTab, visible: (*App).hasMutableTab},
 		// Tab / Shift+Tab run these from the keyboard; the rows exist
 		// because a terminal that swallows Shift+Tab (Backtab) leaves
 		// the menu as the only path to an outdent. "Shift", not
 		// "indent": a label starting with "in" would outrank "Find in
 		// file" in the type-to-filter for the query its test pins.
-		{label: "Shift lines right", action: (*App).menuIndentLines, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
-		{label: "Shift lines left", action: (*App).menuOutdentLines, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
+		{label: "Shift lines right", action: (*App).menuIndentLines, enabled: (*App).hasMutableTab, visible: (*App).hasMutableTab},
+		{label: "Shift lines left", action: (*App).menuOutdentLines, enabled: (*App).hasMutableTab, visible: (*App).hasMutableTab},
 		{label: "Select all", shortcut: "Esc a", action: (*App).menuSelectAll, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 		{label: "Select line", shortcut: "Esc L", action: (*App).menuSelectLine, enabled: (*App).hasEditableTab, visible: (*App).hasEditableTab},
 	}

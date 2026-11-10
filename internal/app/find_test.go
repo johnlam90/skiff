@@ -417,14 +417,21 @@ func TestDrawFindBar_HidesTheCaretWhenTheBarHasNoRoomAtAll(t *testing.T) {
 	scr := a.screen.(tcell.SimulationScreen)
 	scr.SetSize(60, 24)
 	a.width, a.height = 60, 24
-	// A sidebar dragged this wide leaves the bar too narrow for even the
-	// "Find:" label plus one cell of input, while the editor beside it
-	// is still wide enough to render — and to park the hardware cursor
-	// on its own caret, which is the cursor that must not survive.
-	a.sidebarShown, a.sidebarWidth = true, 52
 	a.openFind()
 
+	// A full frame first, so the hardware cursor is parked and visible
+	// — that is the cursor that must not survive. Then the bar is
+	// handed a rect too narrow for even the "Find:" label plus one cell
+	// of input. The layout cannot produce that rect any more (sidebarW
+	// keeps the editor at minEditorAfterDrag and draw refuses to paint
+	// under minWidth), so the strip is driven directly: the bail is the
+	// strip's own contract with whatever rect it is given.
 	a.draw()
+	scr.Show()
+	if _, _, visible := scr.GetCursor(); !visible {
+		t.Fatal("precondition: a bar with room shows its caret")
+	}
+	a.findBar().draw(rect{x: 52, y: 22, w: 8, h: 1})
 	scr.Show()
 
 	if cx, cy, visible := scr.GetCursor(); visible {
@@ -716,5 +723,124 @@ func TestFindBar_RefusesReplaceOverPreview(t *testing.T) {
 	a.menuTogglePreviewMarkdown()
 	if s.replaceOpen || s.focusReplace {
 		t.Fatal("entering preview must close the replace field")
+	}
+}
+
+// TestFindReplace_RefusesWhenItsTabIsNotOnScreen: the bar stays pinned
+// to the tab it opened on (ADR-0001), so after a click onto another tab
+// Enter in the replace field used to rewrite a buffer the user could
+// not see. Replace and replace-all now refuse with a flash until that
+// tab is active again; walking the matches is still allowed.
+func TestFindReplace_RefusesWhenItsTabIsNotOnScreen(t *testing.T) {
+	a, tabA, tabB := seedTwoTabApp(t)
+	a.tabs.ActivateAt(a.tabs.IndexOf(tabA))
+	typeFind(a, "foo")
+	a.handleKey(keyEv(tcell.KeyTab, 0))
+	a.handleKey(keyEv(tcell.KeyRune, 'X'))
+	// What a tab-strip click does while the bar passes the mouse through.
+	a.tabs.ActivateAt(a.tabs.IndexOf(tabB))
+
+	a.handleKey(keyEv(tcell.KeyEnter, 0))
+	a.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModShift))
+
+	if got := tabA.Buffer.Lines[0]; got != "foo bar foo" {
+		t.Fatalf("replace edited the off-screen tab: %q", got)
+	}
+	if got := tabB.Buffer.Lines[0]; got != "foo baz" {
+		t.Fatalf("replace edited the on-screen tab the bar is not bound to: %q", got)
+	}
+	if !strings.Contains(a.statusMsg, "a.txt") || !strings.Contains(a.statusMsg, "switch back") {
+		t.Fatalf("flash = %q, want it to name the bound tab and the way back", a.statusMsg)
+	}
+
+	a.tabs.ActivateAt(a.tabs.IndexOf(tabA))
+	a.handleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModShift))
+	if got := tabA.Buffer.Lines[0]; got != "X bar X" {
+		t.Fatalf("back on its own tab the bar must replace again, got %q", got)
+	}
+}
+
+// TestBarHintThatFits pins the hint ladder: the longest tier that fits
+// beside the counter wins, the counter keeps its priority over every
+// tier, and a bar too narrow for the shortest tier shows none.
+func TestBarHintThatFits(t *testing.T) {
+	tiers := []string{"0123456789", "01234", "01"}
+	for _, c := range []struct {
+		name        string
+		spare, cost int
+		wantCounter bool
+		wantHint    string
+	}{
+		{"everything fits", 20, 5, true, "0123456789"},
+		{"counter pushes the hint down a tier", 12, 5, true, "01234"},
+		{"last tier", 8, 5, true, "01"},
+		{"counter alone", 7, 5, true, ""},
+		{"no counter, short tier", 6, 0, false, "01234"},
+		{"nothing fits", 2, 5, false, ""},
+	} {
+		gotCounter, gotHint := barHintThatFits(c.spare, c.cost, tiers)
+		if gotCounter != c.wantCounter || gotHint != c.wantHint {
+			t.Errorf("%s: barHintThatFits(%d, %d) = (%v, %q), want (%v, %q)",
+				c.name, c.spare, c.cost, gotCounter, gotHint, c.wantCounter, c.wantHint)
+		}
+	}
+}
+
+// TestFindBar_ShowsAHintAtCommonWidths is the regression test for the
+// find bar never naming its keys: at 80 columns with the sidebar open
+// the editor pane is too narrow for the full 76-cell hint, which used
+// to mean no hint at all. A shorter tier must now appear — and it must
+// still say how to leave — while a wide terminal keeps the full text.
+func TestFindBar_ShowsAHintAtCommonWidths(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(path, []byte("foo bar foo\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	for _, c := range []struct {
+		width int
+		want  string
+	}{
+		{80, "esc close"},
+		{120, "⇥ replace"},
+		{200, "Shift+Enter: prev"},
+	} {
+		a := newTestApp(t, dir)
+		resizeTestApp(t, a, c.width, 24)
+		a.openFile(path)
+		a.openFind()
+		a.draw()
+		a.screen.Show()
+		row := screenLine(a.screen.(tcell.SimulationScreen), a.stripRect().y)
+		if !strings.Contains(row, c.want) {
+			t.Errorf("width %d: find bar should hint %q, got %q", c.width, c.want, row)
+		}
+	}
+}
+
+// TestFindHintTiers_ShrinkAndKeepTheExit pins the ladders themselves:
+// each tier is strictly shorter than the one before it, and every tier
+// of both focus states still names Esc — the one key a user who reads
+// nothing else needs.
+func TestFindHintTiers_ShrinkAndKeepTheExit(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	ladders := map[string][]string{
+		"find query":   findHintTiers(false),
+		"find replace": findHintTiers(true),
+		"project":      a.projFindHintTiers(),
+	}
+	a.projFind.replaceOpen = true
+	ladders["project replace open"] = a.projFindHintTiers()
+	a.projFind.focusReplace = true
+	ladders["project replace focused"] = a.projFindHintTiers()
+	for name, tiers := range ladders {
+		for i, tier := range tiers {
+			if !strings.Contains(strings.ToLower(tier), "esc") {
+				t.Errorf("%s tier %d does not name Esc: %q", name, i, tier)
+			}
+			if i > 0 && runeLen(tier) >= runeLen(tiers[i-1]) {
+				t.Errorf("%s tier %d is not shorter than tier %d", name, i, i-1)
+			}
+		}
 	}
 }

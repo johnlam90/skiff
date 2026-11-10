@@ -345,8 +345,8 @@ func (p *Pick) Draw(scr tcell.Screen) {
 	p.bar(r).Draw(scr, th)
 }
 
-// drawRow paints one row: ● on the current item, the label, and a
-// dimmed right-aligned tag.
+// drawRow paints one row: › on the cursor row (see DrawRowCaret), ● on
+// the current item, the label, and a dimmed right-aligned tag.
 func (p *Pick) drawRow(scr tcell.Screen, r Rect, ry int, it PickItem, selected bool) {
 	th := p.Theme
 	bg := th.LineHL
@@ -363,6 +363,9 @@ func (p *Pick) drawRow(scr tcell.Screen, r Rect, ry int, it PickItem, selected b
 	style := rowStyle
 	if selected {
 		style = style.Bold(true)
+		// In the padding cell left of the ● column, so a row that is
+		// both the cursor and the current item shows both marks.
+		DrawRowCaret(scr, r.X+1, ry, bg, th)
 	}
 	drawClippedText(scr, r.X+4, ry, r.W-6-runeLen(it.Tag), it.Label, style)
 	if it.Tag != "" {

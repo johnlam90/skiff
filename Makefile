@@ -84,9 +84,16 @@ test-short:
 # that CI rejects. If lint passes here and fails in CI, reproduce with
 # that exact version: go install golang.org/dl/go1.24.0@latest &&
 # go1.24.0 download && go1.24.0 fmt ./...
+#
+# So the whole target runs under the toolchain go.mod names (GOTOOLCHAIN
+# makes the go command fetch and use it): the same gofmt CI has, and a
+# staticcheck that can read its own toolchain's export data — the pinned
+# release cannot load packages built by a newer local Go at all.
 STATICCHECK_VERSION := v0.6.1
+LINT_TOOLCHAIN := go$(shell sed -n 's/^go //p' go.mod)
+lint: export GOTOOLCHAIN := $(LINT_TOOLCHAIN)
 lint:
-	@unformatted="$$(gofmt -l . | grep -v '^website/' || true)"; \
+	@unformatted="$$("$$(go env GOROOT)/bin/gofmt" -l . | grep -v '^website/' || true)"; \
 	if [ -n "$$unformatted" ]; then \
 		echo "not gofmt-clean:"; echo "$$unformatted"; exit 1; \
 	fi

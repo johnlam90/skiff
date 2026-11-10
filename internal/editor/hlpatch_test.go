@@ -228,3 +228,56 @@ func TestRender_SyncLexRetiresInFlightRequest(t *testing.T) {
 		t.Fatal("the older landing replaced the exact grid")
 	}
 }
+
+// TestApplyHighlight_RefusesLandingAfterUndo pins that a background lex
+// requested before an undo cannot be installed after it. Undo replaces
+// the buffer without edit, so the generation used to stay put and the
+// landing — colours for text that no longer exists — was accepted and
+// cleared StyleStale, cancelling the synchronous re-lex undo asked for.
+func TestApplyHighlight_RefusesLandingAfterUndo(t *testing.T) {
+	scr := newSimScreen(t, 40, 6)
+	defer scr.Fini()
+	th := theme.Default()
+
+	tab := newScratchTab("package x\n\nfunc main() {}\n")
+	tab.Path = "x.go"
+	tab.Render(scr, th, 0, 0, 40, 6)
+	tab.MoveCursorTo(Position{Line: 1}, false)
+	tab.InsertString("// a comment that changes every colour below")
+	req, ok := tab.HighlightRequest(6)
+	if !ok {
+		t.Fatal("an edit inside the window should ask for a re-lex")
+	}
+	res := req.Run(th)
+
+	tab.Undo()
+	if tab.ApplyHighlight(res) {
+		t.Fatal("a landing for the pre-undo text was installed")
+	}
+	if !tab.StyleStale {
+		t.Fatal("undo's synchronous re-lex request was cancelled")
+	}
+}
+
+// TestApplyHighlight_RefusesWhileStyleStale pins the flag on its own:
+// whatever set StyleStale wants an exact lex in Render, and an older
+// landing must not clear it even when the generation still matches.
+func TestApplyHighlight_RefusesWhileStyleStale(t *testing.T) {
+	scr := newSimScreen(t, 40, 6)
+	defer scr.Fini()
+	th := theme.Default()
+
+	tab := newScratchTab("package x\n\nfunc main() {}\n")
+	tab.Path = "x.go"
+	tab.Render(scr, th, 0, 0, 40, 6)
+	tab.MoveCursorTo(Position{Line: 1}, false)
+	tab.InsertString("x")
+	req, ok := tab.HighlightRequest(6)
+	if !ok {
+		t.Fatal("expected a request")
+	}
+	tab.StyleStale = true // e.g. a theme change between request and landing
+	if tab.ApplyHighlight(req.Run(th)) {
+		t.Fatal("landing installed over a pending synchronous re-lex")
+	}
+}

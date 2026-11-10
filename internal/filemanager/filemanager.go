@@ -107,6 +107,9 @@ type Manager struct {
 	// deletes never litters $TMPDIR. "" until then, or when MkdirTemp
 	// failed and every entry fell back to an in-place sibling.
 	trashDir string
+	// gitTrash is this session's own folder under .git/skiff-trash, the
+	// fallback when trashDir is on another filesystem. "" until needed.
+	gitTrash string
 	// trashed is the restore stack, newest last.
 	trashed []trashEntry
 	// seq numbers stored trash entries so two deletes of the same
@@ -176,28 +179,57 @@ func (m *Manager) guard(path string) (string, error) {
 	return p, nil
 }
 
-// Create makes an empty file at path. Parent directories must already
-// exist — the manager never silently mkdirs, so the user can't create
-// folders they didn't realise they were making. O_EXCL refuses to
-// clobber an existing file.
+// Create makes an empty file at path, creating any parent directories
+// that do not exist yet. A name with a separator in it ("sub/x.go") is
+// the user spelling out the folder — the old refusal told them to
+// "create it first" in an editor with no create-folder action, so the
+// only way through was a shell. The guard runs before anything touches
+// the disk and covers the directories too: every one made lies between
+// the root and the file, so nothing is ever created outside the
+// project. O_EXCL refuses to clobber an existing file.
+//
+// The Changeset names the file first, then the topmost directory this
+// call created (when it made any) — one entry is enough for the tree to
+// find the whole new branch. A create that fails after its folders were
+// made leaves them in place and still reports them, so the caller's
+// refresh shows what is on disk.
 func (m *Manager) Create(path string) (Changeset, error) {
 	p := abs(path)
 	if p == m.root || !Within(m.root, p) {
 		return Changeset{}, ErrOutsideRoot
 	}
+	var cs Changeset
+	if made := firstMissingDir(m.root, filepath.Dir(p)); made != "" {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			return Changeset{}, err
+		}
+		cs.Added = append(cs.Added, made)
+	}
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
-		// ENOENT here means the parent doesn't exist; say that instead
-		// of the noisy "open <path>: no such file or directory".
-		if os.IsNotExist(err) {
-			return Changeset{}, fmt.Errorf("%s doesn't exist — create it first", filepath.Dir(p))
-		}
-		return Changeset{}, err
+		return cs, err
 	}
 	if err := f.Close(); err != nil {
-		return Changeset{}, err
+		return cs, err
 	}
-	return Changeset{Added: []string{p}}, nil
+	cs.Added = append([]string{p}, cs.Added...)
+	return cs, nil
+}
+
+// firstMissingDir returns the topmost directory on the way from root
+// down to dir that does not exist, or "" when dir is already there. It
+// is what Create reports as Added for the folders it makes: the walk
+// stops at root, which the caller has already proved contains dir, so
+// it never inspects — or names — anything above the project.
+func firstMissingDir(root, dir string) string {
+	missing := ""
+	for d := dir; d != root && Within(root, d); d = filepath.Dir(d) {
+		if _, err := os.Lstat(d); err == nil {
+			break
+		}
+		missing = d
+	}
+	return missing
 }
 
 // Rename gives the file or directory at path the sibling name newName.
@@ -220,8 +252,13 @@ func (m *Manager) Rename(path, newName string) (Changeset, error) {
 	if np == p {
 		return Changeset{}, nil
 	}
-	if _, err := os.Lstat(np); err == nil {
-		return Changeset{}, fmt.Errorf("a file named %q already exists", newName)
+	if taken, err := os.Lstat(np); err == nil {
+		// On a case-insensitive filesystem (macOS) "README.md" already
+		// "exists" when the file is readme.md — it is the same file, and
+		// a case-only rename of it is a real rename, not a clobber.
+		if old, oerr := os.Lstat(p); oerr != nil || !os.SameFile(old, taken) {
+			return Changeset{}, fmt.Errorf("a file named %q already exists", newName)
+		}
 	}
 	if err := m.rename(p, np); err != nil {
 		return Changeset{}, err

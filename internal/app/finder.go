@@ -18,6 +18,7 @@ package app
 
 import (
 	"path/filepath"
+	"strings"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -117,7 +118,7 @@ func (a *App) openFinder() {
 	// the single-file signal (see NewSingleFile); the finder is a
 	// project-scoped feature that's omitted alongside the tree.
 	if a.tree == nil {
-		a.flash(singleFileRefusal)
+		a.flash(singleFileRefusalFor("Find file in project"))
 		return
 	}
 	a.closeAllModals()
@@ -305,6 +306,17 @@ func (fo *finderOverlay) rect() overlay.Rect {
 	return overlay.Rect{X: x, Y: y, W: w, H: h}
 }
 
+// singleFileRefusalFor is the refusal a project-only surface flashes in
+// single-file mode, naming the feature that was asked for: "<feature>:
+// not available in single-file mode — open a folder to use it". The
+// tail is singleFileRefusal itself, so the finder, the Git panel and
+// project find — which once phrased this three ways — cannot drift from
+// the sentence the rest of the editor uses, and the leader key that
+// was pressed gets its name back in the answer.
+func singleFileRefusalFor(feature string) string {
+	return feature + ": " + strings.ToLower(singleFileRefusal[:1]) + singleFileRefusal[1:]
+}
+
 // Draw paints the overlay: shared frame chrome, the query field with a
 // match-count tail, then either an "indexing…" tail or the result rows
 // with highlighted match characters.
@@ -362,6 +374,12 @@ func (fo *finderOverlay) Draw(scr tcell.Screen) {
 		}
 		fo.drawRow(scr, r, ry, fo.results[idx], idx == fo.Sel(), hitStyle, mutedStyle, bg)
 	}
+	// A query nothing matches used to leave a blank list under a bare
+	// "0/17" — which reads as a finder that has not caught up yet. Say
+	// it, the way the project-find panel does.
+	if state == finder.StateReady && len(fo.results) == 0 && len(fo.query.Value) > 0 && fo.Visible() > 0 {
+		drawAt(scr, r.X+2, rowsStart, trimRunes("No matches", r.W-4), mutedStyle)
+	}
 	// A failed index has no rows to show, so the first row says why and
 	// names the recovery: the tail alone read as a cryptic badge over an
 	// empty list.
@@ -392,6 +410,10 @@ func (fo *finderOverlay) drawRow(scr tcell.Screen, r overlay.Rect, ry int, res f
 	// Background fill so the selected row reads as a single block.
 	for cx := r.X + 1; cx < r.X+r.W-1; cx++ {
 		scr.SetContent(cx, ry, ' ', nil, rowStyle)
+	}
+	if selected {
+		// Same non-colour cue the pickers use, in the padding cell.
+		overlay.DrawRowCaret(scr, r.X+1, ry, rowBG, th)
 	}
 
 	pathRunes := []rune(res.Path)

@@ -390,6 +390,12 @@ when it has been running under tmux for ten seconds without a single
 mouse event and flashes that hint once; the keyboard path (`Esc ?`)
 works regardless.
 
+Copying to your local clipboard from inside tmux needs one more
+setting on tmux 3.3 and newer: `set -g allow-passthrough on`. Skiff
+wraps its OSC 52 copy in tmux's passthrough envelope, and since 3.3
+tmux silently drops passthrough sequences unless that option is on —
+the copy still lands inside Skiff, it just never reaches the terminal.
+
 ### Hotkeys
 
 Skiff deliberately avoids `Ctrl+`-style shortcuts (they fight `tmux`,
@@ -479,8 +485,12 @@ the hotkeys are just a faster path for the actions you reach for most.
 above the status bar:
 
 ```
- Find: foo█            3 of 12   Enter: next · Shift+Enter: prev · Tab: replace · Esc: close
+ Find: foo█     3 of 12   Enter: next · Shift+Enter: prev · Tab: replace · Esc: close · Alt+c: case
 ```
+
+The key hint shortens as the bar narrows (`⏎ next · ⇥ replace · esc
+close`, then `⏎ next · esc close`) before it is dropped, so a pane
+beside the sidebar still names its keys.
 
 - Type to search — matching is **smart-case substring**: an
   all-lowercase query matches any case, a single uppercase letter makes
@@ -497,8 +507,12 @@ above the status bar:
 - The active match is painted a brighter color than the rest, so you
   can pick out where you are in the result set.
 
-There's no regex or whole-word toggle in v1, and case needs no toggle —
-smart case reads it off how you type. The common case is "I know roughly
+- `Alt+c` toggles **match case**: smart case covers most searches, but
+  an all-lowercase query that must match exactly (`id`, not `ID`) needs
+  the toggle. The counter shows `· Aa` while it is on.
+
+There's no regex or whole-word toggle in the in-file bar (project find
+has both). The common case is "I know roughly
 what I'm looking for, take me there."
 
 ### Find file in project
@@ -529,7 +543,9 @@ fuzzy file finder over every non-ignored file in the project:
   results already in hand. Refreshes on the same 10-second cadence
   as the file tree, plus immediately after any create/rename/delete
   inside the editor.
-- Only files are listed — no directories, no symlinked duplicates.
+- Only files that are on disk are listed — no directories, no symlinked
+  duplicates, and no tracked file you have deleted but not yet
+  committed.
 
 ### Git changes
 

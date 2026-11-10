@@ -189,8 +189,8 @@ type Tree struct {
 	IconsEnabled bool
 
 	// HideIgnored filters .gitignore'd entries out of the tree so the
-	// sidebar and the finder (which has always filtered through
-	// go-gitignore) answer "is this project noise?" the same way.
+	// sidebar and the finder (which filters through the same
+	// internal/gitignore) answer "is this project noise?" the same way.
 	// Defaults to on; App.loadUserConfig overrides it from config.json's
 	// "gitignore" key and the ≡ View row flips it.
 	//

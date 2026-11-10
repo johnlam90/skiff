@@ -19,6 +19,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -100,6 +101,30 @@ func (a *App) findOpenTab(abs string) (*editor.Tab, bool) {
 	return nil, false
 }
 
+// syncCleanTab reloads a clean tab whose file changed on disk since the
+// tab last read it. The sweep reads disk, but an open file is rewritten
+// through its buffer and re-saved — and the 10s reconcile may not have
+// run yet, so without this a replace applied the change to the OLDER
+// buffer and the save silently overwrote whatever a `git pull` or
+// another editor had just written. After the reload VerifyLine does the
+// rest: lines that still read as recorded are rewritten, drifted ones
+// are skipped. A dirty tab is left alone — its replace never saves, and
+// the reconcile's conflict prompt owns that case.
+func (a *App) syncCleanTab(tab *editor.Tab) {
+	if tab.Dirty {
+		return
+	}
+	info, err := os.Stat(tab.Path)
+	// Differs, not "is newer": a restored backup (`cp -p`, `mv`, `tar x`)
+	// carries an OLDER mtime — the same rule reconcileTab applies.
+	if err != nil || info.ModTime().Equal(tab.Mtime) {
+		return
+	}
+	if tab.ReloadKeepHistory() == nil {
+		a.invalidateMdPreview(tab)
+	}
+}
+
 // applyMatchesToTab rewrites a tab's matched lines in one undo step,
 // verifying each line against what the sweep recorded first. Matches are
 // per-occurrence, but staging never mutates tab.Buffer.Lines until the
@@ -173,6 +198,7 @@ func (a *App) projReplaceRowApply(row projFindRow) {
 	opts := a.projReplaceOpts()
 	abs := filepath.Join(a.rootDir, filepath.FromSlash(m.Path))
 	if tab, wasClean := a.findOpenTab(abs); tab != nil {
+		a.syncCleanTab(tab)
 		occ, skipped := applyMatchAtTab(tab, m, query, repl, opts)
 		if occ > 0 && wasClean {
 			if err := tab.Save(); err != nil {
@@ -206,9 +232,9 @@ func (a *App) projReplaceConfirmAll() {
 	for _, m := range a.projFind.findMatches {
 		files[m.Path] = true
 	}
-	msg := fmt.Sprintf(
-		"Replace %d match(es) in %d file(s)? Files change on disk — commit or stash first if unsure.",
-		len(a.projFind.findMatches), len(files))
+	msg := plural(len(a.projFind.findMatches), "Replace %d match", "Replace %d matches") +
+		plural(len(files), " in %d file", " in %d files") +
+		"? Files change on disk — commit or stash first if unsure."
 	if a.projFind.findRegex {
 		msg += " Regex replacements expand $1 / ${name} groups ($$ for a literal $)."
 	}
@@ -248,6 +274,7 @@ func (a *App) doProjReplaceAll(matches []search.Match, query, repl string, opts 
 		if tab, wasClean := a.findOpenTab(abs); tab != nil {
 			if _, seen := byTab[tab]; !seen {
 				tabClean[tab] = wasClean
+				a.syncCleanTab(tab)
 			}
 			byTab[tab] = append(byTab[tab], m)
 			continue
@@ -292,7 +319,7 @@ func (a *App) handleProjReplaceDone(r projReplaceResult, _ error) {
 	occ := r.rep.Replaced + r.bufOcc
 	files := r.rep.Files + r.bufFiles
 	skipped := r.rep.Skipped + r.bufSkip
-	msg := fmt.Sprintf("Replaced %d in %d file(s)", occ, files)
+	msg := fmt.Sprintf("Replaced %d", occ) + plural(files, " in %d file", " in %d files")
 	if skipped > 0 {
 		msg += fmt.Sprintf(" (%d skipped — changed since search)", skipped)
 	}

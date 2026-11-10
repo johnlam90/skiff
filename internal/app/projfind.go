@@ -142,7 +142,7 @@ func (a *App) menuFindInProject() {
 // no project index, so the action degrades to a flash there.
 func (a *App) openProjFind() {
 	if a.finder == nil {
-		a.flash("Project search needs a project (open a directory)")
+		a.flash(singleFileRefusalFor("Find in project"))
 		return
 	}
 	a.closeAllModals()
@@ -455,8 +455,8 @@ func (a *App) handleProjFindMouse(x, y int, btn tcell.ButtonMask) {
 	// never drift off the cells the user is looking at.
 	bar := a.stripRect()
 	if y == bar.y && x >= bar.x {
-		label := " Search project: "
-		for _, c := range a.projFindChips(runeLen(label)) {
+		_, chips := a.projFindBarLayout(bar.w)
+		for _, c := range chips {
 			if x >= bar.x+c.x0 && x < bar.x+c.x1 {
 				*c.on = !*c.on
 				a.projFindQueryChanged()
@@ -494,7 +494,7 @@ func (a *App) handleProjFindMouse(x, y int, btn tcell.ButtonMask) {
 //
 //	<editor area>   ▾ internal/app/app.go (12)
 //	                  123: the matched line text
-//	<bar row>        Search project: query     37 matches in 4 files
+//	<bar row>        Find in project: query     37 matches in 4 files
 func (a *App) drawProjFind(r rect) {
 	a.drawProjFindResults()
 	a.drawProjFindBar(r)
@@ -589,9 +589,41 @@ type projFindChip struct {
 	on     *bool
 }
 
-// projFindChips lays out the three mode chips right of the label —
-// computed on the fly so the renderer and the click handler agree.
-func (a *App) projFindChips(labelEnd int) []projFindChip {
+// projFindBarLabel is the bar's left-hand label for a bar barW cells
+// wide. It names the feature the way the ≡ menu does ("Find in
+// project") while there is room, and gets out of the way when there is
+// not: the label plus the chips used to take 30 cells whatever the
+// width, which on a 40-column terminal left the query ten cells and the
+// replace field none. The chips never shrink (they are controls), so
+// the label is what yields — to "Find:", then to nothing, where the
+// chips themselves say which bar this is.
+func projFindBarLabel(barW int) string {
+	switch {
+	case barW >= projFindLabelFullWidth:
+		return " Find in project: "
+	case barW >= projFindLabelShortWidth:
+		return " Find: "
+	}
+	return ""
+}
+
+const (
+	// projFindLabelFullWidth is the bar width from which the full label
+	// fits beside the chips and a comfortable query: 18 of label, 12 of
+	// chips, and half the bar still left for the fields.
+	projFindLabelFullWidth = 60
+	// projFindLabelShortWidth is where even "Find:" stops paying for
+	// its seven cells — below it the replace form needs every one.
+	projFindLabelShortWidth = 48
+)
+
+// projFindBarLayout is the bar's fixed left side for a bar barW cells
+// wide: the label and the three mode chips right of it, in bar-local
+// cells. Draw and the click handler both take it from here — they used
+// to each spell the label out and measure it, which is two copies of a
+// geometry that only works while they agree.
+func (a *App) projFindBarLayout(barW int) (label string, chips []projFindChip) {
+	label = projFindBarLabel(barW)
 	defs := []struct {
 		label string
 		on    *bool
@@ -600,14 +632,41 @@ func (a *App) projFindChips(labelEnd int) []projFindChip {
 		{"⌇w", &a.projFind.findWholeWord},
 		{".*", &a.projFind.findRegex},
 	}
-	out := make([]projFindChip, 0, 3)
-	x := labelEnd
+	chips = make([]projFindChip, 0, 3)
+	x := runeLen(label)
 	for _, d := range defs {
 		w := runeLen(d.label) + 2
-		out = append(out, projFindChip{label: d.label, x0: x, x1: x + w, on: d.on})
+		chips = append(chips, projFindChip{label: d.label, x0: x, x1: x + w, on: d.on})
 		x += w
 	}
-	return out
+	return label, chips
+}
+
+// projFindHintTiers is the project bar's hint ladder for its current
+// focus, longest first (see barHintThatFits): what Enter does and how
+// to leave survive to the last tier, the mode keys go first.
+func (a *App) projFindHintTiers() []string {
+	switch {
+	case a.projFind.replaceOpen && a.projFind.focusReplace:
+		return []string{
+			" Enter: replace line · Shift+Enter: all · Tab: query · Esc: close · Alt+c/w/r: modes ",
+			" ⏎ replace line · ⇧⏎ all · ⇥ query · esc close ",
+			" ⏎ replace line · ⇧⏎ all · esc close ",
+			" ⏎ replace line · esc close ",
+		}
+	case a.projFind.replaceOpen:
+		return []string{
+			" Enter: open · Tab: replace field · Esc: close · Alt+c/w/r: modes ",
+			" ⏎ open · ⇥ replace field · esc close ",
+			" ⏎ open · esc close ",
+		}
+	}
+	return []string{
+		" Enter: open · Tab: replace · Esc: close · Alt+c/w/r: modes ",
+		" ⏎ open · ⇥ replace · esc close · Alt+c/w/r modes ",
+		" ⏎ open · ⇥ replace · esc close ",
+		" ⏎ open · esc close ",
+	}
 }
 
 // drawProjFindBar paints the query input row into the rect layout
@@ -622,10 +681,9 @@ func (a *App) drawProjFindBar(r rect) {
 	for cx := bx; cx < bx+bw; cx++ {
 		a.screen.SetContent(cx, by, ' ', nil, barStyle)
 	}
-	label := " Search project: "
+	label, chips := a.projFindBarLayout(bw)
 	drawAt(a.screen, bx, by, label, labelStyle)
 	// Mode chips: clickable [Aa] [⌇w] [.*] toggles, lit when active.
-	chips := a.projFindChips(runeLen(label))
 	for _, c := range chips {
 		st := mutedStyle
 		if *c.on {
@@ -639,20 +697,14 @@ func (a *App) drawProjFindBar(r rect) {
 	// the cells left over once the input has minFieldWidth. The chips
 	// never yield — they are controls, not labels, and a control the
 	// user cannot click is worse than a reminder they cannot read.
-	hint := " Enter: open · Tab: replace · Esc: close · Alt+c/w/r: modes "
-	if a.projFind.replaceOpen && a.projFind.focusReplace {
-		hint = " Enter: replace line · Shift+Enter: all · Tab: query · Esc: close · Alt+c/w/r: modes "
-	} else if a.projFind.replaceOpen {
-		hint = " Enter: open · Tab: replace field · Esc: close · Alt+c/w/r: modes "
-	}
 	counter := a.projFindCounterText()
 	counterCost := 0
 	if counter != "" {
 		counterCost = runeLen(counter) + 2
 	}
-	hintCost := runeLen(hint) + 1
 	spare := (bx + bw) - (inputStart + minFieldWidth + 1)
-	showCounter, showHint := barLabelsThatFit(spare, counterCost, hintCost)
+	showCounter, hint := barHintThatFits(spare, counterCost, a.projFindHintTiers())
+	showHint, hintCost := hint != "", runeLen(hint)+1
 
 	rightTextStart := bx + bw
 	if showHint {
@@ -748,7 +800,7 @@ func (a *App) projFindCounterText() string {
 			last = m.Path
 		}
 	}
-	s := fmt.Sprintf("%d matches in %d files", len(a.projFind.findMatches), files)
+	s := plural(len(a.projFind.findMatches), "%d match", "%d matches") + " in " + plural(files, "%d file", "%d files")
 	if a.projFind.findTruncated {
 		s += " (capped)"
 	}
@@ -759,7 +811,8 @@ func (a *App) projFindCounterText() string {
 // lit ones, in chip order), or "" when none is on.
 func (a *App) projFindModeTail() string {
 	var on []string
-	for _, c := range a.projFindChips(0) {
+	_, chips := a.projFindBarLayout(0)
+	for _, c := range chips {
 		if *c.on {
 			on = append(on, c.label)
 		}

@@ -251,3 +251,66 @@ func TestLeaderStrip_NeverTouchesTheTabBar(t *testing.T) {
 		t.Fatalf("last row = %q, want the tail hint", last)
 	}
 }
+
+// TestWrapStripSegments_KeepsBindingsWhole is the regression test for
+// the strip breaking inside a binding: at every width, no row may end
+// on a key whose description starts the next row, and no continuation
+// row may open with a separator. Each row therefore starts on a key
+// (or the " Esc " lead) and, in the table forms, ends on a description.
+func TestWrapStripSegments_KeepsBindingsWhole(t *testing.T) {
+	st := stripStyles{
+		base:  tcell.StyleDefault,
+		key:   tcell.StyleDefault.Bold(true),
+		muted: tcell.StyleDefault.Dim(true),
+	}
+	forms := leaderStripForms(leaderBindings(), st)
+	for fi, form := range forms[:2] {
+		for width := 40; width <= 200; width++ {
+			rows := wrapStripSegments(form, width)
+			total := 0
+			for ri, row := range rows {
+				first, last := row[0], row[len(row)-1]
+				if ri > 0 && first.sep {
+					t.Fatalf("form %d width %d: row %d opens with an orphan separator %q", fi, width, ri, first.text)
+				}
+				if ri > 0 && first.style != st.key {
+					t.Fatalf("form %d width %d: row %d should start on a key, got %q", fi, width, ri, first.text)
+				}
+				if last.style != st.base {
+					t.Fatalf("form %d width %d: row %d ends on %q, not a description — a binding was split", fi, width, ri, last.text)
+				}
+				for _, seg := range row {
+					if !seg.sep && seg.style == st.key && seg.text != " Esc " {
+						total++
+					}
+				}
+			}
+			if total != len(leaderBindings()) {
+				t.Fatalf("form %d width %d: %d keys painted, want %d — the wrap dropped a binding", fi, width, total, len(leaderBindings()))
+			}
+		}
+	}
+}
+
+// TestWrapStripSegments_RowsFitTheWidth pins that moving whole bindings
+// did not loosen the bound: with the continuation indent counted, no
+// row is wider than the terminal at any width a binding can fit in.
+func TestWrapStripSegments_RowsFitTheWidth(t *testing.T) {
+	st := stripStyles{}
+	for _, form := range leaderStripForms(leaderBindings(), st) {
+		for width := 40; width <= 200; width += 7 {
+			for ri, row := range wrapStripSegments(form, width) {
+				w := 0
+				if ri > 0 {
+					w = 2
+				}
+				for _, seg := range row {
+					w += runeLen(seg.text)
+				}
+				if w > width {
+					t.Fatalf("width %d: row %d is %d cells wide", width, ri, w)
+				}
+			}
+		}
+	}
+}

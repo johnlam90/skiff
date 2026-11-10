@@ -301,3 +301,25 @@ func TestMenuResolveDiskConflict_NoopWithoutConflict(t *testing.T) {
 		t.Fatalf("no conflict, no overlay; got %T", a.overlays.Top())
 	}
 }
+
+// TestReloadConflictedTab_RerendersMarkdownPreview: the preview is a
+// cached rendering of the buffer, and the conflict prompt's Reload was
+// the one reload path that forgot to refresh it — the page kept showing
+// the edits the user had just thrown away.
+func TestReloadConflictedTab_RerendersMarkdownPreview(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	tab := seedMarkdownTab(t, a, "notes.md", "# Mine\n")
+	a.menuTogglePreviewMarkdown()
+	if findPreviewLine(a, tab, "Mine") < 0 {
+		t.Fatal("precondition: the preview should show the buffer")
+	}
+	if err := os.WriteFile(tab.Path, []byte("# Theirs\n"), 0o644); err != nil {
+		t.Fatalf("external write: %v", err)
+	}
+
+	a.reloadConflictedTab(tab)
+
+	if findPreviewLine(a, tab, "Theirs") < 0 || findPreviewLine(a, tab, "Mine") >= 0 {
+		t.Fatalf("the preview still shows the discarded buffer: %q", a.mdPreviewFor(tab).lines)
+	}
+}

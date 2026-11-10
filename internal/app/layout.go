@@ -19,9 +19,20 @@ package app
 // sidebarW is the effective width of the sidebar block (file tree +
 // splitter): zero when hidden, everything but the ≡ button's column
 // while the Git panel fills the window (gitPanelFillsWidth),
-// a.sidebarWidth otherwise. Every layout helper and click router goes
-// through this so toggling/resizing the panel reshapes the entire UI in
-// one place.
+// a.sidebarWidth otherwise — clamped to what this terminal can hold.
+// Every layout helper and click router goes through this so
+// toggling/resizing the panel reshapes the entire UI in one place.
+//
+// The clamp is applied here, on read, and never written back.
+// a.sidebarWidth is the user's PREFERENCE: resizeSidebar bounds it
+// against the width it was dragged at, and the session restores it into
+// whatever terminal the next launch happens to be. A 150-column sidebar
+// carried into an 80-column window used to leave the editor a width of
+// -70 and every panel right of the tree painted off screen. Bounding
+// the read keeps the editor at minEditorAfterDrag (the same rule the
+// drag enforces, with the same "tiny window: the tree keeps its minimum
+// and the editor shrinks" fallback), and leaving the stored value alone
+// means widening the terminal gives the user their width back.
 func (a *App) sidebarW() int {
 	if !a.sidebarShown {
 		return 0
@@ -29,7 +40,7 @@ func (a *App) sidebarW() int {
 	if a.gitPanelFillsWidth() {
 		return a.width - menuButtonWidth
 	}
-	return a.sidebarWidth
+	return min(a.sidebarWidth, max(minSidebarWidth, a.width-minEditorAfterDrag))
 }
 
 // gitPanelFillsWidth reports whether the Git panel owns the window: it
@@ -91,7 +102,9 @@ func (a *App) splitterX() int {
 	if !a.sidebarShown || a.gitPanelFillsWidth() {
 		return -1
 	}
-	return a.sidebarWidth - 1
+	// sidebarW, not the stored preference: the splitter sits at the
+	// edge of the sidebar that was actually laid out.
+	return a.sidebarW() - 1
 }
 
 // resizeSidebar applies the user's desired sidebar width while clamping it

@@ -808,8 +808,7 @@ func (a *App) drawStatusBar() {
 		rightX -= runeLen(seg.text)
 		st := style
 		if seg.warn {
-			st = style.Foreground(a.theme.Error).
-				Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar | a.theme.Attrs.Error)
+			st = a.statusErrorStyle(style)
 		}
 		if seg.attrs != 0 {
 			st = st.Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar | seg.attrs)
@@ -828,8 +827,7 @@ func (a *App) drawStatusBar() {
 		// A failure report is painted the way the disk-conflict marker
 		// is: Error over the bar, with Attrs.Error carrying the signal on
 		// a palette whose red has been degraded away.
-		leftStyle = style.Foreground(a.theme.Error).
-			Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar | a.theme.Attrs.Error)
+		leftStyle = a.statusErrorStyle(style)
 	}
 	// The » sidebar handle owns the bar's first cell while the explorer
 	// is collapsed; statusLeftMax already charged the left text for it.
@@ -1092,7 +1090,7 @@ func (a *App) statusReadoutTiers(tab *editor.Tab, maxW int) []string {
 		dirty = " · ●"
 	}
 	pos := fmt.Sprintf("Ln %d, Col %d", tab.Cursor.Line+1, tab.Cursor.Col+1)
-	lines := fmt.Sprintf(" · %d lines", tab.Buffer.LineCount())
+	lines := " · " + plural(tab.Buffer.LineCount(), "%d line", "%d lines")
 	full := " " + pos + lines + dirty
 	tiers := make([]string, 0, 4)
 	// The location gets whatever the full readout leaves it; a path
@@ -1400,4 +1398,14 @@ func trimRunes(s string, max int) string {
 	}
 	rs := []rune(s)
 	return string(rs[:max-1]) + "…"
+}
+
+// statusErrorStyle is the status bar's failure/warning style: the
+// theme's readable Error pairing for the bar (see Theme.StatusError),
+// bold, with Attrs.Error carrying the signal on a palette whose red has
+// been degraded away.
+func (a *App) statusErrorStyle(base tcell.Style) tcell.Style {
+	fg, bg := a.theme.StatusError()
+	return base.Foreground(fg).Background(bg).
+		Attributes(tcell.AttrBold | a.theme.Attrs.StatusBar | a.theme.Attrs.Error)
 }

@@ -315,7 +315,7 @@ func TestProjFindDraw_PaintsResultsAndBar(t *testing.T) {
 	}
 
 	barRow := screenLine(scr, a.height-2)
-	if !containsRunes([]rune(barRow), "Search project:") {
+	if !containsRunes([]rune(barRow), "Find in project:") {
 		t.Fatalf("bar row = %q, want the search label", barRow)
 	}
 	// Deliberately not asserted here: which of the bar's right-hand
@@ -589,4 +589,70 @@ func TestHandleProjFindKey_AltTogglesModes(t *testing.T) {
 	}
 	a.projFind.sweep.Invalidate()
 	pumpUntil(t, a, "sweeps", idle(&a.projFind.sweep))
+}
+
+// TestProjFindBarLabel_YieldsToTheFields pins the label ladder: the
+// menu's own name for the feature while the bar is wide, "Find:" in the
+// middle, and nothing at phone width where the chips say which bar it
+// is. The label never says "Search project" — the menu, the leader
+// strip and the README all call this "Find in project".
+func TestProjFindBarLabel_YieldsToTheFields(t *testing.T) {
+	for _, c := range []struct {
+		w    int
+		want string
+	}{
+		{120, " Find in project: "},
+		{projFindLabelFullWidth, " Find in project: "},
+		{projFindLabelFullWidth - 1, " Find: "},
+		{projFindLabelShortWidth, " Find: "},
+		{projFindLabelShortWidth - 1, ""},
+		{40, ""},
+	} {
+		if got := projFindBarLabel(c.w); got != c.want {
+			t.Errorf("projFindBarLabel(%d) = %q, want %q", c.w, got, c.want)
+		}
+	}
+}
+
+// TestProjFindBar_UsableAtFortyColumns is the regression test for the
+// bar at minWidth: the fixed label and chips used to take 30 of the 40
+// cells. With the label gone the chips start at the bar's left edge,
+// the query keeps a real field, and a click on a painted chip toggles
+// that chip — draw and hit-test read the same layout, so the narrow
+// form cannot leave the click zones where the wide form drew them.
+func TestProjFindBar_UsableAtFortyColumns(t *testing.T) {
+	a := projFindApp(t, t.TempDir())
+	resizeApp(t, a, 40, 12)
+	a.draw()
+	a.screen.Show()
+	bar := a.stripRect()
+	row := []rune(screenLine(a.screen.(tcell.SimulationScreen), bar.y))
+	if got := string(row[bar.x : bar.x+12]); got != " Aa  ⌇w  .* " {
+		t.Fatalf("chips should lead the 40-column bar, got %q", got)
+	}
+	_, chips := a.projFindBarLayout(bar.w)
+	if free := bar.w - chips[len(chips)-1].x1; free < 2*minFieldWidth {
+		t.Fatalf("only %d cells left for the fields at 40 columns", free)
+	}
+	// Click the painted ".*" chip: it must be the regex toggle.
+	x := bar.x + runeIndexOf(row[bar.x:], ".*")
+	a.handleProjFindMouse(x, bar.y, tcell.Button1)
+	if !a.projFind.findRegex {
+		t.Fatal("clicking the painted .* chip should arm regex")
+	}
+}
+
+// TestProjFindCounterText_Pluralises pins the counter's grammar: one
+// match in one file is not "1 matches in 1 files".
+func TestProjFindCounterText_Pluralises(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.projFind.query.SetText("x")
+	a.projFind.findMatches = []search.Match{{Path: "a.go", Line: 1}}
+	if got := a.projFindCounterText(); got != "1 match in 1 file" {
+		t.Fatalf("counter = %q, want %q", got, "1 match in 1 file")
+	}
+	a.projFind.findMatches = append(a.projFind.findMatches, search.Match{Path: "b.go", Line: 2})
+	if got := a.projFindCounterText(); got != "2 matches in 2 files" {
+		t.Fatalf("counter = %q, want %q", got, "2 matches in 2 files")
+	}
 }

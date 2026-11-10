@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johnlam90/skiff/internal/filetree"
 	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/overlay"
 )
@@ -325,7 +326,7 @@ func TestGitMergeBranchEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("branches: %v", err)
 	}
-	names := otherNames(all, a.gitSnap.Branch, false)
+	names := a.otherNames(all.Names, a.gitSnap.Branch, false)
 	idx := -1
 	for i, n := range names {
 		if n == "feature" {
@@ -363,7 +364,7 @@ func TestGitDeleteBranchForceOffer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("branches: %v", err)
 	}
-	names := otherNames(all, a.gitSnap.Branch, true)
+	names := a.otherNames(all.Names, a.gitSnap.Branch, true)
 	if len(names) != 1 || names[0] != "orphan" {
 		t.Fatalf("local candidates: %v", names)
 	}
@@ -513,5 +514,89 @@ func TestGitConfirms_NameTheirVerb(t *testing.T) {
 	a.handleGitOpDone(gitOpResult{label: "Remove worktree"}, &git.OpError{WorktreeDirty: true})
 	if c := confirmPrefab(t, a); c.Labels != confirmButtons("Force remove") {
 		t.Errorf("force-remove buttons = %v", c.Labels)
+	}
+}
+
+// TestHandleGitOpDone_FailureDoesNotDestroyAnOpenPrompt: a rejected
+// push normally opens the pull-then-push offer, but not over a prompt
+// the user has started typing into since — then it is an error flash
+// carrying git's advice, and the offer waits for a re-run.
+func TestHandleGitOpDone_FailureDoesNotDestroyAnOpenPrompt(t *testing.T) {
+	a, _ := fakeRepoApp(t)
+	a.openPrompt("New file", "", "half-typed", nil)
+	a.gitDeleteTarget = "stale"
+
+	a.handleGitOpDone(gitOpResult{label: "Push"},
+		&git.OpError{Op: "Push", Advice: "origin has new commits", NonFastForward: true, Err: errors.New("exit status 1")})
+
+	if got := promptPrefab(t, a).Field.Text(); got != "half-typed" {
+		t.Fatalf("the prompt lost its text: %q", got)
+	}
+	if !strings.Contains(a.statusMsg, "Push failed") || !strings.Contains(a.statusMsg, "origin has new commits") {
+		t.Fatalf("flash = %q, want the failure and git's advice", a.statusMsg)
+	}
+	if a.gitDeleteTarget != "" {
+		t.Fatal("a flashed refusal must not leave a force-ladder target armed")
+	}
+}
+
+// TestHandleGitOpDone_FailureOverNothingStillOffersTheFix is the other
+// side of that rule: with nothing in the way, the offer opens as before.
+func TestHandleGitOpDone_FailureOverNothingStillOffersTheFix(t *testing.T) {
+	a, _ := fakeRepoApp(t)
+	a.handleGitOpDone(gitOpResult{label: "Push"},
+		&git.OpError{Op: "Push", Advice: "origin has new commits", NonFastForward: true, Err: errors.New("exit status 1")})
+	if !confirmIsOpen(a) {
+		t.Fatalf("expected the pull-then-push offer; top = %T", a.overlays.Top())
+	}
+}
+
+// TestHandleBranchList_DoesNotReplaceAnOpenPrompt: a branch list that
+// lands after the user moved on to typing somewhere else is dropped
+// with a flash, not opened over their text.
+func TestHandleBranchList_DoesNotReplaceAnOpenPrompt(t *testing.T) {
+	a, _ := fakeRepoApp(t)
+	a.openPrompt("New file", "", "half-typed", nil)
+
+	a.handleBranchList(branchListResult{purpose: "switch", names: []string{"main", "dev"}}, nil)
+
+	if got := promptPrefab(t, a).Field.Text(); got != "half-typed" {
+		t.Fatalf("the prompt lost its text: %q", got)
+	}
+	if !strings.Contains(a.statusMsg, "Branch list") {
+		t.Fatalf("flash = %q, want a note that the list was not opened", a.statusMsg)
+	}
+
+	a.closeAllModals()
+	a.handleBranchList(branchListResult{purpose: "switch", names: []string{"main", "dev"}}, nil)
+	if _, ok := a.overlays.Top().(*overlay.Pick); !ok {
+		t.Fatalf("over nothing the picker must still open; top = %T", a.overlays.Top())
+	}
+}
+
+// TestMenuGitStash_CleanTreeSaysNothingToStash is the regression test
+// for the false success: git exits 0 on a clean tree having stashed
+// nothing, and the editor flashed "Stashed working tree". With no dirty
+// files in the snapshot the verb must not run at all, and the flash
+// must say why; with a change present the stash runs as before.
+func TestMenuGitStash_CleanTreeSaysNothingToStash(t *testing.T) {
+	a, fake := fakeRepoApp(t)
+	a.menuGitStash()
+	if a.statusMsg != "Nothing to stash" {
+		t.Fatalf("clean tree flash = %q, want %q", a.statusMsg, "Nothing to stash")
+	}
+	if fake.Called("stash push -u") {
+		t.Fatal("stash must not run on a clean tree")
+	}
+
+	a.tree.DirtyFiles = map[string]filetree.GitChangeKind{filepath.Join(a.tree.Root.Path, "a.go"): filetree.GitChangeModified}
+	fake.Script("stash push -u", "", nil)
+	a.menuGitStash()
+	pumpUntil(t, a, "git op", idle(&a.gitOp))
+	if !fake.Called("stash push -u") {
+		t.Fatalf("a dirty tree must still stash, ran %v", fake.Calls())
+	}
+	if a.statusMsg != "Stashed working tree" {
+		t.Fatalf("dirty tree flash = %q", a.statusMsg)
 	}
 }

@@ -17,6 +17,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gdamore/tcell/v2"
 
 	"github.com/johnlam90/skiff/internal/clipboard"
 	"github.com/johnlam90/skiff/internal/editor"
@@ -459,5 +462,195 @@ func TestSaveTab_UntitledNamesTheNextStep(t *testing.T) {
 	}
 	if !strings.Contains(a.statusMsg, "New file…") || strings.Contains(a.statusMsg, "not supported") {
 		t.Fatalf("flash should point at ≡ New file…, got %q", a.statusMsg)
+	}
+}
+
+// readDisk returns path's contents as a string, failing the test when
+// the file cannot be read — the save-guard tests all end on "what is on
+// disk now".
+func readDisk(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
+}
+
+// TestSaveTab_ExternalChangePromptsInsteadOfOverwriting is the data-loss
+// fix: a file rewritten since the last ten-second tick must not be
+// silently overwritten by Save. The first Save opens the conflict
+// prompt and leaves the disk alone; after Keep mine the second Save is
+// the user's informed choice and goes through.
+func TestSaveTab_ExternalChangePromptsInsteadOfOverwriting(t *testing.T) {
+	a, path := conflictSetup(t, "mine\n", "theirs\n")
+
+	if a.saveTab(a.activeTabPtr()) {
+		t.Fatal("a save over an unseen external change must not report success")
+	}
+	if got := readDisk(t, path); got != "theirs\n" {
+		t.Fatalf("the external change was overwritten: disk = %q", got)
+	}
+	d := dirtyOverlay(t, a)
+	if d.Title != "Changed on disk" {
+		t.Fatalf("expected the disk-conflict prompt, got %q", d.Title)
+	}
+
+	d.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone)) // Keep mine
+	if !a.saveTab(a.activeTabPtr()) {
+		t.Fatalf("Keep mine then Save must save; flash = %q", a.statusMsg)
+	}
+	if got := readDisk(t, path); got != "mine\n" {
+		t.Fatalf("after Keep mine the buffer should win: disk = %q", got)
+	}
+	if a.overlays.IsOpen() {
+		t.Fatalf("the acknowledged save must not prompt again; top = %T", a.overlays.Top())
+	}
+}
+
+// TestSaveTab_OlderExternalMtimeStillPrompts pins "differs", not
+// "newer": a file restored from a backup carries an older timestamp and
+// is just as much somebody else's bytes.
+func TestSaveTab_OlderExternalMtimeStillPrompts(t *testing.T) {
+	a, path := conflictSetup(t, "mine\n", "restored\n")
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	if a.saveTab(a.activeTabPtr()) {
+		t.Fatal("a save over an older-dated replacement must not go through")
+	}
+	if got := readDisk(t, path); got != "restored\n" {
+		t.Fatalf("the restored file was overwritten: disk = %q", got)
+	}
+}
+
+// TestSaveTab_CleanTabReloadsInsteadOfOverwriting covers the clean
+// buffer: nothing of the user's is at stake, so Save takes the disk
+// copy (what the tick would do a moment later) rather than writing a
+// stale buffer over it or asking a question with one sensible answer.
+func TestSaveTab_CleanTabReloadsInsteadOfOverwriting(t *testing.T) {
+	a, path := conflictSetup(t, "original\n", "theirs\n")
+	tab := a.activeTabPtr()
+	tab.Dirty = false
+
+	if a.saveTab(tab) {
+		t.Fatal("a clean tab over a changed file must not write")
+	}
+	if got := readDisk(t, path); got != "theirs\n" {
+		t.Fatalf("disk = %q, want the external change intact", got)
+	}
+	if tab.Buffer.Lines[0] != "theirs" {
+		t.Fatalf("the clean buffer should have taken the disk copy, got %q", tab.Buffer.Lines[0])
+	}
+	if a.overlays.IsOpen() {
+		t.Fatalf("a clean reload needs no prompt; top = %T", a.overlays.Top())
+	}
+	if !strings.Contains(a.statusMsg, "reloaded instead of saving") {
+		t.Fatalf("flash = %q, want it to say the save became a reload", a.statusMsg)
+	}
+}
+
+// TestSaveTab_FormatterInFlightIsNotASecondWriter keeps format-on-save
+// from tripping the guard: while a formatter run for this path is out,
+// the file's mtime moving is the editor's own doing.
+func TestSaveTab_FormatterInFlightIsNotASecondWriter(t *testing.T) {
+	a, path := conflictSetup(t, "mine\n", "formatted\n")
+	a.formatInFlight = map[string]int{path: 1}
+
+	if !a.saveTab(a.activeTabPtr()) {
+		t.Fatalf("a save during the formatter's own rewrite must go through; flash = %q", a.statusMsg)
+	}
+	if got := readDisk(t, path); got != "mine\n" {
+		t.Fatalf("disk = %q, want the saved buffer", got)
+	}
+}
+
+// TestSaveTab_ClearsDiskConflictMarker pins the other half of resolving
+// by saving: the memo goes with the save, so the next edit does not
+// relight "disk conflict" against a file this tab just wrote.
+func TestSaveTab_ClearsDiskConflictMarker(t *testing.T) {
+	a, path := conflictSetup(t, "mine\n", "theirs\n")
+	a.reconcileOpenTabsWithDisk()
+	dirtyOverlay(t, a).HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone)) // Keep mine
+	tab := a.activeTabPtr()
+	if !a.tabDiskConflict(tab) {
+		t.Fatal("precondition: a dismissed prompt leaves the marker up")
+	}
+
+	if !a.saveTab(tab) {
+		t.Fatalf("save failed: %q", a.statusMsg)
+	}
+	if _, ok := a.diskConflicts[path]; ok {
+		t.Fatal("saving resolves the conflict; the memo must be dropped")
+	}
+	tab.InsertString("more")
+	if a.tabDiskConflict(tab) {
+		t.Fatal("an edit after the resolving save must not read as a conflict")
+	}
+}
+
+// TestCloseTab_DropsDiskConflictMemo: the memo is keyed by path, so one
+// left behind by a closed tab would greet the file's next tab with a
+// conflict marker on its first edit.
+func TestCloseTab_DropsDiskConflictMemo(t *testing.T) {
+	a, path := conflictSetup(t, "mine\n", "theirs\n")
+	a.reconcileOpenTabsWithDisk()
+	a.closeAllModals()
+
+	a.closeTab(a.activeTabPtr())
+	if _, ok := a.diskConflicts[path]; ok {
+		t.Fatal("closing the tab must forget its conflict")
+	}
+	a.openFile(path)
+	tab := a.activeTabPtr()
+	tab.InsertString("x")
+	if a.tabDiskConflict(tab) {
+		t.Fatal("a freshly opened tab must not inherit the closed tab's conflict")
+	}
+}
+
+// TestMenuQuit_SaveStopsAtDiskConflict is the quit path through the
+// same guard: Save-all must not write over an external change on the
+// way out, and must not quit having skipped the save.
+func TestMenuQuit_SaveStopsAtDiskConflict(t *testing.T) {
+	a, path := conflictSetup(t, "mine\n", "theirs\n")
+	a.menuQuit()
+	dirtyChoose(t, a, 2) // Save
+
+	if a.quit {
+		t.Fatal("quit must wait for the conflict to be answered")
+	}
+	if got := readDisk(t, path); got != "theirs\n" {
+		t.Fatalf("quit-save overwrote the external change: disk = %q", got)
+	}
+	if d := dirtyOverlay(t, a); d.Title != "Changed on disk" {
+		t.Fatalf("expected the disk-conflict prompt, got %q", d.Title)
+	}
+}
+
+// TestHasMutableTab_FalseOverMarkdownPreview pins the read-only gate
+// the edit rows hang off: an editable tab stops being mutable the
+// moment its preview is up, and is mutable again when it comes down.
+func TestHasMutableTab_FalseOverMarkdownPreview(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	if a.hasMutableTab() || a.hasRevertableTab() {
+		t.Fatal("no tab: nothing is mutable")
+	}
+	seedMarkdownTab(t, a, "notes.md", "# Title\n")
+	if !a.hasMutableTab() || !a.hasRevertableTab() {
+		t.Fatal("a markdown tab in edit mode is mutable")
+	}
+	a.menuTogglePreviewMarkdown()
+	if a.hasMutableTab() || a.hasRevertableTab() {
+		t.Fatal("a previewed tab is read-only")
+	}
+	if !a.hasEditableTab() {
+		t.Fatal("the tab is still a text tab — copy and find keep their rows")
+	}
+	a.menuTogglePreviewMarkdown()
+	if !a.hasMutableTab() {
+		t.Fatal("leaving the preview makes the tab mutable again")
 	}
 }

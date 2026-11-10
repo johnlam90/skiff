@@ -346,3 +346,37 @@ func TestLexerFor_CachesPositiveMatches(t *testing.T) {
 		t.Fatal("a miss was cached; content analysis would be skipped")
 	}
 }
+
+// TestHighlightSource_LoneCRDoesNotShiftRows pins that a bare carriage
+// return inside a line stays inside that line for colouring. Chroma
+// normalises a lone CR to LF, so every token after it landed one row
+// down and the rest of the window was painted with its neighbour's
+// colours. The buffer keeps the CR; only the lexer's copy swaps it for
+// a space, which is why the two grids below must match rune for rune.
+func TestHighlightSource_LoneCRDoesNotShiftRows(t *testing.T) {
+	th := theme.Default()
+	withCR := "var a = 1 // note\rmore\nfunc main() {}\nconst s = \"x\"\n"
+	plain := strings.ReplaceAll(withCR, "\r", " ")
+
+	got := highlightSource("x.go", withCR, th)
+	want := highlightSource("x.go", plain, th)
+	if len(got) != len(want) {
+		t.Fatalf("rows: got %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if len(got[i]) != len(want[i]) {
+			t.Fatalf("row %d: %d styles, want %d", i, len(got[i]), len(want[i]))
+		}
+		for j := range want[i] {
+			if got[i][j] != want[i][j] {
+				t.Fatalf("row %d rune %d styled differently once a CR sits on row 0", i, j)
+			}
+		}
+	}
+	// Guard the guard: the keyword row really is coloured, so an
+	// all-base grid on both sides could not pass this by accident.
+	base := tcell.StyleDefault.Background(th.BG).Foreground(th.Text)
+	if got[1][0] == base {
+		t.Fatal("func on row 1 carries the base style; the lexer did not run")
+	}
+}

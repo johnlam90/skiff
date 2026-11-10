@@ -32,15 +32,16 @@ func testInfo(lines int) (*Info, *int) {
 }
 
 // TestInfo_BodyRowsAndScrollClamp pins the viewport math: on a 12-row
-// screen the body shows 5 lines (screen minus 7 chrome rows), and
-// scrolling clamps to [0, len-rows].
+// screen the body shows 4 lines (screen minus 7 chrome rows, minus the
+// status row the modal leaves uncovered), and scrolling clamps to
+// [0, len-rows].
 func TestInfo_BodyRowsAndScrollClamp(t *testing.T) {
 	n, _ := testInfo(20)
-	if got := n.bodyRows(); got != 5 {
-		t.Fatalf("body rows = %d, want 5", got)
+	if got := n.bodyRows(); got != 4 {
+		t.Fatalf("body rows = %d, want 4", got)
 	}
 	n.ScrollBy(100)
-	if want := 20 - 5; n.Scroll() != want {
+	if want := 20 - 4; n.Scroll() != want {
 		t.Fatalf("scroll = %d, want %d", n.Scroll(), want)
 	}
 	n.ScrollBy(-100)
@@ -445,5 +446,32 @@ func TestInfo_DragFromBodyDoesNotDismiss(t *testing.T) {
 	n.HandleMouse(r.X-1, r.Y-1, tcell.Button1)
 	if *closed != 1 {
 		t.Fatalf("a fresh outside press after the release must dismiss, closed %d times", *closed)
+	}
+}
+
+// TestInfo_LeavesTheStatusRowAtMinimumHeight is the regression test for
+// Info covering the whole of a ten-row terminal: a body longer than the
+// screen used to take scrH-7 rows, a ten-row frame with nothing under
+// it. It must stop one row short at every height it can, and still
+// reach its last line by scrolling.
+func TestInfo_LeavesTheStatusRowAtMinimumHeight(t *testing.T) {
+	lines := make([]string, 30)
+	for i := range lines {
+		lines[i] = "line"
+	}
+	for _, scrH := range []int{10, 11, 24} {
+		n := &Info{Title: "Report", Lines: lines, Theme: theme.Default()}
+		n.Size = func() (int, int) { return 40, scrH }
+		r := n.rect()
+		if r.Y < 0 || r.Y+r.H > scrH-1 {
+			t.Fatalf("height %d: frame %+v covers the status row", scrH, r)
+		}
+		if n.bodyRows() < 2 {
+			t.Fatalf("height %d: only %d body rows", scrH, n.bodyRows())
+		}
+		n.ScrollBy(1000)
+		if got := n.Scroll() + n.bodyRows(); got != n.RowCount() {
+			t.Fatalf("height %d: scrolled to row %d of %d — the tail is unreachable", scrH, got, n.RowCount())
+		}
 	}
 }

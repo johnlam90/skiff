@@ -308,3 +308,71 @@ func TestOutdentWidth(t *testing.T) {
 		}
 	}
 }
+
+// TestMoveLinesDown_SelectAllKeepsTheCaretInTheBuffer is the
+// out-of-range fix: Select all on "one\ntwo\n" leaves the caret at
+// column 0 of the empty last line, one line PAST the block the gesture
+// moves. Riding down with the block put Cursor.Line at LineCount(). The
+// caret now lands on the end of the last line — the same block, still
+// selected — and the move back up undoes it.
+func TestMoveLinesDown_SelectAllKeepsTheCaretInTheBuffer(t *testing.T) {
+	tab := linesTab("one", "two", "")
+	tab.SelectAll()
+
+	tab.MoveLinesDown()
+
+	if got := strings.Join(tab.Buffer.Lines, "|"); got != "|one|two" {
+		t.Fatalf("lines = %q, want the block moved below the blank line", got)
+	}
+	if tab.Cursor.Line >= tab.Buffer.LineCount() || tab.Anchor.Line >= tab.Buffer.LineCount() {
+		t.Fatalf("selection left the buffer: anchor %+v cursor %+v of %d lines",
+			tab.Anchor, tab.Cursor, tab.Buffer.LineCount())
+	}
+	if first, last := tab.commentLineRange(); first != 1 || last != 2 {
+		t.Fatalf("the selection should still cover the moved block, got lines %d..%d", first, last)
+	}
+
+	tab.MoveLinesUp()
+	if got := strings.Join(tab.Buffer.Lines, "|"); got != "one|two|" {
+		t.Fatalf("moving back up should restore the buffer, got %q", got)
+	}
+}
+
+// TestMoveLinesDown_SelectedLineReachesTheBottom covers the same seam
+// from Select line: the line above the last one, selected newline and
+// all, must still be able to move to the bottom of a file with no
+// trailing newline — the caret clamps instead of the gesture refusing.
+func TestMoveLinesDown_SelectedLineReachesTheBottom(t *testing.T) {
+	tab := linesTab("one", "two", "three")
+	tab.Anchor = Position{Line: 1}
+	tab.Cursor = Position{Line: 2}
+
+	tab.MoveLinesDown()
+
+	if got := strings.Join(tab.Buffer.Lines, "|"); got != "one|three|two" {
+		t.Fatalf("lines = %q", got)
+	}
+	if want := (Position{Line: 2, Col: 3}); tab.Cursor != want {
+		t.Fatalf("cursor = %+v, want %+v (end of the moved line)", tab.Cursor, want)
+	}
+	if want := (Position{Line: 2}); tab.Anchor != want {
+		t.Fatalf("anchor = %+v, want %+v", tab.Anchor, want)
+	}
+}
+
+// TestDuplicateLines_SelectAllStaysInTheBuffer is the symmetric check
+// the fix asked for: duplicating grows the buffer by the block, so the
+// column-0 end line always has somewhere to land.
+func TestDuplicateLines_SelectAllStaysInTheBuffer(t *testing.T) {
+	tab := linesTab("one", "two", "")
+	tab.SelectAll()
+
+	tab.DuplicateLines()
+
+	if got := strings.Join(tab.Buffer.Lines, "|"); got != "one|two|one|two|" {
+		t.Fatalf("lines = %q", got)
+	}
+	if tab.Cursor.Line >= tab.Buffer.LineCount() || tab.Anchor.Line >= tab.Buffer.LineCount() {
+		t.Fatalf("selection left the buffer: anchor %+v cursor %+v", tab.Anchor, tab.Cursor)
+	}
+}

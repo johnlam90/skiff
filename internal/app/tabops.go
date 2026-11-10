@@ -19,6 +19,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/johnlam90/skiff/internal/clipboard"
@@ -66,10 +67,18 @@ func (a *App) saveTab(tab *editor.Tab) bool {
 		a.flash("Untitled tab — use ≡ New file… to create a named file first")
 		return false
 	}
+	if a.saveBlockedByDiskChange(tab) {
+		return false
+	}
 	if err := tab.Save(); err != nil {
 		a.flash(fmt.Sprintf("Save failed: %v", err))
 		return false
 	}
+	// Saving is one of the two ways out of a disk conflict (the buffer
+	// won), so the marker goes now rather than lingering until the next
+	// reconcile tick prunes it — or forever, if the tab is edited again
+	// before that tick and reads as conflicted against a file it wrote.
+	a.clearDiskConflict(tab.Path)
 	a.refreshGitStatusAsync()
 	a.flash(fmt.Sprintf("Saved %s", filepath.Base(tab.Path)))
 	// Format-on-save runs after the disk write succeeds, so a broken
@@ -77,6 +86,75 @@ func (a *App) saveTab(tab *editor.Tab) bool {
 	// formatter (when configured + trusted) reloads the buffer
 	// asynchronously when the formatter job lands — see format.go.
 	a.runFormatOnSave(tab)
+	return true
+}
+
+// saveBlockedByDiskChange is the save path's own look at the disk. The
+// ten-second tick is the only other place that compares a tab against
+// its file, so without this a Save inside that window wrote the buffer
+// straight over whatever `git pull`, `sed -i` or a second editor had
+// just put there — silently, which is the one failure conflict.go
+// exists to prevent. Returns true when the save must not happen.
+//
+// The comparison is "differs", not "newer": a file restored from a
+// backup or extracted from a tarball carries an OLDER mtime and is just
+// as much somebody else's bytes.
+//
+// What happens next depends on what the buffer holds:
+//
+//   - Dirty (or DiskGone, where the buffer is the only copy of what the
+//     tab showed) → the Keep mine / Reload / Diff prompt. Opening it
+//     records the disk revision as acknowledged and moves tab.Mtime onto
+//     it, so the NEXT Save — after "Keep mine", or after Esc — goes
+//     through. A later external write has a new mtime and asks again.
+//   - Clean → nothing of the user's is at stake, so the buffer takes
+//     the disk copy exactly as the tick would have a moment later, and
+//     the flash says the save turned into a reload.
+//
+// Three cases save as before: a file that is not there (a new file, or
+// a DiskGone tab being written back), a stat that fails for any other
+// reason (Save itself reports it), and a formatter still in flight for
+// this path — its rewrite is the editor's own doing, not a second
+// writer, and prompting about it would nag on every quick double save.
+func (a *App) saveBlockedByDiskChange(tab *editor.Tab) bool {
+	// An image tab cannot be saved at all; Save's own refusal is the
+	// message, and there is no buffer here to reload or protect.
+	if tab.IsImage() {
+		return false
+	}
+	info, err := os.Stat(tab.Path)
+	// Not a regular file is the same answer as not there: a directory
+	// sitting in the file's place has no "disk copy" to protect, and
+	// the write that follows is what reports it.
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	mtime := info.ModTime()
+	if mtime.Equal(tab.Mtime) || a.formatInFlight[tab.Path] > 0 {
+		return false
+	}
+	if ack, ok := a.diskConflicts[tab.Path]; ok && ack.Equal(mtime) {
+		// Already prompted about exactly this revision (the tick got
+		// there first while an overlay was up, say) and the user is
+		// saving anyway: that is "Keep mine".
+		return false
+	}
+	name := filepath.Base(tab.Path)
+	if !tab.Dirty && !tab.DiskGone {
+		if err := tab.ReloadKeepHistory(); err != nil {
+			a.flash(fmt.Sprintf("%s changed on disk and reload failed: %v", name, err))
+			return true
+		}
+		a.invalidateMdPreview(tab)
+		a.clearDiskConflict(tab.Path)
+		a.flash(name + " changed on disk — reloaded instead of saving")
+		return true
+	}
+	// A file that came back under a DiskGone tab is on disk again; the
+	// prompt, not the "deleted" badge, now describes the tab.
+	tab.DiskGone = false
+	a.openDiskConflict(tab, mtime)
+	tab.Mtime = mtime
 	return true
 }
 
@@ -164,6 +242,10 @@ func (a *App) closeTab(tab *editor.Tab) {
 	}
 	a.recordClosedTab(tab)
 	a.tabs.Remove(tab)
+	// The conflict memo is keyed by path, so an entry left behind would
+	// greet the file's NEXT tab: its first edit would light the "disk
+	// conflict" marker for a revision that tab loaded fresh.
+	a.clearDiskConflict(tab.Path)
 	defer a.saveSession()
 	a.ensureActiveTabVisible()
 	a.syncActiveTreeFile()
@@ -288,6 +370,33 @@ func (a *App) hasEditableTab() bool {
 	return t != nil && !t.IsImage()
 }
 
+// hasMutableTab reports whether the active tab accepts text edits RIGHT
+// NOW: an editable tab that is not showing its markdown preview. It is
+// the visibility gate for every row that writes the buffer. The split
+// from hasEditableTab matters because the preview is read-only by
+// contract while the tab underneath is still a text tab — gating the
+// edit rows on hasEditableTab alone let Paste, Cut, Undo and the line
+// gestures rewrite markdown source the user could not see.
+func (a *App) hasMutableTab() bool {
+	return a.hasEditableTab() && a.activeMdPreview() == nil
+}
+
+// hasRevertableTab is Revert's visibility gate: any tab, except one
+// showing a read-only markdown preview.
+func (a *App) hasRevertableTab() bool {
+	return a.hasTab() && a.activeMdPreview() == nil
+}
+
+// hasCopyableSelection gates the Copy row on the selection the user can
+// actually see: the rendered page's while a markdown preview is up, the
+// buffer's otherwise.
+func (a *App) hasCopyableSelection() bool {
+	if st := a.activeMdPreview(); st != nil {
+		return st.selA != st.selB
+	}
+	return a.hasSelection()
+}
+
 // activateNextTab switches to the tab right of the active one (wrapping)
 // and runs the same follow-ups a tab-strip click does: keep the new tab
 // on screen in the strip and mirror it into the tree.
@@ -332,7 +441,7 @@ func (a *App) closeOtherTabs() int {
 		others = append(others, tab)
 	}
 	if unsaved > 0 {
-		a.flash(fmt.Sprintf("%d other tab(s) have unsaved changes — save or close them first", unsaved))
+		a.flash(plural(unsaved, "%d other tab has", "%d other tabs have") + " unsaved changes — save or close them first")
 		return 0
 	}
 	for _, tab := range others {

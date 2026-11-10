@@ -271,7 +271,7 @@ func TestRefreshGitStatus_FromScriptedFake(t *testing.T) {
 	fake.Script("rev-list --left-right --count @{upstream}...HEAD", "1\t2\n", nil)
 	fake.Script("status --porcelain -z", " M f.txt\x00", nil)
 	fake.Script("symbolic-ref --short HEAD", "scripted\n", nil)
-	fake.Script("diff --unified=0 --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target, strings.Join([]string{
+	fake.Script("diff --unified=0 --no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD -- "+target, strings.Join([]string{
 		"diff --git a/f.txt b/f.txt",
 		"index 0000000..1111111 100644",
 		"--- a/f.txt",
@@ -1022,5 +1022,20 @@ func TestCollectGitStatus_CarriesIsDirForUntrackedDirs(t *testing.T) {
 	}
 	if res.isDir[filepath.Join(repo, "doomed.txt")] {
 		t.Fatal("a deleted path must never be flagged as a directory")
+	}
+}
+
+// TestDropTrashEntries pins that the session trash's in-place fallback
+// names never reach the tree tint or the git panel: git reports them as
+// untracked files, and a row checked by default would be committed.
+func TestDropTrashEntries(t *testing.T) {
+	files := map[string]git.ChangeKind{
+		"/r/keep.go":                         git.ChangeModified,
+		"/r/.skifftrash-0-gone.go":           git.ChangeAdded,
+		"/r/sub/.skifftrash-3-dir/inner.txt": git.ChangeAdded,
+	}
+	dropTrashEntries(files)
+	if len(files) != 1 || files["/r/keep.go"] != git.ChangeModified {
+		t.Fatalf("files = %v, want only keep.go", files)
 	}
 }

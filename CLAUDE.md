@@ -135,7 +135,9 @@ internal/filetree/scan.go     Off-thread disk sweep: readDir/ScanDirs on
                               and the fixed shouldHide noise list
 internal/filetree/ignore.go   .gitignore-aware filtering: HideIgnored +
                               the per-directory matcher cache, the
-                              nested-chain scoping, open-tab pins
+                              nested-chain scoping (deepest file with a
+                              match decides; nothing under an excluded
+                              directory is re-included), open-tab pins
 internal/filetree/flatten.go  Visible-row list + VS Code-style compact
                               folder chains (single-child dir runs fold
                               into one "a/b/c" row anchored on the
@@ -161,6 +163,14 @@ internal/diff/                The one model of a unified diff: Parse (git
                               No tcell, no theme, no git — the parse and
                               the pairing live once so the gutter and the
                               diff view cannot disagree
+internal/gitignore/           The one .gitignore matcher: a port of git's
+                              pattern parser + wildmatch for ONE ignore
+                              file (Match → NoMatch/Ignored/Included).
+                              No regexp, no deps. The tree and the
+                              finder's walk fallback both compile
+                              through it, and a differential test
+                              against `git check-ignore` fences it —
+                              don't swap a library back in
 internal/mdrender/            Markdown → pre-wrapped theme-styled lines
                               (goldmark AST walk; fenced code through
                               editor.Highlight so Chroma colors match)
@@ -512,6 +522,12 @@ On each tree-refresh tick, `reconcileTab` compares each open tab's mtime
 against what the background sweep found: clean buffer + changed file →
 silent reload; dirty buffer + changed file → conflict prompt; file
 deleted → set `DiskGone` once.
+"Changed" means the mtime *differs* (`Equal`, not `After`): a
+`mv backup f`, `cp -p` or `tar x` puts different bytes under an OLDER
+mtime. The tick is not the only gate — `saveTab` runs the same check
+(`saveBlockedByDiskChange`) before writing, because a save inside the
+ten-second window would otherwise overwrite the other writer silently;
+the formatter's own rewrite is exempted via `formatInFlight`.
 
 ### The overlay stack is the routing truth
 Every floating surface (menu, prompt, confirm, pickers, diff, …) lives
@@ -675,9 +691,12 @@ job calls `test.yml` (`workflow_call`) and gates everything below on
 it — a red suite can never publish:
 
 1. Reads `internal/version/version.go`.
-2. **If that file was edited in the pushed commit**, the version is used
-   as-is (manual major/minor bump). **Otherwise** the patch is
+2. **If that version has no tag yet**, it was set by hand (a manual
+   major/minor bump) and is used as-is. **Otherwise** the patch is
    auto-bumped, committed back to main with `[skip ci]`, and pushed.
+   The test is the VALUE, not "did the commit touch the file": a
+   comment or copyright edit to `version.go` is an ordinary patch
+   release.
 3. Tags `v<x.y.z>`.
 4. GoReleaser cross-compiles, attaches archives to a GitHub Release,
    and writes `Formula/skiff.rb` back into this repo (using the
@@ -688,10 +707,19 @@ If you're touching the workflow or `.goreleaser.yml`, make sure both
 auto-commits keep their `[skip ci]` markers — without them the workflow
 loops forever.
 
-A failed GoReleaser run (API blip, upload timeout) is re-runnable: the tag
-step records that the tag already exists and the next step deletes the
-half-published release object (never the tag) before GoReleaser retries.
-"Re-run failed jobs" on the Actions run is the whole recovery.
+A failed run is re-runnable at any point. A re-run finds the
+`Release vX [skip ci]` commit its first attempt already pushed and
+resumes from it instead of bumping again; if the tag exists it must
+point at the commit being released (anything else stops the run), and
+only then is the half-published release object deleted (never the tag)
+before GoReleaser retries. "Re-run failed jobs" on the Actions run is
+the whole recovery.
+
+A run that main has moved past stands down: when a newer real commit is
+already on main (at the start, or by the time the bump is pushed) the
+newer push's run releases both, so the older one exits green without
+tagging. Bot commits (`[skip ci]`, e.g. the previous release's formula)
+are simply rebased over.
 
 ## What NOT to add
 

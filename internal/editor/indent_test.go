@@ -364,3 +364,64 @@ func TestColonOpensBlock(t *testing.T) {
 		}
 	}
 }
+
+// TestDetectIndent_IgnoresBlockCommentContinuations pins that the " * "
+// lines of a block comment are not read as one-space indentation. They
+// are alignment under the opening "/**", and counting them set the Tab
+// key to a single space in every JSDoc'd two-space file.
+func TestDetectIndent_IgnoresBlockCommentContinuations(t *testing.T) {
+	src := "/**\n * doc\n */\nfunction f() {\n  if (x) {\n    y();\n  }\n}\n"
+	if got := DetectIndent(strings.Split(src, "\n"), "a.js"); got != "  " {
+		t.Fatalf("DetectIndent = %q, want two spaces", got)
+	}
+	// A file that is ONLY a block comment has no indentation signal and
+	// falls through to the extension default.
+	if got := DetectIndent([]string{"/*", " * a", " * b", " */"}, "a.js"); got != "    " {
+		t.Fatalf("comment-only file: DetectIndent = %q, want the 4-space default", got)
+	}
+}
+
+// TestDetectIndent_LoneOneSpaceOutlier pins the outlier rule: one stray
+// one-space line among consistently four-space code does not win, while
+// a file genuinely indented by one space (odd widths among its deeper
+// lines, or more than one such line) keeps its answer.
+func TestDetectIndent_LoneOneSpaceOutlier(t *testing.T) {
+	outlier := []string{"a", "    b", "        c", " stray", "    d"}
+	if got := DetectIndent(outlier, "a.txt"); got != "    " {
+		t.Errorf("lone outlier: got %q, want four spaces", got)
+	}
+	oneSpace := []string{"a", " b", "  c", "   d", " e"}
+	if got := DetectIndent(oneSpace, "a.txt"); got != " " {
+		t.Errorf("one-space file: got %q, want one space", got)
+	}
+	oddDeeper := []string{"a", " b", "  c", "   d"}
+	if got := DetectIndent(oddDeeper, "a.txt"); got != " " {
+		t.Errorf("single level-1 line with odd deeper widths: got %q, want one space", got)
+	}
+	onlyLine := []string{"a", " b"}
+	if got := DetectIndent(onlyLine, "a.txt"); got != " " {
+		t.Errorf("a one-space line with nothing against it: got %q, want one space", got)
+	}
+}
+
+// TestSpaceIndentWidth pins the histogram helper directly, including
+// the empty case DetectIndent relies on to fall through to the default.
+func TestSpaceIndentWidth(t *testing.T) {
+	cases := []struct {
+		name   string
+		widths map[int]int
+		want   int
+	}{
+		{"empty", map[int]int{}, 0},
+		{"smallest wins", map[int]int{2: 3, 4: 5}, 2},
+		{"lone 1 dropped", map[int]int{1: 1, 4: 2, 8: 1}, 4},
+		{"two 1s kept", map[int]int{1: 2, 4: 2}, 1},
+		{"1 with one other line kept", map[int]int{1: 1, 4: 1}, 1},
+		{"1 with non-multiples kept", map[int]int{1: 1, 2: 1, 3: 1}, 1},
+	}
+	for _, c := range cases {
+		if got := spaceIndentWidth(c.widths); got != c.want {
+			t.Errorf("%s: got %d, want %d", c.name, got, c.want)
+		}
+	}
+}

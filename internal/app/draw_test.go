@@ -961,27 +961,34 @@ func TestDrawStatusBar_LowColorUsesAttributes(t *testing.T) {
 }
 
 // TestDrawStatusBar_ErrorFlashPaintsInErrorColour pins the visual half
-// of flashError: a failure report on the bar takes the palette's Error
-// foreground (the disk-conflict marker's treatment), where a plain
-// flash keeps StatusFg — so the two kinds are told apart at a glance.
+// of flashError: a failure report on the bar takes the theme's
+// StatusError pairing (the disk-conflict marker's treatment), where a
+// plain flash keeps StatusFg — so the two kinds are told apart at a
+// glance, and the error stays readable against the bar (Error itself is
+// 1.05:1 over the default theme's status background).
 func TestDrawStatusBar_ErrorFlashPaintsInErrorColour(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	resizeTestApp(t, a, 80, 24)
 	scr := a.screen.(tcell.SimulationScreen)
-	cellFg := func() tcell.Color {
+	cell := func() (tcell.Color, tcell.Color) {
 		a.drawStatusBar()
 		scr.Show()
 		cells, w, _ := scr.GetContents()
-		fg, _, _ := cells[(a.height-1)*w+1].Style.Decompose()
-		return fg
+		fg, bg, _ := cells[(a.height-1)*w+1].Style.Decompose()
+		return fg, bg
 	}
 	a.flash("Copied")
-	if got := cellFg(); got != a.theme.StatusFg {
+	if got, _ := cell(); got != a.theme.StatusFg {
 		t.Fatalf("info flash fg = %v, want StatusFg %v", got, a.theme.StatusFg)
 	}
 	a.flashError("save failed")
-	if got := cellFg(); got != a.theme.Error {
-		t.Fatalf("error flash fg = %v, want Error %v", got, a.theme.Error)
+	wantFg, wantBg := a.theme.StatusError()
+	fg, bg := cell()
+	if fg != wantFg || bg != wantBg {
+		t.Fatalf("error flash = %v on %v, want %v on %v", fg, bg, wantFg, wantBg)
+	}
+	if got := theme.ContrastRatio(fg, bg); got < 3 {
+		t.Fatalf("error flash contrast %.2f — unreadable on the bar", got)
 	}
 }
 
@@ -1355,7 +1362,11 @@ func TestTabChevrons_DropCountsOnACrampedStrip(t *testing.T) {
 		t.Fatalf("precondition: want tabs hidden both ways, got %d/%d", nl, nr)
 	}
 	// Squeeze the strip until the badges no longer earn their counts.
-	a.sidebarWidth = a.width - menuButtonWidth - minVisibleTabCells - 1
+	// The squeeze is the terminal itself: sidebarW clamps the explorer
+	// so the editor keeps minEditorAfterDrag columns, which means a wide
+	// sidebar can no longer starve the strip — only a narrow window can.
+	a.sidebarShown = false
+	a.width = menuButtonWidth + minVisibleTabCells + 1
 	left, right := a.tabChevrons()
 	if left.Label != "‹" || right.Label != "›" {
 		t.Fatalf("cramped strip badges = %q / %q, want the bare chevrons",
@@ -1796,5 +1807,20 @@ func TestDraw_PaintsEveryCell(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestStatusLeftText_SingularLine pins the readout's grammar: a
+// one-line buffer is "1 line", not "1 lines".
+func TestStatusLeftText_SingularLine(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestApp(t, dir)
+	openTestFile(t, a, dir, "one.txt", "only")
+	resizeTestApp(t, a, 120, 24)
+	a.statusMsg = ""
+	_, _, sw, _ := a.statusRect()
+	got := a.statusLeftText(a.statusLeftMax(sw))
+	if !strings.Contains(got, "· 1 line") || strings.Contains(got, "1 lines") {
+		t.Fatalf("readout = %q, want \"1 line\"", got)
 	}
 }

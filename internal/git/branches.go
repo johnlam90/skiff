@@ -24,13 +24,22 @@ import "strings"
 // pseudo-row that is not a branch at all.
 const branchesFormat = "--format=%(HEAD)%00%(refname)%00%(symref)"
 
+// BranchList is the picker's branch list plus the one fact a name alone
+// cannot carry: which entries are remote-tracking. A slash does not say
+// so — "feature/login" is an ordinary local branch — and guessing from
+// it made Switch create a stray local "login" tracking the real one.
+type BranchList struct {
+	Names  []string        // local then remote-tracking, current first
+	Remote map[string]bool // the Names that live under refs/remotes
+}
+
 // Branches lists local then remote-tracking branch names, current
 // first, remote spellings of local branches dropped (origin/x duplicates
 // a local x — switching to it via the local is what the user means).
-func (r *Repo) Branches() ([]string, error) {
+func (r *Repo) Branches() (BranchList, error) {
 	out, err := r.read("for-each-ref", branchesFormat, "refs/heads", "refs/remotes")
 	if err != nil {
-		return nil, err
+		return BranchList{}, err
 	}
 	return parseBranches(string(out)), nil
 }
@@ -38,7 +47,7 @@ func (r *Repo) Branches() ([]string, error) {
 // parseBranches orders for-each-ref's records into the picker list.
 // Split out so the ordering rules are pinned against captured output
 // without a repository.
-func parseBranches(out string) []string {
+func parseBranches(out string) BranchList {
 	var current string
 	var locals, remotes []string
 	seen := map[string]bool{}
@@ -62,6 +71,7 @@ func parseBranches(out string) []string {
 		}
 	}
 	names := make([]string, 0, 1+len(locals)+len(remotes))
+	remote := map[string]bool{}
 	if current != "" {
 		names = append(names, current)
 	}
@@ -71,8 +81,9 @@ func parseBranches(out string) []string {
 			continue
 		}
 		names = append(names, rem)
+		remote[rem] = true
 	}
-	return names
+	return BranchList{Names: names, Remote: remote}
 }
 
 // HasUpstream reports whether the current branch tracks an upstream —

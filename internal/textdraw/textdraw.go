@@ -20,6 +20,8 @@
 package textdraw
 
 import (
+	"strings"
+
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/uniseg"
 )
@@ -105,6 +107,37 @@ func DrawClipped(scr tcell.Screen, x, y, maxW int, s string, st tcell.Style) int
 		budget -= cw
 	}
 	return x
+}
+
+// ExpandTabs replaces every tab in s with the spaces that carry it to
+// the next multiple of tabStop cells, measured from the start of s.
+// uniseg gives a tab width 0 and DrawClipped skips zero-width clusters,
+// so a surface that paints raw text loses every tab — Go code renders
+// flush-left. A surface that shows file content expands first; the
+// result holds no tabs, so Width and DrawClipped agree on it. A string
+// with no tab comes back untouched (no allocation), and a non-positive
+// tabStop leaves s alone rather than dividing by it.
+func ExpandTabs(s string, tabStop int) string {
+	if tabStop <= 0 || !strings.Contains(s, "\t") {
+		return s
+	}
+	var b strings.Builder
+	col := 0
+	state := -1
+	for rest := s; len(rest) > 0; {
+		var cluster string
+		var cw int
+		cluster, rest, cw, state = uniseg.FirstGraphemeClusterInString(rest, state)
+		if cluster == "\t" {
+			n := tabStop - col%tabStop
+			b.WriteString(strings.Repeat(" ", n))
+			col += n
+			continue
+		}
+		b.WriteString(cluster)
+		col += cw
+	}
+	return b.String()
 }
 
 // asciiCell is the one-byte string for each ASCII rune, so painting a

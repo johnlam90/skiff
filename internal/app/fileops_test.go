@@ -1134,3 +1134,110 @@ func TestOpenDeleteConfirm_TellsTheTruthAboutTheTrash(t *testing.T) {
 		t.Fatalf("right-click delete drifted from the menu's: %+v vs %+v", got.Title+got.Message, c.Title+c.Message)
 	}
 }
+
+// TestDoCreateFile_MakesMissingFolders pins New file with a folder that
+// does not exist yet: the folder is created inside the project and the
+// file opens, instead of a flash telling the user to "create it first"
+// in an editor that has no create-folder action.
+func TestDoCreateFile_MakesMissingFolders(t *testing.T) {
+	root := t.TempDir()
+	a := newTestApp(t, root)
+
+	a.doCreateFile(a.rootDir, "sub/x.go")
+
+	target := filepath.Join(a.rootDir, "sub", "x.go")
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("sub/x.go should exist: %v", err)
+	}
+	if tab := a.activeTabPtr(); tab == nil || tab.Path != target {
+		t.Fatalf("the new file should be the active tab, got %+v", tab)
+	}
+	if a.statusMsg != "Created sub/x.go" {
+		t.Fatalf("flash = %q", a.statusMsg)
+	}
+}
+
+// TestDoCreateFile_ExistingNameIsPlainAndRelative is the regression
+// test for "Create failed: open /abs/…/main.go: file exists": a taken
+// name flashes one sentence naming the project-relative path, with no
+// syscall name and no absolute path, and the file keeps its bytes.
+func TestDoCreateFile_ExistingNameIsPlainAndRelative(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "pkg"), 0755); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pkg", "main.go"), []byte("keep"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, root)
+
+	a.doCreateFile(filepath.Join(a.rootDir, "pkg"), "main.go")
+
+	if a.statusMsg != "pkg/main.go already exists" {
+		t.Fatalf("flash = %q, want %q", a.statusMsg, "pkg/main.go already exists")
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, "pkg", "main.go")); string(got) != "keep" {
+		t.Fatalf("existing file was clobbered: %q", got)
+	}
+}
+
+// TestDoCreateFile_OtherFailuresStayRelative covers the remaining
+// failure shape — a path component that is a file — and pins that the
+// OS reason is kept but the path is the project-relative one.
+func TestDoCreateFile_OtherFailuresStayRelative(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "plain"), nil, 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, root)
+
+	a.doCreateFile(a.rootDir, "plain/x.go")
+
+	if !strings.HasPrefix(a.statusMsg, "Couldn't create plain") || strings.Contains(a.statusMsg, a.rootDir) {
+		t.Fatalf("flash should name the relative path only, got %q", a.statusMsg)
+	}
+}
+
+// TestDoRename_SameNameSaysUnchanged pins the unedited-submit case: the
+// prompt pre-fills the current name, and submitting it used to flash
+// "Renamed to x" for a rename that did nothing.
+func TestDoRename_SameNameSaysUnchanged(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "zz.go"), nil, 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, root)
+
+	a.doRename(filepath.Join(a.rootDir, "zz.go"), "zz.go")
+
+	if a.statusMsg != "Name unchanged" {
+		t.Fatalf("flash = %q, want %q", a.statusMsg, "Name unchanged")
+	}
+}
+
+// TestFilePrompts_HintIsProjectRelative pins that every file prompt
+// names its folder the way New file does — relative to the project —
+// rather than as an absolute path the prompt then has to tail-truncate.
+func TestFilePrompts_HintIsProjectRelative(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "pkg", "deep"), 0755); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pkg", "deep", "a.go"), nil, 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, root)
+	sep := string(filepath.Separator)
+
+	a.openFile(filepath.Join(a.rootDir, "pkg", "deep", "a.go"))
+	a.menuRename()
+	if got, want := promptPrefab(t, a).Hint, "in "+filepath.Join("pkg", "deep")+sep; got != want {
+		t.Fatalf("Rename file hint = %q, want %q", got, want)
+	}
+
+	a.setActiveFolder(filepath.Join(a.rootDir, "pkg", "deep"))
+	a.menuRenameFolder()
+	if got, want := promptPrefab(t, a).Hint, "in pkg"+sep; got != want {
+		t.Fatalf("Rename folder hint = %q, want %q", got, want)
+	}
+}

@@ -262,3 +262,29 @@ func TestCloseTabSavesSession(t *testing.T) {
 		t.Fatalf("close should have persisted one tab, got %d", b.tabs.Len())
 	}
 }
+
+// TestCaptureSession_AutoHiddenSidebarIsNotUserHidden: the
+// narrow-terminal rule hiding the explorer is not the user closing it.
+// A session saved inside a narrow split used to persist "hidden", so
+// the next launch in a wide terminal came up without a file tree.
+func TestCaptureSession_AutoHiddenSidebarIsNotUserHidden(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	resizeTestApp(t, a, autoHideSidebarWidth-1, 24)
+	a.applyResponsiveSidebar()
+	if a.sidebarShown || !a.sidebarAutoHidden {
+		t.Fatalf("precondition: the explorer should be auto-hidden (shown=%v auto=%v)", a.sidebarShown, a.sidebarAutoHidden)
+	}
+	if !a.captureSession().SidebarShown {
+		t.Fatal("an auto-hidden explorer must be saved as shown")
+	}
+
+	// The user's own choice, in either direction, is saved as made.
+	a.menuToggleSidebar()
+	a.menuToggleSidebar()
+	if a.sidebarShown || a.sidebarAutoHidden {
+		t.Fatalf("precondition: the explorer should be user-hidden (shown=%v auto=%v)", a.sidebarShown, a.sidebarAutoHidden)
+	}
+	if a.captureSession().SidebarShown {
+		t.Fatal("an explorer the user closed must be saved as hidden")
+	}
+}

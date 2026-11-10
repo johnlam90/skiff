@@ -98,6 +98,46 @@ func barLabelsThatFit(spare, counterCost, hintCost int) (counter, hint bool) {
 	return counter, hint
 }
 
+// barHintThatFits is barLabelsThatFit over a ladder of hints, longest
+// first: the counter is still offered the space first, then the hint is
+// the first tier that fits what is left, or "" when none does. The hint
+// used to be one ~76-cell string, all or nothing — and the find bar is
+// only as wide as the editor pane, so beside an open sidebar on an
+// 80- or 120-column terminal it never showed at all, which left Tab →
+// replace and Alt+c undiscoverable exactly where most people run.
+// Shorter tiers trade words for the glyphs the frames already use
+// (⏎, ⇥) and drop the least-needed keys first.
+func barHintThatFits(spare, counterCost int, tiers []string) (counter bool, hint string) {
+	counter, _ = barLabelsThatFit(spare, counterCost, 0)
+	for _, t := range tiers {
+		if _, ok := barLabelsThatFit(spare, counterCost, runeLen(t)+1); ok {
+			return counter, t
+		}
+	}
+	return counter, ""
+}
+
+// findHintTiers is the in-file find bar's hint ladder for the field
+// that owns the keyboard, longest first (see barHintThatFits). Every
+// tier keeps what Enter does and how to leave; the mode toggle and the
+// reverse gesture are the first to go.
+func findHintTiers(replaceFocused bool) []string {
+	if replaceFocused {
+		return []string{
+			" Enter: replace · Shift+Enter: all · Tab: query · Esc: close · Alt+c: case ",
+			" ⏎ replace · ⇧⏎ all · ⇥ query · esc close · Alt+c case ",
+			" ⏎ replace · ⇧⏎ all · esc close ",
+			" ⏎ replace · esc close ",
+		}
+	}
+	return []string{
+		" Enter: next · Shift+Enter: prev · Tab: replace · Esc: close · Alt+c: case ",
+		" ⏎ next · ⇧⏎ prev · ⇥ replace · esc close · Alt+c case ",
+		" ⏎ next · ⇥ replace · esc close ",
+		" ⏎ next · esc close ",
+	}
+}
+
 // openFind shows the find bar, seeded with the tab's remembered query
 // when it has one: closing the bar keeps the query (see
 // ClearFindHighlights), so Esc f after an Esc picks the search back
@@ -342,9 +382,25 @@ func (s *findStrip) enter(shift bool) {
 	if tab == nil {
 		return
 	}
+	// The bar stays pinned to the tab it opened on (ADR-0001: the mouse
+	// passes through, so the user can click another tab while it is
+	// up), and searching that tab from afar is harmless. REWRITING it
+	// is not: the user would be editing a buffer they cannot see, with
+	// the on-screen file suggesting the replace did nothing.
+	if tab != s.a.activeTabPtr() {
+		s.a.flash(fmt.Sprintf("Find is on %s — switch back to it to replace", tab.DisplayName()))
+		return
+	}
+	// The field cannot be opened over a preview (replaceAllowed), but a
+	// preview can be toggled on under an open bar by paths that do not
+	// rebind it; the page is read-only whichever way it got there.
+	if s.boundPreview() != nil {
+		s.a.flash(previewReadOnlyFlash)
+		return
+	}
 	if shift {
 		if n := tab.ReplaceAllMatches(s.replace.Text()); n > 0 {
-			s.a.flash(fmt.Sprintf("Replaced %d match(es)", n))
+			s.a.flash(plural(n, "Replaced %d match", "Replaced %d matches"))
 		}
 		return
 	}
@@ -431,8 +487,9 @@ func (a *App) hasFindQuery() bool {
 //
 //	" Find: <input>                       3 of 12   Enter: next · Esc: close "
 //
-// The hint on the right is dropped first when the window is too narrow
-// to fit it; the match counter is dropped next; the input yields to
+// The hint on the right shortens tier by tier (findHintTiers) and is
+// dropped first when not even its shortest form fits; the match counter
+// is dropped next; the input yields to
 // neither, because it is the whole point of the bar. Where the bar is
 // wide enough to grant it, the input gets at least minFieldWidth cells —
 // that is the budget the labels are measured against. Narrower than
@@ -463,18 +520,14 @@ func (s *findStrip) draw(r rect) {
 	// the input can be clipped against them, but they only get the cells
 	// left over once the input has minFieldWidth — the input outranks
 	// both, and the counter outranks the hint.
-	hint := " Enter: next · Shift+Enter: prev · Tab: replace · Esc: close · Alt+c: case "
-	if s.replaceOpen && s.focusReplace {
-		hint = " Enter: replace · Shift+Enter: all · Tab: query · Esc: close · Alt+c: case "
-	}
 	counter := s.counterText()
 	counterCost := 0
 	if counter != "" {
 		counterCost = runeLen(counter) + 2
 	}
-	hintCost := runeLen(hint) + 1
 	spare := (bx + bw) - (inputStart + minFieldWidth + 1)
-	showCounter, showHint := barLabelsThatFit(spare, counterCost, hintCost)
+	showCounter, hint := barHintThatFits(spare, counterCost, findHintTiers(s.replaceOpen && s.focusReplace))
+	showHint, hintCost := hint != "", runeLen(hint)+1
 
 	rightTextStart := bx + bw
 	if showHint {

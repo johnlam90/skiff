@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -135,6 +136,27 @@ func (a *App) activeMarkdownTab() *editor.Tab {
 // exactly when the active tab is a markdown file.
 func (a *App) hasMarkdownTab() bool {
 	return a.activeMarkdownTab() != nil
+}
+
+// previewReadOnlyFlash is the one sentence every refused edit flashes
+// while a markdown preview is up — a typed key, an Esc-leader edit verb,
+// a paste. It names the way out by its menu row because the toggle has
+// no leader key of its own.
+const previewReadOnlyFlash = "Preview is read-only — ≡ → Edit Markdown to edit"
+
+// previewRefusesEdit is the guard every buffer-mutating action runs
+// first: with the active tab showing its rendered preview it flashes
+// previewReadOnlyFlash and reports true, and the caller must not touch
+// the buffer. The menu already hides these rows (hasMutableTab), but
+// the Esc leader dispatches straight to the action — and an edit landing
+// in the markdown source hidden behind the page is invisible until the
+// user toggles back and finds text they never saw change.
+func (a *App) previewRefusesEdit() bool {
+	if a.activeMdPreview() == nil {
+		return false
+	}
+	a.flash(previewReadOnlyFlash)
+	return true
 }
 
 // mdPreviewState returns the active preview for tab, nil-safe against
@@ -411,7 +433,7 @@ func (a *App) handleMdPreviewKey(st *mdPreviewState, ev *tcell.EventKey) bool {
 	case tcell.KeyEnd:
 		st.scroll = len(st.lines)
 	default:
-		a.flash("Preview is read-only — ≡ → Edit Markdown to edit")
+		a.flash(previewReadOnlyFlash)
 	}
 	return true
 }
@@ -457,14 +479,21 @@ func (a *App) mdPreviewHit(st *mdPreviewState, x, y int) previewPos {
 	}
 	contentX, _, _ := a.mdPreviewGeom()
 	off := min(max(x-contentX, 0), ew)
+	// Whole clusters, exactly as drawStyledRunes advances: the column
+	// returned is always a cluster boundary, so a selection can never
+	// start between a letter and its combining mark or inside a ZWJ
+	// emoji, and the cells walked match the cells painted.
 	col, acc := 0, 0
-	for _, ru := range st.lines[line] {
-		w := uniseg.StringWidth(string(ru))
+	state := -1
+	for rest := st.lines[line]; rest != ""; {
+		var cluster string
+		var w int
+		cluster, rest, w, state = uniseg.FirstGraphemeClusterInString(rest, state)
 		if acc+w > off {
 			break
 		}
 		acc += w
-		col++
+		col += utf8.RuneCountInString(cluster)
 	}
 	return previewPos{line: line, col: col}
 }
@@ -591,7 +620,13 @@ func (a *App) drawMdPreview(tab *editor.Tab, st *mdPreviewState, x, y, w, h int)
 // drawStyledRunes paints one pre-styled line, advancing by real cell
 // widths so CJK and emoji land where the wrapper measured them; content
 // past maxW is clipped (the wrapper already fit the budget — this only
-// guards a narrower-than-cached frame mid-resize). Runes inside the
+// guards a narrower-than-cached frame mid-resize). The line is walked
+// by grapheme CLUSTER and each cluster is handed to the cell buffer
+// whole (CLAUDE.md "Three units"): painting rune by rune dropped every
+// combining mark (zero cells on its own, so it was skipped) and tore a
+// ZWJ family into three separate people. sts, the selection range and
+// the find spans all stay RUNE-indexed; a cluster takes the answer of
+// its base rune, the same rule the editor body follows. Runes inside the
 // half-open [hl.selFrom, hl.selTo) selection range repaint on the
 // theme's Selection background, with SelectionFg keeping their syntax
 // color only while it stays readable — the editor's own selection
@@ -600,9 +635,17 @@ func (a *App) drawMdPreview(tab *editor.Tab, st *mdPreviewState, x, y, w, h int)
 func drawStyledRunes(scr tcell.Screen, x, y, maxW int, s string, sts []tcell.Style,
 	hl previewLineHL, th theme.Theme) {
 	col := 0
-	for i, ru := range []rune(s) {
-		w := uniseg.StringWidth(string(ru))
+	state := -1
+	// i is the rune index of the cluster's base rune; next is where the
+	// following cluster starts.
+	for i, next := 0, 0; s != ""; i = next {
+		var cluster string
+		var w int
+		cluster, s, w, state = uniseg.FirstGraphemeClusterInString(s, state)
+		next = i + utf8.RuneCountInString(cluster)
 		if w == 0 {
+			// A cluster with no cell of its own (a combining mark with
+			// no base at the head of a line) has nothing to attach to.
 			continue
 		}
 		if col+w > maxW {
@@ -626,7 +669,7 @@ func drawStyledRunes(scr tcell.Screen, x, y, maxW int, s string, sts []tcell.Sty
 				st = theme.WithAttrs(st.Background(th.FindMatch).Foreground(th.Text), th.Attrs.FindMatch)
 			}
 		}
-		scr.SetContent(x+col, y, ru, nil, st)
+		scr.Put(x+col, y, cluster, st)
 		col += w
 	}
 }

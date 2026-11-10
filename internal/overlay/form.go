@@ -245,14 +245,7 @@ func (f *Form) HandleMouse(x, y int, btn tcell.ButtonMask) {
 		}
 		if y == inputRow && row.Options == nil {
 			if x >= fieldStart && x < fieldEnd {
-				target := row.Field.Scroll() + (x - fieldStart)
-				if target < 0 {
-					target = 0
-				}
-				if target > len(row.Field.Value) {
-					target = len(row.Field.Value)
-				}
-				row.Field.Cursor = target
+				row.Field.ClickAt(x - fieldStart)
 			}
 		}
 		return

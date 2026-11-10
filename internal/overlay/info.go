@@ -116,11 +116,16 @@ func (n *Info) body() []infoRow {
 	return rows
 }
 
-// bodyRows returns the visible body height: the screen minus chrome,
-// clamped to the wrapped row count and never below one row.
+// bodyRows returns the visible body height: the screen minus chrome and
+// minus the status row under the modal, clamped to the wrapped row
+// count and never below one row. The status row is held back because it
+// is where the editor reports what happened once the report is closed —
+// the same rule that keeps Confirm, Dirty and Prompt at nine rows on a
+// ten-row terminal. The body scrolls, so the row costs nothing but a
+// line of window.
 func (n *Info) bodyRows() int {
 	_, scrH := n.Size()
-	rows := scrH - infoChromeRows
+	rows := scrH - infoChromeRows - 1
 	if rows < 1 {
 		return 1
 	}

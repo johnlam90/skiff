@@ -671,6 +671,41 @@ func TestRefreshTreeAsync_WritesSessionOffThread(t *testing.T) {
 	}
 }
 
+// TestRefreshTreeAsync_QuietTickLeavesSessionAlone pins that an
+// unchanged session is not rewritten: a second tick with nothing moved
+// must leave whatever is on disk — here, a session another skiff on the
+// same project saved in between — untouched, and a real change must
+// write again.
+func TestRefreshTreeAsync_QuietTickLeavesSessionAlone(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	target := filepath.Join(root, "s.txt")
+	if err := os.WriteFile(target, []byte("one\ntwo\nthree\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, root)
+	a.openFile(target)
+	a.refreshTreeAsync()
+	pumpUntil(t, a, "tree scan", idle(&a.treeScan))
+
+	other := session.Project{SidebarWidth: 77, SavedAt: time.Now()}
+	if err := session.Save(root, other); err != nil {
+		t.Fatalf("other instance save: %v", err)
+	}
+	a.refreshTreeAsync()
+	pumpUntil(t, a, "tree scan", idle(&a.treeScan))
+	if p, _ := session.Load(root); p.SidebarWidth != 77 {
+		t.Fatalf("an idle tick overwrote the session: %+v", p)
+	}
+
+	a.activeTabPtr().MoveCursorTo(editor.Position{Line: 2}, false)
+	a.refreshTreeAsync()
+	pumpUntil(t, a, "tree scan", idle(&a.treeScan))
+	if p, _ := session.Load(root); len(p.Tabs) != 1 || p.Tabs[0].Line != 2 {
+		t.Fatalf("a changed session must be written: %+v", p)
+	}
+}
+
 // findTreeChild returns the root-level tree node named name, or nil.
 func findTreeChild(a *App, name string) *filetree.Node {
 	for _, c := range a.tree.Root.Children {
@@ -780,4 +815,130 @@ func TestHandleCustomActionDone_StillReindexesFinder(t *testing.T) {
 		t.Fatalf("a finished custom action kicked %d finder rebuild(s), want 1", *kicks)
 	}
 	pumpUntil(t, a, "tree scan", idle(&a.treeScan))
+}
+
+// TestReconcile_OlderMtimeReplacementReloads is the `mv backup f` case:
+// the replacement carries an OLDER mtime than the one the tab saw. The
+// old newer-than test read that as "unchanged" and left the stale
+// buffer one Save away from undoing the restore.
+func TestReconcile_OlderMtimeReplacementReloads(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "restored.txt")
+	if err := os.WriteFile(target, []byte("current\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+
+	if err := os.WriteFile(target, []byte("from backup\n"), 0644); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	past := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(target, past, past); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	a.reconcileOpenTabsWithDisk()
+	if got := tab.Buffer.Lines[0]; got != "from backup" {
+		t.Fatalf("an older-dated replacement must reload the clean tab, buffer = %q", got)
+	}
+}
+
+// TestReconcile_OlderMtimeConflictPromptsOncePerRevision is the dirty
+// half of the same change, and the guard on the once-per-revision memo:
+// the prompt opens for the older-dated file, and a dismissed prompt is
+// not re-opened by the next tick now that "differs" replaced "newer".
+func TestReconcile_OlderMtimeConflictPromptsOncePerRevision(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "restored.txt")
+	if err := os.WriteFile(target, []byte("current\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	a.activeTabPtr().InsertString("edit ")
+
+	if err := os.WriteFile(target, []byte("from backup\n"), 0644); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	past := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(target, past, past); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	a.reconcileOpenTabsWithDisk()
+	if !dirtyIsOpen(a) {
+		t.Fatalf("a dirty tab over an older-dated replacement must prompt; top = %T", a.overlays.Top())
+	}
+	a.closeAllModals()
+	a.reconcileOpenTabsWithDisk()
+	if a.overlays.IsOpen() {
+		t.Fatal("the same disk revision must not prompt twice")
+	}
+}
+
+// TestReconcile_ReappearedFileReloadsWhateverItsMtime pins the DiskGone
+// path against the Equal test: a file that comes back is reloaded even
+// when it comes back with the very mtime the tab last saw (a `mv` away
+// and back), because the reappearance zeroes the tab's memo first.
+func TestReconcile_ReappearedFileReloadsWhateverItsMtime(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "gone.txt")
+	if err := os.WriteFile(target, []byte("before\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	seen := tab.Mtime
+
+	if err := os.Remove(target); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	a.reconcileOpenTabsWithDisk()
+	if !tab.DiskGone {
+		t.Fatal("precondition: the tab should be marked DiskGone")
+	}
+	if err := os.WriteFile(target, []byte("after\n"), 0644); err != nil {
+		t.Fatalf("recreate: %v", err)
+	}
+	if err := os.Chtimes(target, seen, seen); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	a.reconcileOpenTabsWithDisk()
+	if tab.DiskGone {
+		t.Fatal("the file is back; DiskGone must clear")
+	}
+	if got := tab.Buffer.Lines[0]; got != "after" {
+		t.Fatalf("the reappeared file must be reloaded, buffer = %q", got)
+	}
+}
+
+// TestApplyTabProbes_StaleProbeAfterSaveIsIgnored pins the re-stat: a
+// probe taken before a save carries the previous mtime, and with
+// "changed" meaning "differs" it would read as an external write —
+// reloading a tab the user just saved, or prompting a conflict over
+// edits typed since. The tab must be left exactly as it is.
+func TestApplyTabProbes_StaleProbeAfterSaveIsIgnored(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "a.txt")
+	if err := os.WriteFile(p, []byte("one\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestApp(t, root)
+	a.openFile(p)
+	tab := a.activeTabPtr()
+	stale := tabProbe{path: p, mtime: tab.Mtime.Add(-time.Minute)}
+	tab.InsertString("typed since the save ")
+
+	a.applyTabProbes([]tabProbe{stale})
+
+	if a.anyModalOpen() {
+		t.Fatal("a stale probe raised a conflict prompt")
+	}
+	if !tab.Dirty || !strings.HasPrefix(tab.Buffer.Lines[0], "typed since") {
+		t.Fatalf("the tab was disturbed: dirty=%v line=%q", tab.Dirty, tab.Buffer.Lines[0])
+	}
 }

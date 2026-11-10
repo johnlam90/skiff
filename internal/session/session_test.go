@@ -373,3 +373,39 @@ func TestStateDirIsRedirectedDuringTests(t *testing.T) {
 		t.Fatalf("stateDir resolved under the real home during tests: %s", dir)
 	}
 }
+
+// TestSave_SweepsAbandonedTempFiles pins the cleanup of atomic-write
+// leftovers: a temp file old enough to be a crash remnant is removed on
+// the next save, a fresh one (a write in flight in another instance) is
+// left alone.
+func TestSave_SweepsAbandonedTempFiles(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	if err := Save(root, Project{SavedAt: time.Now()}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	dir, err := sessionsDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, ".abc.json.tmp-123")
+	fresh := filepath.Join(dir, ".def.json.tmp-456")
+	for _, p := range []string{stale, fresh} {
+		if err := os.WriteFile(p, []byte("{"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * tempFileGrace)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(root, Project{SavedAt: time.Now()}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatal("the abandoned temp file should be swept")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatal("a fresh temp file may be a write in flight and must stay")
+	}
+}

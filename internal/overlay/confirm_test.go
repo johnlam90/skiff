@@ -107,10 +107,98 @@ func TestConfirm_MouseZonesMatchDrawnButtons(t *testing.T) {
 	}
 }
 
-// TestConfirm_DrawTruncatesMessageByRunes pins the rune-safe
-// truncation: a multibyte message longer than the modal must clip at a
-// rune boundary with an ellipsis, never split a rune into garbage.
-func TestConfirm_DrawTruncatesMessageByRunes(t *testing.T) {
+// confirmBodyText returns the text painted on the confirm's visible body
+// rows, one string per row with the surrounding padding trimmed.
+func confirmBodyText(scr tcell.SimulationScreen, c *Confirm) []string {
+	r := c.rect()
+	var out []string
+	for i := 0; i < c.bodyRows(); i++ {
+		row := ""
+		for x := r.X + 2; x < r.X+r.W-2; x++ {
+			row += string(cellAt(scr, x, r.Y+4+i))
+		}
+		out = append(out, strings.TrimSpace(row))
+	}
+	return out
+}
+
+// TestConfirm_LongMessageWrapsInsteadOfTruncating is the regression test
+// for confirms cut mid-sentence: a Message wider than the frame used to
+// end in an ellipsis ("Remove the last commit? Its changes stay in your
+// …"), hiding the half of the question that states the consequence. It
+// must now wrap on word boundaries, grow the frame by the extra rows,
+// keep the buttons clickable on the row below, and paint no ellipsis.
+func TestConfirm_LongMessageWrapsInsteadOfTruncating(t *testing.T) {
+	scr := simScreen(t)
+	c, log := testConfirm()
+	c.Message = "Remove the last commit? Its changes stay in your working tree, ready to commit again."
+	c.Draw(scr)
+	scr.Show()
+
+	r := c.rect()
+	if r.W != confirmWidth || r.H != confirmChromeRows+2 {
+		t.Fatalf("an 85-cell message should wrap to two rows in the 54-cell frame, got %+v", r)
+	}
+	got := confirmBodyText(scr, c)
+	if joined := strings.Join(got, " "); joined != c.Message {
+		t.Fatalf("wrapped rows = %q, want the whole message", got)
+	}
+	for _, row := range got {
+		if strings.Contains(row, "…") {
+			t.Fatalf("wrapped message must not be ellipsised: %q", row)
+		}
+	}
+	_, yesX := c.buttonCols()
+	c.HandleMouse(r.X+yesX+1, r.Y+c.buttonRow(), tcell.Button1)
+	if len(*log) != 2 || (*log)[1] != "yes" {
+		t.Fatalf("Yes click under a wrapped message: got %v", *log)
+	}
+}
+
+// TestConfirm_LongMessageFitsTheMinimumSize pins the wrap against the
+// floor in CLAUDE.md: at 40x10 the chrome is unchanged, so the modal is
+// still nine rows above a visible status row, and the sentence that
+// cannot fit two rows is reachable by scrolling instead of being lost.
+func TestConfirm_LongMessageFitsTheMinimumSize(t *testing.T) {
+	const scrW, scrH = 40, 10
+	scr := simScreen(t)
+	scr.SetSize(scrW, scrH)
+	c, _ := testConfirm()
+	c.Size = func() (int, int) { return scrW, scrH }
+	c.Message = "Replace 3 matches in 2 files? Files change on disk; undo covers open tabs only, so commit first."
+	c.Draw(scr)
+	scr.Show()
+
+	r := c.rect()
+	if r.Y+r.H > scrH-1 || r.X < 0 || r.X+r.W > scrW {
+		t.Fatalf("wrapped confirm must leave the status row free: %+v on %dx%d", r, scrW, scrH)
+	}
+	if c.bodyRows() != scrH-confirmChromeRows {
+		t.Fatalf("bodyRows = %d, want the %d the screen leaves", c.bodyRows(), scrH-confirmChromeRows)
+	}
+	all := c.rows()
+	if len(all) <= c.bodyRows() {
+		t.Fatalf("fixture should overflow the window: %d rows", len(all))
+	}
+	if got := confirmBodyText(scr, c); got[0] != all[0] {
+		t.Fatalf("first visible row = %q, want %q", got[0], all[0])
+	}
+	// The tail is a scroll away, and the scroll clamps at the end.
+	c.HandleKey(key(tcell.KeyPgDn, 0))
+	c.HandleKey(key(tcell.KeyPgDn, 0))
+	c.HandleKey(key(tcell.KeyPgDn, 0))
+	c.Draw(scr)
+	scr.Show()
+	got := confirmBodyText(scr, c)
+	if got[len(got)-1] != all[len(all)-1] {
+		t.Fatalf("last visible row after scrolling = %q, want %q", got[len(got)-1], all[len(all)-1])
+	}
+}
+
+// TestConfirm_UnbreakableMessageWrapsByCluster pins the cluster-safe
+// half: a multibyte message with no spaces is broken between clusters,
+// never inside one, and no row overruns the frame.
+func TestConfirm_UnbreakableMessageWrapsByCluster(t *testing.T) {
 	scr := simScreen(t)
 	c, _ := testConfirm()
 	for i := 0; i < 40; i++ {
@@ -118,22 +206,15 @@ func TestConfirm_DrawTruncatesMessageByRunes(t *testing.T) {
 	}
 	c.Draw(scr)
 	scr.Show()
-	r := Centered(80, 24, confirmWidth, confirmHeight)
-	row := ""
-	for x := r.X + 1; x < r.X+r.W-1; x++ {
-		row += string(cellAt(scr, x, r.Y+4))
+	r := c.rect()
+	got := confirmBodyText(scr, c)
+	if joined := strings.Join(got, ""); joined != c.Message {
+		t.Fatalf("rows = %q, want the message split between runes", got)
 	}
-	if len([]rune(row)) > r.W-2 {
-		t.Fatalf("message row overflows the modal: %d runes", len([]rune(row)))
-	}
-	found := false
-	for _, ch := range row {
-		if ch == '…' {
-			found = true
+	for y := r.Y + 4; y < r.Y+4+c.bodyRows(); y++ {
+		if got := cellAt(scr, r.X+r.W-1, y); got != '│' {
+			t.Fatalf("row %d overran the right border: %q", y, got)
 		}
-	}
-	if !found {
-		t.Fatal("truncated message must end in an ellipsis")
 	}
 }
 

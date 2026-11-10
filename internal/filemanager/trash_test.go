@@ -213,9 +213,11 @@ func TestRestore_EmptyTrash(t *testing.T) {
 	}
 }
 
-// TestRestore_RenameFailureKeepsEntry: when the rename back fails (the
-// parent folder vanished under us) the entry stays so a later restore
-// can still succeed, and the error reaches the caller.
+// TestRestore_RenameFailureKeepsEntry: when the rename back fails the
+// entry stays so a later restore can still succeed, and the error
+// reaches the caller. (A vanished parent no longer counts as a failure —
+// Restore recreates it, see TestRestore_RecreatesMissingParent — so the
+// failure is injected at the rename seam.)
 func TestRestore_RenameFailureKeepsEntry(t *testing.T) {
 	root := t.TempDir()
 	m := New(root)
@@ -223,19 +225,16 @@ func TestRestore_RenameFailureKeepsEntry(t *testing.T) {
 	if _, err := m.Trash(target); err != nil {
 		t.Fatalf("Trash: %v", err)
 	}
-	if err := os.RemoveAll(filepath.Join(root, "sub")); err != nil {
-		t.Fatalf("remove parent: %v", err)
-	}
-
-	if _, err := m.Restore(); err == nil {
-		t.Fatal("expected the rename back to fail without its parent")
+	m.rename = func(string, string) error { return errExdev }
+	if _, err := m.Restore(); !errors.Is(err, errExdev) {
+		t.Fatalf("err = %v, want the rename failure", err)
 	}
 	if !m.HasTrash() {
 		t.Fatal("the entry must survive a failed restore")
 	}
-	mkDir(t, root, "sub")
+	m.rename = os.Rename
 	if _, err := m.Restore(); err != nil {
-		t.Fatalf("restore after re-creating the parent: %v", err)
+		t.Fatalf("restore once the rename works: %v", err)
 	}
 	if !exists(target) {
 		t.Fatal("second restore should land the file")
@@ -364,5 +363,86 @@ func TestEmptyTrash_DiscardsStored(t *testing.T) {
 	}
 	if m.trashDir == "" || !exists(m.trashed[0].stored) {
 		t.Fatal("a delete after EmptyTrash should land in a new trash dir")
+	}
+}
+
+// TestTrash_CrossDeviceInRepoUsesGitDir pins the middle tier: when the
+// temp dir is on another filesystem and the project is a git repo, the
+// item is stored under .git — never as an in-place sibling, which git
+// would report as an untracked file, stage on commit and carry off on
+// `stash -u`. Restore still brings it back.
+func TestTrash_CrossDeviceInRepoUsesGitDir(t *testing.T) {
+	root := t.TempDir()
+	mkDir(t, root, ".git")
+	m := New(root)
+	m.rename = func(oldpath, newpath string) error {
+		if !strings.HasPrefix(newpath, root+string(filepath.Separator)) {
+			return errExdev
+		}
+		return os.Rename(oldpath, newpath)
+	}
+	target := mkFile(t, root, "sub/doomed.txt", "x")
+	if _, err := m.Trash(target); err != nil {
+		t.Fatalf("Trash: %v", err)
+	}
+	stored := m.trashed[0].stored
+	if filepath.Dir(filepath.Dir(stored)) != filepath.Join(root, ".git", gitTrashName) {
+		t.Fatalf("stored = %q, want it in a session folder under .git/%s", stored, gitTrashName)
+	}
+	// A second skiff on the same repo deleting a same-named file must
+	// not overwrite this one's entry: both number from zero.
+	other := New(root)
+	other.rename = m.rename
+	twin := mkFile(t, root, "other/doomed.txt", "y")
+	if _, err := other.Trash(twin); err != nil {
+		t.Fatalf("second instance Trash: %v", err)
+	}
+	if other.trashed[0].stored == stored {
+		t.Fatal("two instances stored into the same path")
+	}
+	entries, _ := os.ReadDir(filepath.Join(root, "sub"))
+	if len(entries) != 0 {
+		t.Fatalf("nothing may be left beside the original, got %v", entries)
+	}
+	if _, err := m.Restore(); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "x" {
+		t.Fatalf("restored content = %q", got)
+	}
+	m.EmptyTrash()
+	if !exists(filepath.Join(root, ".git", gitTrashName)) {
+		t.Fatal("the shared folder must survive while another instance still holds entries")
+	}
+	other.EmptyTrash()
+	if exists(filepath.Join(root, ".git", gitTrashName)) {
+		t.Fatal("EmptyTrash should remove the emptied .git trash folder")
+	}
+}
+
+// TestRestore_RecreatesMissingParent pins that one entry whose folder
+// has since been renamed cannot strand the older deletes behind it: the
+// parent is recreated and both entries come back.
+func TestRestore_RecreatesMissingParent(t *testing.T) {
+	root := t.TempDir()
+	m := New(root)
+	first := mkFile(t, root, "first.txt", "1")
+	inner := mkFile(t, root, "a/x.txt", "2")
+	if _, err := m.Trash(first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Trash(inner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Rename(filepath.Join(root, "a"), "b"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := m.Restore(); err != nil {
+			t.Fatalf("restore %d: %v", i, err)
+		}
+	}
+	if !exists(first) || !exists(inner) {
+		t.Fatal("both trashed files should be back")
 	}
 }

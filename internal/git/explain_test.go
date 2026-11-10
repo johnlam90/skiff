@@ -27,6 +27,10 @@ func TestExplain_Mappings(t *testing.T) {
 		{"No stash entries found.", "no stash to pop"},
 		{"fatal: The current branch x has no upstream branch.", "this branch has no upstream yet"},
 		{"fatal: could not read from remote repository", "couldn't reach origin — check network / credentials"},
+		// git prints both lines when the remote was never configured;
+		// the missing remote must win over the network guess.
+		{"fatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.", "no remote named origin is configured — add one with git remote add origin <url>"},
+		{"fatal: No configured push destination.", "no remote named origin is configured — add one with git remote add origin <url>"},
 		{"error: Your local changes to the following files would be overwritten by checkout:", "uncommitted changes are in the way — commit or stash first"},
 		{"fatal: '/r/side' is already checked out at '/r/other'", "that branch is checked out in another worktree — remove or switch it first"},
 		{"fatal: refname 'side' already exists", "that path or branch already exists — pick another"},

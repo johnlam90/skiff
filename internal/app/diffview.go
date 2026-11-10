@@ -293,19 +293,27 @@ func diffSideStyles(rows []diff.Row, langPath string, th theme.Theme) (left, rig
 func diffLongestLine(unified []string, rows []diff.Row) int {
 	longest := 0
 	for _, l := range unified {
-		if n := runeLen(l); n > longest {
+		if n := diffLineCells(l); n > longest {
 			longest = n
 		}
 	}
 	for _, r := range rows {
-		if n := runeLen(r.Left); n > longest {
+		if n := diffLineCells(r.Left); n > longest {
 			longest = n
 		}
-		if n := runeLen(r.Right); n > longest {
+		if n := diffLineCells(r.Right); n > longest {
 			longest = n
 		}
 	}
 	return longest
+}
+
+// diffLineCells is one diff line's width in cells with its tabs
+// expanded — the unit the body scrolls sideways in. Counting runes
+// undercounts a tab-indented line by up to three cells per tab, which
+// stopped the scroll short of a long Go line's tail.
+func diffLineCells(s string) int {
+	return textdraw.Width(textdraw.ExpandTabs(s, editor.TabStop))
 }
 
 // handleDiffKey routes keyboard input while the diff view is open:
@@ -505,10 +513,14 @@ func (d *diffOverlay) modalRect() (x, y, w, h int) {
 	}
 	// Chrome: border + title + divider above the body, blank + buttons
 	// + border below = 7 rows. The body gets whatever remains, capped
-	// by how many rows the widest layout actually has.
+	// by how many rows the widest layout actually has. The floor is two
+	// rows, not three: 7 + 3 is the whole of a minHeight (10-row)
+	// terminal, and a modal that covers the status row hides the flash
+	// its own dismissal produces (CLAUDE.md, "minWidth / minHeight are
+	// derived floors"). Two rows scroll; a covered status row does not.
 	maxBody := a.height - 9
-	if maxBody < 3 {
-		maxBody = 3
+	if maxBody < 2 {
+		maxBody = 2
 	}
 	body := len(d.rows)
 	if len(d.unified) > body {
@@ -693,7 +705,10 @@ func (d *diffOverlay) drawSide(scr tcell.Screen, x, y, w, lineNo int, text strin
 	if tw <= 0 {
 		return
 	}
-	col, runeIdx, skipped := 0, 0, 0
+	// vis is the cluster's cell column in the UNSCROLLED line — tab
+	// stops are measured there, so sideways scrolling slides the text
+	// without re-flowing its indentation.
+	vis, runeIdx := 0, 0
 	state := -1
 	for rest := text; len(rest) > 0; {
 		var cluster string
@@ -701,14 +716,25 @@ func (d *diffOverlay) drawSide(scr tcell.Screen, x, y, w, lineNo int, text strin
 		cluster, rest, cw, state = uniseg.FirstGraphemeClusterInString(rest, state)
 		i := runeIdx
 		runeIdx += utf8.RuneCountInString(cluster)
-		if skipped < d.scrollX {
-			skipped += cw
-			continue
+		// uniseg measures a tab as zero cells. Dropping it with the
+		// combining marks below is what rendered Go code flush-left; a
+		// tab instead advances to the next stop, like the editor's.
+		isTab := cluster == "\t"
+		if isTab {
+			cw = editor.TabStop - vis%editor.TabStop
 		}
+		col := vis - d.scrollX
+		vis += cw
 		if cw == 0 {
 			continue // a bare combining mark with no base cell to ride
 		}
-		if col+cw > tw {
+		if col+cw <= 0 {
+			continue // wholly scrolled off the left edge
+		}
+		if col < 0 && !isTab {
+			continue // a wide glyph straddling the scroll edge: its visible half stays blank
+		}
+		if col >= tw || (col+cw > tw && !isTab) {
 			break
 		}
 		st := base
@@ -722,9 +748,18 @@ func (d *diffOverlay) drawSide(scr tcell.Screen, x, y, w, lineNo int, text strin
 				st = st.Reverse(true)
 			}
 		}
+		if isTab {
+			// One rune, several cells: every cell of the tab takes the
+			// tab's own style, so an emphasis span over changed
+			// indentation is as wide as the indentation. The part of a
+			// tab cut by either edge of the column still paints.
+			for c := max(col, 0); c < col+cw && c < tw; c++ {
+				textdraw.Cell(scr, x+diffNoGutter+c, y, ' ', nil, st)
+			}
+			continue
+		}
 		rs := []rune(cluster)
 		scr.SetContent(x+diffNoGutter+col, y, rs[0], rs[1:], st)
-		col += cw
 	}
 }
 
@@ -780,7 +815,11 @@ func diffBodyLines(p diff.Patch) []string {
 		for _, h := range f.Hunks {
 			out = append(out, h.Header())
 			for _, ln := range h.Lines {
-				out = append(out, string(ln.Kind.Marker())+ln.Text)
+				// Tabs are expanded here, measured from the text's own
+				// column 0 rather than the marker's, so indentation
+				// lands on the same stops the editor shows — the body
+				// is painted by DrawClipped, which drops a raw tab.
+				out = append(out, string(ln.Kind.Marker())+textdraw.ExpandTabs(ln.Text, editor.TabStop))
 				if ln.NoNewline {
 					out = append(out, `\ No newline at end of file`)
 				}

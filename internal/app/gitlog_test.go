@@ -72,7 +72,7 @@ func TestOpenGitLog_FromScriptedFake(t *testing.T) {
 	fake.Script("log --format=%h%x00%s%x00%cr -n 200 --",
 		"abc1234\x00scripted subject\x002 days ago\n"+
 			"def5678\x00older\x003 days ago\n", nil)
-	fake.Script("show --format= --src-prefix=a/ --dst-prefix=b/ abc1234 --", strings.Join([]string{
+	fake.Script("show --format= --no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/ abc1234 --", strings.Join([]string{
 		"diff --git a/f.txt b/f.txt",
 		"index 0000000..1111111 100644",
 		"--- a/f.txt",

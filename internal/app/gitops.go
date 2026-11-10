@@ -67,12 +67,28 @@ func (a *App) runGitOp(label, okFlash string, touchesTree bool, op gitOp) bool {
 // explicit confirm. The routing reads the OpError's flags, never its
 // text — the git package classified the refusal when it built the
 // error.
+//
+// Every failure branch opens an overlay, so every one of them yields to
+// landingWouldInterrupt: an op finishing while the user types into a
+// prompt or the find bar reports as an error flash carrying git's
+// advice, and the follow-up offer is not made — re-running the verb
+// with nothing in the way brings it back.
 func (a *App) handleGitOpDone(r gitOpResult, err error) {
 	var opErr *git.OpError
 	errors.As(err, &opErr)
 	switch {
 	case err == nil:
 		a.flash(r.okFlash)
+	case a.landingWouldInterrupt():
+		// The force ladders key off these targets; a refusal that is
+		// only flashed must not leave one armed for an unrelated later
+		// failure to pick up.
+		a.gitDeleteTarget, a.gitWorktreeTarget = "", ""
+		detail := err.Error()
+		if opErr != nil && opErr.Advice != "" {
+			detail = opErr.Advice
+		}
+		a.flashError(r.label + " failed — " + detail)
 	case opErr != nil && opErr.NonFastForward && r.label == "Push":
 		c := a.openConfirm("Push rejected",
 			"origin has commits you don't. Pull (merge), then push?",
@@ -266,6 +282,7 @@ func (a *App) menuGitFetch() {
 type branchListResult struct {
 	purpose string // "switch" | "merge" | "delete" | "base" | "worktree"
 	names   []string
+	remote  map[string]bool // which names are remote-tracking
 }
 
 // requestBranchList collects the branch list on the branchList job — on
@@ -279,14 +296,26 @@ type branchListResult struct {
 func (a *App) requestBranchList(purpose string) {
 	repo := a.readRepo()
 	a.branchList.Start(func(context.Context) (branchListResult, error) {
-		names, _ := repo.Branches()
-		return branchListResult{purpose: purpose, names: names}, nil
+		list, _ := repo.Branches()
+		return branchListResult{purpose: purpose, names: list.Names, remote: list.Remote}, nil
 	})
 }
 
 // handleBranchList routes a collected branch list to the picker that
 // asked for it.
+//
+// A list that lands on top of something the user has since started
+// typing into is dropped with a flash rather than opened — the picker
+// was asked for a moment ago, the prompt is being used now.
 func (a *App) handleBranchList(r branchListResult, _ error) {
+	// Remembered for as long as the picker built from this list is up:
+	// its rows are plain names, and whether one is remote-tracking is a
+	// fact only the listing knows (a slash proves nothing).
+	a.remoteBranches = r.remote
+	if a.landingWouldInterrupt() {
+		a.flash("Branch list is ready — pick the action again to open it")
+		return
+	}
 	switch r.purpose {
 	case "switch":
 		a.openSwitchBranchPick(r.names)
@@ -310,7 +339,7 @@ func (a *App) openComparePick(names []string) {
 	items = append(items, listPickItem{Label: "HEAD (working default)", Current: a.diffBase == ""})
 	for _, n := range names {
 		it := listPickItem{Label: n, Current: n == a.diffBase}
-		if strings.ContainsRune(n, '/') {
+		if a.remoteBranches[n] {
 			it.Tag = "remote"
 		}
 		items = append(items, it)
@@ -374,17 +403,17 @@ func (a *App) openSwitchBranchPick(names []string) {
 		a.flash("No other branches")
 		return
 	}
-	a.openListPick("Switch branch", branchPickItems(names, a.gitSnap.Branch),
+	a.openListPick("Switch branch", a.branchPickItems(names, a.gitSnap.Branch),
 		func(app *App, i int) { app.doGitSwitchBranch(names[i]) }, nil, nil)
 }
 
 // branchPickItems shapes branch names for the list picker: the current
 // branch wears the ● marker and remote-tracking spellings a dimmed tag.
-func branchPickItems(names []string, current string) []listPickItem {
+func (a *App) branchPickItems(names []string, current string) []listPickItem {
 	items := make([]listPickItem, len(names))
 	for i, n := range names {
 		items[i] = listPickItem{Label: n, Current: n == current}
-		if strings.ContainsRune(n, '/') {
+		if a.remoteBranches[n] {
 			items[i].Tag = "remote"
 		}
 	}
@@ -403,16 +432,20 @@ func (a *App) doGitSwitchBranch(name string) {
 	if _, ok := a.safeRef(name); !ok {
 		return
 	}
-	if _, ok := a.safeRef(localBranchName(name)); !ok {
+	if _, ok := a.safeRef(a.localBranchName(name)); !ok {
 		return
 	}
-	a.runGitOp("Switch branch", "On "+localBranchName(name), true,
+	a.runGitOp("Switch branch", "On "+a.localBranchName(name), true,
 		func(r *git.Repo) error { return r.Switch(name) })
 }
 
 // localBranchName strips the remote prefix from a remote-tracking
-// spelling ("origin/fix" → "fix"); local names pass through.
-func localBranchName(name string) string {
+// spelling ("origin/fix" → "fix"); local names pass through, slashes
+// and all ("feature/login" stays "feature/login").
+func (a *App) localBranchName(name string) string {
+	if !a.remoteBranches[name] {
+		return name
+	}
 	if i := strings.IndexByte(name, '/'); i >= 0 {
 		return name[i+1:]
 	}
@@ -444,9 +477,19 @@ func (a *App) menuGitNewBranch() {
 
 // menuGitStash stashes the working tree, new files included (-u —
 // "stash my changes" from an editor means the file just created too).
+// A tree with nothing changed is refused with its own flash.
 func (a *App) menuGitStash() {
 	a.closeMenu()
 	if !a.hasGitRepo() {
+		return
+	}
+	// On a clean tree `git stash push` exits 0 having saved nothing
+	// ("No local changes to save"), so the success flash below claimed
+	// a stash that does not exist — and the next Pop stash would pop
+	// some older one. The last snapshot already knows the tree is
+	// clean; say so and leave git alone.
+	if !a.hasGitChanges() {
+		a.flash("Nothing to stash")
 		return
 	}
 	a.runGitOp("Stash", "Stashed working tree", true, (*git.Repo).StashPush)
@@ -491,12 +534,12 @@ func (a *App) menuGitMergeBranch() {
 
 // openMergeBranchPick opens the merge picker for a collected list.
 func (a *App) openMergeBranchPick(all []string) {
-	names := otherNames(all, a.gitSnap.Branch, false)
+	names := a.otherNames(all, a.gitSnap.Branch, false)
 	if len(names) == 0 {
 		a.flash("No other branches to merge")
 		return
 	}
-	a.openListPick("Merge into "+a.gitSnap.Branch, branchPickItems(names, ""),
+	a.openListPick("Merge into "+a.gitSnap.Branch, a.branchPickItems(names, ""),
 		func(app *App, i int) {
 			name := names[i]
 			if _, ok := app.safeRef(name); !ok {
@@ -540,12 +583,12 @@ func (a *App) menuGitDeleteBranch() {
 
 // openDeleteBranchPick opens the delete picker for a collected list.
 func (a *App) openDeleteBranchPick(all []string) {
-	names := otherNames(all, a.gitSnap.Branch, true)
+	names := a.otherNames(all, a.gitSnap.Branch, true)
 	if len(names) == 0 {
 		a.flash("No other local branches")
 		return
 	}
-	a.openListPick("Delete branch", branchPickItems(names, ""),
+	a.openListPick("Delete branch", a.branchPickItems(names, ""),
 		func(app *App, i int) {
 			name := names[i]
 			if _, ok := app.safeRef(name); !ok {
@@ -565,13 +608,13 @@ func (a *App) openDeleteBranchPick(all []string) {
 // otherNames filters a collected branch list: drop the current branch,
 // and with localOnly the remote-tracking spellings too (you can't
 // `branch -d` those).
-func otherNames(all []string, current string, localOnly bool) []string {
+func (a *App) otherNames(all []string, current string, localOnly bool) []string {
 	var out []string
 	for _, n := range all {
 		if n == current {
 			continue
 		}
-		if localOnly && strings.ContainsRune(n, '/') {
+		if localOnly && a.remoteBranches[n] {
 			continue
 		}
 		out = append(out, n)

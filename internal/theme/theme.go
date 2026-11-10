@@ -119,6 +119,23 @@ func (t Theme) SelectionFg(fg tcell.Color) tcell.Color {
 	return t.Text
 }
 
+// StatusError returns the colours a failure report or warning is
+// painted with on the status bar. Error is tuned against the editor
+// background; the bar is usually the accent colour, and on most palettes
+// the two are near-identical in luminance (Tokyo Night: 1.05:1), so the
+// one message the user most needs to read was the one they could not.
+// Where Error already clears the status floor over the bar it is used
+// as-is. Elsewhere the pair flips into a chip — Error as the background,
+// with a foreground walked to 4.5:1 against it — which keeps the hue as
+// the signal instead of walking it to a near-black that reads like any
+// other status text.
+func (t Theme) StatusError() (fg, bg tcell.Color) {
+	if ContrastRatio(t.Error, t.StatusBG) >= minStatusContrast {
+		return t.Error, t.StatusBG
+	}
+	return ensureContrast(t.BG, t.Error, 4.5), t.Error
+}
+
 // minFieldContrast is the readability floor for text typed into a
 // focused input. WCAG AA, not the 3:1 graphics bar: the custom-action
 // form's field is where the user reads their own keystrokes back, so

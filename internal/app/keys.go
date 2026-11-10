@@ -31,9 +31,17 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 	// bytes inside the paste are stripped — delivering them would close
 	// whatever modal is open or arm the leader — and the leader window
 	// is kept disarmed so pasted text can never fire an action.
+	//
+	// A paste that arrives while an overlay or a strip has the keyboard
+	// is narrower still: only its printable text gets through. See
+	// pasteKeyToSurface.
 	if a.pasting {
 		a.lastEscape = time.Time{}
 		if ev.Key() == tcell.KeyEsc {
+			return
+		}
+		if a.overlays.Top() != nil || a.strip != nil {
+			a.pasteKeyToSurface(ev)
 			return
 		}
 	}
@@ -54,9 +62,9 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 	// Pasted text bound for the editor is buffered, not typed: one
 	// InsertString on the end marker is one undo entry and one find
 	// re-scan, where per-key insertion snapshotted the whole buffer on
-	// every pasted line. Overlays and strips above still take pasted
-	// keys one at a time — a prompt's field has no batch seam and
-	// needs none.
+	// every pasted line. Overlays and strips never reach this: the
+	// paste block at the top hands them their text rune by rune — a
+	// prompt's field has no batch seam and needs none.
 	if a.pasting {
 		a.bufferPasteKey(ev)
 		return
@@ -272,6 +280,56 @@ func (a *App) leaderWindowIntercept(ev *tcell.EventKey) bool {
 	return false
 }
 
+// pasteKeyToSurface delivers one pasted key to the overlay or strip that
+// owns the keyboard — as TEXT, never as a command. Before this, a
+// pasted Tab or Enter reached the surface as the key it looks like:
+// "\tf\n" pasted over the unsaved-changes modal walked focus to Discard
+// and activated it, and "X\nY\n" pasted into the find bar's replace
+// field ran two replacements.
+//
+// The rule: a rune is delivered as a plain rune (modifiers stripped —
+// an Alt rune is tmux's spelling of ESC + rune, and Alt+c in the find
+// bar is a mode toggle), and a run of Enter / LF / Tab BETWEEN runes
+// collapses to one space. Leading and trailing breaks are dropped, so
+// the trailing newline a terminal selection usually carries does not
+// become a trailing space in a file name. A space rather than nothing
+// because every text surface here is a single-line field, where
+// "foo\nbar" meaning "foo bar" is the reading that loses least.
+// Everything else — arrows, Backspace, function keys — has no text form
+// and is dropped. A surface with no text field (the confirm and dirty
+// modals, the pickers' button rows) ignores plain runes, so a paste
+// over one is a no-op.
+func (a *App) pasteKeyToSurface(ev *tcell.EventKey) {
+	switch ev.Key() {
+	case tcell.KeyRune:
+		if a.pasteGap {
+			a.pasteGap = false
+			a.deliverPastedRune(' ')
+		}
+		a.pasteSurfaceText = true
+		a.deliverPastedRune(ev.Rune())
+	case tcell.KeyEnter, tcell.KeyLF, tcell.KeyTab:
+		// Only a break that follows text can become a separator; one
+		// that opens the paste has nothing to separate.
+		a.pasteGap = a.pasteSurfaceText
+	}
+}
+
+// deliverPastedRune hands r to whichever surface owns the keyboard, as
+// an unmodified rune key. The owner is re-read on every rune: a surface
+// cannot close mid-paste any more (nothing but text reaches it), but
+// asking is cheaper than proving that at every future overlay.
+func (a *App) deliverPastedRune(r rune) {
+	ev := tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone)
+	if ov := a.overlays.Top(); ov != nil {
+		ov.HandleKey(ev)
+		return
+	}
+	if a.strip != nil {
+		a.strip.handleKey(ev)
+	}
+}
+
 // bufferPasteKey appends one pasted key to the paste buffer as the text
 // it stands for: a rune verbatim (an Alt rune is a tmux-mangled ESC
 // byte plus the rune, and the rune is content), Enter and LF as "\n",
@@ -310,7 +368,11 @@ func (a *App) applyPaste() {
 		return
 	}
 	tab := a.activeTabPtr()
-	if tab == nil || a.mdPreviewFor(tab) != nil {
+	if tab == nil {
+		return
+	}
+	if a.mdPreviewFor(tab) != nil {
+		a.flash(previewReadOnlyFlash)
 		return
 	}
 	tab.InsertString(text)

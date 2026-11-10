@@ -31,6 +31,7 @@ import (
 	"github.com/johnlam90/skiff/internal/finder"
 	"github.com/johnlam90/skiff/internal/git"
 	"github.com/johnlam90/skiff/internal/overlay"
+	"github.com/johnlam90/skiff/internal/session"
 	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 )
@@ -192,6 +193,14 @@ type App struct {
 	// conflict.go.
 	diskConflicts map[string]time.Time
 
+	// formatInFlight counts, per tab path, the format-on-save runs that
+	// have started and not yet landed. While one is out, the file's
+	// mtime moving is the editor's own formatter at work, so the save
+	// path's disk check (saveBlockedByDiskChange) must not read it as a
+	// second writer. Touched only on the event loop: execFormatter
+	// counts up before the job starts, handleFormatDone counts down.
+	formatInFlight map[string]int
+
 	// overlays is the single routing truth for which floating modal is
 	// up: handleKey, handleMouse, draw, and anyModalOpen all consult it
 	// instead of the per-modal booleans. The booleans below survive as
@@ -340,6 +349,13 @@ type App struct {
 	pasting     bool
 	pasteBuf    []rune
 	pasteLastCR bool
+	// pasteSurfaceText and pasteGap are the paste state for the OTHER
+	// destination — an overlay or strip (pasteKeyToSurface): whether
+	// any pasted rune has been delivered yet, and whether a line break
+	// or tab is waiting to become a single space before the next one.
+	// Both reset with the paste markers.
+	pasteSurfaceText bool
+	pasteGap         bool
 
 	// files is the one owner of every file operation — create, rename,
 	// trash / restore, move, copy, duplicate — and of the session trash
@@ -510,9 +526,14 @@ type App struct {
 	// checkbox set (absent = checked) and the panel row the open diff
 	// came from (-1 = diff not from the panel). The one-at-a-time
 	// mutation gate is the gitOp job above.
-	gitCommitChecks   map[string]bool
-	diffPanelRow      int
-	gitDeleteTarget   string // branch mid-delete, for the force-delete offer
+	gitCommitChecks map[string]bool
+	diffPanelRow    int
+	gitDeleteTarget string          // branch mid-delete, for the force-delete offer
+	remoteBranches  map[string]bool // which names in the last branch listing are remote-tracking
+	// sessionSaved is the session payload the refresh tick last handed
+	// to the store (SavedAt unset) — the tick skips the write while a
+	// fresh capture still equals it.
+	sessionSaved      session.Project
 	gitWorktreeTarget string // worktree mid-remove, for the force-remove offer
 	diffBase          string // compare-against ref; "" = HEAD (the default)
 
@@ -813,6 +834,32 @@ func (a *App) Close() {
 	}
 }
 
+// fitToScreen is everything Run does between learning the terminal's
+// real size and the first paint. It is its own function because the
+// constructors run with a.width == 0 — tcell reports the size only once
+// the screen is live — so every geometry-dependent decision taken
+// during New (the session's sidebar, the tab strip's scroll) has to be
+// re-taken here, and a step forgotten here is invisible until someone
+// boots into exactly the wrong shape.
+func (a *App) fitToScreen() {
+	a.width, a.height = a.screen.Size()
+	// Apply the narrow-terminal rule against the size we booted at, not
+	// just against later resizes: starting inside a 55-column tmux pane
+	// is the exact case this exists for, and tcell does not synthesise
+	// an EventResize for the initial size.
+	a.applyResponsiveSidebar()
+	// A restored session activates its tab before any size is known
+	// (restoreSession runs in New, where a.width is still zero), so the
+	// tab strip's scroll has never been fitted to this terminal: with
+	// more tabs than fit, the active one sat off the right edge until
+	// the first resize or tab switch. After the sidebar rule on
+	// purpose — hiding the sidebar changes the strip's width.
+	a.ensureActiveTabVisible()
+	// Reconcile the mouse mode against the state we booted into before
+	// the first paint; every later change rides handleEvent.
+	a.syncMouseMode()
+}
+
 // Run is the editor's main event loop. It blocks on PollEvent, dispatches
 // each event, redraws, and exits when a.quit is set.
 func (a *App) Run() error {
@@ -837,15 +884,7 @@ func (a *App) Run() error {
 	stopSignals := a.watchSignals()
 	defer stopSignals()
 
-	a.width, a.height = a.screen.Size()
-	// Apply the narrow-terminal rule against the size we booted at, not
-	// just against later resizes: starting inside a 55-column tmux pane
-	// is the exact case this exists for, and tcell does not synthesise
-	// an EventResize for the initial size.
-	a.applyResponsiveSidebar()
-	// Reconcile the mouse mode against the state we booted into before
-	// the first paint; every later change rides handleEvent.
-	a.syncMouseMode()
+	a.fitToScreen()
 	a.draw()
 	a.screen.Show()
 
@@ -889,9 +928,12 @@ func (a *App) handleEvent(ev tcell.Event) {
 		a.width, a.height = a.screen.Size()
 		// The tab strip's viewport just changed width — keep the
 		// active tab on screen rather than wherever the old scroll
-		// left it.
-		a.ensureActiveTabVisible()
+		// left it. The sidebar rule runs FIRST: it can show or hide
+		// the explorer on this very resize, and a scroll computed
+		// against the old sidebar width leaves the active tab outside
+		// the strip the frame then paints.
 		a.applyResponsiveSidebar()
+		a.ensureActiveTabVisible()
 		a.screen.Sync()
 	case *tcell.EventKey:
 		a.handleKey(e)
@@ -903,6 +945,7 @@ func (a *App) handleEvent(ev tcell.Event) {
 		// dropped so a paste can never complete an armed Esc.
 		a.pasting = e.Start()
 		a.lastEscape = time.Time{}
+		a.pasteSurfaceText, a.pasteGap = false, false
 		if a.pasting {
 			a.pasteBuf = a.pasteBuf[:0]
 			a.pasteLastCR = false
@@ -913,8 +956,13 @@ func (a *App) handleEvent(ev tcell.Event) {
 		a.handleMouse(e)
 	case *quitRequestEvent:
 		// A signal, not a person: skip the dirty-tab modal and quit.
-		// Close()'s session save preserves state, and dirty buffers
-		// come back dirty on the next open's session restore.
+		// Close()'s session save preserves which tabs were open and
+		// where their carets sat — and nothing else. The session
+		// stores paths and positions, never buffer text, so unsaved
+		// edits are LOST on a signal quit; the next open reads every
+		// tab back from disk. There is no recovery file. A terminal
+		// that is going away cannot wait on a prompt, which is why
+		// this still does not ask.
 		a.quit = true
 	case *autoScrollEvent:
 		a.handleAutoScroll()

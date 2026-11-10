@@ -275,3 +275,17 @@ func TestFileOpGate_IsSeparateFromProjectReplace(t *testing.T) {
 	close(release)
 	pumpUntil(t, a, "replace", idle(&a.projReplace))
 }
+
+// TestHandleFileOpProgress_Pluralises pins the mid-copy flash's
+// grammar: the first file copied is "1 file".
+func TestHandleFileOpProgress_Pluralises(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.handleFileOpProgress("Copy", 1)
+	if !strings.HasSuffix(a.statusMsg, "… 1 file") {
+		t.Fatalf("flash = %q, want it to end \"… 1 file\"", a.statusMsg)
+	}
+	a.handleFileOpProgress("Copy", 12)
+	if !strings.HasSuffix(a.statusMsg, "… 12 files") {
+		t.Fatalf("flash = %q, want it to end \"… 12 files\"", a.statusMsg)
+	}
+}

@@ -20,6 +20,7 @@ package app
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/johnlam90/skiff/internal/editor"
 )
@@ -76,7 +77,7 @@ func (a *App) openFileMode(path string, preview bool) {
 	if err != nil {
 		// Name the file and the verb: a bare "Error: is a directory"
 		// left the user guessing which click it was about.
-		a.flash(fmt.Sprintf("Couldn't open %s: %v", filepath.Base(path), err))
+		a.flash(openFailure(path, err))
 		return
 	}
 	t.Preview = preview
@@ -137,4 +138,15 @@ func (a *App) notePreviewCreated() {
 	}
 	a.previewCoachShown = true
 	a.flash("Preview tab — edit it or click again to keep it open")
+}
+
+// openFailure words a failed open for the status bar: the verb, the
+// file's name once, then the reason. Some of the editor's refusals
+// already lead with the name ("bin.dat: looks like a binary file"), and
+// prefixing them again read "Couldn't open bin.dat: bin.dat: looks like
+// a binary file".
+func openFailure(path string, err error) string {
+	name := filepath.Base(path)
+	reason := strings.TrimPrefix(err.Error(), name+": ")
+	return fmt.Sprintf("Couldn't open %s: %s", name, reason)
 }

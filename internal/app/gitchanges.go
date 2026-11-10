@@ -118,7 +118,7 @@ type gitPanelState struct {
 // instead of switching.
 func (a *App) toggleGitPanel() {
 	if a.tree == nil {
-		a.flash("Git changes isn't available in single-file mode")
+		a.flash(singleFileRefusalFor("Git changes"))
 		return
 	}
 	if a.gitPanel.active && a.sidebarShown {
@@ -812,7 +812,10 @@ func (a *App) gitPanelHintSegs() []string {
 	if a.gitPanel.onBtns {
 		return []string{"⏎ " + a.gitPanelBtnVerb(), "←→ button", "⇥ list", "esc exit"}
 	}
-	return []string{"↑↓ move", "␣ stage", "⏎ diff", "⇥ buttons", "esc exit"}
+	// "check", not "stage": Space flips the row's commit checkbox. Skiff
+	// never runs `git add` (README, "Commit straight from the panel"),
+	// and a hint that says stage sends people looking for an index.
+	return []string{"↑↓ move", "␣ check", "⏎ diff", "⇥ buttons", "esc exit"}
 }
 
 // gitPanelBtnVerb names the focused action-row button, or "" when the

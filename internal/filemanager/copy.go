@@ -161,6 +161,12 @@ func uniqueDestPath(dir, base string, isDir bool) string {
 	if !isDir {
 		ext = filepath.Ext(base)
 		stem = strings.TrimSuffix(base, ext)
+		if stem == "" {
+			// A dotfile is all "extension" to filepath.Ext: ".env" would
+			// become " copy.env" — a leading space, no longer hidden, and
+			// outside every `.env*` ignore rule.
+			stem, ext = base, ""
+		}
 	}
 	for n := 1; ; n++ {
 		name := stem + " copy" + ext
@@ -208,6 +214,11 @@ func copyTree(src, dst string, progress func()) error {
 			return err
 		}
 		return os.Symlink(target, dst)
+	case !info.Mode().IsRegular():
+		// A FIFO, socket or device. Opening a FIFO blocks until a writer
+		// shows up, which hung the file-op job — and with it every later
+		// paste, move and duplicate — for the rest of the session.
+		return fmt.Errorf("%s is not a regular file", filepath.Base(src))
 	default:
 		in, err := os.Open(src)
 		if err != nil {

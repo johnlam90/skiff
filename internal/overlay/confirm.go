@@ -10,6 +10,7 @@ package overlay
 import (
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/textdraw"
 	"github.com/johnlam90/skiff/internal/theme"
 )
 
@@ -54,6 +55,13 @@ const confirmMaxBodyRows = 14
 // are added on top, so a one-row body reproduces confirmHeight exactly.
 const confirmChromeRows = confirmHeight - 1
 
+// confirmSqueezedChromeRows is the chrome a windowed body can fall back
+// to on a short screen: the same rows minus one of the two blanks under
+// the buttons. It only ever applies to a multi-row body that would
+// otherwise cover the status row — the one-line form keeps
+// confirmHeight, which is what sets minHeight.
+const confirmSqueezedChromeRows = confirmChromeRows - 1
+
 // confirmDefaultLabels are the stock captions. A caller that leaves
 // Labels zero gets these plus the pinned columns, so every existing
 // Yes/No confirm renders byte-identically.
@@ -65,8 +73,11 @@ var confirmDefaultLabels = [2]string{"[  No  ]", "[ Yes ]"}
 // click, or a click outside runs OnCancel.
 //
 // Rows (relY), one-line form: 0 border · 1 title · 2 divider · 3 blank ·
-// 4 message · 5 buttons · 6–7 blank · 8 border. A multi-line Body grows
-// rows 4..4+n-1 and pushes the button row down with it.
+// 4 message · 5 buttons · 6–7 blank · 8 border. A multi-line Body — or a
+// Message too long for one row, which is word-wrapped rather than cut
+// (see rows) — grows rows 4..4+n-1 and pushes the button row down with
+// it; on a screen too short for all of it the body windows and scrolls,
+// so the chrome (confirmChromeRows) never grows.
 type Confirm struct {
 	Title   string
 	Message string
@@ -166,19 +177,46 @@ func (c *Confirm) buttonCols() (noX, yesX int) {
 	return cols[0], cols[1]
 }
 
+// rows returns the scrollable body rows: the caller's Body, or — when
+// there is none and the one-line Message is wider than the frame's text
+// column — the Message word-wrapped to that column. A Message that fits
+// returns nil, which is the classic one-line form with its pinned
+// geometry. The wrap exists because the alternative was an ellipsis in
+// the middle of the question a destructive confirm asks ("Remove the
+// last commit? Its changes stay in your …"): the rest of the sentence
+// is the consent. Everything that sizes, scrolls or paints the body
+// reads it here, so a wrapped Message windows exactly like a Body and
+// costs no chrome row.
+func (c *Confirm) rows() []string {
+	if len(c.Body) > 0 {
+		return c.Body
+	}
+	w := c.BodyTextWidth()
+	if w <= 0 || runeLen(c.Message) <= w {
+		return nil
+	}
+	return textdraw.WrapWords(c.Message, w)
+}
+
 // bodyRows returns how many body rows are visible: one for the Message
-// form, otherwise the Body length clamped by the row cap and by what
-// the screen can fit above the button row.
+// form, otherwise the row count (Body, or a wrapped Message) clamped by
+// the row cap and by what the screen can fit above the button row.
 func (c *Confirm) bodyRows() int {
-	n := len(c.Body)
+	n := len(c.rows())
 	if n == 0 {
 		return 1
 	}
 	if n > confirmMaxBodyRows {
 		n = confirmMaxBodyRows
 	}
-	if _, h := c.Size(); n > h-confirmChromeRows {
-		n = h - confirmChromeRows
+	// The window is what the screen leaves once the status row under
+	// the modal is held back (that row is where the confirm's own
+	// outcome is flashed — see CLAUDE.md, "minWidth / minHeight are
+	// derived floors") and the second of the two blank rows under the
+	// buttons is given up, which rect does when it has to. At minHeight
+	// that is two rows of body in the same nine-row modal.
+	if _, h := c.Size(); n > h-1-confirmSqueezedChromeRows {
+		n = h - 1 - confirmSqueezedChromeRows
 	}
 	if n < 1 {
 		n = 1
@@ -197,7 +235,7 @@ func (c *Confirm) buttonRow() int { return 4 + c.bodyRows() }
 func (c *Confirm) buttonOffset() int { return (c.frameWidth() - confirmWidth) / 2 }
 
 // bar describes the body's scroll indicator inside frame r. total is
-// len(Body), which is zero in the classic Message form — so a bar is
+// len(rows()), which is zero in the classic Message form — so a bar is
 // arithmetically impossible there and the pinned 54×9 geometry keeps
 // every cell it had. Draw and HandleMouse both derive the bar here, so
 // the painted column and the clickable column are the same column.
@@ -206,7 +244,7 @@ func (c *Confirm) bar(r Rect) Bar {
 		x:      BarColumn(r),
 		top:    r.Y + 4,
 		viewH:  c.bodyRows(),
-		total:  len(c.Body),
+		total:  len(c.rows()),
 		scroll: c.scroll,
 	}
 }
@@ -214,11 +252,11 @@ func (c *Confirm) bar(r Rect) Bar {
 // Scroll exposes the first visible body row for tests.
 func (c *Confirm) Scroll() int { return c.scroll }
 
-// ScrollBy moves the Body window by delta rows, clamped to the content.
+// ScrollBy moves the body window by delta rows, clamped to the content.
 // A body that fits entirely pins to zero, so the one-line Message form
 // can never scroll its text out of view.
 func (c *Confirm) ScrollBy(delta int) {
-	maxScroll := len(c.Body) - c.bodyRows()
+	maxScroll := len(c.rows()) - c.bodyRows()
 	if maxScroll <= 0 {
 		c.scroll = 0
 		return
@@ -233,10 +271,19 @@ func (c *Confirm) ScrollBy(delta int) {
 }
 
 // rect computes the confirm's centered rectangle. Height tracks the
-// body so the button row never lands on top of the content.
+// body so the button row never lands on top of the content. When the
+// full chrome plus the body would cover the status row, the frame sheds
+// the spare blank row under the buttons instead (never below the
+// squeezed chrome) — rows are positioned from the top, so the button
+// row and the hit zones do not move.
 func (c *Confirm) rect() Rect {
 	w, h := c.Size()
-	return Centered(w, h, c.frameWidth(), confirmChromeRows+c.bodyRows())
+	n := c.bodyRows()
+	fh := confirmChromeRows + n
+	if fh > h-1 {
+		fh = max(h-1, confirmSqueezedChromeRows+n)
+	}
+	return Centered(w, h, c.frameWidth(), fh)
 }
 
 // HandleKey: Left/Right/Tab move focus between No and Yes, Enter
@@ -330,11 +377,12 @@ func (c *Confirm) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	}
 }
 
-// Draw renders the confirm: frame, the body (a centered rune-safe
-// message, or the visible slice of a left-aligned multi-line Body —
-// commands and paths read poorly centered), and the two buttons — the
-// stock No / Yes or the caller's Labels — the action one in the error
-// color because every Yes in the editor is destructive.
+// Draw renders the confirm: frame, the body (a centered message —
+// wrapped over several centered rows when one cannot hold it — or the
+// visible slice of a left-aligned multi-line Body, because commands and
+// paths read poorly centered), and the two buttons — the stock No / Yes
+// or the caller's Labels — the action one in the error color because
+// every Yes in the editor is destructive.
 func (c *Confirm) Draw(scr tcell.Screen) {
 	r := c.rect()
 	th := c.Theme
@@ -345,13 +393,24 @@ func (c *Confirm) Draw(scr tcell.Screen) {
 
 	bg := th.LineHL
 	bodyStyle := tcell.StyleDefault.Background(bg).Foreground(th.Text)
-	if len(c.Body) == 0 {
+	body := c.rows()
+	if len(body) == 0 {
 		msg := trimRunes(c.Message, r.W-4)
 		msgX := r.X + (r.W-runeLen(msg))/2
 		drawText(scr, msgX, r.Y+4, r.X+r.W-1-msgX, msg, bodyStyle)
 	} else {
-		for i, rows := 0, c.bodyRows(); i < rows && c.scroll+i < len(c.Body); i++ {
-			drawText(scr, r.X+2, r.Y+4+i, r.W-4, trimRunes(c.Body[c.scroll+i], r.W-4), bodyStyle)
+		c.ScrollBy(0) // re-clamp: a resize can re-wrap the Message shorter
+		centered := len(c.Body) == 0
+		for i, rows := 0, c.bodyRows(); i < rows && c.scroll+i < len(body); i++ {
+			line := trimRunes(body[c.scroll+i], r.W-4)
+			x := r.X + 2
+			if centered {
+				// A wrapped Message is still a sentence, not a
+				// listing: each row keeps the one-line form's
+				// centring inside the same text column.
+				x += (r.W - 4 - runeLen(line)) / 2
+			}
+			drawText(scr, x, r.Y+4+i, r.W-4, line, bodyStyle)
 		}
 		// Painted after the rows so the bar is never overwritten by a
 		// body line — the rows clip to r.W-4 and stop two cells short

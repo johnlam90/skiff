@@ -660,3 +660,93 @@ func FuzzReplaceLine(f *testing.F) {
 		}
 	})
 }
+
+// TestReplaceLine_RegexAnchorsSeeTheWholeLine pins the regex scan to the
+// full line. It used to probe line[from:], so every resume point looked
+// like a line start and a word boundary: `^\t` stripped all indentation
+// and `\bfoo` matched the second half of "foofoo".
+func TestReplaceLine_RegexAnchorsSeeTheWholeLine(t *testing.T) {
+	opts := DefaultOptions()
+	opts.Regex = true
+	cases := []struct{ line, query, repl, want string }{
+		{"\t\t\tx := 1", `^\t`, "", "\t\tx := 1"},
+		{"abc", `^`, "// ", "// abc"},
+		{"foofoo", `\bfoo`, "X", "Xfoo"},
+		{"a b", `$`, ";", "a b;"},
+	}
+	for _, c := range cases {
+		if got, _ := ReplaceLine(c.line, c.query, c.repl, opts); got != c.want {
+			t.Errorf("ReplaceLine(%q, %q, %q) = %q, want %q", c.line, c.query, c.repl, got, c.want)
+		}
+	}
+	root := t.TempDir()
+	seed(t, root, "a.txt", "aaa\n")
+	ms, _ := Search(root, []string{"a.txt"}, `^a`, opts)
+	if len(ms) != 1 {
+		t.Fatalf("`^a` on \"aaa\" reported %d hits, want 1", len(ms))
+	}
+}
+
+// TestSearchReplace_CRLFFileKeepsItsEndings pins the terminator out of
+// the matched text: `;$` must find a CRLF line, the recorded Text must
+// equal what an open buffer holds (no "\r"), and a rewrite — even one
+// whose pattern eats trailing whitespace — must leave the file CRLF.
+func TestSearchReplace_CRLFFileKeepsItsEndings(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, seed(t, root, "a.txt", "foo;\r\nbar  \r\nbaz\r\n"))
+	opts := DefaultOptions()
+	opts.Regex = true
+	ms, _ := Search(root, []string{"a.txt"}, `;$`, opts)
+	if len(ms) != 1 || ms[0].Text != "foo;" {
+		t.Fatalf("`;$` matches = %+v, want one with Text \"foo;\"", ms)
+	}
+	ms, _ = Search(root, []string{"a.txt"}, `\s+$`, opts)
+	if len(ms) != 1 {
+		t.Fatalf("`\\s+$` matched %d lines, want only the one with trailing spaces", len(ms))
+	}
+	rep := ApplyReplace(root, ms, `\s+$`, "", opts)
+	if rep.Replaced != 1 {
+		t.Fatalf("report = %+v, want 1 replaced", rep)
+	}
+	got, _ := os.ReadFile(p)
+	if want := "foo;\r\nbar\r\nbaz\r\n"; string(got) != want {
+		t.Fatalf("file = %q, want %q", got, want)
+	}
+	one, _ := Search(root, []string{"a.txt"}, "baz", DefaultOptions())
+	if rep := ApplyReplaceAt(root, one[0], "baz", "qux", DefaultOptions()); rep.Replaced != 1 {
+		t.Fatalf("ApplyReplaceAt report = %+v", rep)
+	}
+	got, _ = os.ReadFile(p)
+	if want := "foo;\r\nbar\r\nqux\r\n"; string(got) != want {
+		t.Fatalf("file after row apply = %q, want %q", got, want)
+	}
+}
+
+// TestSearchReplace_DoesNotFollowSymlinks pins the project boundary: a
+// tracked symlink pointing outside the root is neither searched nor
+// rewritten, so a hostile repo cannot get ~/.bashrc edited under an
+// in-project name.
+func TestSearchReplace_DoesNotFollowSymlinks(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("foo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "notes.txt")); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	ms, _ := Search(root, []string{"notes.txt"}, "foo", DefaultOptions())
+	if len(ms) != 0 {
+		t.Fatalf("search followed the symlink: %+v", ms)
+	}
+	forged := []Match{{Path: "notes.txt", Line: 1, Col: 0, Text: "foo"}}
+	if rep := ApplyReplace(root, forged, "foo", "bar", DefaultOptions()); rep.Replaced != 0 || rep.Skipped != 1 {
+		t.Fatalf("ApplyReplace report = %+v, want the match skipped", rep)
+	}
+	if rep := ApplyReplaceAt(root, forged[0], "foo", "bar", DefaultOptions()); rep.Replaced != 0 {
+		t.Fatalf("ApplyReplaceAt report = %+v, want nothing replaced", rep)
+	}
+	if got, _ := os.ReadFile(outside); string(got) != "foo\n" {
+		t.Fatalf("file outside the project was rewritten: %q", got)
+	}
+}
