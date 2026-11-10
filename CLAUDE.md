@@ -522,6 +522,12 @@ On each tree-refresh tick, `reconcileTab` compares each open tab's mtime
 against what the background sweep found: clean buffer + changed file →
 silent reload; dirty buffer + changed file → conflict prompt; file
 deleted → set `DiskGone` once.
+"Changed" means the mtime *differs* (`Equal`, not `After`): a
+`mv backup f`, `cp -p` or `tar x` puts different bytes under an OLDER
+mtime. The tick is not the only gate — `saveTab` runs the same check
+(`saveBlockedByDiskChange`) before writing, because a save inside the
+ten-second window would otherwise overwrite the other writer silently;
+the formatter's own rewrite is exempted via `formatInFlight`.
 
 ### The overlay stack is the routing truth
 Every floating surface (menu, prompt, confirm, pickers, diff, …) lives
