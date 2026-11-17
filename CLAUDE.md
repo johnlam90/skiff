@@ -51,6 +51,11 @@ internal/app/esctty.go        The /dev/tty read filter under tcell: rewrites a
                               plain Esc) into the CSI-u form of Alt+Esc so the
                               menu opens; holds a lone ESC ≤60ms to catch a
                               pair split across writes (tmux, SSH)
+internal/app/locale.go        A C/POSIX locale is not allowed to make tcell fall
+                              back to ASCII ("?" for every glyph): UTF-8 is forced
+                              for the screen's Init only, then the session's own
+                              value is restored for child processes; SKIFF_ASCII
+                              opts out
 internal/app/layout.go        All screen geometry: panel rects + splitter clamping
 internal/app/draw.go          The render pass + tab-strip layout
 internal/app/refresh.go       10s tick: off-thread scan, on-loop apply, tab reconcile

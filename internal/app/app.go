@@ -682,7 +682,9 @@ func newTerminalScreen() (tcell.Screen, error) {
 	} else if err != nil {
 		return nil, err
 	}
-	if err := scr.Init(); err != nil {
+	// Init is where tcell reads the locale; see locale.go for why a
+	// C/POSIX one is not allowed to turn every glyph into "?".
+	if err := withUTF8Locale(scr.Init); err != nil {
 		return nil, err
 	}
 	// Baseline mouse reporting only — clicks, drags and the wheel. The

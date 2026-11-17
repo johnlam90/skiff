@@ -396,6 +396,16 @@ wraps its OSC 52 copy in tmux's passthrough envelope, and since 3.3
 tmux silently drops passthrough sequences unless that option is on —
 the copy still lands inside Skiff, it just never reaches the terminal.
 
+### Question marks instead of icons and borders
+
+If `≡`, `×`, the borders and the scrollbar all showed up as `?`, the
+session's locale was `C` or `POSIX` (`LC_ALL=C` is common over SSH and
+inside wrappers) and the terminal library fell back to ASCII. Skiff now
+ignores a `C`/`POSIX` locale for its own drawing and assumes the
+terminal is UTF-8; programs it runs (git, formatters, custom actions)
+still inherit your locale unchanged. On a terminal that genuinely
+cannot show UTF-8, set `SKIFF_ASCII=1` to get the ASCII fallback back.
+
 ### Hotkeys
 
 Skiff deliberately avoids `Ctrl+`-style shortcuts (they fight `tmux`,
