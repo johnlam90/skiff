@@ -372,15 +372,18 @@ func repoFileDiff(repo *git.Repo, base, path string, untracked bool) (diff.Patch
 	return diff.Patch{Files: []diff.File{file}}, err
 }
 
-// repoHunkPreview returns the unified diff hunk covering zero-based line.
+// repoHunkPreview returns the unified diff hunk covering zero-based line,
+// diffed against base ("" means HEAD) — the same base the gutter marker
+// that was clicked was computed against, or the preview answers a
+// different question than the marker asked.
 // Its only caller is the asynchronous gutter-click path, which hands it
 // the handle the main loop captured. An empty patch with a nil error
 // means no hunk claims the line; with an error, git could not answer.
-func repoHunkPreview(repo *git.Repo, path string, line int) (diff.Patch, error) {
+func repoHunkPreview(repo *git.Repo, base, path string, line int) (diff.Patch, error) {
 	if repo.Root() == "" || path == "" || line < 0 {
 		return diff.Patch{}, nil
 	}
-	p, err := repo.Diff("HEAD", 3, path)
+	p, err := repo.Diff(base, 3, path)
 	if err != nil && p.Empty() {
 		return diff.Patch{}, err
 	}
