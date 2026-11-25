@@ -53,10 +53,15 @@ func TestOSC52Sequence_Encoding(t *testing.T) {
 			want: "\x1b]52;c;aMOpbGxv\x07",
 		},
 		{
-			name: "tmux wraps inner sequence",
+			// Under tmux the copy is sent both ways: plain for a tmux
+			// that handles OSC 52 itself (set-clipboard on), then
+			// wrapped for one that passes it through to the terminal
+			// (allow-passthrough on). Since tmux 3.3 passthrough is off
+			// by default, so the wrapper alone reached nobody there.
+			name: "tmux sends plain then wrapped",
 			text: "hello",
 			tmux: true,
-			want: "\x1bPtmux;\x1b\x1b]52;c;aGVsbG8=\x07\x1b\\",
+			want: "\x1b]52;c;aGVsbG8=\x07" + "\x1bPtmux;\x1b\x1b]52;c;aGVsbG8=\x07\x1b\\",
 		},
 	}
 
@@ -135,7 +140,7 @@ func TestCopyToSystem_WritesSequence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read tty: %v", err)
 	}
-	want := "\x1bPtmux;\x1b\x1b]52;c;aGVsbG8=\x07\x1b\\"
+	want := "\x1b]52;c;aGVsbG8=\x07" + "\x1bPtmux;\x1b\x1b]52;c;aGVsbG8=\x07\x1b\\"
 	if string(written) != want {
 		t.Fatalf("tty bytes mismatch\n got: %q\nwant: %q", written, want)
 	}
