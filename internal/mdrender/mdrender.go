@@ -363,7 +363,8 @@ func (r *renderer) codeLines(lines []string, grid [][]tcell.Style) {
 			// One source rune per grid entry, however many cells the
 			// cluster (or the expanded tab) paints.
 			consumed := len([]rune(cluster))
-			if cluster == "\t" {
+			isTab := cluster == "\t"
+			if isTab {
 				cw = codeTabStop - row.width%codeTabStop
 				cluster = strings.Repeat(" ", cw)
 			}
@@ -371,6 +372,13 @@ func (r *renderer) codeLines(lines []string, grid [][]tcell.Style) {
 				rows = append(rows, row)
 				blockW = max(blockW, row.width)
 				row = codeRow{}
+				if isTab {
+					// The tab was measured from the column it just
+					// left. On the fresh row it starts at column zero
+					// and is a whole stop wide.
+					cw = codeTabStop
+					cluster = strings.Repeat(" ", cw)
+				}
 			}
 			st := plain
 			if sts != nil && j < len(sts) {
@@ -495,7 +503,7 @@ func (r *renderer) table(t *extast.Table, st tcell.Style) {
 			if i < len(row) {
 				c = row[i]
 			}
-			cr, cs := fitCell(c, widths[i], st)
+			cr, cs := fitCell(c, widths[i], st, r.th.Muted)
 			runes = append(runes, cr...)
 			sts = append(sts, cs...)
 			if i < cols-1 {
@@ -514,7 +522,10 @@ func (r *renderer) table(t *extast.Table, st tcell.Style) {
 
 // fitCell truncates or pads one captured cell to exactly w cells,
 // ellipsising a cut so a shrunken column still says it lost something.
-func fitCell(c styledCell, w int, pad tcell.Style) ([]rune, []tcell.Style) {
+// The ellipsis is painted in muted, the theme's own secondary text
+// colour: the terminal's default foreground it used to take is only
+// readable when the terminal and the theme agree on light or dark.
+func fitCell(c styledCell, w int, pad tcell.Style, muted tcell.Color) ([]rune, []tcell.Style) {
 	var runes []rune
 	var sts []tcell.Style
 	used := 0
@@ -540,7 +551,7 @@ func fitCell(c styledCell, w int, pad tcell.Style) ([]rune, []tcell.Style) {
 			rest = tail
 		}
 		runes = append(runes, '…')
-		sts = append(sts, pad.Foreground(tcell.ColorDefault).Dim(true))
+		sts = append(sts, pad.Foreground(muted).Dim(true))
 		used++
 	}
 	for used < w {
