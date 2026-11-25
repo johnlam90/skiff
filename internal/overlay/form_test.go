@@ -371,3 +371,29 @@ func TestForm_FieldClickCountsCells(t *testing.T) {
 		t.Fatalf("click on the third glyph: cursor %d, want 2", got)
 	}
 }
+
+// TestForm_EmptySelectCyclesNowhere pins that a select row with an
+// empty (but non-nil) option list is inert. Cycling it took a modulo by
+// its zero length — a divide-by-zero from the keyboard and from either
+// chevron. The custom-actions loader rejects such a row today; the form
+// must not depend on every future caller doing the same.
+func TestForm_EmptySelectCyclesNowhere(t *testing.T) {
+	f, _ := testForm()
+	f.Rows[1].Options = []string{}
+	f.Focus = 1
+	f.HandleKey(key(tcell.KeyRight, 0))
+	f.HandleKey(key(tcell.KeyLeft, 0))
+
+	r := f.rect()
+	inputRow := r.Y + 3 + 1*formRowHeight + 1
+	for _, x := range []int{r.X + 3, r.X + r.W - 3 - 1} {
+		f.HandleMouse(x, inputRow, tcell.Button1)
+		f.HandleMouse(x, inputRow, tcell.ButtonNone)
+	}
+	if f.Rows[1].Sel != 0 {
+		t.Fatalf("an empty select has nothing to move to, Sel = %d", f.Rows[1].Sel)
+	}
+	if v := f.Values()["MODE"]; v != "" {
+		t.Fatalf("an empty select reports no value, got %q", v)
+	}
+}

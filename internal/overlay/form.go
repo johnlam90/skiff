@@ -175,16 +175,24 @@ func (f *Form) HandleKey(ev *tcell.EventKey) {
 	if row.Options != nil {
 		switch ev.Key() {
 		case tcell.KeyLeft, tcell.KeyUp:
-			row.Sel--
-			if row.Sel < 0 {
-				row.Sel = len(row.Options) - 1
-			}
+			row.cycle(-1)
 		case tcell.KeyRight, tcell.KeyDown:
-			row.Sel = (row.Sel + 1) % len(row.Options)
+			row.cycle(+1)
 		}
 		return
 	}
 	row.Field.HandleKey(ev)
+}
+
+// cycle steps a select row's choice by delta (+1 or -1), wrapping at
+// either end. A row with no options stays where it is: there is nothing
+// to wrap around, and the modulo would divide by zero.
+func (r *FormRow) cycle(delta int) {
+	n := len(r.Options)
+	if n == 0 {
+		return
+	}
+	r.Sel = ((r.Sel+delta)%n + n) % n
 }
 
 // HandleMouse: clicks on a row focus it, select chevrons cycle, text
@@ -234,12 +242,9 @@ func (f *Form) HandleMouse(x, y int, btn tcell.ButtonMask) {
 		if y == inputRow && row.Options != nil {
 			switch x {
 			case fieldStart:
-				row.Sel--
-				if row.Sel < 0 {
-					row.Sel = len(row.Options) - 1
-				}
+				row.cycle(-1)
 			case fieldEnd - 1:
-				row.Sel = (row.Sel + 1) % len(row.Options)
+				row.cycle(+1)
 			}
 			return
 		}
