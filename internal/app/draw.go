@@ -914,7 +914,11 @@ func (a *App) statusRightSegments(sw int) []statusRightSegment {
 	// the conflict overlay must not mean forgetting the conflict, so
 	// this stays up until the tab is saved, reloaded or closed.
 	if a.tabDiskConflict(a.activeTabPtr()) {
-		admit(posConflict, statusRightSegment{text: statusConflictTag, warn: true})
+		// A press reopens the prompt: the marker is the visible claim
+		// that a conflict is waiting, so it is also the way to it. The
+		// same action stays on the ≡ menu, which is the primary route.
+		admit(posConflict, statusRightSegment{text: statusConflictTag, warn: true,
+			click: (*App).menuResolveDiskConflict})
 	}
 	// 2. Pending-gesture tag: while an Esc is armed (leader or
 	// double-tap window still open) show "Esc…" beside the git segment
