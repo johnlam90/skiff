@@ -77,9 +77,14 @@ type execRunner struct{}
 // trying to open an editor we can't host; GIT_OPTIONAL_LOCKS=0 keeps the
 // background `git status` from taking index.lock to refresh the index,
 // which is what made a commit typed in another terminal fail with
-// "index.lock exists" every so often.
+// "index.lock exists" every so often; GIT_LITERAL_PATHSPECS=1 makes
+// every path argument name exactly that path. Git otherwise reads a
+// pathspec as a glob, so "app/[id]/page.tsx" also matched "app/i/…" and
+// "app/d/…" and a path-scoped commit took files nobody checked. No verb
+// here passes a glob or pathspec magic, so nothing is lost.
 func hardenedEnv() []string {
-	return append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_EDITOR=true", "GIT_OPTIONAL_LOCKS=0")
+	return append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_EDITOR=true",
+		"GIT_OPTIONAL_LOCKS=0", "GIT_LITERAL_PATHSPECS=1")
 }
 
 // command builds the one shape of git process this package ever spawns:

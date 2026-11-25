@@ -207,3 +207,29 @@ func TestOpenWith_RoutesThroughTheRunner(t *testing.T) {
 		t.Fatalf("calls = %d, want 2", fake.CallCount())
 	}
 }
+
+// TestHardenedEnv_PathsAreLiteralPathspecs pins that a path handed to a
+// verb names that path and nothing else. Git reads a pathspec as a glob
+// by default, so committing Next.js's "app/[id]/page.tsx" also staged
+// and committed "app/i/page.tsx" and "app/d/page.tsx" — files the user
+// never checked. The editor only ever passes real paths.
+func TestHardenedEnv_PathsAreLiteralPathspecs(t *testing.T) {
+	dir := initRepo(t)
+	for _, sub := range []string{"[id]", "i", "d"} {
+		if err := os.MkdirAll(filepath.Join(dir, "app", sub), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		writeSeed(t, filepath.Join(dir, "app", sub, "page.tsx"), "x\n")
+	}
+	r := Open(dir)
+	if err := r.Commit([]string{filepath.Join(dir, "app", "[id]", "page.tsx")}, "one file"); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	out, err := exec.Command("git", "-C", dir, "show", "--name-only", "--format=", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("show: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "app/[id]/page.tsx" {
+		t.Fatalf("commit should hold only the bracketed path, got:\n%s", got)
+	}
+}
