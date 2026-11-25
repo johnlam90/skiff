@@ -50,7 +50,10 @@ internal/app/esctty.go        The /dev/tty read filter under tcell: rewrites a
                               fast "Esc Esc" (which tcell would fold into ONE
                               plain Esc) into the CSI-u form of Alt+Esc so the
                               menu opens; holds a lone ESC ≤60ms to catch a
-                              pair split across writes (tmux, SSH)
+                              pair split across writes (tmux, SSH). Also lifts
+                              drag-and-drop messages (OSC 72) out of the stream
+                              before tcell parses them, and serializes every
+                              write to the tty
 internal/app/locale.go        A C/POSIX locale is not allowed to make tcell fall
                               back to ASCII ("?" for every glyph): UTF-8 is forced
                               for the screen's Init only, then the session's own
@@ -104,6 +107,15 @@ internal/app/fileops.go       App side of file ops: the prompts/confirms, the
 internal/app/fileclip.go      File clipboard: cut/copy/paste/duplicate tree
                               entries on a background runner; the done event
                               carries the manager's Changeset
+internal/app/filedrop.go      Files dropped on the editor. The shared half —
+                              the drop target and its lit tree row,
+                              spring-loaded folders, the edge scroll, the
+                              import — and the whole pasted-path route: the
+                              placement bar a path-only paste raises, and
+                              the ≡ "Import path…" row
+internal/app/dnd.go           The same drop over kitty's OSC 72 protocol:
+                              registration, hover → highlight, drop → fetch
+                              + import on the fileOp job
 internal/app/session_restore.go App ↔ session store bridge (capture/restore)
 internal/app/gitops.go        Git write side: commit/push/pull/branch/stash runner
 internal/editor/buffer.go     Position + Buffer ([]string lines), edit primitives
@@ -155,13 +167,28 @@ internal/filetree/nav.go      Hit-test, toggle, scroll, Reveal, and
                               expanded-dir session persistence
 internal/filemanager/         The one owner of file operations: Create /
                               Rename / Trash / Restore / Move / Copy /
-                              Duplicate over a project root, each returning
-                              a Changeset (Added/Removed/Moved). Owns the
+                              Duplicate / Import over a project root, each
+                              returning a Changeset (Added/Removed/Moved).
+                              Import is the one verb whose SOURCE may be
+                              outside the root — a dropped file always
+                              is. Owns the
                               session trash, the " copy" ladder, the
                               cross-device fallback and every guard (root,
                               escape, into-itself, separator). No tcell,
                               theme, app or filetree imports — testable
                               against a t.TempDir() with no screen
+internal/droppath/            "Is this paste a file drop?" Pure
+                              classification of pasted text into existing
+                              absolute paths (shell-escaped, quoted,
+                              file:// or raw); the stat function is injected
+internal/dnd/                 Client side of kitty's drag-and-drop protocol
+                              (OSC 72), accept-drops half only: the wire
+                              format, the Scanner that lifts messages out of
+                              the tty stream, the Conn that routes them
+                              (hover/drop to the loop, file data to the
+                              worker) and Fetch, which turns a drop into
+                              local paths or files staged from another
+                              machine. No tcell, no app
 internal/diff/                The one model of a unified diff: Parse (git
                               text) and Lines (buffer vs disk) build it,
                               Rows pairs it for the side-by-side view.
@@ -635,6 +662,82 @@ recomputes the answer from `a.overlays.Top()` rather than accumulating
 it, so no opener or closer has to pair its calls, and `syncMouseMode`
 caches in `a.mouseFlags` because tcell's `EnableMouse` re-emits the
 whole disable-then-enable run on every call.
+
+### A dropped file is two inputs to one drop (filedrop.go, dnd.go)
+A terminal program never sees an OS drop; it sees what its terminal
+turns one into, and there are exactly two shapes. **Rex, Herdr and
+Ghostty paste the file's path** — no pointer position, and byte-for-byte
+the same as that path pasted as text. **kitty speaks OSC 72** (and
+libghostty is growing it): hover events with a cell, a drop event, and
+the file's bytes in-band so a drop from the laptop reaches an editor
+running over SSH.
+
+Both end in `filemanager.Import` on the `fileOp` job and share one target
+model: `Tree.DropTarget` lights the folder, `dropFolderAt` resolves a cell
+to one (a file row means its parent; anything that is not a row means the
+root; off the tree means the active folder), and `dropHoverAt` runs the
+spring-loaded folders and the edge scroll. Rules worth knowing before
+touching either:
+
+- **A pasted path is a drop only once confirmed.** `applyPaste` asks
+  `droppath.Classify`; a paste of nothing but existing paths raises the
+  placement bar and copies nothing until the user answers. Copying on
+  sight would turn a pasted `/etc/hosts` into a file copy. See
+  `docs/adr/0003-a-pasted-path-is-a-drop-only-once-confirmed.md` before
+  "streamlining" the bar away.
+- **The bar is keyed for someone who is not looking at it.** Enter
+  presses the focused button and the focus starts on `[ As text ]`; a
+  typed character means "as text" and is then typed. A copy takes a
+  click (folder row or `[ Copy ]`), or Tab / the arrows first. Don't make
+  Enter copy by default and don't swallow printable keys: "paste a path,
+  press Enter" must never create a file.
+- **The bar takes a paste whole.** `handleKey` buffers a paste while
+  `placeBarUp()` instead of delivering it rune by rune — a second dropped
+  path's first character would otherwise answer the bar "as text" and
+  the rest would be typed into the buffer.
+- **The bar spans the window, and the tree gives up a row for it.** Its
+  three buttons need 33 cells and the editor can be 22 wide; `sidebarRect`
+  is one row shorter while the bar is up so it never hides a folder.
+- **Never send the OSC 72 `t=q` query, and never gate the paste route on
+  it.** Rex answers the handshake and cannot deliver a drop. `attachDnd`
+  registers (`t=a`) and then believes only events that arrive.
+- **File data never crosses the event loop.** `escTty` lifts OSC 72 out
+  of the byte stream below tcell (`dnd.Scanner`); `dnd.Conn` posts
+  hover/drop as a Notify and streams data to the fetch worker over a
+  bounded channel — that channel is the backpressure.
+- **The scanner has no clock, on purpose.** A message in progress is
+  waited for however long the stream stalls: the stream is ordered, so
+  what arrives after a stall IS the rest of the message, and "giving up"
+  after a pause typed a file's base64 into the open buffer (the first
+  version did exactly that after 2s). What ends a message early is
+  evidence in the stream: a control byte, `ESC` not followed by `\`, or
+  a body past `dnd.MaxBody` (discarded, never released). Each is
+  reported through `Sink.Lost`, which fails the fetch in flight —
+  never a short file reported as copied. The one timed wait left in
+  `escTty.fill` is the original lone-ESC window; `ESC ]` and longer
+  prefixes wait for their next byte, and `]72;` arriving in one piece
+  after a released ESC is still captured. Don't add a timeout back.
+- **Nothing is lifted inside a bracketed paste**, and a protocol drop is
+  honoured only after a hover the editor accepted (`dndDrop`). Pasted
+  bytes must not be able to speak the protocol: this route copies with
+  no bar and no click.
+- **Writes to the tty go through `escTty.Write`'s mutex.** tcell hands a
+  frame over in `Write` calls that each hold whole sequences, so a
+  worker's request cannot land inside one.
+- **Always send a machine id** — `dnd.RandomMachineID` when the lookup
+  fails — and accept nothing before it has gone out. With no id the
+  terminal treats the editor as local and a path that exists on both
+  machines is copied from the wrong one.
+- **Report "move" only when every source landed** (`startDndFetch`):
+  the source deletes its originals on a move.
+- **Finish the drop after the copy** (`t=r:o=…`): on macOS dropped files
+  are only guaranteed to exist until the terminal is told it is over.
+- **Every name from the terminal goes through `dnd.ValidName`** before
+  it is joined onto a staging path. Staging is
+  `$XDG_STATE_HOME/skiff/drops`, not the project and not `/tmp`.
+
+The protocol route is off inside tmux/screen/zellij, on Windows and in
+single-file mode; the paste route works in all but the last.
 
 ### Sidebar splitter drag
 A drag is detected when a press lands at exactly `x == splitterX()`.

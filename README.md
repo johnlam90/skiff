@@ -84,6 +84,10 @@ The goals, in order:
   and a directory past 1000 entries is truncated with an inert
   `… N more` row — the sidebar is for navigating, the finder (`Esc p`)
   indexes the rest.
+- **Drag files in** — drop a file or folder from Finder (or any file
+  manager) onto the explorer and it is [copied into the
+  project](#dropping-files-in), on the laptop or over SSH. Nothing is
+  ever overwritten.
 - **External change detection** — if a file on disk changes underneath
   an open clean buffer, the editor reloads it; if your buffer is dirty,
   you get the [disk-conflict prompt](#when-a-file-changes-under-you) —
@@ -674,6 +678,59 @@ a persistent index: skiff never runs `git add`, so anything you staged
 in a shell stays exactly as you left it. Rewriting history stays in
 your shell too — the log views are read-only.
 
+### Dropping files in
+
+Drag a file or folder from your desktop onto Skiff and it is copied
+into the project. What that looks like depends on what your terminal
+tells a program about a drop:
+
+**Most terminals paste the file's path** — Rex, Herdr and Ghostty do,
+and so does anything running under tmux. Skiff recognises a paste that
+is nothing but existing file paths and docks a two-line bar:
+
+```
+ Copy photo.png into internal/app/
+ [ Cancel ] [ As text ] [ Copy ]   click a folder, or Tab then Enter
+```
+
+- **Click a folder** in the tree to copy there. Your pointer is still on
+  the row you dropped on, and that row lights up as soon as the mouse
+  moves — so the gesture is "drop, click". A file row means the folder
+  it lives in; resting on a closed folder opens it. **`[ Copy ]`**
+  copies into the highlighted folder.
+- **From the keyboard:** `Tab` then `Enter` copies into the highlighted
+  folder; **↑ ↓ ← →** choose another one first.
+- **Just keep typing** if you were pasting a path into your file: the
+  bar appears because a pasted path looks exactly like a dropped file,
+  and typing — or a plain `Enter` — answers "this was text". The path
+  lands in the buffer as it always did, and nothing is copied.
+- **`Esc`** cancels.
+
+The bar is why a drop needs one more click than in VS Code: a pasted
+path carries no pointer position, and Skiff will not guess between
+"copy this file" and "type this path". It only ever copies on a click or
+a deliberate `Tab`.
+
+**kitty (0.47+) speaks a real drag-and-drop protocol**, and other
+terminals are adopting it. There the folder under your pointer lights up
+while you are still dragging, the file lands exactly where you let go,
+and there is no bar.
+
+**Over SSH** the file has to cross from your laptop:
+
+| Terminal | Remote drops |
+| --- | --- |
+| Rex | work — Rex uploads the file, then pastes where it landed |
+| Herdr | files work the same way; folders are refused by Herdr |
+| kitty | work, folders included — the terminal sends the bytes |
+| Ghostty | not yet: it pastes your laptop's path, which the remote machine cannot read. Skiff says so rather than typing the path into your file |
+
+A name that is already taken becomes `photo copy.png`; nothing is
+overwritten. `≡` → **Import path…** does the same copy from a typed or
+pasted path, with no dragging at all. Under tmux only the pasted-path
+route is available, and `skiff somefile` (single-file mode) has no
+explorer to drop on.
+
 ### When a file changes under you
 
 The pane next door running `git pull` or `sed -i` is the normal case
@@ -1003,6 +1060,9 @@ them while still making it one click to opt a project in.
 │   ├── app/                  # Event loop, layout, menu, keys, mouse, drawing
 │   ├── editor/               # Buffer, tab, cursor, wrap, indent, brackets, highlighting
 │   ├── filetree/             # Lazy directory tree with identity-preserving refresh
+│   ├── filemanager/          # Create / rename / trash / move / copy / import
+│   ├── droppath/             # Is this paste a dropped file?
+│   ├── dnd/                  # Drag-and-drop protocol client (OSC 72)
 │   ├── overlay/              # Overlay stack + the prefab floating surfaces
 │   ├── git/                  # Git process boundary + the Snapshot model
 │   ├── search/               # Literal smart-case project search engine

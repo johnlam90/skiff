@@ -115,6 +115,30 @@ session. An empty changeset still runs that tail, which is how a failed
 op leaves nothing stale.
 _Avoid_: refresh list, diff (that's git's), result
 
+**Drop**:
+A file or folder dragged from the desktop onto the editor, to be copied
+into a folder of the project. It reaches skiff one of two ways — as a
+pasted path, or as drag-and-drop protocol events — and either way it is
+"these sources, into this folder", finished by one import. A drop never
+overwrites and never moves a project file.
+_Avoid_: upload (the terminal uploads; skiff copies), paste (a paste is
+only how one kind of drop arrives)
+
+**Drop target**:
+The folder a pending drop would land in, lit as a filled row in the
+explorer. A file row means the folder it lives in; anything that is not a
+row means the project root; a pointer off the tree means the active
+folder.
+_Avoid_: selection (that's the editor's), active folder (the default a
+drop target starts from, not the same thing)
+
+**Placement bar**:
+The overlay a pasted-path drop raises: what will be copied where, and
+the three answers — copy, paste as text, cancel. It exists because a
+pasted path carries no pointer position and is indistinguishable from
+pasted text, so the copy waits for the user.
+_Avoid_: drop prompt, confirm (a confirm is a prefab), drop zone
+
 ### Git
 
 **Repo**:
