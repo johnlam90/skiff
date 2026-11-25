@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -71,7 +72,14 @@ type Runner interface {
 // environment on every call.
 type execRunner struct{}
 
-// hardenedEnv is the environment every invocation runs under:
+// hardenedEnv is the environment every invocation runs under: the
+// process's own, passed through gitEnv.
+func hardenedEnv() []string {
+	return gitEnv(os.Environ())
+}
+
+// gitEnv turns a base environment into the one git runs under.
+//
 // GIT_TERMINAL_PROMPT=0 keeps a credential prompt from hanging a
 // goroutine forever; GIT_EDITOR=true keeps merge-ish commands from
 // trying to open an editor we can't host; GIT_OPTIONAL_LOCKS=0 keeps the
@@ -82,8 +90,38 @@ type execRunner struct{}
 // pathspec as a glob, so "app/[id]/page.tsx" also matched "app/i/…" and
 // "app/d/…" and a path-scoped commit took files nobody checked. No verb
 // here passes a glob or pathspec magic, so nothing is lost.
-func hardenedEnv() []string {
-	return append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_EDITOR=true",
+//
+// The locale is pinned for messages only. explain.go recognises a
+// refusal by git's English wording, so under a translated git every
+// OpError lost its flags and its advice. LC_MESSAGES=C fixes that, but
+// LC_ALL outranks it and LANGUAGE is consulted before it, so both are
+// removed. Blanket LC_ALL=C is deliberately not used: hooks inherit this
+// environment and would lose the user's character set. Instead LC_ALL's
+// value is carried into LC_CTYPE and LANG, the two it most visibly
+// governed.
+func gitEnv(base []string) []string {
+	lcAll := ""
+	for _, kv := range base {
+		if key, val, _ := strings.Cut(kv, "="); key == "LC_ALL" {
+			lcAll = val
+		}
+	}
+	env := make([]string, 0, len(base)+8)
+	for _, kv := range base {
+		switch key, _, _ := strings.Cut(kv, "="); key {
+		case "LC_ALL", "LANGUAGE", "LC_MESSAGES":
+			continue
+		case "LC_CTYPE", "LANG":
+			if lcAll != "" {
+				continue // replaced by LC_ALL's value below
+			}
+		}
+		env = append(env, kv)
+	}
+	if lcAll != "" {
+		env = append(env, "LC_CTYPE="+lcAll, "LANG="+lcAll)
+	}
+	return append(env, "LC_MESSAGES=C", "GIT_TERMINAL_PROMPT=0", "GIT_EDITOR=true",
 		"GIT_OPTIONAL_LOCKS=0", "GIT_LITERAL_PATHSPECS=1")
 }
 
