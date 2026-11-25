@@ -458,11 +458,13 @@ func (a *App) openFormatInstallPrompt(tab *editor.Tab, ext string, argvTemplate 
 		// Refresh the file tree immediately so the new
 		// .skiff/format.json appears in the sidebar without
 		// waiting for the 10-second tick. Same pair fileops.go uses
-		// after every other directory mutation we make. Clear any
-		// past "declined" entry for this ext too — installing now
-		// means the prompt was really opt-in, not a leftover
-		// dismissal — regardless of which trust branch follows.
-		app.tree.Refresh()
+		// after every other directory mutation we make — and through
+		// refreshTree, because single-file mode has no tree to
+		// refresh. Clear any past "declined" entry for this ext too —
+		// installing now means the prompt was really opt-in, not a
+		// leftover dismissal — regardless of which trust branch
+		// follows.
+		app.refreshTree()
 		app.refreshGitStatusAsync()
 		app.persistInstallDecline(root, ext, false)
 

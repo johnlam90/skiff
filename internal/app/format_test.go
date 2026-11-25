@@ -1269,3 +1269,40 @@ func TestHandleFormatDone_FailureRetiresInFlightCount(t *testing.T) {
 		t.Fatal("the last landing must drop the entry")
 	}
 }
+
+// TestMaybeOfferInstall_AcceptInSingleFileMode pins that saying Yes to
+// the install prompt works with no file tree. Single-file mode builds
+// none, and the accept path refreshed it unconditionally — a nil
+// dereference that took the editor down on the user's first save.
+func TestMaybeOfferInstall_AcceptInSingleFileMode(t *testing.T) {
+	useTestTrustFile(t)
+	root := t.TempDir()
+	target := filepath.Join(root, "main.go")
+	if err := os.WriteFile(target, []byte("orig\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	useTestDefaultsFile(t, `{"commands":{"go":["sh","-c","echo formatted > $FILE"]}}`)
+
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	t.Cleanup(func() { scr.Fini() })
+	scr.SetSize(120, 40)
+	a := newSingleFileApp(scr, target)
+	if a.tree != nil {
+		t.Fatal("single-file mode must not build a tree")
+	}
+
+	a.runFormatOnSave(a.tabs.At(0))
+	if !confirmIsOpen(a) {
+		t.Fatal("expected install prompt to open")
+	}
+	confirmYes(a)
+	pumpUntil(t, a, "formatter", idle(&a.formatter))
+
+	cfg, err := format.Load(root)
+	if err != nil || cfg == nil || len(cfg.Commands["go"]) == 0 {
+		t.Fatalf("install should have written the go entry, got %v (err %v)", cfg, err)
+	}
+}
