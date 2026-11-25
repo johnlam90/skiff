@@ -93,6 +93,10 @@ func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 	if rootChange != GitChangeNone {
 		rootStyle = rootStyle.Foreground(gitChangeColor(th, rootChange))
 	}
+	if t.DropTarget != "" && t.DropTarget == t.Root.Path {
+		rootStyle = dropStyle(th, rootStyle)
+		textdraw.Fill(scr, x, y+1, w, 1, rootStyle)
+	}
 	drawString(scr, x, y+1, w, " "+t.Root.Name, rootStyle)
 	drawChangeLetter(scr, x, y+1, w, rootChange, rootStyle)
 
@@ -144,7 +148,8 @@ func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		item := flat[idx]
 		active := item.Node.Path == t.ActiveFile || (item.Node.IsDir && item.containsPath(t.ActiveFolder))
 		change := t.changeKind(item.Node)
-		drawNodeRow(scr, th, x, listTop+row, rowW, item, active, change, t.IconsEnabled)
+		drop := item.Node.IsDir && item.containsPath(t.DropTarget)
+		drawNodeRow(scr, th, x, listTop+row, rowW, item, active, drop, change, t.IconsEnabled)
 		visible = append(visible, item.Node)
 	}
 	t.visible = visible
@@ -178,8 +183,16 @@ func (t *Tree) changeKind(n *Node) GitChangeKind {
 // styling. That's the visual cue you find in nvim-tree and friends:
 // a quick eye-scan picks out Go from Ruby from Markdown without
 // reading any text.
-func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, active bool, change GitChangeKind, withIcons bool) {
+//
+// drop marks the row as the folder a pending file drop would land in:
+// the whole row is filled with the Selection colour first, and every
+// chunk then paints on that background instead of the sidebar's.
+func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, active, drop bool, change GitChangeKind, withIcons bool) {
 	bg := th.SidebarBG
+	if drop {
+		bg = th.Selection
+		textdraw.Fill(scr, x, y, w, 1, dropStyle(th, tcell.StyleDefault.Foreground(th.Text)))
+	}
 	indent := strings.Repeat("  ", item.Depth)
 
 	// The "… N more" sentinel is not a filesystem entry: no chevron, no
@@ -233,6 +246,9 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 		fg = gitChangeColor(th, change)
 	}
 	rowStyle := tcell.StyleDefault.Background(bg).Foreground(fg)
+	if drop {
+		rowStyle = dropStyle(th, rowStyle)
+	}
 	if active {
 		// Bold plus, on a degraded palette, Attrs.SelectedRow: the
 		// Accent hue is gone there and bold alone does not say "this is
@@ -290,6 +306,9 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 	// hue is the at-a-glance cue, and the name turning Modified is
 	// already enough to flag "this is dirty".
 	glyphStyle := tcell.StyleDefault.Background(bg).Foreground(glyphFg)
+	if drop {
+		glyphStyle = dropStyle(th, glyphStyle)
+	}
 	if active {
 		glyphStyle = glyphStyle.Bold(true)
 	}
@@ -302,6 +321,14 @@ func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, a
 	gx := textdraw.Width(glyph)
 	drawString(scr, x+px+gx, y, nameW-px-gx, textdraw.ClipEllipsis("  "+suffix, nameW-px-gx), rowStyle)
 	drawChangeLetter(scr, x, y, w, change, rowStyle)
+}
+
+// dropStyle turns a row style into the drop-target one: the Selection
+// background, bold, and — on a palette too shallow to show that
+// background as a distinct colour — the selected-row attributes, so the
+// target still reads as "this one" in sixteen colours.
+func dropStyle(th theme.Theme, st tcell.Style) tcell.Style {
+	return theme.WithAttrs(st.Background(th.Selection).Bold(true), th.Attrs.SelectedRow)
 }
 
 // changeLetterCells is how many cells at the row's right edge the

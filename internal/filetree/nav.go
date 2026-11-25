@@ -270,3 +270,121 @@ func (t *Tree) descend(n *Node, name string) *Node {
 	_ = t.reload(n)
 	return childByName(n, name)
 }
+
+// DirAt returns the folder a file dropped on the sidebar-local cell
+// (localX, localY) should land in: a folder row means that folder, a
+// file row the folder it lives in, and anything that is not a row —
+// the header, the root's own row, the blank space under the list, the
+// "… N more" note — the project root. A looping link is treated like a
+// file: it is a folder the tree will not open, so a drop on it goes
+// beside it.
+func (t *Tree) DirAt(localX, localY int) string {
+	n, ok := t.HitTest(localX, localY)
+	if !ok || n == t.Root {
+		return t.Root.Path
+	}
+	if n.IsDir && !n.Loop {
+		return n.Path
+	}
+	return filepath.Dir(n.Path)
+}
+
+// NodeFor returns the node for an absolute path, or nil when the tree
+// has not loaded one. It walks what is in memory and never reads the
+// disk, so it is safe on every hover event; a folder that was never
+// expanded has no nodes below it yet.
+func (t *Tree) NodeFor(path string) *Node {
+	if t.Root == nil || path == "" {
+		return nil
+	}
+	if path == t.Root.Path {
+		return t.Root
+	}
+	rel, err := filepath.Rel(t.Root.Path, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil
+	}
+	n := t.Root
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		var next *Node
+		for _, c := range n.Children {
+			if c.Name == part {
+				next = c
+				break
+			}
+		}
+		if next == nil {
+			return nil
+		}
+		n = next
+	}
+	return n
+}
+
+// dirRows lists the folders that have a row right now, in the order
+// they are drawn, the root first. A compact chain contributes its
+// deepest folder — the one the row acts on.
+func (t *Tree) dirRows() []flatNode {
+	rows := []flatNode{{Node: t.Root}}
+	for _, f := range t.flatten() {
+		if f.Node.IsDir && !f.Node.Sentinel && !f.Node.Loop {
+			rows = append(rows, f)
+		}
+	}
+	return rows
+}
+
+// StepDir returns the folder delta rows away from path among the folder
+// rows, clamped at both ends — what Up and Down move a drop target by.
+// A path with no row of its own (a collapsed ancestor hides it) counts
+// as the root, so the first step lands on something visible.
+func (t *Tree) StepDir(path string, delta int) string {
+	rows := t.dirRows()
+	at := 0
+	for i, f := range rows[1:] {
+		if f.containsPath(path) {
+			at = i + 1
+			break
+		}
+	}
+	at = min(max(at+delta, 0), len(rows)-1)
+	return rows[at].Node.Path
+}
+
+// ShowDir scrolls the list just far enough to bring path's row inside
+// a view of viewH rows. It expands nothing: a folder hidden under a
+// collapsed ancestor has no row to show, and the pinned root row never
+// needs scrolling to.
+func (t *Tree) ShowDir(path string, viewH int) {
+	if viewH <= 0 || path == t.Root.Path {
+		return
+	}
+	for i, f := range t.flatten() {
+		if !f.Node.IsDir || !f.containsPath(path) {
+			continue
+		}
+		if i < t.ScrollY {
+			t.ScrollY = i
+		} else if i >= t.ScrollY+viewH {
+			t.ScrollY = i - viewH + 1
+		}
+		return
+	}
+}
+
+// EdgeScroll reports the scroll a drag hovering at sidebar-local row
+// localY is asking for, given a list viewH rows tall: -1 at the top
+// edge when rows are hidden above, +1 at the bottom edge when rows are
+// hidden below, 0 otherwise. The pinned header rows count as the top
+// edge — that is where a pointer pushing upward ends up. It reads the
+// row count of the last Render, like the scrollbar's hit-test.
+func (t *Tree) EdgeScroll(localY, viewH int) int {
+	row := localY - listHeaderRows
+	if row <= 0 && t.ScrollY > 0 {
+		return -1
+	}
+	if row >= viewH-1 && t.ScrollY+viewH < t.flatCount {
+		return 1
+	}
+	return 0
+}

@@ -8,6 +8,7 @@
 package filetree
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -508,5 +509,201 @@ func TestExpandDirsUnknownSkipped(t *testing.T) {
 	got := tr.ExpandedDirs()
 	if len(got) != 1 || got[0] != "real" {
 		t.Fatalf("only 'real' should expand, got %v", got)
+	}
+}
+
+// mkTwoLevel builds root/{a/{a1/,a2/,f.txt}, b/, top.txt} — two levels of
+// folders, so stepping and hit-testing have rows at more than one
+// depth. a1 and a2 each hold a file, which keeps "a" from folding into
+// a compact chain.
+func mkTwoLevel(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, "a"))
+	mustMkdir(t, filepath.Join(root, "a", "a1"))
+	mustMkdir(t, filepath.Join(root, "a", "a2"))
+	mustWrite(t, filepath.Join(root, "a", "a1", "x.txt"), "x")
+	mustWrite(t, filepath.Join(root, "a", "a2", "y.txt"), "y")
+	mustWrite(t, filepath.Join(root, "a", "f.txt"), "f")
+	mustMkdir(t, filepath.Join(root, "b"))
+	mustWrite(t, filepath.Join(root, "b", "keep.txt"), "k")
+	mustWrite(t, filepath.Join(root, "top.txt"), "t")
+	return root
+}
+
+// TestDirAt pins what a drop on each kind of sidebar cell means: a
+// folder row is that folder, a file row is the folder it lives in, and
+// everything that is not a row — the header, the root's own row, the
+// blank space under the list — is the project root.
+func TestDirAt(t *testing.T) {
+	tr, err := New(mkTwoLevel(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a := findChild(tr.Root, "a")
+	tr.Toggle(a)
+	cells, w := renderAndCollect(t, tr, 40, 20)
+	row := func(name string) int {
+		t.Helper()
+		y := findRowY(cells, w, 20, name)
+		if y < 0 {
+			t.Fatalf("row %q not rendered", name)
+		}
+		return y
+	}
+	cases := []struct {
+		name string
+		y    int
+		want string
+	}{
+		{"a folder row", row("a1"), filepath.Join(tr.Root.Path, "a", "a1")},
+		{"a nested file row", row("f.txt"), a.Path},
+		{"a root-level file row", row("top.txt"), tr.Root.Path},
+		{"the root's own row", 1, tr.Root.Path},
+		{"the header", 0, tr.Root.Path},
+		{"blank space under the list", 15, tr.Root.Path},
+	}
+	for _, c := range cases {
+		if got := tr.DirAt(3, c.y); got != c.want {
+			t.Errorf("%s: DirAt = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestNodeFor pins the path → node lookup: it answers from what the
+// tree has loaded and never reads the disk, so a folder that was never
+// expanded has no node for its children yet.
+func TestNodeFor(t *testing.T) {
+	tr, err := New(mkTwoLevel(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a := findChild(tr.Root, "a")
+	if got := tr.NodeFor(tr.Root.Path); got != tr.Root {
+		t.Error("NodeFor(root) is not the root node")
+	}
+	if got := tr.NodeFor(a.Path); got != a {
+		t.Error("NodeFor(a) is not a's node")
+	}
+	inner := filepath.Join(a.Path, "a1")
+	if got := tr.NodeFor(inner); got != nil {
+		t.Errorf("NodeFor of an unloaded child = %v, want nil", got.Path)
+	}
+	tr.Toggle(a)
+	if got := tr.NodeFor(inner); got == nil || got.Path != inner {
+		t.Errorf("NodeFor after expanding = %v, want the a1 node", got)
+	}
+	for _, p := range []string{filepath.Join(tr.Root.Path, "nope"), filepath.Dir(tr.Root.Path), ""} {
+		if got := tr.NodeFor(p); got != nil {
+			t.Errorf("NodeFor(%q) = %v, want nil", p, got.Path)
+		}
+	}
+}
+
+// TestStepDir pins keyboard target stepping: folder rows in the order
+// they are drawn, the root first, files skipped, clamped at both ends.
+func TestStepDir(t *testing.T) {
+	tr, err := New(mkTwoLevel(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a := findChild(tr.Root, "a")
+	tr.Toggle(a)
+	root := tr.Root.Path
+	a1, a2 := filepath.Join(a.Path, "a1"), filepath.Join(a.Path, "a2")
+	b := filepath.Join(root, "b")
+
+	order := []string{root, a.Path, a1, a2, b}
+	for i := 0; i+1 < len(order); i++ {
+		if got := tr.StepDir(order[i], 1); got != order[i+1] {
+			t.Errorf("StepDir(%q, +1) = %q, want %q", order[i], got, order[i+1])
+		}
+		if got := tr.StepDir(order[i+1], -1); got != order[i] {
+			t.Errorf("StepDir(%q, -1) = %q, want %q", order[i+1], got, order[i])
+		}
+	}
+	if got := tr.StepDir(root, -1); got != root {
+		t.Errorf("stepping up from the root = %q, want it to stay", got)
+	}
+	if got := tr.StepDir(b, 1); got != b {
+		t.Errorf("stepping down from the last folder = %q, want it to stay", got)
+	}
+	if got := tr.StepDir(filepath.Join(root, "not-shown"), 1); got != a.Path {
+		t.Errorf("stepping from a folder with no row = %q, want the first folder row", got)
+	}
+}
+
+// TestShowDir pins the scroll that keeps a stepped-to folder on screen:
+// only as far as needed, and not at all when the row is already there.
+func TestShowDir(t *testing.T) {
+	root := t.TempDir()
+	var names []string
+	for i := 0; i < 12; i++ {
+		name := fmt.Sprintf("d%02d", i)
+		names = append(names, name)
+		mustMkdir(t, filepath.Join(root, name))
+	}
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const viewH = 5
+	path := func(i int) string { return filepath.Join(tr.Root.Path, names[i]) }
+
+	tr.ShowDir(path(2), viewH)
+	if tr.ScrollY != 0 {
+		t.Errorf("an on-screen row scrolled the tree to %d", tr.ScrollY)
+	}
+	tr.ShowDir(path(9), viewH)
+	if tr.ScrollY != 5 {
+		t.Errorf("ScrollY = %d, want 5 (row 9 as the last of 5 visible)", tr.ScrollY)
+	}
+	tr.ShowDir(path(3), viewH)
+	if tr.ScrollY != 3 {
+		t.Errorf("ScrollY = %d, want 3 (row 3 at the top)", tr.ScrollY)
+	}
+	tr.ShowDir(tr.Root.Path, viewH)
+	if tr.ScrollY != 3 {
+		t.Errorf("the pinned root row moved the scroll to %d", tr.ScrollY)
+	}
+}
+
+// TestEdgeScroll pins the auto-scroll zones a held drag uses to reach
+// rows that are off screen: the top edge scrolls up only when there is
+// something above, the bottom edge down only when there is something
+// below, and the middle never scrolls.
+func TestEdgeScroll(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 12; i++ {
+		mustMkdir(t, filepath.Join(root, fmt.Sprintf("d%02d", i)))
+	}
+	tr, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const h, viewH = 7, 5 // 2 header rows + 5 list rows
+	render := func() { renderAndCollect(t, tr, 30, h) }
+
+	render()
+	if got := tr.EdgeScroll(2, viewH); got != 0 {
+		t.Errorf("top row with nothing above: EdgeScroll = %d, want 0", got)
+	}
+	if got := tr.EdgeScroll(6, viewH); got != 1 {
+		t.Errorf("bottom row with rows below: EdgeScroll = %d, want +1", got)
+	}
+	if got := tr.EdgeScroll(4, viewH); got != 0 {
+		t.Errorf("a middle row: EdgeScroll = %d, want 0", got)
+	}
+
+	tr.ScrollY = 7 // rows 7..11 shown: the end of the list
+	render()
+	if got := tr.EdgeScroll(2, viewH); got != -1 {
+		t.Errorf("top row with rows above: EdgeScroll = %d, want -1", got)
+	}
+	if got := tr.EdgeScroll(1, viewH); got != -1 {
+		t.Errorf("the pinned root row with rows above: EdgeScroll = %d, want -1", got)
+	}
+	if got := tr.EdgeScroll(6, viewH); got != 0 {
+		t.Errorf("bottom row at the end of the list: EdgeScroll = %d, want 0", got)
 	}
 }

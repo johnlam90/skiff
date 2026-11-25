@@ -172,6 +172,14 @@ type Tree struct {
 	ActiveFolder string
 	ActiveFile   string
 
+	// DropTarget is the absolute path of the folder a pending file drop
+	// would land in, "" when nothing is being dropped. Render fills
+	// that folder's row — the root's own row when it is the root — with
+	// the Selection colour, which is the only "it goes HERE" cue a
+	// terminal drag can give. A folder folded into a compact chain
+	// shows on its chain row, the same rule ActiveFolder follows.
+	DropTarget string
+
 	// DirtyFiles and DirtyFolders carry the project's git status — both
 	// indexed by absolute path. Files in DirtyFiles render in the theme's
 	// Modified color; folders in DirtyFolders do the same so a collapsed

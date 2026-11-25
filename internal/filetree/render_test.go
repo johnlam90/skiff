@@ -934,3 +934,92 @@ func TestRender_DotDirChainRendersMuted(t *testing.T) {
 		t.Fatalf("dot chain row fg = %v, want Muted", fg)
 	}
 }
+
+// rowBackgrounds returns the set of background colours painted on row y
+// — one entry means the row is filled edge to edge with it.
+func rowBackgrounds(cells []tcell.SimCell, w, y int) map[tcell.Color]bool {
+	out := map[tcell.Color]bool{}
+	for x := 0; x < w; x++ {
+		_, bg, _ := cells[y*w+x].Style.Decompose()
+		out[bg] = true
+	}
+	return out
+}
+
+// TestRender_DropTargetRowIsFilled pins the drop highlight: the folder a
+// pending drop would land in is painted on the Selection colour across
+// the whole row — the one cue the user has for "it goes HERE" — and no
+// other row picks the colour up.
+func TestRender_DropTargetRowIsFilled(t *testing.T) {
+	tr, err := New(mkTree(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tr.DropTarget = findChild(tr.Root, "alpha").Path
+
+	cells, w := renderAndCollect(t, tr, 40, 20)
+	sel, side := theme.Default().Selection, theme.Default().SidebarBG
+	alphaY, betaY := findRowY(cells, w, 20, "alpha"), findRowY(cells, w, 20, "Beta")
+	if got := rowBackgrounds(cells, w, alphaY); len(got) != 1 || !got[sel] {
+		t.Errorf("drop-target row backgrounds = %v, want only Selection", got)
+	}
+	if got := rowBackgrounds(cells, w, betaY); len(got) != 1 || !got[side] {
+		t.Errorf("a neighbouring row's backgrounds = %v, want only SidebarBG", got)
+	}
+}
+
+// TestRender_DropTargetRootRow pins that the project root can be the
+// target: its pinned name row takes the fill, because "drop into the
+// root" is what a drop on empty space means.
+func TestRender_DropTargetRootRow(t *testing.T) {
+	tr, err := New(mkTree(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tr.DropTarget = tr.Root.Path
+
+	cells, w := renderAndCollect(t, tr, 40, 20)
+	if got := rowBackgrounds(cells, w, 1); len(got) != 1 || !got[theme.Default().Selection] {
+		t.Errorf("root row backgrounds = %v, want only Selection", got)
+	}
+	if got := rowBackgrounds(cells, w, 2); got[theme.Default().Selection] {
+		t.Error("the first child row took the root's drop fill")
+	}
+}
+
+// TestRender_DropTargetInsideChain pins the compact-folder case: a
+// folder folded into an "a/b/c" row has no row of its own, so the chain
+// row is where its highlight has to show.
+func TestRender_DropTargetInsideChain(t *testing.T) {
+	tr, err := New(mkChain(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a := findChild(tr.Root, "a")
+	tr.Toggle(a)
+	tr.DropTarget = findChild(a, "b").Path
+
+	cells, w := renderAndCollect(t, tr, 40, 20)
+	y := findRowY(cells, w, 20, "a/b/c/")
+	if y < 0 {
+		t.Fatal("chain row not rendered")
+	}
+	if got := rowBackgrounds(cells, w, y); len(got) != 1 || !got[theme.Default().Selection] {
+		t.Errorf("chain row backgrounds = %v, want only Selection", got)
+	}
+}
+
+// TestRender_NoDropTargetPaintsNoFill pins the resting state: with no
+// drop pending, the Selection colour appears nowhere in the tree.
+func TestRender_NoDropTargetPaintsNoFill(t *testing.T) {
+	tr, err := New(mkTree(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cells, w := renderAndCollect(t, tr, 40, 20)
+	for y := 0; y < 20; y++ {
+		if rowBackgrounds(cells, w, y)[theme.Default().Selection] {
+			t.Errorf("row %d is painted with the drop fill and nothing is being dropped", y)
+		}
+	}
+}
