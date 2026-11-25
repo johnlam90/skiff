@@ -275,7 +275,10 @@ func readRaw(path string) map[string]any {
 	if err != nil || len(data) == 0 {
 		return raw
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
+	// A bare `null` is valid JSON that unmarshals into a nil map, and
+	// writing a key into that panics — it is no more a key map than a
+	// file that fails to parse, so it takes the same road.
+	if err := json.Unmarshal(data, &raw); err != nil || raw == nil {
 		_ = atomicfile.Write(path+".bad", data, 0600)
 		return map[string]any{}
 	}

@@ -594,3 +594,24 @@ func TestSet_MalformedFileIsBackedUp(t *testing.T) {
 		t.Fatalf("the rewritten config should load: %v", err)
 	}
 }
+
+// TestSet_NullFileDoesNotPanic pins the one JSON document that parses
+// cleanly and still is not a key map: a config.json holding `null`
+// unmarshals into a nil map, and the write that followed panicked. It
+// is handled like any other non-object file — set aside as .bad and
+// replaced by the user's choice.
+func TestSet_NullFileDoesNotPanic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte("null"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetIcons(path, IconsOn); err != nil {
+		t.Fatalf("SetIcons: %v", err)
+	}
+	if got, _ := os.ReadFile(path + ".bad"); string(got) != "null" {
+		t.Fatalf("backup = %q, want the original bytes", got)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("the rewritten config should load: %v", err)
+	}
+}
