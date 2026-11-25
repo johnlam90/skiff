@@ -16,6 +16,7 @@ package app
 import (
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/johnlam90/skiff/internal/overlay"
 	"github.com/johnlam90/skiff/internal/theme"
 	"github.com/johnlam90/skiff/internal/userconfig"
 )
@@ -93,13 +94,27 @@ func (a *App) openThemePick() {
 	}
 	a.openListPick("Theme — previews live", items,
 		func(app *App, i int) { app.applyTheme(entries[i].ID, true) },
-		func(app *App, i int) { app.applyTheme(entries[i].ID, false) },
+		func(app *App, i int) {
+			app.applyTheme(entries[i].ID, false)
+			app.syncThemePick()
+		},
 		func(app *App) {
 			// Cancel reverts however far the preview wandered.
 			if app.currentThemeID() != original {
 				app.applyTheme(original, false)
 			}
 		})
+}
+
+// syncThemePick hands the open picker the theme it just previewed. A
+// prefab overlay copies the theme when it opens, so without this the
+// picker stayed in the old palette while everything behind it changed.
+// Kept here rather than in applyTheme: this is the one overlay that
+// stays open across a theme change.
+func (a *App) syncThemePick() {
+	if p, ok := a.overlays.Top().(*overlay.Pick); ok {
+		p.Theme = a.theme
+	}
 }
 
 // isLightTheme classifies a palette by its background: contrast vs
