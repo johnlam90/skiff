@@ -100,6 +100,16 @@ func wrapSegBounds(segs []int, seg, lineLen int) (start, end int) {
 	return start, end
 }
 
+// lastRowCol is the last column a caret may rest at on a NON-final
+// wrapped row spanning runes[start:end): the start of the row's last
+// grapheme cluster, never before the row's own start. "end - 1" is that
+// column only when the last character is a single rune; behind a base
+// letter with a combining mark, or an emoji sequence, it is the middle
+// of the cluster — a place no caret can be drawn.
+func lastRowCol(runes []rune, start, end int) int {
+	return max(PrevCluster(runes, end), start)
+}
+
 // WrapRowOfCol returns the segment index that renders rune column col:
 // the largest i with segs[i] <= col. A col at a segment boundary belongs
 // to the later row (the cursor sits at that row's first cell), and the
@@ -267,9 +277,9 @@ func (t *Tab) clampCursorWrapped(width, viewH int) {
 	// segment may hold the caret at end (the line's length).
 	limit := end
 	if seg < len(segs)-1 {
-		limit = end - 1
+		limit = lastRowCol(t.Buffer.LineRunes(line), start, end)
 	}
-	col := min(max(t.Cursor.Col, start), max(limit, start))
+	col := min(max(t.Cursor.Col, start), limit)
 	t.MoveCursorTo(Position{Line: line, Col: col}, false)
 }
 
@@ -508,10 +518,10 @@ func (t *Tab) wrapRowCol(line, seg, visualCol, width int) int {
 	start, end := wrapSegBounds(segs, seg, len(runes))
 	limit := end
 	if seg < len(segs)-1 {
-		limit = end - 1
+		limit = lastRowCol(runes, start, end)
 	}
 	col := start + RuneColAtVisual(runes[start:end], visualCol)
-	return min(col, max(limit, start))
+	return min(col, limit)
 }
 
 // MoveCursorRows moves the caret n visual rows down (negative: up),
@@ -579,8 +589,8 @@ func (t *Tab) wrapEndCol(width int) int {
 	segs := WrapSegments(runes, width)
 	seg := WrapRowOfCol(segs, t.Cursor.Col)
 	if seg < len(segs)-1 {
-		_, end := wrapSegBounds(segs, seg, len(runes))
-		if limit := max(end-1, segs[seg]); t.Cursor.Col != limit {
+		start, end := wrapSegBounds(segs, seg, len(runes))
+		if limit := lastRowCol(runes, start, end); t.Cursor.Col != limit {
 			return limit
 		}
 	}

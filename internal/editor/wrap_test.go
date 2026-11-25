@@ -873,3 +873,34 @@ func TestRenderWrapped_DegradedCursorLineUnderlined(t *testing.T) {
 		t.Fatal("the next line must not be underlined")
 	}
 }
+
+// TestWrap_RowEndNeverLandsInsideACluster pins the last caret-able
+// column of a non-final wrapped row. It was computed as "end - 1" in
+// runes, which is the middle of the cluster whenever the row's last
+// character is more than one rune — a base letter plus a combining
+// mark here. End, a vertical move and the post-edit clamp all used it,
+// and each could park the caret where no glyph begins.
+func TestWrap_RowEndNeverLandsInsideACluster(t *testing.T) {
+	// Row one is "abcé" (four cells, five runes); row two "fgh".
+	tab := &Tab{Buffer: NewBuffer("abcéfgh"), Wrap: true, lastWrapW: 4}
+	tab.initUndo()
+	runes := tab.Buffer.LineRunes(0)
+	if segs := WrapSegments(runes, 4); len(segs) != 2 || segs[1] != 5 {
+		t.Fatalf("fixture should wrap after the accented e, segs = %v", segs)
+	}
+	onBoundary := func(what string) {
+		t.Helper()
+		if c := tab.Cursor.Col; ClusterStart(runes, c) != c {
+			t.Fatalf("%s left the caret inside a cluster at col %d", what, c)
+		}
+	}
+
+	tab.MoveLineEnd(false)
+	onBoundary("End")
+	if tab.Cursor.Col != 3 {
+		t.Fatalf("End should stop on the row's last character (col 3), got %d", tab.Cursor.Col)
+	}
+	if got := tab.wrapRowCol(0, 0, 99, 4); got != 3 {
+		t.Fatalf("a vertical move past the row's end should land on col 3, got %d", got)
+	}
+}
