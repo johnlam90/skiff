@@ -200,14 +200,23 @@ func (a *App) projReplaceRowApply(row projFindRow) {
 	if tab, wasClean := a.findOpenTab(abs); tab != nil {
 		a.syncCleanTab(tab)
 		occ, skipped := applyMatchAtTab(tab, m, query, repl, opts)
-		if occ > 0 && wasClean {
-			if err := tab.Save(); err != nil {
-				a.flash(fmt.Sprintf("Replaced, but save failed: %v", err))
+		var saveErr error
+		if occ > 0 {
+			// The buffer changed under a preview that may be showing it.
+			a.invalidateMdPreview(tab)
+			if wasClean {
+				saveErr = tab.Save()
 			}
 		}
-		if skipped > 0 {
+		// One report per apply, and the failure outranks the rest: the
+		// success line used to be flashed straight over it, leaving a
+		// buffer that was not on disk announced as "Replaced".
+		switch {
+		case saveErr != nil:
+			a.flashError(fmt.Sprintf("Replaced, but save failed: %v", saveErr))
+		case skipped > 0:
 			a.flash("Skipped — the line changed since the search")
-		} else if occ > 0 {
+		case occ > 0:
 			a.flash(fmt.Sprintf("Replaced %d on %s:%d", occ, m.Path, m.Line))
 		}
 	} else {
