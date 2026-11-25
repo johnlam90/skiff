@@ -1298,6 +1298,15 @@ func (a *App) drawFlashStrip() {
 	}
 	style := tcell.StyleDefault.Background(a.theme.LineHL).
 		Foreground(a.theme.Text).Bold(true)
+	if a.statusErr {
+		// A failure keeps its colour when it is long enough to land
+		// here instead of on the status bar — those are the reports
+		// carrying a path and a reason. Error is tuned against the
+		// editor background, which LineHL sits next to; Attrs.Error
+		// carries it on a palette with no red.
+		style = style.Foreground(a.theme.Error).
+			Attributes(tcell.AttrBold | a.theme.Attrs.Error)
+	}
 	lines := wrapFlashLines(a.statusMsg, a.flashStripTextWidth())
 	for i := 0; i < h; i++ {
 		for cx := x; cx < x+w; cx++ {

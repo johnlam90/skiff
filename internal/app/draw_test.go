@@ -1854,3 +1854,33 @@ func TestStatusLeftText_SingularLine(t *testing.T) {
 		t.Fatalf("readout = %q, want \"1 line\"", got)
 	}
 }
+
+// TestFlashStrip_ErrorKeepsItsErrorColour: a failure report long enough
+// to move onto the flash strip must still read as a failure. The strip
+// painted every message in plain text colour, so the longest errors —
+// the ones with a path and a reason in them — were the ones that lost
+// the red.
+func TestFlashStrip_ErrorKeepsItsErrorColour(t *testing.T) {
+	a := narrowFlashApp(t)
+	openTestFile(t, a, a.rootDir, "reflow.go", "package p\n")
+	fgAt := func() tcell.Color {
+		a.draw()
+		a.screen.Show()
+		cells, w, _ := a.screen.(tcell.SimulationScreen).GetContents()
+		sx, sy, _, _ := a.flashStripRect()
+		fg, _, _ := cells[sy*w+sx+1].Style.Decompose()
+		return fg
+	}
+
+	a.flashError(longFlash)
+	if a.flashStripRows() == 0 {
+		t.Fatal("fixture should raise the strip")
+	}
+	if got := fgAt(); got != a.theme.Error {
+		t.Fatalf("an error on the strip is painted %v, want the theme's Error %v", got, a.theme.Error)
+	}
+	a.statusErr = false
+	if got := fgAt(); got != a.theme.Text {
+		t.Fatalf("an ordinary flash stays in Text, got %v", got)
+	}
+}
