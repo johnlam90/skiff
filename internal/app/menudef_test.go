@@ -54,6 +54,9 @@ var preRedesignMenuActions = []string{
 // be declared here on purpose.
 var postRedesignMenuActions = []string{
 	"Git…", "File clipboard…",
+	// The menu path to a file drop: copy a path from anywhere on this
+	// machine into the active folder (filedrop.go).
+	"Import path…",
 	"Go to matching bracket", "Move to previous word", "Move to next word",
 	"Resolve disk conflict…", "Refresh file tree", "Keyboard shortcuts…",
 	// The Nerd Font icons picker — the menu door detection cannot
@@ -147,21 +150,21 @@ func drillInItemByLabel(t *testing.T, a *App, label string) menuItemDef {
 
 // TestMenuLayout_EmptySession pins the headline claim of the redesign:
 // with no tab, no repo and no custom actions the menu collapses to the
-// eleven rows that can actually do something — New file, the two
-// project searches, the seven view rows and Quit — and the whole modal
-// is 20 cells tall, well inside an 80×24 tmux split.
+// twelve rows that can actually do something — New file, Import path,
+// the two project searches, the seven view rows and Quit — and the
+// whole modal is 21 cells tall, well inside an 80×24 tmux split.
 func TestMenuLayout_EmptySession(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.customActions = nil
 	items, dividers, h := a.menuLayout()
 
-	if h != 20 {
-		t.Errorf("modalHeight = %d, want 20", h)
+	if h != 21 {
+		t.Errorf("modalHeight = %d, want 21", h)
 	}
-	if got := len(items); got != 12 {
-		t.Errorf("item count = %d, want 12; got %v", got, menuLabels(a, items))
+	if got := len(items); got != 13 {
+		t.Errorf("item count = %d, want 13; got %v", got, menuLabels(a, items))
 	}
-	wantDiv := []int{3, 5, 8, 17}
+	wantDiv := []int{3, 6, 9, 18}
 	if len(dividers) != len(wantDiv) {
 		t.Fatalf("dividers = %v, want %v", dividers, wantDiv)
 	}
@@ -422,8 +425,8 @@ func TestMenuLayout_WithCustomActions(t *testing.T) {
 	}
 	items, _, h := a.menuLayout()
 
-	if h != 23 { // 20 + 2 items + 1 divider
-		t.Errorf("modalHeight = %d, want 23", h)
+	if h != 24 { // 21 + 2 items + 1 divider
+		t.Errorf("modalHeight = %d, want 24", h)
 	}
 	// Custom actions should be the second-to-last and third-to-last
 	// rows, with Quit as the final row.

@@ -33,6 +33,18 @@
 // held longer than that, so closing a menu or arming the leader is not
 // perceptibly slower and a rune typed after the window cannot complete
 // an Esc chord the leader had already expired.
+//
+// The same filter has a second job, for the same reason it has the
+// first: it is the only place below tcell's parser. Drag-and-drop
+// messages (OSC 72, internal/dnd) are lifted out of the stream here and
+// handed to a sink, because a dropped file arrives as megabytes of
+// base64 that tcell must never see — parsed, it is wasted work; given
+// up on, it is keystrokes typed into the open buffer. The lone-ESC
+// window above is the ONLY clock in this file: a message that has
+// started is waited for however long the network takes, because the
+// rest of it is what the stream delivers next. And every write to the
+// tty goes through this wrapper's mutex, so the worker fetching a drop
+// can send a request without it landing inside a frame.
 
 package app
 
@@ -41,9 +53,12 @@ import (
 	"io"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+
+	"github.com/johnlam90/skiff/internal/dnd"
 )
 
 // altEscSeq is the CSI-u (kitty keyboard protocol) form of Esc with the
@@ -123,6 +138,9 @@ type escChunk struct {
 // EventError rather than a crash. Because the rewrite can grow the
 // stream, output that does not fit the caller's buffer is kept in
 // pending and handed back on the following Read calls.
+//
+// Read is called by one goroutine, tcell's input loop, and scan belongs
+// to it. Write and SetSink are safe from any goroutine.
 type escTty struct {
 	tcell.Tty
 	pending    []byte
@@ -131,6 +149,59 @@ type escTty struct {
 	once       sync.Once
 	// now and after are seams for tests; nil means the real clock.
 	after func(time.Duration) <-chan time.Time
+
+	// scan lifts drag-and-drop messages out of the stream before the
+	// double-Esc rewrite and tcell ever see them.
+	scan dnd.Scanner
+	// sink receives what scan lifts, on Read's goroutine. An atomic
+	// pointer because the app attaches it after the screen — and with
+	// it the reader — is already running.
+	sink atomic.Pointer[sinkBox]
+	// wmu makes each Write call exclusive. tcell hands a frame over in
+	// Write calls that each hold whole escape sequences, so holding
+	// this across one is enough to keep a worker's request out of the
+	// middle of a sequence.
+	wmu sync.Mutex
+}
+
+// sinkBox holds a dnd.Sink for the atomic pointer, which needs a
+// concrete type to point at.
+type sinkBox struct{ s dnd.Sink }
+
+// SetSink sets where lifted drag-and-drop messages go; nil drops them.
+// Until it is called they are still lifted out of the stream — they
+// must never reach tcell — and simply discarded.
+func (t *escTty) SetSink(s dnd.Sink) {
+	if s == nil {
+		t.sink.Store(nil)
+		return
+	}
+	t.sink.Store(&sinkBox{s})
+}
+
+// ttySink is the Sink the scanner is fed: it forwards to whatever the
+// app has attached, or to nothing.
+type ttySink struct{ t *escTty }
+
+// Ingest forwards one message body.
+func (k ttySink) Ingest(body []byte) {
+	if b := k.t.sink.Load(); b != nil {
+		b.s.Ingest(body)
+	}
+}
+
+// Lost forwards the news that a message was cut off.
+func (k ttySink) Lost() {
+	if b := k.t.sink.Load(); b != nil {
+		b.s.Lost()
+	}
+}
+
+// Write sends p to the terminal, one caller at a time.
+func (t *escTty) Write(p []byte) (int, error) {
+	t.wmu.Lock()
+	defer t.wmu.Unlock()
+	return t.Tty.Write(p)
 }
 
 // start launches the reader goroutine exactly once.
@@ -170,28 +241,15 @@ func (t *escTty) wait(d time.Duration) <-chan time.Time {
 	return time.After(d)
 }
 
-// Read implements io.Reader over the wrapped tty with the ESC ESC
-// rewrite applied. The tty is only consulted when nothing rewritten is
-// still waiting, so bytes are delivered in order. When the raw chunk
-// ends on a lone ESC, Read waits up to escMergeWindow for the next
-// chunk and rewrites the two together, so a double tap split across
-// writes still becomes one Alt+Esc.
+// Read implements io.Reader over the wrapped tty with drag-and-drop
+// messages lifted out and the ESC ESC rewrite applied. The tty is only
+// consulted when nothing rewritten is still waiting, so bytes are
+// delivered in order.
 func (t *escTty) Read(p []byte) (int, error) {
 	t.start()
 	if len(t.pending) == 0 {
-		raw, err := t.next()
-		if len(raw) > 0 && raw[len(raw)-1] == 0x1b && err == nil {
-			// One bounded wait for the other half of a possible pair.
-			select {
-			case c, ok := <-t.chunks:
-				if ok {
-					raw = append(raw, c.b...)
-					err = c.err
-				}
-			case <-t.wait(escMergeWindow):
-			}
-		}
-		t.pending = rewriteDoubleEsc(raw)
+		pass, err := t.fill()
+		t.pending = rewriteDoubleEsc(pass)
 		if len(t.pending) == 0 {
 			return 0, err
 		}
@@ -209,33 +267,73 @@ func (t *escTty) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// next blocks for the following raw chunk. A closed channel after the
-// reader exited reports EOF so tcell's loop stops cleanly.
-func (t *escTty) next() ([]byte, error) {
-	c, ok := <-t.chunks
-	if !ok {
-		return nil, io.EOF
+// fill blocks until there is input to hand tcell and returns it with
+// every drag-and-drop message removed. There is exactly one bounded
+// wait in it:
+//
+//   - a chunk that ends on a lone ESC is held for one escMergeWindow.
+//     That is the original double-tap wait — long enough to see whether
+//     the second tap, or the rest of an escape sequence, follows — and
+//     whatever is still a lone ESC once the next chunk has arrived is
+//     released rather than waited on again;
+//   - input already in hand is returned at once, even with a message
+//     half-received behind it: a key must not wait on a file;
+//   - otherwise it blocks on the tty, exactly as a plain read would —
+//     including in the middle of a message. A stalled message is never
+//     given up on: what the stream delivers after a stall is the rest
+//     of it, and abandoning the capture would hand those bytes to tcell
+//     as typed text. See dnd.Scanner for what does end a message early.
+func (t *escTty) fill() ([]byte, error) {
+	sink := ttySink{t}
+	var pass []byte
+	for {
+		var window <-chan time.Time
+		held := t.scan.Held()
+		switch {
+		case held:
+			window = t.wait(escMergeWindow)
+		case len(pass) > 0:
+			return pass, nil
+		}
+		select {
+		case c, ok := <-t.chunks:
+			if !ok {
+				return append(pass, t.scan.Flush()...), io.EOF
+			}
+			pass = append(pass, t.scan.Feed(c.b, sink)...)
+			if held {
+				pass = append(pass, t.scan.Release()...)
+			}
+			if c.err != nil {
+				return append(pass, t.scan.Flush()...), c.err
+			}
+		case <-window:
+			pass = append(pass, t.scan.Release()...)
+		}
 	}
-	return c.b, c.err
 }
 
 // newDoubleEscScreen builds the terminfo screen over a /dev/tty wrapped
 // in escTty. It returns (nil, nil) when the platform has no usable dev
 // tty — Windows, or a session with no controlling terminal — so the
 // caller falls back to tcell.NewScreen and loses only the double-tap
-// rewrite, never the editor.
-func newDoubleEscScreen() (tcell.Screen, error) {
+// rewrite and the drag-and-drop protocol route, never the editor. The
+// wrapper is returned beside the screen because the app needs both of
+// its other faces: SetSink for the messages it lifts, Write for the
+// requests sent back.
+func newDoubleEscScreen() (tcell.Screen, *escTty, error) {
 	if runtime.GOOS == "windows" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	tty, err := tcell.NewDevTty()
 	if err != nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	scr, err := tcell.NewTerminfoScreenFromTty(&escTty{Tty: tty})
+	wrapped := &escTty{Tty: tty}
+	scr, err := tcell.NewTerminfoScreenFromTty(wrapped)
 	if err != nil {
 		_ = tty.Close()
-		return nil, nil
+		return nil, nil, nil
 	}
-	return scr, nil
+	return scr, wrapped, nil
 }

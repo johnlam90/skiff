@@ -459,9 +459,16 @@ func (a *App) menuNewFile() {
 // "(in subfolder)" suffix otherwise, so the user can tell at a glance
 // where the file will land before they even click.
 func (a *App) newFileLabel() string {
+	return labelNewFile + a.activeFolderSuffix() + "…"
+}
+
+// activeFolderSuffix is the " (in subdir/)" tail the rows that act on
+// the active folder share — New file and Import path — or "" when that
+// folder is the project root, where naming it would only be noise.
+func (a *App) activeFolderSuffix() string {
 	folder := a.activeFolder
 	if folder == "" || a.isProjectRoot(folder) {
-		return labelNewFile + "…"
+		return ""
 	}
 	rel := a.relativeFolderLabel(folder)
 	// Truncate so the row never overflows the modal width — see
@@ -481,7 +488,7 @@ func (a *App) newFileLabel() string {
 		}
 		suffix = " (in " + rel + ")"
 	}
-	return labelNewFile + suffix + "…"
+	return suffix
 }
 
 // relativeFolderLabel returns folder rendered relative to the project root,

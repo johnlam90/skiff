@@ -74,6 +74,13 @@ func (a *App) sidebarRect() (x, y, w, h int) {
 		return 0, 0, 0, 0
 	}
 	h = a.height - 2
+	// The placement bar (filedrop.go) floats over the row just above
+	// the sidebar's footer. The tree hands that row over while the bar
+	// is up, so its scroll clamp — and every hit-test, which reads this
+	// rect — agrees that the last folder is the one above the bar.
+	if a.placeBarUp() {
+		h--
+	}
 	if a.gitPanelFillsWidth() {
 		return 0, 0, sw, h
 	}

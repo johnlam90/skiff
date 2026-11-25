@@ -165,6 +165,10 @@ func fileMenuGroup() []menuItemDef {
 		{action: (*App).menuRenameFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).renameFolderLabel, visible: (*App).hasActiveSubfolder},
 		{action: (*App).menuDeleteFolder, enabled: (*App).hasActiveSubfolder, labelFor: (*App).deleteFolderLabel, visible: (*App).hasActiveSubfolder},
 		{action: (*App).menuUndoDelete, enabled: (*App).hasTrashedEntry, labelFor: (*App).undoDeleteLabel, visible: (*App).hasTrashedEntry},
+		// The menu path to what a drag-and-drop does: copy a file from
+		// anywhere on this machine into the active folder. Hidden in
+		// single-file mode, where there is no project to copy into.
+		{action: (*App).menuImportPath, enabled: alwaysTrue, labelFor: (*App).importPathLabel, visible: (*App).hasTree},
 		{label: "File clipboard…", action: (*App).menuFileClipboard, enabled: (*App).hasFileClipActions, visible: (*App).hasFileClipActions},
 		// Tab switching needs a second tab to switch to, so the trio
 		// hides rather than dims on a single tab.

@@ -118,6 +118,14 @@ type fileOpResult struct {
 	label string
 	src   string
 	cs    filemanager.Changeset
+
+	// imported marks a drop's copy (filedrop.go, dnd.go): several
+	// sources from outside the project into dst, want of them asked
+	// for. It lands through handleImportDone, which — unlike the
+	// single-source ops above — has a partial success to report.
+	imported bool
+	want     int
+	dst      string
 }
 
 // startFileOp runs a move, copy or duplicate on the fileOp job so a
@@ -130,21 +138,9 @@ type fileOpResult struct {
 // progress tick is a Notify whose closure runs on the loop too.
 func (a *App) startFileOp(kind fileOpKind, src, dstDir string) {
 	label := kind.label()
-	scr := a.screen
 	files := a.files
-	// tick is the on-loop half of a progress report, built here so the
-	// goroutine only ever posts it.
-	tick := func(n int64) { a.handleFileOpProgress(label, n) }
+	progress := a.fileOpProgress(label)
 	started := a.fileOp.Start(func(context.Context) (fileOpResult, error) {
-		var count int64
-		lastTick := time.Now()
-		progress := func() {
-			n := atomic.AddInt64(&count, 1)
-			if time.Since(lastTick) > 150*time.Millisecond {
-				lastTick = time.Now()
-				_ = scr.PostEvent(asyncjob.Notify(func() { tick(n) }))
-			}
-		}
 		var cs filemanager.Changeset
 		var err error
 		switch kind {
@@ -164,6 +160,26 @@ func (a *App) startFileOp(kind fileOpKind, src, dstDir string) {
 	a.flash(gerundOf(label) + " " + filepath.Base(src) + "…")
 }
 
+// fileOpProgress returns the per-entry callback a background file op
+// hands the manager: it counts entries and, at most every 150ms, posts
+// the count to the loop for a "Pasting… 240 files" flash. It is built
+// on the loop and called only by the op's one goroutine, so the tick
+// timestamp needs no lock; the on-loop half is a Notify, never a UI
+// write from the worker.
+func (a *App) fileOpProgress(label string) func() {
+	scr := a.screen
+	tick := func(n int64) { a.handleFileOpProgress(label, n) }
+	var count int64
+	lastTick := time.Now()
+	return func() {
+		n := atomic.AddInt64(&count, 1)
+		if time.Since(lastTick) > 150*time.Millisecond {
+			lastTick = time.Now()
+			_ = scr.PostEvent(asyncjob.Notify(func() { tick(n) }))
+		}
+	}
+}
+
 // handleFileOpProgress keeps the user informed mid-copy.
 func (a *App) handleFileOpProgress(label string, count int64) {
 	a.flash(gerundOf(label) + "… " + plural(int(count), "%d file", "%d files"))
@@ -178,6 +194,8 @@ func gerundOf(label string) string {
 		return "Pasting"
 	case "Duplicate":
 		return "Duplicating"
+	case "Copy":
+		return "Copying"
 	default:
 		return label
 	}
@@ -205,6 +223,10 @@ func doneVerbOf(label string) string {
 // changed the disk, and refreshing only the tree left the finder and
 // the git tint stale.
 func (a *App) handleFileOpDone(r fileOpResult, err error) {
+	if r.imported {
+		a.handleImportDone(r, err)
+		return
+	}
 	if err != nil {
 		a.applyChangeset(filemanager.Changeset{})
 		a.flash(fmt.Sprintf("%s failed: %v", r.label, err))

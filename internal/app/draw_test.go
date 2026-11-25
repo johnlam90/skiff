@@ -1787,6 +1787,16 @@ func TestDraw_PaintsEveryCell(t *testing.T) {
 		{"find strip", 120, 40, func(a *App) { a.openFile(goFile); a.openFind() }},
 		{"flash strip", 120, 40, func(a *App) { a.openFile(goFile); a.flash("a message") }},
 		{"menu open", 120, 40, func(a *App) { a.openFile(goFile); a.openMenu() }},
+		// The placement bar takes a row away from the tree (sidebarRect
+		// shrinks while it is up) and paints that row itself — exactly
+		// the kind of hand-over this fence exists to check.
+		{"placement bar", 120, 40, func(a *App) { a.openFile(goFile); a.openPlaceBar([]string{goFile}, goFile, false) }},
+		{"placement bar, sidebar hidden", 120, 40, func(a *App) {
+			a.openFile(goFile)
+			a.menuToggleSidebar()
+			a.openPlaceBar([]string{goFile}, goFile, false)
+		}},
+		{"placement bar at the minimum size", minWidth, minHeight, func(a *App) { a.openPlaceBar([]string{goFile}, goFile, true) }},
 		{"minimum size", minWidth, minHeight, func(a *App) { a.openFile(goFile) }},
 		{"too small", minWidth - 1, minHeight, func(a *App) { a.openFile(goFile) }},
 	}

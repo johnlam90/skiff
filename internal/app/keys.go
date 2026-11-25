@@ -40,6 +40,15 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		if ev.Key() == tcell.KeyEsc {
 			return
 		}
+		// The placement bar is the one surface that takes a paste
+		// whole instead of rune by rune: a second file dropped while
+		// it is up has to be read as a path, and its characters must
+		// never reach the bar as keys (every path has a "t" in it
+		// somewhere, and t is the bar's "paste as text").
+		if a.placeBarUp() {
+			a.bufferPasteKey(ev)
+			return
+		}
 		if a.overlays.Top() != nil || a.strip != nil {
 			a.pasteKeyToSurface(ev)
 			return
@@ -354,12 +363,11 @@ func (a *App) bufferPasteKey(ev *tcell.EventKey) {
 	}
 }
 
-// applyPaste lands the buffered paste in the active tab as one
-// InsertString — one undo step, one find re-scan — and empties the
-// buffer. A paste with no tab to land in, or onto a markdown preview
-// (read-only by construction), is discarded rather than held for the
-// next tab: the user pasted into what was on screen, and delivering it
-// somewhere else later would be a surprise.
+// applyPaste lands the buffered paste when its end marker arrives. A
+// paste that is nothing but file paths is a dropped file — that is how
+// Rex, Herdr and Ghostty deliver one — and goes to the placement bar
+// instead of the buffer (filedrop.go); with the bar already up, its
+// paths join the pending drop. Everything else is text.
 func (a *App) applyPaste() {
 	text := string(a.pasteBuf)
 	a.pasteBuf = a.pasteBuf[:0]
@@ -367,6 +375,22 @@ func (a *App) applyPaste() {
 	if text == "" {
 		return
 	}
+	if a.placeBarUp() {
+		a.joinDropPaste(text)
+		return
+	}
+	if a.tryDropPaste(text) {
+		return
+	}
+	a.insertPastedText(text)
+}
+
+// insertPastedText puts text in the active tab as one InsertString —
+// one undo step, one find re-scan. A paste with no tab to land in, or
+// onto a markdown preview (read-only by construction), is discarded
+// rather than held for the next tab: the user pasted into what was on
+// screen, and delivering it somewhere else later would be a surprise.
+func (a *App) insertPastedText(text string) {
 	tab := a.activeTabPtr()
 	if tab == nil {
 		return

@@ -25,6 +25,7 @@ import (
 
 	"github.com/johnlam90/skiff/internal/asyncjob"
 	"github.com/johnlam90/skiff/internal/customactions"
+	"github.com/johnlam90/skiff/internal/dnd"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filemanager"
 	"github.com/johnlam90/skiff/internal/filetree"
@@ -379,6 +380,37 @@ type App struct {
 	// background move/copy at a time it may run.
 	fileClip fileClip
 
+	// drop is the file drop in progress, if any: a pasted path waiting
+	// on the placement bar, or a protocol drag hovering over the
+	// window. It owns the tree's lit drop-target row. All writes go
+	// through setDropTarget / clearDrop — see filedrop.go.
+	drop fileDrop
+
+	// dnd is the app's end of the drag-and-drop protocol (dnd.go): nil
+	// when no tty filter carries it — tests, Windows, a session with no
+	// controlling terminal. dndRegistered is whether the terminal has
+	// been told the editor accepts drops; dndFetching whether a drop's
+	// transfer is in flight, so an exit can cancel it on the wire.
+	dnd           *dnd.Conn
+	dndRegistered bool
+	dndFetching   bool
+	// dndIDSent is whether the terminal has been told which machine
+	// the editor is on. Nothing is accepted before it has: until then a
+	// terminal would take a remote editor for a local one and hand it
+	// paths that name the wrong machine's files.
+	dndIDSent bool
+	// dndMimes is what the drag currently over the window offers — the
+	// terminal sends the list with the first hover only — and
+	// dndLastReply the answer last given for it, -1 before any, so the
+	// terminal is told only when the answer changes.
+	dndMimes     []string
+	dndLastReply int
+	// dndMachineID and dndLimits are seams: the real machine-id lookup
+	// shells out on macOS, and the real idle limit is thirty seconds.
+	// Zero values mean dnd.MachineID and dnd.DefaultLimits.
+	dndMachineID func() (string, error)
+	dndLimits    dnd.Limits
+
 	// Background jobs. Every goroutine-backed feature is one
 	// asyncjob.Job: the job owns the in-flight/queued/generation
 	// bookkeeping its policy needs, the loop lands every one of them
@@ -558,7 +590,7 @@ func New(rootDir string) (*App, error) {
 	if abs, err := filepath.Abs(rootDir); err == nil {
 		rootDir = abs
 	}
-	scr, err := newTerminalScreen()
+	scr, tty, err := newTerminalScreen()
 	if err != nil {
 		return nil, err
 	}
@@ -570,6 +602,13 @@ func New(rootDir string) (*App, error) {
 	}
 
 	a := newApp(scr, rootDir, tree, true)
+	// Offer the drag-and-drop protocol route where there is a tty
+	// filter to carry it. Project mode only: single-file mode has no
+	// explorer to drop on, so NewSingleFile never attaches and the
+	// filter simply discards what it lifts.
+	if tty != nil {
+		tty.SetSink(a.attachDnd(tty))
+	}
 	a.refreshGitStatus()
 	a.startTreeRefresh()
 	a.startMouseProbe(tmuxActive(), mouseProbeDelay)
@@ -629,7 +668,7 @@ func (a *App) welcomeFlash() {
 // actions that need a base directory — Save As, New File, the
 // relative/absolute path helpers — have somewhere to anchor.
 func NewSingleFile(filePath string) (*App, error) {
-	scr, err := newTerminalScreen()
+	scr, _, err := newTerminalScreen()
 	if err != nil {
 		return nil, err
 	}
@@ -670,22 +709,27 @@ func newSingleFileApp(scr tcell.Screen, filePath string) *App {
 // paste, and the default-theme background painted before the first
 // event. Kept apart from newApp so tests can hand newApp a
 // SimulationScreen instead of a live terminal.
-func newTerminalScreen() (tcell.Screen, error) {
+//
+// The second result is the tty filter under the screen, nil when the
+// fallback screen is in use (Windows, or no controlling terminal). It
+// is what carries the drag-and-drop protocol; without it only the
+// pasted-path route for drops exists. See dnd.go.
+func newTerminalScreen() (tcell.Screen, *escTty, error) {
 	// Prefer the /dev/tty screen with the ESC ESC rewrite (esctty.go) so
 	// a fast double-tap of Esc opens the menu; fall back to tcell's own
 	// choice where no dev tty exists.
-	scr, err := newDoubleEscScreen()
+	scr, tty, err := newDoubleEscScreen()
 	if scr == nil {
 		if scr, err = tcell.NewScreen(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	} else if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Init is where tcell reads the locale; see locale.go for why a
 	// C/POSIX one is not allowed to turn every glyph into "?".
 	if err := withUTF8Locale(scr.Init); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Baseline mouse reporting only — clicks, drags and the wheel. The
 	// all-motion mode (`?1003h`) is switched on per-overlay by
@@ -700,7 +744,7 @@ func newTerminalScreen() (tcell.Screen, error) {
 	th := theme.Default()
 	scr.SetStyle(tcell.StyleDefault.Background(th.BG).Foreground(th.Text))
 	scr.Clear()
-	return scr, nil
+	return scr, tty, nil
 }
 
 // newApp builds the App core every construction path shares: the struct
@@ -720,6 +764,8 @@ func newApp(scr tcell.Screen, rootDir string, tree *filetree.Tree, sidebarShown 
 		files:          filemanager.New(rootDir),
 		hoveredMenuRow: -1,
 		diffPanelRow:   -1,
+		drop:           fileDrop{hoverBtn: -1},
+		dndLastReply:   -1,
 		sidebarShown:   sidebarShown,
 		sidebarWidth:   defaultSidebarWidth,
 		wrapOn:         true,
@@ -831,6 +877,8 @@ func (a *App) Close() {
 	a.files.EmptyTrash()
 	a.stopTreeRefresh()
 	a.stopAutoScroll()
+	// Before Fini: the tty is still ours to write to.
+	a.detachDnd()
 	if a.screen != nil {
 		a.screen.Fini()
 	}
