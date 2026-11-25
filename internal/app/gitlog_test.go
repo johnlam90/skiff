@@ -490,3 +490,33 @@ func TestDrawGitLog_HintNamesEnter(t *testing.T) {
 		t.Fatalf("title row should name Enter as show: %q", title)
 	}
 }
+
+// TestFileHistory_WorksInSingleFileMode pins what the menu already
+// promises: History of this file asks git about the tab's own path, so
+// it needs no tree. The gate read the whole-repo snapshot's branch,
+// which single-file mode never loads, so the row was dead there.
+func TestFileHistory_WorksInSingleFileMode(t *testing.T) {
+	requireGit(t)
+	dir := initRepo(t)
+	file := filepath.Join(dir, "solo.txt")
+	writeFileT(t, file, "one\n")
+	gitRun(t, dir, "add", ".")
+	gitRun(t, dir, "commit", "-q", "-m", "seed solo")
+
+	scr := tcell.NewSimulationScreen("UTF-8")
+	if err := scr.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	t.Cleanup(func() { scr.Fini() })
+	scr.SetSize(120, 40)
+	a := newSingleFileApp(scr, file)
+	a.width, a.height = scr.Size()
+
+	if !a.hasFileHistoryTab() {
+		t.Fatal("History of this file should be available for a file tab in single-file mode")
+	}
+	a.menuFileHistory()
+	if !gitLogIsOpen(a) || len(gitLogOv(t, a).entries) != 1 {
+		t.Fatalf("want the file's one commit listed, top=%T", a.overlays.Top())
+	}
+}
