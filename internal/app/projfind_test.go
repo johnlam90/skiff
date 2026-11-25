@@ -694,3 +694,32 @@ func TestProjFindCounterText_Pluralises(t *testing.T) {
 		t.Fatalf("counter = %q, want %q", got, "2 matches in 2 files")
 	}
 }
+
+// TestProjFindDragDoesNotRepeatTheClick pins the click latch on the
+// panel: every event of a drag carries Button1, so holding the button
+// over a mode chip flipped it on each motion event, and a drag that
+// left the panel dismissed it. Only a fresh press acts.
+func TestProjFindDragDoesNotRepeatTheClick(t *testing.T) {
+	a := projFindApp(t, t.TempDir())
+	bar := a.stripRect()
+	_, chips := a.projFindBarLayout(bar.w)
+	cx := bar.x + chips[0].x0
+
+	a.handleProjFindMouse(cx, bar.y, tcell.Button1)
+	if !a.projFind.findMatchCase {
+		t.Fatal("a press on the chip should arm it")
+	}
+	a.handleProjFindMouse(cx, bar.y, tcell.Button1) // held: motion, not a click
+	if !a.projFind.findMatchCase {
+		t.Fatal("holding the button over the chip must not flip it back")
+	}
+	a.handleProjFindMouse(0, 0, tcell.Button1) // dragged off the panel
+	if !a.projFindOpen() {
+		t.Fatal("a drag that leaves the panel must not dismiss it")
+	}
+	a.handleProjFindMouse(cx, bar.y, tcell.ButtonNone)
+	a.handleProjFindMouse(cx, bar.y, tcell.Button1)
+	if a.projFind.findMatchCase {
+		t.Fatal("a second, fresh press should flip the chip back")
+	}
+}

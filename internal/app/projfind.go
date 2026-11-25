@@ -71,6 +71,10 @@ type projFindState struct {
 	findMatchCase bool
 	findWholeWord bool
 	findRegex     bool
+	// press is the panel's click latch: chips, rows and the
+	// click-outside dismiss answer a fresh press, never the motion of a
+	// held drag — see overlay.Press.
+	press overlay.Press
 
 	// Project-wide replace riding the panel (see projreplace.go). The
 	// X ranges are stamped by drawProjFindBar for the mouse handler.
@@ -147,6 +151,10 @@ func (a *App) openProjFind() {
 	}
 	a.closeAllModals()
 	a.strip = projFindStrip{a: a}
+	// The panel can open under a button that is still down (the menu
+	// row that opened it fires on the press); that drag is not a click
+	// on whatever the panel puts under the pointer.
+	a.projFind.press.Sync(a.mouse.held)
 	a.projFind.query = overlay.Field{}
 	a.projFind.findMatches = nil
 	a.projFind.findTruncated = false
@@ -449,6 +457,7 @@ func (a *App) projFindEditKey(ev *tcell.EventKey) {
 // opens it, clicking anywhere outside the panel dismisses it.
 func (a *App) handleProjFindMouse(x, y int, btn tcell.ButtonMask) {
 	ex, ey, ew, eh := a.editorRect()
+	fresh := a.projFind.press.Fresh(btn)
 	if btn&tcell.WheelUp != 0 {
 		a.projFind.findScrollY -= wheelLines
 		a.projFindClampScroll(a.projFindRows())
@@ -459,7 +468,7 @@ func (a *App) handleProjFindMouse(x, y int, btn tcell.ButtonMask) {
 		a.projFindClampScroll(a.projFindRows())
 		return
 	}
-	if btn&tcell.Button1 == 0 {
+	if !fresh {
 		return
 	}
 	// Bar row: chip clicks toggle a mode and re-run the query; other

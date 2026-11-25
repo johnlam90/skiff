@@ -89,6 +89,10 @@ type diffOverlay struct {
 	tinted bool
 	// hover is the focused button: 0 = Close, 1 = Open file.
 	hover int
+	// press is the click latch: the buttons and the click-outside
+	// dismiss answer a fresh press, never the motion of a held drag —
+	// see overlay.Press.
+	press overlay.Press
 }
 
 // diffLoadKind names which surface asked for a diff. The two differ
@@ -372,6 +376,7 @@ func (d *diffOverlay) HandleKey(ev *tcell.EventKey) {
 // modifier into its own event.
 func (d *diffOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	a := d.app
+	fresh := d.press.Fresh(btn)
 	shift := !a.lastShiftAt.IsZero() && time.Since(a.lastShiftAt) < modifierStickyWindow
 	if btn&tcell.WheelUp != 0 {
 		if shift {
@@ -404,7 +409,7 @@ func (d *diffOverlay) HandleMouse(x, y int, btn tcell.ButtonMask) {
 	} else if closeRect.contains(x, y) {
 		d.hover = 0
 	}
-	if btn&tcell.Button1 == 0 {
+	if !fresh {
 		return
 	}
 	if x < mx || x >= mx+mw || y < my || y >= my+mh {

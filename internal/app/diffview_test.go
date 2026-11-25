@@ -1075,3 +1075,28 @@ func TestDrawDiffView_WideLineNumbersStayInsideTheGutter(t *testing.T) {
 		t.Fatalf("right side = %q, want the number, the two-cell gap, then the text", got)
 	}
 }
+
+// TestDiffView_DragAcrossButtonsFiresNothing pins the click latch: a
+// terminal reports a drag as a stream of events that all carry Button1,
+// so a press in the diff body dragged over [ Close ] — or off the modal
+// — used to count as a click there and dismiss the view. Only a fresh
+// press activates a target.
+func TestDiffView_DragAcrossButtonsFiresNothing(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.openDiffView("Diff · f.txt", samplePatch(), "", "f.txt")
+	d := diffOv(t, a)
+	mx, my, _, _ := d.modalRect()
+	_, closeRect := d.buttonRects()
+
+	d.HandleMouse(mx+4, my+4, tcell.Button1) // press in the body
+	d.HandleMouse(closeRect.x+1, closeRect.y, tcell.Button1)
+	d.HandleMouse(0, 0, tcell.Button1)
+	if !diffIsOpen(a) {
+		t.Fatal("a drag must not press Close or dismiss the view")
+	}
+	d.HandleMouse(0, 0, tcell.ButtonNone)
+	d.HandleMouse(closeRect.x+1, closeRect.y, tcell.Button1)
+	if diffIsOpen(a) {
+		t.Fatal("a fresh press on Close should still close")
+	}
+}
