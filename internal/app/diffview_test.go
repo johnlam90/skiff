@@ -1028,3 +1028,50 @@ func TestDiffModalRect_LeavesTheStatusRowAtMinimumSize(t *testing.T) {
 		t.Fatalf("scroll %d + %d visible does not reach the last of %d rows", d.scroll, d.visibleRows(), d.bodyCount())
 	}
 }
+
+// TestDrawDiffView_WideLineNumbersStayInsideTheGutter pins the gutter's
+// own bounds. It was a fixed five cells holding three digits, so a
+// four-digit line number overwrote the modal's left padding and the
+// centre divider, and a five-digit one the border. The gutter now grows
+// with the largest number in the diff.
+func TestDrawDiffView_WideLineNumbersStayInsideTheGutter(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.openDiffView("Diff · f.txt", patchOf(
+		"diff --git a/f.txt b/f.txt",
+		"index 1111111..2222222 100644",
+		"--- a/f.txt",
+		"+++ b/f.txt",
+		"@@ -12345,3 +12345,3 @@",
+		" ctx one",
+		"-old line",
+		"+new line",
+		" ctx two",
+	), "", "f.txt")
+	d := diffOv(t, a)
+	d.Draw(a.screen)
+	a.screen.Show()
+	cells, w, _ := a.screen.(tcell.SimulationScreen).GetContents()
+	mx, my, mw, _ := d.modalRect()
+	bodyX, bodyW := mx+2, mw-4
+	rowY := my + 4 // hunk header, then the first context row
+	row := func(x0, n int) string {
+		var b strings.Builder
+		for x := x0; x < x0+n; x++ {
+			b.WriteRune(cells[rowY*w+x].Runes[0])
+		}
+		return b.String()
+	}
+	if got := row(bodyX-1, 1); got != " " {
+		t.Fatalf("the cell left of the body must stay padding, got %q", got)
+	}
+	if got := row(bodyX, 7+len("ctx one")); got != "12345  ctx one" {
+		t.Fatalf("left side = %q, want the number, the two-cell gap, then the text", got)
+	}
+	leftW := (bodyW - 3) / 2
+	if got := row(bodyX+leftW+1, 1); got != "│" {
+		t.Fatalf("the centre divider was overwritten: %q", got)
+	}
+	if got := row(bodyX+leftW+3, 7+len("ctx one")); got != "12345  ctx one" {
+		t.Fatalf("right side = %q, want the number, the two-cell gap, then the text", got)
+	}
+}

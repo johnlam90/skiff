@@ -53,8 +53,10 @@ const (
 	// dip under ~45 cells — too cramped for real code lines — so the
 	// view adapts to unified.
 	diffSideBySideMinBody = 92
-	// diffNoGutter is the width of one side's line-number gutter:
-	// "9999 " — four digits and a space.
+	// diffNoGutter is the narrowest one side's line-number gutter gets:
+	// "999  " — three digits, then the two cells that set the number
+	// off from the text. A diff reaching past line 999 widens it (see
+	// diffGutterWidth).
 	diffNoGutter = 5
 )
 
@@ -71,8 +73,11 @@ type diffOverlay struct {
 	rows     []diff.Row
 	openPath string
 	maxLen   int
-	scroll   int
-	scrollX  int
+	// gutterW is the line-number gutter's width for this diff, set when
+	// the rows are; zero reads as diffNoGutter (see gutter).
+	gutterW int
+	scroll  int
+	scrollX int
 	// leftStyles/rightStyles are the per-side Chroma grids — each side
 	// of a modified pair holds different text, so each gets its own
 	// lex (see diffSideStyles). nil when highlighting is off.
@@ -227,6 +232,7 @@ func (a *App) openDiffView(title string, p diff.Patch, openPath, langPath string
 	a.closeAllModals()
 	d := &diffOverlay{app: a, title: title, openPath: openPath}
 	d.rows = diff.Rows(p)
+	d.gutterW = diffGutterWidth(d.rows)
 	d.unified = diffBodyLines(p)
 	d.leftStyles, d.rightStyles = diffSideStyles(d.rows, langPath, a.theme)
 	d.tints, d.tinted = a.theme.DiffTints()
@@ -668,6 +674,25 @@ func (d *diffOverlay) drawRowSideBySide(scr tcell.Screen, x, y, w, idx int) {
 		a.theme.GitAdded, d.tints.AddRow, d.tints.AddEmph, row.RightEmph, rctx)
 }
 
+// diffGutterWidth is the line-number gutter a diff needs: room for its
+// largest line number plus the two-cell gap before the text, and never
+// narrower than diffNoGutter. A fixed five cells drew a four-digit
+// number one cell left of its column and a five-digit one over the
+// modal's border.
+func diffGutterWidth(rows []diff.Row) int {
+	maxNo := 0
+	for _, r := range rows {
+		maxNo = max(maxNo, r.LeftNo, r.RightNo)
+	}
+	return max(diffNoGutter, len(itoa(maxNo))+2)
+}
+
+// gutter is the overlay's line-number gutter width, falling back to the
+// minimum for an overlay built without openDiffView.
+func (d *diffOverlay) gutter() int {
+	return max(d.gutterW, diffNoGutter)
+}
+
 // drawDiffSide paints one half of a side-by-side row: a muted line
 // number (blank when the side has none), then the text cluster by
 // cluster. A changed side gets the full-width row tint — gutter, text,
@@ -699,9 +724,13 @@ func (d *diffOverlay) drawSide(scr tcell.Screen, x, y, w, lineNo int, text strin
 	if changed && !tinted {
 		base = base.Foreground(changeColor)
 	}
+	// Right-aligned with two cells left before the text. The gutter is
+	// as wide as the diff's largest number needs, so this never starts
+	// left of x — a fixed five cells put "1000" on the divider.
+	g := d.gutter()
 	no := itoa(lineNo)
-	drawAt(scr, x+diffNoGutter-1-runeLen(no)-1, y, no+" ", noStyle)
-	tw := w - diffNoGutter
+	drawAt(scr, x+g-2-runeLen(no), y, no+" ", noStyle)
+	tw := w - g
 	if tw <= 0 {
 		return
 	}
@@ -754,12 +783,12 @@ func (d *diffOverlay) drawSide(scr tcell.Screen, x, y, w, lineNo int, text strin
 			// indentation is as wide as the indentation. The part of a
 			// tab cut by either edge of the column still paints.
 			for c := max(col, 0); c < col+cw && c < tw; c++ {
-				textdraw.Cell(scr, x+diffNoGutter+c, y, ' ', nil, st)
+				textdraw.Cell(scr, x+g+c, y, ' ', nil, st)
 			}
 			continue
 		}
 		rs := []rune(cluster)
-		scr.SetContent(x+diffNoGutter+col, y, rs[0], rs[1:], st)
+		scr.SetContent(x+g+col, y, rs[0], rs[1:], st)
 	}
 }
 
