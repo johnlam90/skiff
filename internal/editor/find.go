@@ -508,31 +508,58 @@ func (t *Tab) ReplaceAllMatches(repl string) int {
 	// so t.FindMatches stops describing the spans this call swapped.
 	matches := t.FindMatches
 	opts := t.findOptions()
+	// A line never carries a terminator, so every spelling of a line
+	// break in the replacement becomes the one replaceOnLine splits on.
+	repl = strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(repl)
 	replaced := 0
 	t.edit(undoGroupStructural, func() {
 		// FindAll emits matches in document order, so one line's hits
-		// are a contiguous run sorted by column.
-		for i := 0; i < len(matches); {
-			j := i
-			for j < len(matches) && matches[j].Line == matches[i].Line {
-				j++
+		// are a contiguous run sorted by column. The runs are applied
+		// last line first: a replacement holding a line break grows the
+		// buffer, and working upward keeps every match still to come on
+		// the line index it was recorded with.
+		for j := len(matches); j > 0; {
+			i := j - 1
+			for i > 0 && matches[i-1].Line == matches[j-1].Line {
+				i--
 			}
-			replaced += t.replaceOnLine(matches[i:j], repl, opts)
-			i = j
+			n, added := t.replaceOnLine(matches[i:j], repl, opts)
+			replaced += n
+			line := matches[i].Line
+			if t.Cursor.Line > line {
+				t.Cursor.Line += added
+			}
+			if t.Anchor.Line > line {
+				t.Anchor.Line += added
+			}
+			j = i
 		}
+		t.Cursor = t.clampToCluster(t.Cursor)
+		t.Anchor = t.clampToCluster(t.Anchor)
 	})
 	return replaced
 }
 
+// clampToCluster pulls p back inside the buffer and onto a grapheme
+// boundary — where a caret may rest after an edit rewrote the line
+// under it and left the old column past the end or inside a cluster.
+func (t *Tab) clampToCluster(p Position) Position {
+	p = t.Buffer.Clamp(p)
+	p.Col = ClusterStart(t.Buffer.LineRunes(p.Line), p.Col)
+	return p
+}
+
 // replaceOnLine rewrites one buffer line with every match in ms (all on
-// that line, ascending by column) swapped for repl, and returns how many
-// it swapped. A span that does not fit the line as it is now — out of
-// range, or overlapping the one before it — is left alone rather than
-// spliced at coordinates that no longer mean anything.
-func (t *Tab) replaceOnLine(ms []Match, repl string, opts FindOptions) int {
+// that line, ascending by column) swapped for repl. It returns how many
+// it swapped and how many lines the buffer grew by — a replacement with
+// a "\n" in it becomes real lines, never a terminator inside one. A
+// span that does not fit the line as it is now — out of range, or
+// overlapping the one before it — is left alone rather than spliced at
+// coordinates that no longer mean anything.
+func (t *Tab) replaceOnLine(ms []Match, repl string, opts FindOptions) (swapped, added int) {
 	line := ms[0].Line
 	if line < 0 || line >= len(t.Buffer.Lines) {
-		return 0
+		return 0, 0
 	}
 	runes := []rune(t.Buffer.Lines[line])
 	var out strings.Builder
@@ -548,11 +575,20 @@ func (t *Tab) replaceOnLine(ms []Match, repl string, opts FindOptions) int {
 		n++
 	}
 	if n == 0 {
-		return 0
+		return 0, 0
 	}
 	out.WriteString(string(runes[prev:]))
-	t.Buffer.Lines[line] = out.String()
-	return n
+	parts := strings.Split(out.String(), "\n")
+	if len(parts) == 1 {
+		t.Buffer.Lines[line] = parts[0]
+		return n, 0
+	}
+	lines := make([]string, 0, len(t.Buffer.Lines)+len(parts)-1)
+	lines = append(lines, t.Buffer.Lines[:line]...)
+	lines = append(lines, parts...)
+	lines = append(lines, t.Buffer.Lines[line+1:]...)
+	t.Buffer.Lines = lines
+	return n, len(parts) - 1
 }
 
 // ReplaceLines swaps whole lines (0-based index → new content) as ONE

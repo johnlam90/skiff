@@ -922,3 +922,46 @@ func TestReplaceAllMatches_SkipsSpansThatNoLongerFit(t *testing.T) {
 		t.Fatalf("buffer %q, want %q", got, "Z bar")
 	}
 }
+
+// TestReplaceAllMatches_ClampsCaretIntoShrunkLine: a replace-all that
+// shortens the caret's line must not leave the caret past its end. It
+// used to stay at its old column — 16 on a 7-rune line — where the next
+// edit indexed off the end of the line.
+func TestReplaceAllMatches_ClampsCaretIntoShrunkLine(t *testing.T) {
+	tab, _ := NewTab("")
+	tab.InsertString("aaaa foo foo foo")
+	tab.SetFindQuery("foo")
+	if got := tab.ReplaceAllMatches(""); got != 3 {
+		t.Fatalf("replaced %d, want 3", got)
+	}
+	n := len(tab.Buffer.LineRunes(0))
+	if tab.Cursor.Col > n || tab.Anchor.Col > n {
+		t.Fatalf("caret %+v / anchor %+v past the %d-rune line", tab.Cursor, tab.Anchor, n)
+	}
+}
+
+// TestReplaceAllMatches_NewlineInReplacementSplitsLines: a buffer line
+// never carries a terminator, so a replacement with a line break has to
+// become real lines — CRLF and bare CR included — and matches on the
+// lines below must still land on their own line after the split.
+func TestReplaceAllMatches_NewlineInReplacementSplitsLines(t *testing.T) {
+	tab, _ := NewTab("")
+	tab.InsertString("a,b\nc,d\ntail")
+	tab.Cursor = Position{Line: 2, Col: 4}
+	tab.Anchor = tab.Cursor
+	tab.SetFindQuery(",")
+	if got := tab.ReplaceAllMatches("\r\n"); got != 2 {
+		t.Fatalf("replaced %d, want 2", got)
+	}
+	want := []string{"a", "b", "c", "d", "tail"}
+	if strings.Join(tab.Buffer.Lines, "|") != strings.Join(want, "|") {
+		t.Fatalf("lines = %q, want %q", tab.Buffer.Lines, want)
+	}
+	if tab.Cursor != (Position{Line: 4, Col: 4}) {
+		t.Fatalf("caret should follow its line down the splits, got %+v", tab.Cursor)
+	}
+	tab.Undo()
+	if strings.Join(tab.Buffer.Lines, "|") != "a,b|c,d|tail" {
+		t.Fatalf("one undo should restore the buffer, got %q", tab.Buffer.Lines)
+	}
+}
