@@ -281,6 +281,21 @@ func TestConn_LostFailsTheFetch(t *testing.T) {
 	}
 }
 
+// TestConn_MalformedMessageFailsTheFetch pins that a message which does
+// not parse is treated like a lost one while a transfer is attached. It
+// may have been a block of the file, so dropping it quietly let the
+// worker finish "successfully" with a block missing.
+func TestConn_MalformedMessageFailsTheFetch(t *testing.T) {
+	c, _, _ := collectControl()
+	in := c.Attach()
+	defer in.Close()
+	c.Ingest([]byte("t=r:x=1:m=1;QUJD"))
+	c.Ingest([]byte("x=abc;"))
+	if _, err := in.Recv(context.Background(), time.Second); !errors.Is(err, ErrInterrupted) {
+		t.Errorf("Recv after a malformed message: err = %v, want ErrInterrupted", err)
+	}
+}
+
 // TestConn_LostEndsTheChain pins that the message after a lost one
 // starts fresh: it must not be read as the next piece of a chain whose
 // tail never arrived.

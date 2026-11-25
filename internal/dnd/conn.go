@@ -90,14 +90,15 @@ func (c *Conn) Send(seq []byte) error {
 }
 
 // Ingest routes the body of one message lifted from the input stream.
-// A body that does not parse is dropped, and takes the chain it
-// interrupted with it. A query reply is skipped without touching the
-// chain — it is the one message the spec lets a terminal send in the
-// middle of one.
+// A body that does not parse is handled as a lost message: it is
+// dropped, it takes the chain it interrupted with it, and it fails a
+// transfer in flight — nobody can say it was not a block of the file.
+// A query reply is skipped without touching the chain — it is the one
+// message the spec lets a terminal send in the middle of one.
 func (c *Conn) Ingest(body []byte) {
 	m, err := Parse(body)
 	if err != nil {
-		c.inChain = false
+		c.Lost()
 		return
 	}
 	if m.Type == 'q' || m.Type == 'Q' {
