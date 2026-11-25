@@ -1306,3 +1306,29 @@ func TestMaybeOfferInstall_AcceptInSingleFileMode(t *testing.T) {
 		t.Fatalf("install should have written the go entry, got %v (err %v)", cfg, err)
 	}
 }
+
+// TestExecFormatter_MissingBinaryIsNotReportedAsFormatted pins the
+// silent skip for a formatter that is not installed: nothing ran, so
+// the landing must not reload the tab or claim "Formatted with …" — and
+// it must still retire the in-flight count, or saves of that file would
+// wave external changes through for the rest of the session.
+func TestExecFormatter_MissingBinaryIsNotReportedAsFormatted(t *testing.T) {
+	useTestTrustFile(t)
+	root := t.TempDir()
+	target := filepath.Join(root, "main.go")
+	if err := os.WriteFile(target, []byte("orig\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, root)
+	openTabAtPath(t, a, target)
+
+	a.execFormatter(target, []string{"skiff-no-such-formatter", target})
+	waitFormatterQuiet(t, a)
+
+	if strings.Contains(a.statusMsg, "Formatted with") {
+		t.Fatalf("a formatter that never ran was reported as run: %q", a.statusMsg)
+	}
+	if n := a.formatInFlight[target]; n != 0 {
+		t.Fatalf("in-flight count should be retired, got %d", n)
+	}
+}

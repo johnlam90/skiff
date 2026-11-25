@@ -47,6 +47,10 @@ import (
 type formatResult struct {
 	tabPath string
 	label   string // command name (just argv[0]) for status messages
+	// skipped is set when the formatter binary is not installed: the
+	// run is a silent no-op, so the landing has nothing to reload and
+	// nothing to report.
+	skipped bool
 }
 
 // runFormatOnSave is called by saveTabAt after a successful disk
@@ -633,6 +637,7 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 		cmd.Dir = root
 		cmd.WaitDelay = formatWaitDelay
 		out, err := cmd.CombinedOutput()
+		skipped := false
 		if err != nil {
 			// Distinguish "binary not installed" from "formatter ran
 			// but failed" — the first is a silent skip (per the spec),
@@ -643,6 +648,7 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 				err = fmt.Errorf("timed out after %s", deadline)
 			case errors.As(err, &pathErr) && errors.Is(pathErr.Err, exec.ErrNotFound):
 				err = nil
+				skipped = true
 			case len(out) > 0:
 				preview := string(out)
 				if i := indexNewline(preview); i >= 0 {
@@ -654,7 +660,7 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 				err = fmt.Errorf("%v: %s", err, preview)
 			}
 		}
-		return formatResult{tabPath: tabPath, label: label}, err
+		return formatResult{tabPath: tabPath, label: label, skipped: skipped}, err
 	})
 }
 
@@ -689,6 +695,16 @@ func (a *App) handleFormatDone(r formatResult, err error) {
 	}
 	if err != nil {
 		a.flash(fmt.Sprintf("%s failed: %v", r.label, err))
+		return
+	}
+	if r.skipped {
+		// Nothing ran, so the file is as the save left it. Reloading
+		// and flashing "Formatted with …" told the user a tool they do
+		// not have had just rewritten their file. The "label…" flash
+		// execFormatter raised is taken down with it.
+		if a.statusMsg == r.label+"…" {
+			a.statusMsg = ""
+		}
 		return
 	}
 	for _, tab := range a.tabs.Tabs() {
