@@ -779,7 +779,8 @@ func TestGitPanelButtons_CarryLiveState(t *testing.T) {
 	for _, b := range a.gitPanelButtons(60) {
 		labels = append(labels, b.label)
 	}
-	want := []string{"[ Commit 2 ]", "[ Push ↑2 ]", "[ Pull ↓1 ]", "[ ⋯ ]"}
+	// The folder row counts: it is committed like any other checked row.
+	want := []string{"[ Commit 3 ]", "[ Push ↑2 ]", "[ Pull ↓1 ]", "[ ⋯ ]"}
 	for i, w := range want {
 		if labels[i] != w {
 			t.Fatalf("label %d = %q, want %q (all: %v)", i, labels[i], w, labels)
@@ -1648,5 +1649,53 @@ func TestGitPanelHint_SaysCheckNotStage(t *testing.T) {
 	segs := strings.Join(a.gitPanelHintSegs(), "  ")
 	if !strings.Contains(segs, "␣ check") || strings.Contains(segs, "stage") {
 		t.Fatalf("hint = %q, want Space described as check", segs)
+	}
+}
+
+// TestGitPanel_UntrackedFolderHasACheckbox pins that a new folder is a
+// commit row like any other. Git reports a wholly untracked folder as
+// one collapsed entry, and that row is committed — but it had no
+// checkbox, could not be unchecked, and was left out of the button's
+// count, so "[ Commit 1 ]" committed two things and there was no way to
+// hold the folder back.
+func TestGitPanel_UntrackedFolderHasACheckbox(t *testing.T) {
+	a := gitPanelApp(t, 1)
+	dir := filepath.Join(a.rootDir, "newdir")
+	a.gitPanel.rows = append(a.gitPanel.rows, gitChangeRow{
+		Rel: "newdir/", Abs: dir, Kind: filetree.GitChangeAdded, IsDir: true,
+	})
+	count := func() string { return a.gitPanelButtons(60)[0].label }
+	box := func() rune {
+		a.draw()
+		a.screen.Show()
+		cells, w, _ := a.screen.(tcell.SimulationScreen).GetContents()
+		sx, sy, _, _ := a.sidebarRect()
+		return cells[(sy+gitPanelListTop+1)*w+sx+1].Runes[0]
+	}
+
+	if got := count(); got != "[ Commit 2 ]" {
+		t.Fatalf("the folder row should be counted, got %q", got)
+	}
+	if got := box(); got != '●' {
+		t.Fatalf("the folder row should draw a checked box, got %q", got)
+	}
+	if got := a.checkedChangePaths(); len(got) != 2 {
+		t.Fatalf("both rows are checked by default, got %v", got)
+	}
+
+	a.gitPanelClick(1, gitPanelListTop+1) // the folder row's box (panel-local)
+	if !a.gitPanel.active {
+		t.Fatal("a click on the box toggles it; it must not reveal the folder in the explorer")
+	}
+	if got := count(); got != "[ Commit 1 ]" {
+		t.Fatalf("unchecking the folder should drop it from the count, got %q", got)
+	}
+	if got := box(); got != '○' {
+		t.Fatalf("the folder row should draw an empty box, got %q", got)
+	}
+	for _, p := range a.checkedChangePaths() {
+		if p == dir {
+			t.Fatal("an unchecked folder must not be committed")
+		}
 	}
 }

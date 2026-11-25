@@ -350,11 +350,10 @@ func (a *App) activateGitPanelFocus(space bool) {
 	}
 	row := a.gitPanel.rows[a.gitPanel.Sel()]
 	if space {
-		// Directories are collapsed untracked entries — they commit
-		// file by file once expanded, so they carry no checkbox.
-		if !row.IsDir {
-			a.toggleCommitCheck(row.Abs)
-		}
+		// A folder row (git's one collapsed entry for a wholly
+		// untracked folder) toggles like a file: it is committed as a
+		// unit, so it has to be possible to hold it back.
+		a.toggleCommitCheck(row.Abs)
 		return
 	}
 	a.activateGitChangeRow(row)
@@ -473,8 +472,8 @@ func (a *App) gitPanelClick(x, y int) {
 	}
 	row := a.gitPanel.rows[idx]
 	// The leading checkbox cell toggles the row in/out of the commit
-	// set without opening anything.
-	if x <= 2 && !row.IsDir {
+	// set without opening anything — folder rows included.
+	if x <= 2 {
 		a.toggleCommitCheck(row.Abs)
 		return
 	}
@@ -579,7 +578,7 @@ type gitPanelBtn struct {
 func (a *App) gitPanelButtons(sw int) []gitPanelBtn {
 	checked := 0
 	for _, r := range a.gitPanel.rows {
-		if !r.IsDir && a.commitCheckOn(r.Abs) {
+		if a.commitCheckOn(r.Abs) {
 			checked++
 		}
 	}
@@ -1064,16 +1063,17 @@ func (a *App) drawGitPanelRow(sx, ry, sw int, row gitChangeRow, selected, keyFoc
 		dir = row.Rel[:idx]
 	}
 
-	// Commit checkbox: ● in / ○ out of the next commit. Directories
-	// (untracked collapsed entries) reveal in the tree instead — their
-	// contents commit file-by-file once expanded, so no box.
-	if !row.IsDir {
-		check, style := '●', letterStyle
-		if !a.commitCheckOn(row.Abs) {
-			check, style = '○', mutedStyle
-		}
-		a.screen.SetContent(sx+1, ry, check, nil, style)
+	// Commit checkbox: ● in / ○ out of the next commit. A folder row —
+	// git's single collapsed entry for a wholly untracked folder — gets
+	// one too. Nothing in the panel ever expands it into file rows, and
+	// it is committed as a unit, so without a box it was committed
+	// uncounted and could not be held back. Activating it still reveals
+	// the folder in the tree.
+	check, checkStyle := '●', letterStyle
+	if !a.commitCheckOn(row.Abs) {
+		check, checkStyle = '○', mutedStyle
 	}
+	a.screen.SetContent(sx+1, ry, check, nil, checkStyle)
 	if keyFocused {
 		a.screen.SetContent(sx, ry, '›', nil,
 			tcell.StyleDefault.Background(bg).Foreground(a.theme.Accent).Bold(true))
