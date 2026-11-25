@@ -1,6 +1,6 @@
 module github.com/johnlam90/skiff
 
-go 1.24.0
+go 1.27.4
 
 require (
 	github.com/alecthomas/chroma/v2 v2.24.0
