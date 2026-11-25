@@ -205,18 +205,12 @@ func TestReplaceWritesThroughSymlink(t *testing.T) {
 }
 
 // TestReplaceCreatesMissingFile covers the first save of a brand-new
-// file: nothing to resolve, nothing to preserve, so it lands 0644.
+// file: nothing to resolve and nothing to preserve. Its mode is the
+// process umask's business — see TestReplace_NewFileHonoursUmask.
 func TestReplaceCreatesMissingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fresh.txt")
 	if err := Replace(path, []byte("hello")); err != nil {
 		t.Fatalf("Replace: %v", err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0644 {
-		t.Fatalf("mode = %v, want 0644", got)
 	}
 	got, err := os.ReadFile(path)
 	if err != nil {
@@ -224,6 +218,50 @@ func TestReplaceCreatesMissingFile(t *testing.T) {
 	}
 	if string(got) != "hello" {
 		t.Fatalf("content = %q", got)
+	}
+}
+
+// TestReplace_WritesThroughADanglingSymlink: a link whose target does
+// not exist yet is still a link. Saving through it must create the
+// target — the first save of a file reached through a dotfile-manager
+// symlink — not replace the link with a regular file, which silently
+// detaches the path from wherever it pointed.
+func TestReplace_WritesThroughADanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real", "target.txt")
+	if err := os.Mkdir(filepath.Dir(target), 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.txt")
+	// Relative, so the test also pins that a relative target is read
+	// against the link's own directory.
+	if err := os.Symlink(filepath.Join("real", "target.txt"), link); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	if err := Replace(link, []byte("through")); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the link must stay a link (err %v)", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "through" {
+		t.Fatalf("target = %q (err %v), want the saved bytes", got, err)
+	}
+}
+
+// TestReplace_SymlinkLoopIsAnErrorNotAHang: resolving a dangling link
+// by hand must give up on a cycle.
+func TestReplace_SymlinkLoopIsAnErrorNotAHang(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	if err := os.Symlink(b, a); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	if err := os.Symlink(a, b); err != nil {
+		t.Fatal(err)
+	}
+	if err := Replace(a, []byte("x")); err == nil {
+		t.Fatal("a symlink cycle should be refused")
 	}
 }
 
