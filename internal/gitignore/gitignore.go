@@ -253,6 +253,55 @@ const (
 // Running a slash-free basename pattern through the pathname rules is
 // safe: with no "/" on either side the two modes cannot differ.
 func wildmatch(p, t string) int {
+	var memo wmMemo
+	return memo.match(p, t)
+}
+
+// wmMemoAfter is how many recursive calls one match makes before it
+// starts remembering results. An ordinary pattern ("*.log", "doc/**/x")
+// recurses a handful of times and must stay allocation-free — this runs
+// once per pattern per tree row. Only a pattern already deep into
+// backtracking pays for the map.
+const wmMemoAfter = 256
+
+// wmMemo remembers sub-match results within ONE top-level wildmatch.
+//
+// Every recursive call is made on a suffix of the original pattern and
+// a suffix of the original text, so the pair of remaining lengths names
+// the sub-problem exactly, and its answer never depends on how it was
+// reached. Caching it is therefore invisible in the result: the abort
+// codes are stored and returned as computed, not reinterpreted. What it
+// removes is the re-exploration — repeated "**/" segments revisit the
+// same pairs on both of their branches, which is exponential without a
+// memo (in git too) and quadratic with one.
+type wmMemo struct {
+	calls int
+	seen  map[uint64]int8
+}
+
+// sub is wildmatch for a recursive call: the cached answer for this
+// (pattern rest, text rest) pair when there is one, otherwise computed
+// and — once the match has shown itself to be backtracking — stored.
+func (m *wmMemo) sub(p, t string) int {
+	m.calls++
+	if m.calls <= wmMemoAfter {
+		return m.match(p, t)
+	}
+	key := uint64(len(p))<<32 | uint64(len(t))
+	if r, ok := m.seen[key]; ok {
+		return int(r)
+	}
+	r := m.match(p, t)
+	if m.seen == nil {
+		m.seen = make(map[uint64]int8)
+	}
+	m.seen[key] = int8(r)
+	return r
+}
+
+// match is the matcher proper; see wildmatch. It recurses only through
+// sub.
+func (m *wmMemo) match(p, t string) int {
 	pi, ti := 0, 0
 	for ; pi < len(p); pi, ti = pi+1, ti+1 {
 		pc := p[pi]
@@ -287,7 +336,7 @@ func wildmatch(p, t string) int {
 				if leftEdge && rightEdge {
 					// "**/" may match nothing at all, which is what
 					// lets "a/**/b" match "a/b".
-					if pi < len(p) && p[pi] == '/' && wildmatch(p[pi+1:], t[ti:]) == wmMatch {
+					if pi < len(p) && p[pi] == '/' && m.sub(p[pi+1:], t[ti:]) == wmMatch {
 						return wmMatch
 					}
 					matchSlash = true
@@ -312,7 +361,7 @@ func wildmatch(p, t string) int {
 				continue
 			}
 			for ; ti < len(t); ti++ {
-				r := wildmatch(p[pi:], t[ti:])
+				r := m.sub(p[pi:], t[ti:])
 				if r != wmNoMatch {
 					if !matchSlash || r != wmAbortToStarStar {
 						return r

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ignoreCase is one row of the matcher's corpus: the lines of a
@@ -407,4 +408,33 @@ func gitVerdict(t *testing.T, tc ignoreCase) bool {
 	}
 	t.Fatalf("git check-ignore -- %q: %v (harness assumes exit 0 or 1)", arg, err)
 	return false
+}
+
+// TestWildmatch_RepeatedStarStarSegmentsTerminate pins the case the
+// abort codes do not prune. Each "**/" may match nothing or any number
+// of directories, and the two branches re-explore the same
+// (pattern rest, text rest) pairs, so the cost doubled with every extra
+// segment: 24 of them held one Match for over a second, 30 for minutes.
+// Real git has the same blow-up — this is a faithful port — but an
+// editor cannot hang on a file anyone in the repo can write. Results
+// are remembered per pair, which changes how often a pair is computed
+// and never what it computes.
+func TestWildmatch_RepeatedStarStarSegmentsTerminate(t *testing.T) {
+	path := strings.Repeat("a/", 40) + "b"
+	for _, pat := range []string{
+		strings.Repeat("**/", 30) + "zzz",
+		strings.Repeat("**/a/", 30) + "zzz",
+	} {
+		start := time.Now()
+		if got := wildmatch(pat, path); got == wmMatch {
+			t.Fatalf("pattern %q must not match", pat)
+		}
+		if d := time.Since(start); d > 2*time.Second {
+			t.Fatalf("pattern with 30 ** segments took %v", d)
+		}
+	}
+	// And the memo must not change an answer that is a match.
+	if got := wildmatch(strings.Repeat("**/", 30)+"b", path); got != wmMatch {
+		t.Fatalf("a matching ** chain should still match, got %d", got)
+	}
 }
