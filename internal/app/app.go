@@ -200,7 +200,17 @@ type App struct {
 	// path's disk check (saveBlockedByDiskChange) must not read it as a
 	// second writer. Touched only on the event loop: execFormatter
 	// counts up before the job starts, handleFormatDone counts down.
+	// Runs are serialised per path (see formatQueued), so the count is
+	// 0 or 1.
 	formatInFlight map[string]int
+
+	// formatQueued holds, per tab path, the argv of ONE format-on-save
+	// run waiting for the run in flight on that same file. A formatter
+	// rewrites its file in place, so two on one file race and the
+	// earlier one can finish last, putting old text back. A save that
+	// arrives mid-run parks its argv here (newest wins) and
+	// handleFormatDone starts it. Event loop only.
+	formatQueued map[string][]string
 
 	// overlays is the single routing truth for which floating modal is
 	// up: handleKey, handleMouse, draw, and anyModalOpen all consult it
@@ -454,10 +464,13 @@ type App struct {
 	branchList   asyncjob.Job[branchListResult]
 	worktreeList asyncjob.Job[worktreeListResult]
 	// formatter is the format-on-save shell-out (format.go) and
-	// customAction the user's shell-out (actions.go): Concurrent.
-	// Neither ever had a gate — a formatter is per saved tab and an
-	// action is the user's own command with its own report — so every
-	// start spawns and every landing applies, as before.
+	// customAction the user's shell-out (actions.go): Concurrent, so
+	// every start spawns and every landing applies. An action is the
+	// user's own command with its own report and has no gate at all.
+	// The formatter is concurrent ACROSS files only: execFormatter
+	// keeps at most one run per path and queues one follow-up (see
+	// formatQueued), because two formatters on one file overwrite each
+	// other.
 	formatter    asyncjob.Job[formatResult]
 	customAction asyncjob.Job[customActionResult]
 

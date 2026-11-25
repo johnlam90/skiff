@@ -983,3 +983,37 @@ func TestApplyTabProbes_StaleProbeAfterSaveIsIgnored(t *testing.T) {
 		t.Fatalf("the tab was disturbed: dirty=%v line=%q", tab.Dirty, tab.Buffer.Lines[0])
 	}
 }
+
+// TestReconcileTab_SkipsAFileItsFormatterIsRewriting: while a formatter
+// run is in flight for a path, the file's mtime moving is the editor's
+// own doing. A tick landing in that window used to read it as a second
+// writer — a conflict prompt over a dirty buffer, a reload under a
+// clean one — just before the formatter's landing dealt with it
+// properly. The tick now leaves the tab for the landing, and catches a
+// real external change on the tick after.
+func TestReconcileTab_SkipsAFileItsFormatterIsRewriting(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("one"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	tab.Buffer.Lines = []string{"mine"}
+	tab.Dirty = true
+	before := tab.Mtime
+	writeNewer(t, target, "formatted", tab.Mtime)
+
+	a.formatInFlight = map[string]int{target: 1}
+	a.reconcileOpenTabsWithDisk()
+	if dirtyIsOpen(a) || a.tabDiskConflict(tab) || !tab.Mtime.Equal(before) {
+		t.Fatal("a tick during a formatter run must leave the tab alone")
+	}
+
+	delete(a.formatInFlight, target)
+	a.reconcileOpenTabsWithDisk()
+	if !dirtyIsOpen(a) {
+		t.Fatal("with no run in flight the change is a real conflict again")
+	}
+}

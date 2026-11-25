@@ -425,6 +425,14 @@ func (a *App) reconcileTab(tab *editor.Tab, p tabProbe) {
 	if p.mtime.Equal(tab.Mtime) {
 		return // unchanged on disk.
 	}
+	if a.formatInFlight[tab.Path] > 0 {
+		// The editor's own formatter is rewriting this file. Its
+		// landing reloads a clean buffer and adopts the mtime under a
+		// dirty one; acting here first raised a conflict prompt over
+		// our own write. Mtime is left alone, so a change that is NOT
+		// the formatter's is still seen on the tick after it lands.
+		return
+	}
 	if tab.Dirty {
 		// Two writers, one file: the user has to choose, because
 		// every automatic answer here loses somebody's work. Only

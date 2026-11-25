@@ -1350,3 +1350,67 @@ func TestFormatterErrPreview_CutsOnCharacterBoundary(t *testing.T) {
 		t.Fatalf("preview = %q, want 80 characters and an ellipsis", got)
 	}
 }
+
+// TestExecFormatter_SecondSaveWaitsForTheFirstRun pins per-file
+// serialisation. A formatter rewrites its file in place, so two runs on
+// one file race: the first, having read the old text, could finish last
+// and put the OLD text back on disk — and its landing then reloaded
+// that into the buffer, silently undoing the edit made in between. A
+// second save now queues behind the run in flight; when that run lands
+// the buffer is written back (the stale run may have overwritten it)
+// and only then formatted.
+func TestExecFormatter_SecondSaveWaitsForTheFirstRun(t *testing.T) {
+	useTestTrustFile(t)
+	root := t.TempDir()
+	target := filepath.Join(root, "f.txt")
+	if err := os.WriteFile(target, []byte("v1\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, root)
+	tab := openTabAtPath(t, a, target)
+
+	// Run one is slow and writes text derived from the first save.
+	a.execFormatter(target, []string{"sh", "-c", `sleep 0.4; printf 'stale\n' > "$0"`, target})
+
+	// The user edits and saves again while it is still running.
+	tab.ReplaceLines(map[int]string{0: "second"})
+	if err := tab.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	a.execFormatter(target, []string{"sh", "-c", `tr a-z A-Z < "$0" > "$0.tmp" && mv "$0.tmp" "$0"`, target})
+	if n := a.formatInFlight[target]; n != 1 {
+		t.Fatalf("a second run on the same file must queue, not start: %d in flight", n)
+	}
+
+	pumpUntil(t, a, "both formatter runs", func() bool { return len(a.formatInFlight) == 0 })
+	if got, _ := os.ReadFile(target); string(got) != "SECOND\n" {
+		t.Fatalf("disk = %q, want the second save, formatted", got)
+	}
+	if got := tab.Buffer.Lines[0]; got != "SECOND" {
+		t.Fatalf("buffer = %q, want the second save, formatted", got)
+	}
+}
+
+// TestExecFormatter_OtherFilesStillRunConcurrently pins the half that
+// must not change: the queue is per file. Saving a second tab while the
+// first tab's formatter runs starts its own run at once.
+func TestExecFormatter_OtherFilesStillRunConcurrently(t *testing.T) {
+	useTestTrustFile(t)
+	root := t.TempDir()
+	one, two := filepath.Join(root, "one.txt"), filepath.Join(root, "two.txt")
+	for _, p := range []string{one, two} {
+		if err := os.WriteFile(p, []byte("x\n"), 0644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	a := newTestApp(t, root)
+	openTabAtPath(t, a, one)
+	openTabAtPath(t, a, two)
+
+	a.execFormatter(one, []string{"sh", "-c", "sleep 0.2", one})
+	a.execFormatter(two, []string{"sh", "-c", "sleep 0.2", two})
+	if a.formatInFlight[one] != 1 || a.formatInFlight[two] != 1 {
+		t.Fatalf("each file should have its own run in flight, got %v", a.formatInFlight)
+	}
+	pumpUntil(t, a, "both formatter runs", func() bool { return len(a.formatInFlight) == 0 })
+}
