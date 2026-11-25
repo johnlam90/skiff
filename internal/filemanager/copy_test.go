@@ -491,3 +491,100 @@ func TestDuplicate_FolderWithFIFOFailsInsteadOfHanging(t *testing.T) {
 		t.Fatal("Duplicate blocked on the FIFO")
 	}
 }
+
+// TestCopy_ReadOnlyFolderKeepsItsContentsAndMode: a folder without owner
+// write (0555 — a vendored or generated tree) was created with its final
+// mode before its children were copied, so the first child failed with
+// "permission denied" and the copy never happened. It is now made
+// writable for the fill and given its real mode afterwards.
+func TestCopy_ReadOnlyFolderKeepsItsContentsAndMode(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permission bits")
+	}
+	root := t.TempDir()
+	mkFile(t, root, "pkg/ro/a.txt", "A")
+	ro := filepath.Join(root, "pkg", "ro")
+	if err := os.Chmod(ro, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	dest := mkDir(t, root, "out")
+	copied := filepath.Join(dest, "pkg", "ro")
+	// t.TempDir cannot remove a folder it may not write into.
+	t.Cleanup(func() { _ = os.Chmod(ro, 0o755); _ = os.Chmod(copied, 0o755) })
+
+	if _, err := New(root).Copy(filepath.Join(root, "pkg"), dest, nil); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	if got := readText(t, filepath.Join(copied, "a.txt")); got != "A" {
+		t.Fatalf("copied content = %q", got)
+	}
+	info, err := os.Stat(copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o555 {
+		t.Fatalf("copied folder mode = %o, want 555", got)
+	}
+}
+
+// TestDuplicate_FailureLeavesNoPartialCopy: a copy that dies half way
+// must not leave half a folder behind under the " copy" name — it looks
+// like a finished duplicate and the next attempt lands on " copy 2".
+func TestDuplicate_FailureLeavesNoPartialCopy(t *testing.T) {
+	root := t.TempDir()
+	mkFile(t, root, "d/a.txt", "x")
+	if err := syscall.Mkfifo(filepath.Join(root, "d", "pipe"), 0o644); err != nil {
+		t.Skip("mkfifo unavailable:", err)
+	}
+	if _, err := New(root).Duplicate(filepath.Join(root, "d"), nil); err == nil {
+		t.Fatal("copying a FIFO should be refused")
+	}
+	if exists(filepath.Join(root, "d copy")) {
+		t.Fatal("the partial copy should have been removed")
+	}
+}
+
+// TestMove_OrdinaryRenameFailureIsNotACopy: only a cross-device rename
+// falls back to copy-then-delete. Any other failure — permissions, a
+// vanished source — used to take the same road, turning a refused move
+// into a copy plus a best-effort delete of the original.
+func TestMove_OrdinaryRenameFailureIsNotACopy(t *testing.T) {
+	root := t.TempDir()
+	m := New(root)
+	m.rename = func(oldpath, newpath string) error {
+		return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: os.ErrPermission}
+	}
+	src := mkFile(t, root, "a.txt", "data")
+	sub := mkDir(t, root, "sub")
+
+	if _, err := m.Move(src, sub, nil); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("err = %v, want the rename's own failure", err)
+	}
+	if got := readText(t, src); got != "data" {
+		t.Fatalf("the source must be untouched, got %q", got)
+	}
+	if exists(filepath.Join(sub, "a.txt")) {
+		t.Fatal("a refused move must not leave a copy behind")
+	}
+}
+
+// TestMove_CopyFailureSparesAFileItDidNotCreate: the cleanup after a
+// failed copy removes only what the copy made. A name that appeared at
+// the destination between the ladder check and the copy belongs to
+// someone else.
+func TestMove_CopyFailureSparesAFileItDidNotCreate(t *testing.T) {
+	root := t.TempDir()
+	m := New(root)
+	src := mkFile(t, root, "a.txt", "data")
+	sub := mkDir(t, root, "sub")
+	m.rename = func(_, newpath string) error {
+		mkFile(t, filepath.Dir(newpath), filepath.Base(newpath), "planted")
+		return errExdev
+	}
+	if _, err := m.Move(src, sub, nil); err == nil {
+		t.Fatal("expected the copy to fail on the planted destination")
+	}
+	if got := readText(t, filepath.Join(sub, "a.txt")); got != "planted" {
+		t.Fatalf("the file the copy did not create must survive, got %q", got)
+	}
+}

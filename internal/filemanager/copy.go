@@ -165,14 +165,28 @@ func isDirEntry(path string) (bool, error) {
 
 // moveEntry relocates src to dest: rename when the filesystem allows,
 // copy-then-delete across devices (the one case os.Rename can't do).
+//
+// Only a cross-device failure takes the fallback. Every other rename
+// error — permissions, a source that vanished — is returned as it is: a
+// move the filesystem refused used to become a copy followed by a
+// best-effort delete of the original. If the copy lands but the
+// original cannot be removed, the copy stays and the error says so —
+// two copies are recoverable, zero are not.
 func (m *Manager) moveEntry(src, dest string, progress func()) error {
-	if err := m.rename(src, dest); err == nil {
+	err := m.rename(src, dest)
+	if err == nil {
 		return nil
+	}
+	if !isCrossDevice(err) {
+		return err
 	}
 	if err := copyTree(src, dest, progress); err != nil {
 		return err
 	}
-	return os.RemoveAll(src)
+	if err := os.RemoveAll(src); err != nil {
+		return fmt.Errorf("copied to %s, but the original could not be removed: %w", filepath.Base(dest), err)
+	}
+	return nil
 }
 
 // uniqueDestPath returns dir/base if free, else the first free name on
@@ -212,6 +226,13 @@ func uniqueDestPath(dir, base string, isDir bool) string {
 // dst must not exist yet (uniqueDestPath guarantees that). progress is
 // called once per copied entry so the background runner can narrate;
 // nil is allowed for callers that don't care.
+//
+// A failed copy takes its own output with it, and only its own: every
+// entry is created exclusively (Mkdir, O_EXCL, Symlink), so a name
+// that turned up at dst in the meantime fails the copy without being
+// touched, and whatever this call did create is removed before it
+// returns. Half a folder left under a " copy" name reads as a finished
+// duplicate.
 func copyTree(src, dst string, progress func()) error {
 	if progress != nil {
 		progress()
@@ -222,15 +243,20 @@ func copyTree(src, dst string, progress func()) error {
 	}
 	switch {
 	case info.IsDir():
-		if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
+		// Owner rwx while the folder is filled: a read-only source
+		// (0555) created with its final mode refuses its own first
+		// child. The real mode goes on once the children are in.
+		perm := info.Mode().Perm()
+		if err := os.Mkdir(dst, perm|0o700); err != nil {
 			return err
 		}
-		entries, err := os.ReadDir(src)
-		if err != nil {
+		if err := copyDirEntries(src, dst, progress); err != nil {
+			removeTree(dst)
 			return err
 		}
-		for _, e := range entries {
-			if err := copyTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), progress); err != nil {
+		if perm != perm|0o700 {
+			if err := os.Chmod(dst, perm); err != nil {
+				removeTree(dst)
 				return err
 			}
 		}
@@ -258,8 +284,42 @@ func copyTree(src, dst string, progress func()) error {
 		}
 		if _, err := io.Copy(out, in); err != nil {
 			out.Close()
+			_ = os.Remove(dst)
 			return err
 		}
-		return out.Close()
+		if err := out.Close(); err != nil {
+			_ = os.Remove(dst)
+			return err
+		}
+		return nil
 	}
+}
+
+// copyDirEntries copies every entry of the directory src into the
+// already-created directory dst, stopping at the first failure.
+func copyDirEntries(src, dst string, progress func()) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := copyTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), progress); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeTree deletes a directory tree this package created, best
+// effort. Folders already given a read-only final mode are made
+// writable first — RemoveAll cannot unlink entries out of a directory
+// it may not write to.
+func removeTree(path string) {
+	_ = filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			_ = os.Chmod(p, 0o700)
+		}
+		return nil
+	})
+	_ = os.RemoveAll(path)
 }
