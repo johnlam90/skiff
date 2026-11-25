@@ -323,8 +323,9 @@ func (a *App) projFindMove(delta int) {
 	a.projFindClampView(rows)
 }
 
-// projFindClampView keeps the selected row inside the results viewport,
-// and the viewport inside the row list.
+// projFindClampView brings the selected row inside the results viewport
+// and then keeps the viewport inside the row list — the keyboard's
+// clamp, for moves that change the selection.
 func (a *App) projFindClampView(rows []projFindRow) {
 	_, _, _, eh := a.editorRect()
 	if eh < 1 {
@@ -335,6 +336,18 @@ func (a *App) projFindClampView(rows []projFindRow) {
 	}
 	if a.projFind.findSelected >= a.projFind.findScrollY+eh {
 		a.projFind.findScrollY = a.projFind.findSelected - eh + 1
+	}
+	a.projFindClampScroll(rows)
+}
+
+// projFindClampScroll keeps the viewport inside the row list and leaves
+// the selection alone — the wheel's clamp. Scrolling is how the user
+// looks away from the selected row, so pulling the view back to it (as
+// projFindClampView does) made the wheel a no-op.
+func (a *App) projFindClampScroll(rows []projFindRow) {
+	_, _, _, eh := a.editorRect()
+	if eh < 1 {
+		eh = 1
 	}
 	maxScroll := len(rows) - eh
 	if maxScroll < 0 {
@@ -438,12 +451,12 @@ func (a *App) handleProjFindMouse(x, y int, btn tcell.ButtonMask) {
 	ex, ey, ew, eh := a.editorRect()
 	if btn&tcell.WheelUp != 0 {
 		a.projFind.findScrollY -= wheelLines
-		a.projFindClampView(a.projFindRows())
+		a.projFindClampScroll(a.projFindRows())
 		return
 	}
 	if btn&tcell.WheelDown != 0 {
 		a.projFind.findScrollY += wheelLines
-		a.projFindClampView(a.projFindRows())
+		a.projFindClampScroll(a.projFindRows())
 		return
 	}
 	if btn&tcell.Button1 == 0 {

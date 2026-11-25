@@ -230,6 +230,44 @@ func TestProjFindMouseClickOnMatchRowOpensFile(t *testing.T) {
 	}
 }
 
+// TestProjFindWheelScrollsPastTheSelection pins that the wheel moves the
+// results viewport on its own. The wheel used to run the keyboard's
+// keep-the-selection-visible clamp, which dragged the view straight
+// back to the selected row — a long result list could not be scrolled
+// with the mouse at all.
+func TestProjFindWheelScrollsPastTheSelection(t *testing.T) {
+	a := projFindApp(t, t.TempDir())
+	var ms []search.Match
+	for i := 1; i <= 300; i++ {
+		ms = append(ms, search.Match{Path: "a.go", Line: i, Text: "alpha"})
+	}
+	a.projFind.findMatches = ms
+	a.projFind.findSelected = 0
+	ex, ey, _, eh := a.editorRect()
+
+	for i := 0; i < 40; i++ {
+		a.handleProjFindMouse(ex+1, ey+1, tcell.WheelDown)
+	}
+	if got, want := a.projFind.findScrollY, 40*wheelLines; got != want {
+		t.Fatalf("wheel down x40: scrollY = %d, want %d", got, want)
+	}
+	if a.projFind.findSelected != 0 {
+		t.Fatalf("the wheel must not move the selection, got %d", a.projFind.findSelected)
+	}
+	for i := 0; i < 500; i++ {
+		a.handleProjFindMouse(ex+1, ey+1, tcell.WheelDown)
+	}
+	if got, want := a.projFind.findScrollY, len(a.projFindRows())-eh; got != want {
+		t.Fatalf("wheel stops at the last page: scrollY = %d, want %d", got, want)
+	}
+	// The keyboard still brings its selection back into view.
+	a.projFindMove(+1)
+	if a.projFind.findScrollY > a.projFind.findSelected {
+		t.Fatalf("a keyboard move should scroll to the selection: scrollY %d, selected %d",
+			a.projFind.findScrollY, a.projFind.findSelected)
+	}
+}
+
 // TestProjFindMouseClickOnHeaderFolds checks a Button1 click on a
 // file-header row folds that group in place — the panel stays open and
 // no tab opens, matching what Enter-on-header does in
