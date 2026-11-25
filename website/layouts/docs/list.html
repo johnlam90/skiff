@@ -7,9 +7,12 @@
       <header class="mb-10">
         <span class="section-eyebrow">Documentation</span>
         <h1 class="text-3xl lg:text-5xl font-semibold tracking-tight" style="color: #fff;">Skiff Docs</h1>
-        <p class="mt-4 text-lg max-w-2xl" style="color: var(--color-text-soft);">
+        {{/* A div, not a p: .Content is already paragraphs, and a p
+             inside a p is invalid — the browser closes the outer one
+             early and its styling never reaches the text. */}}
+        <div class="mt-4 text-lg max-w-2xl" style="color: var(--color-text-soft);">
           {{ .Content | default "Reference for installing, running, and configuring Skiff. Pick a topic from the list below." | safeHTML }}
-        </p>
+        </div>
       </header>
 
       {{ $docs := where site.RegularPages "Section" "docs" }}

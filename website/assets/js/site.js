@@ -74,7 +74,9 @@
   }
 
   // wireMobileMenu toggles the mobile nav drawer when the menu button
-  // is pressed. Closes on link click and on Escape.
+  // is pressed. Closes on link click, on Escape, and on its own close
+  // button — the drawer covers the header, toggle included, so on a
+  // touchscreen that button is the only way out without navigating.
   function wireMobileMenu() {
     var btn = document.querySelector("[data-mobile-toggle]");
     var menu = document.getElementById("mobile-menu");
@@ -97,6 +99,13 @@
     menu.querySelectorAll("a").forEach(function (a) {
       a.addEventListener("click", close);
     });
+    var closeBtn = menu.querySelector("[data-mobile-close]");
+    if (closeBtn) {
+      closeBtn.addEventListener("click", function () {
+        close();
+        btn.focus();
+      });
+    }
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape" && menu.classList.contains("is-open")) close();
     });

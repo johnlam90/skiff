@@ -7,13 +7,13 @@
         style="color: #fff;">That page got formatted out.</h1>
     <p class="mt-6 text-lg" style="color: var(--color-text-soft);">
       The page you were looking for moved, got renamed, or never existed.
-      Head back to <a href="/" style="color: var(--color-accent); text-decoration: underline; text-underline-offset: 3px;">the homepage</a>
-      or browse <a href="/docs/" style="color: var(--color-accent); text-decoration: underline; text-underline-offset: 3px;">the docs</a>.
+      Head back to <a href="{{ site.Home.RelPermalink }}" style="color: var(--color-accent); text-decoration: underline; text-underline-offset: 3px;">the homepage</a>
+      or browse <a href="{{ "docs/" | relURL }}" style="color: var(--color-accent); text-decoration: underline; text-underline-offset: 3px;">the docs</a>.
     </p>
 
     <div class="mt-10 flex flex-col sm:flex-row gap-3 justify-center">
-      <a href="/" class="btn btn-primary">Back to home</a>
-      <a href="/docs/" class="btn btn-secondary">Read the docs</a>
+      <a href="{{ site.Home.RelPermalink }}" class="btn btn-primary">Back to home</a>
+      <a href="{{ "docs/" | relURL }}" class="btn btn-secondary">Read the docs</a>
     </div>
 
     <div class="mt-16 max-w-md mx-auto">

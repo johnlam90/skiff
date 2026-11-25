@@ -28,8 +28,8 @@ full project view.
 
 <figure class="screenshot-figure">
   <img
-    src="/img/screenshots/opening-a-project.png"
-    srcset="/img/screenshots/opening-a-project-1200.png 1200w, /img/screenshots/opening-a-project.png 2000w"
+    src="{{< relurl "img/screenshots/opening-a-project.png" >}}"
+    srcset="{{< relurl "img/screenshots/opening-a-project-1200.png" >}} 1200w, {{< relurl "img/screenshots/opening-a-project.png" >}} 2000w"
     sizes="(min-width: 1024px) 800px, 100vw"
     width="2000" height="1414"
     alt="Skiff just after opening the skiff project — sidebar shows the file tree, the editor area shows 'No file open' with a hint to click a file or press the menu icon."
@@ -47,8 +47,8 @@ That first click opens a *preview* tab: its label is italic, and the next single
 
 <figure class="screenshot-figure">
   <img
-    src="/img/screenshots/clicking-a-file.png"
-    srcset="/img/screenshots/clicking-a-file-1200.png 1200w, /img/screenshots/clicking-a-file.png 2000w"
+    src="{{< relurl "img/screenshots/clicking-a-file.png" >}}"
+    srcset="{{< relurl "img/screenshots/clicking-a-file-1200.png" >}} 1200w, {{< relurl "img/screenshots/clicking-a-file.png" >}} 2000w"
     sizes="(min-width: 1024px) 800px, 100vw"
     width="2000" height="1409"
     alt="main.go open in the editor with Tokyo Night syntax highlighting after clicking it in the sidebar."
@@ -70,8 +70,8 @@ Every action lives in the action menu. Open it three ways:
 
 <figure class="screenshot-figure">
   <img
-    src="/img/screenshots/clicking-the-menu.png"
-    srcset="/img/screenshots/clicking-the-menu-1200.png 1200w, /img/screenshots/clicking-the-menu.png 2000w"
+    src="{{< relurl "img/screenshots/clicking-the-menu.png" >}}"
+    srcset="{{< relurl "img/screenshots/clicking-the-menu-1200.png" >}} 1200w, {{< relurl "img/screenshots/clicking-the-menu.png" >}} 2000w"
     sizes="(min-width: 1024px) 800px, 100vw"
     width="2000" height="1412"
     alt="Action menu modal expanded over the editor — Save, Close tab, Find file, Open on Repo, Quit editor, and other actions visible."
@@ -91,8 +91,8 @@ To save: open the menu and pick **Save**, or press `Esc s`.
 
 <figure class="screenshot-figure">
   <img
-    src="/img/screenshots/saving.png"
-    srcset="/img/screenshots/saving-1200.png 1200w, /img/screenshots/saving.png 2000w"
+    src="{{< relurl "img/screenshots/saving.png" >}}"
+    srcset="{{< relurl "img/screenshots/saving-1200.png" >}} 1200w, {{< relurl "img/screenshots/saving.png" >}} 2000w"
     sizes="(min-width: 1024px) 800px, 100vw"
     width="2000" height="1411"
     alt="Editor with a line selected mid-edit, status bar at the bottom showing the cursor position and dirty marker."

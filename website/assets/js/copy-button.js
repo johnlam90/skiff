@@ -73,14 +73,24 @@
 
   // markCopied flashes the button into a "copied" state for ~1.5s then
   // restores the original icon HTML so the same button stays usable.
+  //
+  // The original icon is captured once per flash, not once per click. A
+  // second click while the checkmark was showing used to read the
+  // checkmark as "the original" and restore that, leaving the button
+  // stuck on a tick for good.
   function markCopied(btn) {
-    var original = btn.innerHTML;
+    if (btn._copyTimer) {
+      clearTimeout(btn._copyTimer);
+    } else {
+      btn._copyOriginal = btn.innerHTML;
+    }
     btn.classList.add("is-copied");
     btn.innerHTML = checkmarkSVG();
     btn.setAttribute("aria-label", "Copied");
-    setTimeout(function () {
+    btn._copyTimer = setTimeout(function () {
+      btn._copyTimer = null;
       btn.classList.remove("is-copied");
-      btn.innerHTML = original;
+      btn.innerHTML = btn._copyOriginal;
       btn.setAttribute("aria-label", btn.getAttribute("data-copy-label") || "Copy");
     }, ICON_DURATION);
   }
