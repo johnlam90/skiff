@@ -82,6 +82,14 @@ func (a *App) openFileMode(path string, preview bool) {
 	}
 	t.Preview = preview
 	if preview {
+		// InsertPreview overwrites the current preview tab in place, so
+		// that tab never reaches closeTab. Drop what is keyed by it
+		// here, or its rendered markdown preview outlives it — and not
+		// through closeTab itself, which would put a tab the user never
+		// kept on the reopen stack.
+		if old := a.tabs.Preview(); old != nil {
+			delete(a.mdPreview, old)
+		}
 		a.tabs.InsertPreview(t)
 	} else {
 		a.tabs.Append(t)

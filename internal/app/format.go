@@ -47,6 +47,10 @@ import (
 type formatResult struct {
 	tabPath string
 	label   string // command name (just argv[0]) for status messages
+	// skipped is set when the formatter binary is not installed: the
+	// run is a silent no-op, so the landing has nothing to reload and
+	// nothing to report.
+	skipped bool
 }
 
 // runFormatOnSave is called by saveTabAt after a successful disk
@@ -458,11 +462,13 @@ func (a *App) openFormatInstallPrompt(tab *editor.Tab, ext string, argvTemplate 
 		// Refresh the file tree immediately so the new
 		// .skiff/format.json appears in the sidebar without
 		// waiting for the 10-second tick. Same pair fileops.go uses
-		// after every other directory mutation we make. Clear any
-		// past "declined" entry for this ext too — installing now
-		// means the prompt was really opt-in, not a leftover
-		// dismissal — regardless of which trust branch follows.
-		app.tree.Refresh()
+		// after every other directory mutation we make — and through
+		// refreshTree, because single-file mode has no tree to
+		// refresh. Clear any past "declined" entry for this ext too —
+		// installing now means the prompt was really opt-in, not a
+		// leftover dismissal — regardless of which trust branch
+		// follows.
+		app.refreshTree()
 		app.refreshGitStatusAsync()
 		app.persistInstallDecline(root, ext, false)
 
@@ -593,7 +599,14 @@ var formatTimeout = formatTimeoutDefault
 // status — exactly the same pattern runCustomAction uses. The job is
 // Concurrent: format-on-save is per tab, so a second tab saved while
 // the first's formatter still runs gets its own run and its own
-// landing, exactly as before the job existed.
+// landing.
+//
+// One FILE never has two runs at once. A formatter rewrites its file
+// in place; a second run started mid-flight raced the first, which
+// could finish last and put the older text back on disk — and its
+// landing then reloaded that into the buffer. A save that arrives while
+// a run is out for the same path is queued instead (one slot, newest
+// argv wins) and started by that run's landing.
 //
 // We deliberately use exec.CommandContext (not sh -c) with an explicit
 // argv so a shell-injection vector via a malicious format.json is just
@@ -613,12 +626,28 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 		}
 		return
 	}
-	root := a.rootDir
-	label := argv[0]
-	deadline := formatTimeout
 	// Copy the argv: the caller's slice may be reused or mutated on
-	// the event loop while the goroutine still reads it.
+	// the event loop while the goroutine still reads it — or while it
+	// waits in the queue.
 	args := append([]string(nil), argv...)
+	if a.formatInFlight[tabPath] > 0 {
+		if a.formatQueued == nil {
+			a.formatQueued = make(map[string][]string)
+		}
+		a.formatQueued[tabPath] = args
+		return
+	}
+	a.startFormatter(tabPath, args)
+}
+
+// startFormatter spawns one formatter run for tabPath. Its only callers
+// are execFormatter, once it has found no run in flight for the path,
+// and handleFormatDone starting the queued follow-up. args is already
+// the callee's own copy.
+func (a *App) startFormatter(tabPath string, args []string) {
+	root := a.rootDir
+	label := args[0]
+	deadline := formatTimeout
 	a.flash(label + "…")
 	if a.formatInFlight == nil {
 		a.formatInFlight = make(map[string]int)
@@ -631,6 +660,7 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 		cmd.Dir = root
 		cmd.WaitDelay = formatWaitDelay
 		out, err := cmd.CombinedOutput()
+		skipped := false
 		if err != nil {
 			// Distinguish "binary not installed" from "formatter ran
 			// but failed" — the first is a silent skip (per the spec),
@@ -641,19 +671,28 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 				err = fmt.Errorf("timed out after %s", deadline)
 			case errors.As(err, &pathErr) && errors.Is(pathErr.Err, exec.ErrNotFound):
 				err = nil
+				skipped = true
 			case len(out) > 0:
-				preview := string(out)
-				if i := indexNewline(preview); i >= 0 {
-					preview = preview[:i]
-				}
-				if len(preview) > 80 {
-					preview = preview[:80] + "…"
-				}
-				err = fmt.Errorf("%v: %s", err, preview)
+				err = fmt.Errorf("%v: %s", err, formatterErrPreview(out))
 			}
 		}
-		return formatResult{tabPath: tabPath, label: label}, err
+		return formatResult{tabPath: tabPath, label: label, skipped: skipped}, err
 	})
+}
+
+// formatterErrPreview is the slice of a failed formatter's output the
+// status flash quotes: its first line, capped at 80 characters. The cap
+// counts runes — cutting at byte 80 could end the flash on half a
+// multi-byte character.
+func formatterErrPreview(out []byte) string {
+	preview := string(out)
+	if i := indexNewline(preview); i >= 0 {
+		preview = preview[:i]
+	}
+	if rs := []rune(preview); len(rs) > 80 {
+		preview = string(rs[:80]) + "…"
+	}
+	return preview
 }
 
 // indexNewline returns the index of the first newline in s, or -1.
@@ -685,8 +724,27 @@ func (a *App) handleFormatDone(r formatResult, err error) {
 	} else {
 		a.formatInFlight[r.tabPath]--
 	}
+	if next, queued := a.formatQueued[r.tabPath]; queued {
+		// A newer save is waiting on this file, so this run's output
+		// is already out of date: nothing of it is reloaded or
+		// reported, failure included — the follow-up speaks for the
+		// file.
+		delete(a.formatQueued, r.tabPath)
+		a.runQueuedFormatter(r.tabPath, next)
+		return
+	}
 	if err != nil {
 		a.flash(fmt.Sprintf("%s failed: %v", r.label, err))
+		return
+	}
+	if r.skipped {
+		// Nothing ran, so the file is as the save left it. Reloading
+		// and flashing "Formatted with …" told the user a tool they do
+		// not have had just rewritten their file. The "label…" flash
+		// execFormatter raised is taken down with it.
+		if a.statusMsg == r.label+"…" {
+			a.statusMsg = ""
+		}
 		return
 	}
 	for _, tab := range a.tabs.Tabs() {
@@ -714,4 +772,35 @@ func (a *App) handleFormatDone(r formatResult, err error) {
 		return
 	}
 	// Tab was closed before the formatter finished — silent no-op.
+}
+
+// runQueuedFormatter starts the run a save queued behind an earlier one
+// on the same file, once that earlier run has landed.
+//
+// The earlier run read the file before the newer save and may have
+// written after it, so the disk can hold formatted OLD text. A clean
+// buffer is exactly what that newer save wrote, so it is written back
+// first and the formatter then runs on the right bytes. A dirty buffer
+// means the user has typed since: nothing is run, because their next
+// save writes the file and formats it anyway — the mtime is adopted so
+// that save is not met with a conflict prompt over the editor's own
+// formatter. A tab closed in the meantime has nothing to protect.
+func (a *App) runQueuedFormatter(tabPath string, args []string) {
+	for _, tab := range a.tabs.Tabs() {
+		if tab.Path != tabPath {
+			continue
+		}
+		if tab.Dirty {
+			if info, err := os.Stat(tab.Path); err == nil {
+				tab.Mtime = info.ModTime()
+			}
+			return
+		}
+		if err := tab.Save(); err != nil {
+			a.flashError(fmt.Sprintf("%s: could not rewrite before formatting: %v", filepath.Base(tabPath), err))
+			return
+		}
+		a.startFormatter(tabPath, args)
+		return
+	}
 }

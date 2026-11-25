@@ -83,26 +83,37 @@ var ErrImageTooLarge = errors.New("image dimensions too large to preview")
 // flash message is useful.
 //
 // Two guards run before the real decode, both cheap relative to the
-// full raster they protect against: a Stat against maxOpenBytes (the
+// full raster they protect against: a Stat — taken BEFORE the open, so
+// a FIFO is refused rather than blocked on — against maxOpenBytes (the
 // same cap NewTab applies to text, so an oversize image can't sneak
 // past the size gate the way it used to), then an image.DecodeConfig
 // probe against maxImagePixels — a header-only read that catches a
 // tiny file whose declared dimensions would otherwise make image.Decode
 // allocate an arbitrarily large raster on the event loop.
 func decodeImageFile(path string) (image.Image, string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, "", err
-	}
-	defer f.Close()
-
-	if info, statErr := f.Stat(); statErr == nil {
+	// Stat before the open, exactly as readTextFile does: opening a FIFO
+	// is the call that blocks, so a pipe named "x.png" has to be refused
+	// from its mode, not discovered by hanging the event loop on it.
+	if info, statErr := os.Stat(path); statErr == nil {
+		if !info.Mode().IsRegular() {
+			return nil, "", fmt.Errorf("%s: %w", filepath.Base(path), ErrNotRegularFile)
+		}
 		if info.Size() > maxOpenBytes {
 			return nil, "", fmt.Errorf("%s is %s (limit %s): %w",
 				filepath.Base(path), mibString(info.Size()), mibString(maxOpenBytes),
 				ErrFileTooLarge)
 		}
 	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, "", err
+	}
+	defer file.Close()
+	// The stat's size can be stale by the time the bytes are read (a
+	// file still being written), so the reads are bounded too: nothing
+	// past the cap reaches the decoder. A section reader rather than a
+	// LimitReader because the header probe below needs to rewind.
+	f := io.NewSectionReader(file, 0, maxOpenBytes)
 
 	cfg, _, err := image.DecodeConfig(f)
 	if err != nil {

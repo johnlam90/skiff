@@ -206,3 +206,26 @@ func TestThemePick_ModalOverPickerReverts(t *testing.T) {
 		t.Fatalf("stranded preview: %q, want %q", a.themeID, original)
 	}
 }
+
+// TestThemePick_PickerRepaintsInThePreviewedTheme: the picker previews
+// live on everything behind it, so it has to preview on itself too. A
+// prefab overlay holds its theme by value from the moment it opened;
+// the picker stayed in the old palette while the editor changed under
+// it — a dark dialog over a light editor, or the reverse.
+func TestThemePick_PickerRepaintsInThePreviewedTheme(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	a := newTestApp(t, t.TempDir())
+	a.openThemePick()
+	opened := pickPrefab(t, a).Theme.BG
+	// Walk down until the preview is a palette with a different
+	// background — neighbours in the list can share one.
+	for i := 0; i < len(theme.List()) && a.theme.BG == opened; i++ {
+		a.handleKey(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	}
+	if a.theme.BG == opened {
+		t.Fatal("fixture should reach a palette with another background")
+	}
+	if got := pickPrefab(t, a).Theme.BG; got != a.theme.BG {
+		t.Fatalf("picker still painted in %v while the editor previews %v", got, a.theme.BG)
+	}
+}

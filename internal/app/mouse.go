@@ -811,9 +811,10 @@ func (a *App) openGitHunkAt(tab *editor.Tab, localX, localY int) bool {
 	if !ok {
 		return false
 	}
-	path := tab.Path
+	// Captured on the loop: the worker must not read App state.
+	base, path := a.diffBase, tab.Path
 	a.requestDiff(diffLoadHunk, "Git change · "+filepath.Base(path), path,
-		func(repo *git.Repo) (diff.Patch, error) { return repoHunkPreview(repo, path, line) })
+		func(repo *git.Repo) (diff.Patch, error) { return repoHunkPreview(repo, base, path, line) })
 	return true
 }
 

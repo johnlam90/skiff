@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filemanager"
@@ -1239,5 +1240,31 @@ func TestFilePrompts_HintIsProjectRelative(t *testing.T) {
 	a.menuRenameFolder()
 	if got, want := promptPrefab(t, a).Hint, "in pkg"+sep; got != want {
 		t.Fatalf("Rename folder hint = %q, want %q", got, want)
+	}
+}
+
+// TestFolderLabels_TruncateOnCharacterBoundaries pins that a long
+// folder path is shortened without cutting a character in half. The
+// three labels sliced the path by bytes, so a non-ASCII folder name
+// could reach the menu as invalid UTF-8 — a replacement glyph where the
+// name's first visible character should be.
+func TestFolderLabels_TruncateOnCharacterBoundaries(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	deep := filepath.Join(a.rootDir, strings.Repeat("目录/", 12)+"文件夹")
+	if err := os.MkdirAll(deep, 0755); err != nil {
+		t.Fatal(err)
+	}
+	a.setActiveFolder(deep)
+	for name, got := range map[string]string{
+		"activeFolderSuffix": a.activeFolderSuffix(),
+		"renameFolderLabel":  a.renameFolderLabel(),
+		"deleteFolderLabel":  a.deleteFolderLabel(),
+	} {
+		if !utf8.ValidString(got) {
+			t.Errorf("%s cut a character in half: %q", name, got)
+		}
+		if !strings.Contains(got, "…") || !strings.Contains(got, "文件夹") {
+			t.Errorf("%s should keep the folder's own name behind an ellipsis, got %q", name, got)
+		}
 	}
 }

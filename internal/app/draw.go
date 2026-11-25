@@ -698,6 +698,15 @@ func (a *App) drawSplitter() {
 	}
 }
 
+// drawCentered paints s centred in the w cells starting at x, shortened
+// with an ellipsis when it does not fit. It measures and advances in
+// cells: the loop it replaces used each rune's BYTE offset as its
+// column, so a "·" or "≡" pushed the rest of the line two cells right.
+func (a *App) drawCentered(x, y, w int, s string, st tcell.Style) {
+	s = textdraw.ClipEllipsis(s, w)
+	textdraw.DrawClipped(a.screen, x+(w-textdraw.Width(s))/2, y, w, s, st)
+}
+
 // emptyEditorHints are the ways out of the "no file open" state, in the
 // order a new user is likely to want them, for the session shape the
 // editor is actually in. The lines used to be one fixed pair that told
@@ -748,11 +757,7 @@ func (a *App) drawEmptyEditor() {
 	bold := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text).Bold(true)
 	textdraw.Fill(a.screen, ex, ey, ew, eh, muted)
 	cy := ey + eh/2
-	title := trimRunes("No file open", ew)
-	cx1 := ex + (ew-runeLen(title))/2
-	for i, r := range title {
-		textdraw.Cell(a.screen, cx1+i, cy-1, r, nil, bold)
-	}
+	a.drawCentered(ex, cy-1, ew, "No file open", bold)
 	// Hints stack downward from one row below the title. Rows that
 	// would fall outside the editor rect are dropped rather than
 	// clipped, so a two-row pane still shows the title cleanly.
@@ -761,11 +766,7 @@ func (a *App) drawEmptyEditor() {
 		if hy >= ey+eh {
 			break
 		}
-		msg := trimRunes(hint, ew)
-		hx := ex + (ew-runeLen(msg))/2
-		for i, r := range msg {
-			textdraw.Cell(a.screen, hx+i, hy, r, nil, muted)
-		}
+		a.drawCentered(ex, hy, ew, hint, muted)
 	}
 	a.screen.HideCursor()
 }
@@ -913,7 +914,11 @@ func (a *App) statusRightSegments(sw int) []statusRightSegment {
 	// the conflict overlay must not mean forgetting the conflict, so
 	// this stays up until the tab is saved, reloaded or closed.
 	if a.tabDiskConflict(a.activeTabPtr()) {
-		admit(posConflict, statusRightSegment{text: statusConflictTag, warn: true})
+		// A press reopens the prompt: the marker is the visible claim
+		// that a conflict is waiting, so it is also the way to it. The
+		// same action stays on the ≡ menu, which is the primary route.
+		admit(posConflict, statusRightSegment{text: statusConflictTag, warn: true,
+			click: (*App).menuResolveDiskConflict})
 	}
 	// 2. Pending-gesture tag: while an Esc is armed (leader or
 	// double-tap window still open) show "Esc…" beside the git segment
@@ -1297,6 +1302,15 @@ func (a *App) drawFlashStrip() {
 	}
 	style := tcell.StyleDefault.Background(a.theme.LineHL).
 		Foreground(a.theme.Text).Bold(true)
+	if a.statusErr {
+		// A failure keeps its colour when it is long enough to land
+		// here instead of on the status bar — those are the reports
+		// carrying a path and a reason. Error is tuned against the
+		// editor background, which LineHL sits next to; Attrs.Error
+		// carries it on a palette with no red.
+		style = style.Foreground(a.theme.Error).
+			Attributes(tcell.AttrBold | a.theme.Attrs.Error)
+	}
 	lines := wrapFlashLines(a.statusMsg, a.flashStripTextWidth())
 	for i := 0; i < h; i++ {
 		for cx := x; cx < x+w; cx++ {

@@ -567,3 +567,41 @@ func TestRender_TableCellTruncatesWholeClusters(t *testing.T) {
 		t.Fatalf("truncation split a family: %q", cut)
 	}
 }
+
+// TestRender_CodeTabAfterAWrapStartsAtColumnZero pins the tab stop of a
+// tab that wraps. Its width was measured against the row it was about
+// to leave, so a tab pushed onto a fresh row kept the narrow width it
+// had at the old column instead of a full stop from column zero —
+// indentation in a wrapped code line came out one to three cells short.
+func TestRender_CodeTabAfterAWrapStartsAtColumnZero(t *testing.T) {
+	// Width 10 leaves a 9-cell text column: "abcdefghi" fills it, and
+	// the tab (3 cells at column 9) no longer fits.
+	lines, _ := Render([]byte("```\nabcdefghi\tX\n```\n"), 10, theme.Default())
+	i := findLine(lines, "abcdefghi")
+	if i < 0 || i+1 >= len(lines) {
+		t.Fatalf("code block missing from %q", lines)
+	}
+	want := string(codeRail) + strings.Repeat(" ", codeTabStop) + "X"
+	if got := strings.TrimRight(lines[i+1], " "); got != want {
+		t.Fatalf("wrapped row = %q, want %q", got, want)
+	}
+}
+
+// TestRender_TableEllipsisUsesTheThemesMutedColour pins the colour of
+// the "…" a truncated cell ends in. It was painted with the terminal's
+// default foreground over the theme's background — near-invisible with
+// a light theme in a dark terminal, where that default is a light grey.
+func TestRender_TableEllipsisUsesTheThemesMutedColour(t *testing.T) {
+	th := theme.Default()
+	src := "| a | b |\n|---|---|\n| " + strings.Repeat("word ", 12) + " | x |\n"
+	lines, styles := Render([]byte(src), 20, th)
+	i := findLine(lines, "…")
+	if i < 0 {
+		t.Fatalf("no truncated cell in %q", lines)
+	}
+	at := strings.IndexRune(lines[i], '…')
+	col := len([]rune(lines[i][:at]))
+	if fg, _, _ := styles[i][col].Decompose(); fg != th.Muted {
+		t.Fatalf("ellipsis foreground = %v, want the theme's Muted %v", fg, th.Muted)
+	}
+}

@@ -230,6 +230,44 @@ func TestProjFindMouseClickOnMatchRowOpensFile(t *testing.T) {
 	}
 }
 
+// TestProjFindWheelScrollsPastTheSelection pins that the wheel moves the
+// results viewport on its own. The wheel used to run the keyboard's
+// keep-the-selection-visible clamp, which dragged the view straight
+// back to the selected row — a long result list could not be scrolled
+// with the mouse at all.
+func TestProjFindWheelScrollsPastTheSelection(t *testing.T) {
+	a := projFindApp(t, t.TempDir())
+	var ms []search.Match
+	for i := 1; i <= 300; i++ {
+		ms = append(ms, search.Match{Path: "a.go", Line: i, Text: "alpha"})
+	}
+	a.projFind.findMatches = ms
+	a.projFind.findSelected = 0
+	ex, ey, _, eh := a.editorRect()
+
+	for i := 0; i < 40; i++ {
+		a.handleProjFindMouse(ex+1, ey+1, tcell.WheelDown)
+	}
+	if got, want := a.projFind.findScrollY, 40*wheelLines; got != want {
+		t.Fatalf("wheel down x40: scrollY = %d, want %d", got, want)
+	}
+	if a.projFind.findSelected != 0 {
+		t.Fatalf("the wheel must not move the selection, got %d", a.projFind.findSelected)
+	}
+	for i := 0; i < 500; i++ {
+		a.handleProjFindMouse(ex+1, ey+1, tcell.WheelDown)
+	}
+	if got, want := a.projFind.findScrollY, len(a.projFindRows())-eh; got != want {
+		t.Fatalf("wheel stops at the last page: scrollY = %d, want %d", got, want)
+	}
+	// The keyboard still brings its selection back into view.
+	a.projFindMove(+1)
+	if a.projFind.findScrollY > a.projFind.findSelected {
+		t.Fatalf("a keyboard move should scroll to the selection: scrollY %d, selected %d",
+			a.projFind.findScrollY, a.projFind.findSelected)
+	}
+}
+
 // TestProjFindMouseClickOnHeaderFolds checks a Button1 click on a
 // file-header row folds that group in place — the panel stays open and
 // no tab opens, matching what Enter-on-header does in
@@ -654,5 +692,34 @@ func TestProjFindCounterText_Pluralises(t *testing.T) {
 	a.projFind.findMatches = append(a.projFind.findMatches, search.Match{Path: "b.go", Line: 2})
 	if got := a.projFindCounterText(); got != "2 matches in 2 files" {
 		t.Fatalf("counter = %q, want %q", got, "2 matches in 2 files")
+	}
+}
+
+// TestProjFindDragDoesNotRepeatTheClick pins the click latch on the
+// panel: every event of a drag carries Button1, so holding the button
+// over a mode chip flipped it on each motion event, and a drag that
+// left the panel dismissed it. Only a fresh press acts.
+func TestProjFindDragDoesNotRepeatTheClick(t *testing.T) {
+	a := projFindApp(t, t.TempDir())
+	bar := a.stripRect()
+	_, chips := a.projFindBarLayout(bar.w)
+	cx := bar.x + chips[0].x0
+
+	a.handleProjFindMouse(cx, bar.y, tcell.Button1)
+	if !a.projFind.findMatchCase {
+		t.Fatal("a press on the chip should arm it")
+	}
+	a.handleProjFindMouse(cx, bar.y, tcell.Button1) // held: motion, not a click
+	if !a.projFind.findMatchCase {
+		t.Fatal("holding the button over the chip must not flip it back")
+	}
+	a.handleProjFindMouse(0, 0, tcell.Button1) // dragged off the panel
+	if !a.projFindOpen() {
+		t.Fatal("a drag that leaves the panel must not dismiss it")
+	}
+	a.handleProjFindMouse(cx, bar.y, tcell.ButtonNone)
+	a.handleProjFindMouse(cx, bar.y, tcell.Button1)
+	if a.projFind.findMatchCase {
+		t.Fatal("a second, fresh press should flip the chip back")
 	}
 }

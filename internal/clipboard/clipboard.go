@@ -81,6 +81,21 @@ func CopyToSystem(text string) error {
 // osc52Sequence renders text as the escape sequence CopyToSystem writes,
 // or ErrTooLarge when the terminal could not carry it.
 //
+// Under tmux the copy is sent twice, because tmux has two independent
+// switches and no way to ask which is set:
+//
+//   - plain OSC 52, which tmux itself acts on when `set-clipboard on`
+//     (it sets the outer terminal's clipboard and a paste buffer);
+//   - the same sequence in a DCS passthrough wrapper, which tmux hands
+//     to the outer terminal untouched when `allow-passthrough on`.
+//
+// Sending only the wrapper was the whole story until tmux 3.3 turned
+// passthrough off by default; since then it reached nobody on a stock
+// config, and a user who had turned set-clipboard on still got nothing.
+// A tmux that honours both sets the same text twice, which is harmless.
+// One with neither on still drops both — that needs a line in
+// tmux.conf, and no escape sequence can change it.
+//
 // tmux is deliberately the ONLY multiplexer that gets a wrapper. herdr
 // (HERDR_ENV=1) intercepts the pane's plain OSC 52 and bridges it to
 // the host clipboard itself — wrapping there would break copy, so don't
@@ -92,9 +107,9 @@ func osc52Sequence(text string, tmux bool) (string, error) {
 	encoded := base64.StdEncoding.EncodeToString([]byte(text))
 	seq := fmt.Sprintf("\x1b]52;c;%s\x07", encoded)
 	if tmux {
-		// tmux passthrough: wrap inner escape sequences so tmux forwards
-		// them verbatim to the host terminal.
-		seq = fmt.Sprintf("\x1bPtmux;\x1b%s\x1b\\", seq)
+		// Plain first, then the passthrough wrapper around the same
+		// inner sequence (its ESC doubled, as the wrapper requires).
+		seq += fmt.Sprintf("\x1bPtmux;\x1b%s\x1b\\", seq)
 	}
 	return seq, nil
 }

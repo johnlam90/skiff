@@ -345,3 +345,28 @@ func TestPreviewCoachMark_SilentForPermanentOpens(t *testing.T) {
 		t.Errorf("the first real preview should still explain itself, got %q", a.statusMsg)
 	}
 }
+
+// TestPreviewEvictionDropsItsMarkdownPreview: the preview slot replaces
+// its tab in place, without going through closeTab, so a rendered
+// markdown preview keyed by the evicted tab stayed in the map — pinning
+// the tab, its buffer and the whole rendered grid for the rest of the
+// session, once per file browsed.
+func TestPreviewEvictionDropsItsMarkdownPreview(t *testing.T) {
+	dir := t.TempDir()
+	md := mkFile(t, dir, "notes.md", "# Title\n\nbody\n")
+	other := mkFile(t, dir, "other.txt", "x\n")
+	a := newTestApp(t, dir)
+
+	a.openFilePreview(md)
+	a.menuTogglePreviewMarkdown()
+	if len(a.mdPreview) != 1 {
+		t.Fatalf("markdown preview should be on, have %d", len(a.mdPreview))
+	}
+	a.openFilePreview(other)
+	if a.tabs.Len() != 1 || a.tabs.At(0).Path != other {
+		t.Fatalf("the preview slot should now hold %s", other)
+	}
+	if len(a.mdPreview) != 0 {
+		t.Fatalf("the evicted tab's rendered preview should be dropped, %d left", len(a.mdPreview))
+	}
+}

@@ -483,9 +483,7 @@ func (a *App) activeFolderSuffix() string {
 		if keep < 4 {
 			keep = 4
 		}
-		if keep < len(rel) {
-			rel = "…" + rel[len(rel)-keep:]
-		}
+		rel = keepTail(rel, keep)
 		suffix = " (in " + rel + ")"
 	}
 	return suffix
@@ -582,6 +580,22 @@ func (a *App) menuRenameFolder() {
 	)
 }
 
+// keepTail shortens s to an ellipsis plus its last keep characters — the
+// end of a folder path is the part that names the folder. It cuts on a
+// grapheme boundary: the byte slice it replaces could start the tail in
+// the middle of a multi-byte character and hand the menu invalid UTF-8.
+func keepTail(s string, keep int) string {
+	rs := []rune(s)
+	if keep >= len(rs) {
+		return s
+	}
+	start := len(rs) - keep
+	if cs := editor.ClusterStart(rs, start); cs != start {
+		start = editor.NextCluster(rs, cs)
+	}
+	return "…" + string(rs[start:])
+}
+
 // renameFolderLabel is the dynamic label hook for the Rename Folder
 // menu row. Same shape as deleteFolderLabel — bare label at root,
 // "(subdir/)" suffix otherwise. Without the suffix the user would
@@ -601,9 +615,7 @@ func (a *App) renameFolderLabel() string {
 		if keep < 4 {
 			keep = 4
 		}
-		if keep < len(rel) {
-			rel = "…" + rel[len(rel)-keep:]
-		}
+		rel = keepTail(rel, keep)
 		suffix = " (" + rel + ")"
 	}
 	return "Rename folder" + suffix + "…"
@@ -658,9 +670,7 @@ func (a *App) deleteFolderLabel() string {
 		if keep < 4 {
 			keep = 4
 		}
-		if keep < len(rel) {
-			rel = "…" + rel[len(rel)-keep:]
-		}
+		rel = keepTail(rel, keep)
 		suffix = " (" + rel + ")"
 	}
 	return "Delete folder" + suffix + "…"

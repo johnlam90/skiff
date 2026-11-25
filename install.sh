@@ -105,14 +105,17 @@ require_cmd() {
 
 # fetch downloads url to outfile using curl or wget (whichever is present).
 # We try curl first because it's near-universal and gives clean redirect
-# behaviour with -L; wget is the BusyBox / minimal-image fallback.
+# behaviour with -L; wget is the BusyBox / minimal-image fallback — and
+# BusyBox wget only knows the short options, so the long spellings GNU
+# wget accepts (--quiet, --output-document) are an "unrecognized option"
+# there. -q and -O mean the same thing to both.
 fetch() {
 	url="$1"
 	outfile="$2"
 	if command -v curl >/dev/null 2>&1; then
 		curl --fail --show-error --silent --location --output "$outfile" "$url"
 	elif command -v wget >/dev/null 2>&1; then
-		wget --quiet --output-document "$outfile" "$url"
+		wget -q -O "$outfile" "$url"
 	else
 		fatal "need curl or wget to download release archives"
 	fi
@@ -191,41 +194,86 @@ verify_signature() {
 		return
 	fi
 
-	cosign verify-blob \
+	# The identity is anchored at both ends and pinned to main. cosign
+	# treats this as an unanchored regular expression, so the old
+	# "https://github.com/<repo>/…/release.yml@.*" also matched any URL
+	# that merely CONTAINED that text, and any ref of the workflow — a
+	# release signed from a throwaway branch verified as well as one
+	# from main. Every real release is cut from main (see release.yml).
+	#
+	# cosign's own stderr is kept and shown on failure: "refusing to
+	# install" with the reason thrown away leaves the user unable to
+	# tell an expired certificate from a tampered file.
+	identity="^https://github\\.com/${REPO}/\\.github/workflows/release\\.yml@refs/heads/main\$"
+	if ! cosign verify-blob \
 		--bundle "$tmp_dir/checksums.txt.cosign.bundle" \
-		--certificate-identity-regexp "https://github.com/${REPO}/\.github/workflows/release\.yml@.*" \
+		--certificate-identity-regexp "$identity" \
 		--certificate-oidc-issuer https://token.actions.githubusercontent.com \
-		"$sums_file" >/dev/null 2>&1 \
-		|| fatal "checksums.txt signature verification failed — refusing to install"
+		"$sums_file" >/dev/null 2>"$tmp_dir/cosign.err"; then
+		sed 's/^/  cosign: /' "$tmp_dir/cosign.err" >&2
+		fatal "checksums.txt signature verification failed — refusing to install"
+	fi
 	info "  signature verified"
 }
 
+# normalize_tag turns a version the user or GitHub handed us into the
+# tag it names, or prints nothing if it is not one. Tags are "v" plus a
+# dotted version; VERSION=0.2.27 is accepted and gains the "v", because
+# every other place a version is written (the README, `skiff --version`)
+# shows it bare. Anything with a character that does not belong in a tag
+# is refused rather than pasted into a download URL.
+normalize_tag() {
+	tag="$1"
+	case "$tag" in
+		v*) ;;
+		*) tag="v$tag" ;;
+	esac
+	case "$tag" in
+		v[0-9]*) ;;
+		*) return 1 ;;
+	esac
+	case "$tag" in
+		*[!A-Za-z0-9._-]*) return 1 ;;
+	esac
+	printf '%s\n' "$tag"
+}
+
+# tag_from_headers reads HTTP response headers on stdin and prints the
+# release tag named by the last Location: header that points at one
+# (…/releases/tag/v0.0.13 -> v0.0.13). Everything after the tag is
+# dropped: the carriage return every header line ends in, and the
+# " [following]" GNU wget appends when it echoes a redirect — which the
+# old "take everything after the last slash" kept as part of the tag.
+tag_from_headers() {
+	sed -n 's#^[[:space:]]*[Ll]ocation:.*/releases/tag/\([A-Za-z0-9._-]*\).*#\1#p' | tail -n 1
+}
+
 # resolve_version picks the version to install. If the user passed VERSION,
-# trust it as-is (allowing pinned installs). Otherwise we follow GitHub's
-# /releases/latest redirect — that's a single HTTP call with no API rate
-# limit, no JSON parsing, and works behind corporate caches.
+# it is used (allowing pinned installs), with or without its leading "v".
+# Otherwise we follow GitHub's /releases/latest redirect — that's a
+# single HTTP call with no API rate limit, no JSON parsing, and works
+# behind corporate caches.
 resolve_version() {
 	if [ -n "${VERSION:-}" ]; then
-		echo "$VERSION"
+		normalize_tag "$VERSION" \
+			|| fatal "VERSION=$VERSION is not a release tag (expected something like v0.2.27)"
 		return
 	fi
 	url="https://github.com/${REPO}/releases/latest"
-	# -I to fetch headers only; grep the Location: line and take its tail
-	# segment, which is the tag (e.g. /releases/tag/v0.0.13 -> v0.0.13).
+	# Headers only. curl -I follows the redirect and prints each hop's
+	# headers. wget has no HEAD mode that BusyBox shares, so it fetches
+	# the page into /dev/null and -S prints the headers of every hop to
+	# stderr; -S, -q and -O are the options BusyBox and GNU wget have in
+	# common (--max-redirect and --server-response are GNU-only).
 	if command -v curl >/dev/null 2>&1; then
-		header="$(curl --silent --location --head "$url" 2>/dev/null \
-			| grep -i '^location:' | tail -n 1)"
+		found="$(curl --silent --location --head "$url" 2>/dev/null | tag_from_headers)"
+	elif command -v wget >/dev/null 2>&1; then
+		found="$(wget -S -q -O /dev/null "$url" 2>&1 | tag_from_headers)"
 	else
-		# wget --max-redirect=0 prints the would-be redirect to stderr.
-		header="$(wget --max-redirect=0 --server-response --output-document=/dev/null "$url" 2>&1 \
-			| grep -i 'Location:' | tail -n 1)"
+		fatal "need curl or wget to find the latest release"
 	fi
-	tag="${header##*/}"
-	tag="$(printf '%s' "$tag" | tr -d '\r\n')"
-	if [ -z "$tag" ]; then
-		fatal "could not resolve latest version from $url"
-	fi
-	echo "$tag"
+	normalize_tag "${found:-}" \
+		|| fatal "could not resolve latest version from $url"
 }
 
 # pick_install_dir chooses where to drop the binary, honoring INSTALL_DIR
@@ -237,33 +285,55 @@ pick_install_dir() {
 		echo "$INSTALL_DIR"
 		return
 	fi
-	if [ -d "$HOME/.local/bin" ] || mkdir -p "$HOME/.local/bin" 2>/dev/null; then
-		echo "$HOME/.local/bin"
+	# HOME can be unset (a bare `env -i`, some init contexts) and this
+	# script runs under `set -u`; without one there is no per-user bin,
+	# and "/.local/bin" is not a place to install to.
+	home="${HOME:-}"
+	if [ -n "$home" ] && { [ -d "$home/.local/bin" ] || mkdir -p "$home/.local/bin" 2>/dev/null; }; then
+		echo "$home/.local/bin"
 		return
 	fi
 	echo "/usr/local/bin"
 }
 
-# install_binary moves the extracted binary into the chosen directory.
-# When the directory isn't writable, we re-run the move under sudo if it's
-# available — most "system" install dirs need root but we don't want to
-# silently fail with a permission error.
+# install_binary puts the extracted binary into the chosen directory.
+# When the directory isn't writable, the same steps run under sudo if
+# it's available — most "system" install dirs need root but we don't
+# want to silently fail with a permission error.
+#
+# The binary is COPIED to a temporary name beside its destination, made
+# executable, and only then renamed into place:
+#
+#   - A rename within one directory is atomic and works while the old
+#     binary is running. Moving straight from /tmp is a copy when /tmp
+#     is another filesystem, and writing over a running executable
+#     fails with "text file busy" — which is every upgrade run from
+#     inside a skiff session.
+#   - A copy made under sudo belongs to root. `sudo mv` of the file we
+#     extracted kept OUR ownership on a binary in a root-owned
+#     directory, leaving it writable by the unprivileged user.
+#   - A failure part way leaves the old binary untouched.
 install_binary() {
 	src="$1"
 	dest_dir="$2"
 	dest="$dest_dir/$BINARY"
+	stage="$dest_dir/.$BINARY.new.$$"
 
-	if [ -w "$dest_dir" ] || ([ ! -e "$dest_dir" ] && mkdir -p "$dest_dir" 2>/dev/null); then
-		mv "$src" "$dest"
-		chmod +x "$dest"
-		return
+	if [ -w "$dest_dir" ] || { [ ! -e "$dest_dir" ] && mkdir -p "$dest_dir" 2>/dev/null; }; then
+		if cp "$src" "$stage" && chmod 0755 "$stage" && mv -f "$stage" "$dest"; then
+			return
+		fi
+		rm -f "$stage"
+		fatal "could not install to $dest"
 	fi
 	if command -v sudo >/dev/null 2>&1; then
 		warn "writing to $dest_dir requires sudo"
 		sudo mkdir -p "$dest_dir"
-		sudo mv "$src" "$dest"
-		sudo chmod +x "$dest"
-		return
+		if sudo cp "$src" "$stage" && sudo chmod 0755 "$stage" && sudo mv -f "$stage" "$dest"; then
+			return
+		fi
+		sudo rm -f "$stage"
+		fatal "could not install to $dest"
 	fi
 	fatal "cannot write to $dest_dir and sudo is not available"
 }
@@ -273,7 +343,7 @@ install_binary() {
 # fresh ~/.local/bin on an older shell rc.
 warn_if_not_in_path() {
 	dir="$1"
-	case ":$PATH:" in
+	case ":${PATH:-}:" in
 		*":$dir:"*) return ;;
 	esac
 	warn "$dir is not on your \$PATH — add this to your shell rc:"
@@ -289,8 +359,9 @@ main() {
 	os="$(detect_os)"
 	arch="$(detect_arch)"
 	version="$(resolve_version)"
-	# Strip a leading 'v' so the version slot in the archive name matches
-	# GoReleaser's {{ .Version }} (which is bare). Tags ARE prefixed v.
+	# resolve_version always returns the tag, "v" included, whichever
+	# way VERSION was spelled. Strip it so the version slot in the
+	# archive name matches GoReleaser's {{ .Version }} (which is bare).
 	bare_version="${version#v}"
 
 	archive="${BINARY}_${bare_version}_${os}_${arch}.tar.gz"
@@ -303,7 +374,13 @@ main() {
 	tmp="$(mktemp -d)"
 	# Clean up on any exit, including failure paths — we don't want to
 	# leave half-extracted archives in /tmp littering the filesystem.
-	trap 'rm -rf "$tmp"' EXIT INT TERM
+	# A signal also has to END the script: a trap that only cleans up
+	# returns to where it was interrupted, so Ctrl-C deleted the temp
+	# directory and the install carried on without it. 130 and 143 are
+	# the conventional statuses for SIGINT and SIGTERM.
+	trap 'rm -rf "$tmp"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
 
 	fetch "$url" "$tmp/$archive" \
 		|| fatal "download failed (was the release published with this archive name?)"

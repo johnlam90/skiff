@@ -25,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gdamore/tcell/v2"
+
 	"github.com/johnlam90/skiff/internal/asyncjob"
 	"github.com/johnlam90/skiff/internal/editor"
 	"github.com/johnlam90/skiff/internal/filetree"
@@ -259,6 +261,45 @@ func TestReconcileTab_SilentReloadKeepsUndo(t *testing.T) {
 	}
 	if got := tab.Buffer.String(); got != preReload {
 		t.Fatalf("after undo = %q, want %q", got, preReload)
+	}
+}
+
+// TestReconcileTab_ConflictWaitsForAnOpenStrip pins that the background
+// conflict prompt does not wipe a docked bar. The prompt's opener closes
+// every modal AND drops the strip, so a ten-second tick landing while
+// the user typed a find query threw the query away. The tick now holds
+// off — leaving the tab's Mtime alone — and prompts once the bar is
+// gone.
+func TestReconcileTab_ConflictWaitsForAnOpenStrip(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("one"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	tab.Buffer.Lines = []string{"mine"}
+	tab.Dirty = true
+	a.openFind()
+	for _, r := range "mi" {
+		a.handleKey(keyEv(tcell.KeyRune, r))
+	}
+	bar, ok := a.strip.(*findStrip)
+	if !ok || bar.query.Text() != "mi" {
+		t.Fatalf("find bar should be up holding the query, strip=%T", a.strip)
+	}
+
+	writeNewer(t, target, "theirs", tab.Mtime)
+	a.reconcileOpenTabsWithDisk()
+	if a.strip != bar || bar.query.Text() != "mi" || dirtyIsOpen(a) {
+		t.Fatalf("the tick must leave the find bar and its query alone (strip=%T, prompt=%v)", a.strip, dirtyIsOpen(a))
+	}
+
+	a.closeFind()
+	a.reconcileOpenTabsWithDisk()
+	if !dirtyIsOpen(a) {
+		t.Fatal("once the bar is closed the next tick should raise the conflict prompt")
 	}
 }
 
@@ -940,5 +981,39 @@ func TestApplyTabProbes_StaleProbeAfterSaveIsIgnored(t *testing.T) {
 	}
 	if !tab.Dirty || !strings.HasPrefix(tab.Buffer.Lines[0], "typed since") {
 		t.Fatalf("the tab was disturbed: dirty=%v line=%q", tab.Dirty, tab.Buffer.Lines[0])
+	}
+}
+
+// TestReconcileTab_SkipsAFileItsFormatterIsRewriting: while a formatter
+// run is in flight for a path, the file's mtime moving is the editor's
+// own doing. A tick landing in that window used to read it as a second
+// writer — a conflict prompt over a dirty buffer, a reload under a
+// clean one — just before the formatter's landing dealt with it
+// properly. The tick now leaves the tab for the landing, and catches a
+// real external change on the tick after.
+func TestReconcileTab_SkipsAFileItsFormatterIsRewriting(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("one"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	tab.Buffer.Lines = []string{"mine"}
+	tab.Dirty = true
+	before := tab.Mtime
+	writeNewer(t, target, "formatted", tab.Mtime)
+
+	a.formatInFlight = map[string]int{target: 1}
+	a.reconcileOpenTabsWithDisk()
+	if dirtyIsOpen(a) || a.tabDiskConflict(tab) || !tab.Mtime.Equal(before) {
+		t.Fatal("a tick during a formatter run must leave the tab alone")
+	}
+
+	delete(a.formatInFlight, target)
+	a.reconcileOpenTabsWithDisk()
+	if !dirtyIsOpen(a) {
+		t.Fatal("with no run in flight the change is a real conflict again")
 	}
 }

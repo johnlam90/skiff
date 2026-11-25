@@ -24,6 +24,7 @@
 package atomicfile
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 )
@@ -61,7 +62,12 @@ func Write(path string, data []byte, perm os.FileMode) error {
 // the path is resolved through symlinks first (saving through a link must
 // update the target, not replace the link with a regular file), and the
 // existing file's permission bits are preserved (a 0755 script stays
-// executable). A file that doesn't exist yet is created 0644.
+// executable).
+//
+// A file that doesn't exist yet is created the way any program creates
+// one — 0666 filtered by the process umask — see createFile. A link
+// whose target doesn't exist yet is followed to that target, so the
+// first save through a dangling link creates what it points at.
 //
 // Known, accepted limitations of rename-based replace: hard links to
 // the file are broken (the other names keep the old inode); xattrs,
@@ -74,20 +80,105 @@ func Replace(path string, data []byte) error {
 		if !os.IsNotExist(err) {
 			return err
 		}
-		// A first save of a new file has nothing to resolve; resolve
-		// the parent directory instead (it may itself be a link) and
-		// rejoin the base name.
-		parent, perr := filepath.EvalSymlinks(filepath.Dir(path))
-		if perr != nil {
-			return perr
+		// Nothing at the end of the path yet: a first save, possibly
+		// through a link (or a chain of them) to a file not yet made.
+		resolved, err = resolveMissing(path)
+		if err != nil {
+			return err
 		}
-		resolved = filepath.Join(parent, filepath.Base(path))
+	}
+	info, err := os.Stat(resolved)
+	if os.IsNotExist(err) {
+		switch err := createFile(resolved, data); {
+		case err == nil:
+			return nil
+		case !os.IsExist(err):
+			return err
+		}
+		// Someone created it between the stat and the create. It is an
+		// existing file now and is replaced like one.
+		info, err = os.Stat(resolved)
 	}
 	perm := os.FileMode(0644)
-	if info, err := os.Stat(resolved); err == nil {
+	if err == nil {
 		perm = info.Mode().Perm()
 	}
 	return replaceFile(resolved, data, perm)
+}
+
+// maxSymlinkHops bounds resolveMissing's walk, so a cycle of links is
+// an error instead of a loop. 40 is the kernel's own customary limit.
+const maxSymlinkHops = 40
+
+// resolveMissing finds where a path that does not resolve should be
+// created. filepath.EvalSymlinks cannot say: it fails on a dangling
+// link exactly as it does on a missing file. Each step resolves the
+// directory (which must exist), then looks at the last element without
+// following it: missing means "create it here", a symlink means "go
+// where it points", read relative to the link's own directory.
+//
+// Without this, a save through a dangling link renamed a regular file
+// over the link, quietly detaching the path from its target.
+func resolveMissing(path string) (string, error) {
+	for hop := 0; hop < maxSymlinkHops; hop++ {
+		dir, err := filepath.EvalSymlinks(filepath.Dir(path))
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(dir, filepath.Base(path))
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			return path, nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			return path, nil
+		}
+		target, err := os.Readlink(path)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(dir, target)
+		}
+		path = target
+	}
+	return "", &os.PathError{Op: "resolve", Path: path, Err: errors.New("too many levels of symbolic links")}
+}
+
+// createFile writes a file that does not exist yet, and fails with an
+// IsExist error if it turns out to. There is no previous content to
+// protect, so the temp-and-rename dance buys nothing here — and it
+// costs the umask: a temp file has to be chmod'ed to its final mode,
+// which overrode the user's umask and made the first save of a file
+// 0644 even under a private 077. Creating it directly lets the kernel
+// apply the umask, as it does for every other program.
+//
+// A failed write removes the file it created; the data is fsynced and
+// the directory entry synced like any other save.
+func createFile(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0666)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	_ = syncDir(filepath.Dir(path))
+	return nil
 }
 
 // replaceFile is the temp/rename/sync core Write and Replace share:

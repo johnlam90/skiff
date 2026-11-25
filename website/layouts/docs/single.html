@@ -5,9 +5,9 @@
 
     <article class="min-w-0">
       <nav class="text-sm mb-6" aria-label="Breadcrumb" style="color: var(--color-muted);">
-        <a href="/" class="hover:underline">Home</a>
+        <a href="{{ site.Home.RelPermalink }}" class="hover:underline">Home</a>
         <span class="mx-2">/</span>
-        <a href="/docs/" class="hover:underline">Docs</a>
+        <a href="{{ "docs/" | relURL }}" class="hover:underline">Docs</a>
         <span class="mx-2">/</span>
         <span style="color: var(--color-text-soft);">{{ .Title }}</span>
       </nav>

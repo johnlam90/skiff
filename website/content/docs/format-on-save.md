@@ -37,7 +37,6 @@ Real-world examples:
 ```json
 {
   "commands": {
-    "go":   ["gofmt", "-w", "$FILE"],
     "go":   ["goimports", "-w", "$FILE"],
     "php":  ["pint", "--quiet", "$FILE"],
     "py":   ["ruff", "format", "$FILE"],
@@ -70,7 +69,7 @@ The remembered answer (along with a SHA-256 hash of the config it applies to) li
 
 1. Save writes the file to disk first. A broken or slow formatter never blocks the save.
 2. Skiff looks up the file's extension in `format.json`. No match → done.
-3. The configured command runs in a goroutine. The UI keeps responding; you can keep typing.
+3. The configured command runs in the background. The UI keeps responding; you can keep typing. Different files format at the same time, but one file never has two runs at once — save again while its formatter is still going and the second run waits for the first.
 4. When the formatter finishes, Skiff reloads the buffer — but only if you haven't typed anything since saving. If you did, your in-flight edits win and a status flash tells you the on-disk file was reformatted.
 5. If the configured binary isn't installed, it's a silent no-op. You don't have to install everyone's formatter to clone a repo.
 
@@ -102,7 +101,7 @@ These never run on their own. Instead, when you save a file in a project where:
 
 Skiff asks once: **"Add `gofmt` for `.go` to `.skiff/format.json`?"**
 
-- **Yes** — merges the entry into the project's config (creating `.skiff/format.json` if it didn't exist), auto-trusts the resulting file, and runs the formatter on the save you just made.
+- **Yes** — merges the entry into the project's config (creating `.skiff/format.json` if it didn't exist). The prompt lists every command the merged file will hold, not just the new one. If the project had no config, or had one you already trusted, the result is trusted and the formatter runs on the save you just made. If it had a config you have never answered the trust prompt for — or the file changed while the prompt was up — the entry is still added, but the regular trust prompt follows and nothing runs until you say yes to the whole file.
 - **No / Esc** — remembered per-extension in the trust file. Skiff won't ask again about that extension in this project until you edit the project config manually.
 
 This keeps your personal preferences out of repos that don't want them, while making it one click to opt a project in.

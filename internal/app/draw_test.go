@@ -907,6 +907,26 @@ func TestDrawEmptyEditor_ClipsEveryHintRow(t *testing.T) {
 	}
 }
 
+// TestDrawEmptyEditor_HintsPaintWithoutGaps pins that a hint is painted
+// cell by cell as written. The painter used the byte offset of each
+// rune as its column, so everything after a "·" or "≡" (three bytes,
+// one cell) landed two cells too far right and the line came out with
+// holes in it.
+func TestDrawEmptyEditor_HintsPaintWithoutGaps(t *testing.T) {
+	dir := t.TempDir()
+	mkFile(t, dir, "a.txt", "x")
+	a := newTestApp(t, dir)
+	a.draw()
+	a.screen.Show()
+	scr := a.screen.(tcell.SimulationScreen)
+	_, ey, _, eh := a.editorRect()
+	for row, hint := range a.emptyEditorHints() {
+		if line := screenLine(scr, ey+eh/2+1+row); !strings.Contains(line, hint) {
+			t.Errorf("hint row %d: want %q painted intact, got %q", row, hint, strings.TrimSpace(line))
+		}
+	}
+}
+
 // TestDrawStatusBar_DiskConflictMarker pins the persistent conflict
 // warning: dismissing the conflict overlay must not mean forgetting the
 // conflict, so the status bar keeps a marker until the tab is saved or
@@ -1832,5 +1852,35 @@ func TestStatusLeftText_SingularLine(t *testing.T) {
 	got := a.statusLeftText(a.statusLeftMax(sw))
 	if !strings.Contains(got, "· 1 line") || strings.Contains(got, "1 lines") {
 		t.Fatalf("readout = %q, want \"1 line\"", got)
+	}
+}
+
+// TestFlashStrip_ErrorKeepsItsErrorColour: a failure report long enough
+// to move onto the flash strip must still read as a failure. The strip
+// painted every message in plain text colour, so the longest errors —
+// the ones with a path and a reason in them — were the ones that lost
+// the red.
+func TestFlashStrip_ErrorKeepsItsErrorColour(t *testing.T) {
+	a := narrowFlashApp(t)
+	openTestFile(t, a, a.rootDir, "reflow.go", "package p\n")
+	fgAt := func() tcell.Color {
+		a.draw()
+		a.screen.Show()
+		cells, w, _ := a.screen.(tcell.SimulationScreen).GetContents()
+		sx, sy, _, _ := a.flashStripRect()
+		fg, _, _ := cells[sy*w+sx+1].Style.Decompose()
+		return fg
+	}
+
+	a.flashError(longFlash)
+	if a.flashStripRows() == 0 {
+		t.Fatal("fixture should raise the strip")
+	}
+	if got := fgAt(); got != a.theme.Error {
+		t.Fatalf("an error on the strip is painted %v, want the theme's Error %v", got, a.theme.Error)
+	}
+	a.statusErr = false
+	if got := fgAt(); got != a.theme.Text {
+		t.Fatalf("an ordinary flash stays in Text, got %v", got)
 	}
 }

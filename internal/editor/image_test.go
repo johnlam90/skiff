@@ -400,3 +400,22 @@ func writeJPEG(t *testing.T, path string, img image.Image) {
 		t.Fatalf("write: %v", err)
 	}
 }
+
+// TestDecodeImageFile_RefusesWhatIsNotARegularFile pins the stat-first
+// guard the text path already had. An image tab opened the path before
+// looking at it, and opening a FIFO blocks until a writer shows up — a
+// pipe named "x.png" froze the event loop for good. A directory stands
+// in for the FIFO here: it takes the same refusal without needing a
+// platform-specific call to create.
+func TestDecodeImageFile_RefusesWhatIsNotARegularFile(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "folder.png")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := decodeImageFile(dir); !errors.Is(err, ErrNotRegularFile) {
+		t.Fatalf("err = %v, want ErrNotRegularFile", err)
+	}
+	if _, err := NewTab(dir); !errors.Is(err, ErrNotRegularFile) {
+		t.Fatalf("NewTab err = %v, want ErrNotRegularFile", err)
+	}
+}

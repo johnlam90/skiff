@@ -16,12 +16,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
 // errExdev is the cross-device failure the rename seam simulates — the
 // one os.Rename failure that cannot be provoked inside one t.TempDir().
-var errExdev = errors.New("simulated EXDEV")
+// It has the shape os.Rename really returns, because moveEntry tells a
+// cross-device failure from every other kind by its errno.
+var errExdev error = &os.LinkError{Op: "rename", Err: syscall.EXDEV}
 
 // crossDeviceRename fails every rename whose destination leaves the
 // source's parent directory, exactly the shape of a same-filesystem

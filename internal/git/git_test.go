@@ -207,3 +207,80 @@ func TestOpenWith_RoutesThroughTheRunner(t *testing.T) {
 		t.Fatalf("calls = %d, want 2", fake.CallCount())
 	}
 }
+
+// TestHardenedEnv_PathsAreLiteralPathspecs pins that a path handed to a
+// verb names that path and nothing else. Git reads a pathspec as a glob
+// by default, so committing Next.js's "app/[id]/page.tsx" also staged
+// and committed "app/i/page.tsx" and "app/d/page.tsx" — files the user
+// never checked. The editor only ever passes real paths.
+func TestHardenedEnv_PathsAreLiteralPathspecs(t *testing.T) {
+	dir := initRepo(t)
+	for _, sub := range []string{"[id]", "i", "d"} {
+		if err := os.MkdirAll(filepath.Join(dir, "app", sub), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		writeSeed(t, filepath.Join(dir, "app", sub, "page.tsx"), "x\n")
+	}
+	r := Open(dir)
+	if err := r.Commit([]string{filepath.Join(dir, "app", "[id]", "page.tsx")}, "one file"); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	out, err := exec.Command("git", "-C", dir, "show", "--name-only", "--format=", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("show: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "app/[id]/page.tsx" {
+		t.Fatalf("commit should hold only the bracketed path, got:\n%s", got)
+	}
+}
+
+// TestGitEnv_PinsMessageLanguageOnly pins the locale half of the
+// hardened environment. OpError's flags and advice are read off git's
+// English output, so a translated git ("nicht vollständig
+// zusammengeführt") turned every refusal into an unrecognised failure.
+// Messages are forced to C — and only messages: LC_ALL would win over
+// LC_MESSAGES, so it is taken out and its value carried into LC_CTYPE
+// and LANG, which keeps hooks and filename handling in the user's own
+// character set.
+func TestGitEnv_PinsMessageLanguageOnly(t *testing.T) {
+	get := func(env []string, key string) (string, bool) {
+		val, ok := "", false
+		for _, kv := range env {
+			if k, v, found := strings.Cut(kv, "="); found && k == key {
+				val, ok = v, true
+			}
+		}
+		return val, ok
+	}
+	env := gitEnv([]string{"PATH=/bin", "LC_ALL=de_DE.UTF-8", "LC_CTYPE=C", "LANGUAGE=de:fr", "LC_MESSAGES=de_DE.UTF-8", "LANG=fr_FR.UTF-8"})
+	if _, ok := get(env, "LC_ALL"); ok {
+		t.Error("LC_ALL must be removed: it overrides LC_MESSAGES")
+	}
+	if _, ok := get(env, "LANGUAGE"); ok {
+		t.Error("LANGUAGE must be removed: gettext consults it before LC_MESSAGES")
+	}
+	for key, want := range map[string]string{
+		"LC_MESSAGES":           "C",
+		"LC_CTYPE":              "de_DE.UTF-8",
+		"LANG":                  "de_DE.UTF-8",
+		"PATH":                  "/bin",
+		"GIT_TERMINAL_PROMPT":   "0",
+		"GIT_LITERAL_PATHSPECS": "1",
+	} {
+		if got, _ := get(env, key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+
+	// With no LC_ALL the user's own categories are left exactly as set.
+	env = gitEnv([]string{"LANG=ja_JP.UTF-8", "LC_CTYPE=en_US.UTF-8"})
+	if got, _ := get(env, "LANG"); got != "ja_JP.UTF-8" {
+		t.Errorf("LANG = %q, want it untouched", got)
+	}
+	if got, _ := get(env, "LC_CTYPE"); got != "en_US.UTF-8" {
+		t.Errorf("LC_CTYPE = %q, want it untouched", got)
+	}
+	if got, _ := get(env, "LC_MESSAGES"); got != "C" {
+		t.Errorf("LC_MESSAGES = %q, want C", got)
+	}
+}

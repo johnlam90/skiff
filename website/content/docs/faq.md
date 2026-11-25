@@ -16,7 +16,7 @@ Tree-sitter requires CGO, per-language grammar packaging, and platform-specific 
 
 ## Why no config *system*?
 
-A config file is a tax. Every option you expose is one more thing the user has to research, decide on, and maintain. Skiff picks defaults. What's left is three keys the editor writes for you — `icons`, `theme` and `wrap` in `~/.config/skiff/config.json`, each set from a picker or a menu row rather than by hand — plus the two things that genuinely vary per-user, custom actions and format-on-save commands, in tiny JSON files with three or four fields. See [Configuration](/docs/configuration/). No plugin manifests, no keymap file, no dotfile sprawl.
+A config file is a tax. Every option you expose is one more thing the user has to research, decide on, and maintain. Skiff picks defaults. What's left is five keys the editor writes for you — `icons`, `theme`, `wrap`, `gitignore` and `scrollcaret` in `~/.config/skiff/config.json`, each set from a picker or a menu row rather than by hand — plus the two things that genuinely vary per-user, custom actions and format-on-save commands, in tiny JSON files with three or four fields. See [Configuration](/docs/configuration/). No plugin manifests, no keymap file, no dotfile sprawl.
 
 ## Why no `Ctrl+` shortcuts?
 
@@ -32,7 +32,7 @@ Yes. WSL is just Linux from Skiff's perspective. Install the Linux binary with t
 
 ## How do I contribute?
 
-Open a PR against [johnlam90/skiff](https://github.com/johnlam90/skiff). The contribution rules are in the repo's `CLAUDE.md`: every source file gets a corresponding `_test.go` file, every public and private function gets a doc comment, every new file gets the standard header. CI runs `go test ./...` on every push and PR — broken tests block merges.
+Open a PR against [johnlam90/skiff](https://github.com/johnlam90/skiff). The contribution rules are in the repo's `CLAUDE.md`: every source file gets a corresponding `_test.go` file, every public and private function gets a doc comment, every new file gets the standard header. CI runs on every PR and gates the merge on all of it: `go mod tidy` cleanliness, `go build`, `gofmt`, `go vet`, a pinned `staticcheck`, and `go test -race ./...` on Linux and macOS. `make test` and `make lint` run the same checks locally.
 
 ## What's the license?
 

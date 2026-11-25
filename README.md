@@ -1042,8 +1042,14 @@ project where:
 …Skiff asks once: **"Add `gofmt` for `.go` to `.skiff/format.json`?"**
 
 - **Yes** — merges the entry into the project's config (creating
-  `.skiff/format.json` if it didn't exist), auto-trusts the
-  resulting file, and runs the formatter on the save you just made.
+  `.skiff/format.json` if it didn't exist). The prompt lists every
+  command the merged file will hold. If the project had no config,
+  or had one you already trusted, the result is trusted and the
+  formatter runs on the save you just made. If it had a config you
+  have never answered the trust prompt for — or the file changed
+  while the prompt was up — the entry is still added, but the
+  regular trust prompt follows and nothing runs until you say yes
+  to the whole file.
 - **No / Esc** — remembered per-extension in the trust file. You
   won't be re-asked about that file type in this project until you
   manually edit the project config.

@@ -304,6 +304,37 @@ func TestEditorPress_PlacesCaret(t *testing.T) {
 	}
 }
 
+// TestOpenGitHunkAt_DiffsAgainstTheCompareBase pins that a gutter click
+// previews the change the marker stands for. With a compare base set
+// the markers are drawn against that base, but the preview always asked
+// git about HEAD — so a marked line could open "no change here", or a
+// different hunk than the one the gutter showed.
+func TestOpenGitHunkAt_DiffsAgainstTheCompareBase(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "p.txt")
+	if err := os.WriteFile(target, []byte("hello\n"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	tab.GitLines = map[int]editor.GitLineChange{0: editor.GitLineModified}
+	a.diffBase = "main"
+
+	fake := &git.Fake{}
+	fake.Script("diff --unified=3 --no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/ main -- "+target,
+		"@@ -1 +1 @@\n-hell\n+hello\n", nil)
+	a.gitRunner = fake
+
+	if !a.openGitHunkAt(tab, 0, 0) {
+		t.Fatal("expected gutter marker click to be handled")
+	}
+	pumpUntil(t, a, "diff load", idle(&a.diffLoad))
+	if !diffIsOpen(a) {
+		t.Fatal("the hunk against the compare base should open")
+	}
+}
+
 // TestOpenGitHunkAt_RequestsDiffOffThread proves gutter markers are
 // clickable and that the click no longer pays for the git read inline —
 // internal/git's ten-second read timeout used to be a ten-second freeze

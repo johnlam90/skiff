@@ -3,21 +3,21 @@ description: Summarize Skiff GitHub release downloads (totals, by platform, by v
 allowed-tools: Bash(gh api:*), Bash(jq:*)
 ---
 
-Run the following and present the results as a clean summary with three sections (Grand total, By platform, Top 10 versions). Note in the output that the count includes Homebrew installs, CI, mirrors, and scrapers — it's an upper bound, not unique humans. Exclude `checksums.txt` from totals.
+Run the following and present the results as a clean summary with three sections (Grand total, By platform, Top 10 versions). Note in the output that the count includes Homebrew installs, CI, mirrors, and scrapers — it's an upper bound, not unique humans. Exclude `checksums.txt` and its signature `checksums.txt.cosign.bundle` from totals — neither is an install.
 
 ```bash
 gh api repos/johnlam90/skiff/releases --paginate > /tmp/skiff_releases.json
 
 echo "=== GRAND TOTAL ==="
-jq '[.[] | (.assets // [])[] | select(.name != "checksums.txt") | .download_count] | add' /tmp/skiff_releases.json
+jq '[.[] | (.assets // [])[] | select(.name | startswith("checksums.txt") | not) | .download_count] | add' /tmp/skiff_releases.json
 
 echo ""
 echo "=== BY PLATFORM ==="
-jq -r '[.[] | (.assets // [])[] | select(.name != "checksums.txt")] | group_by(.name | capture("_(?<p>(darwin|linux|windows)_(amd64|arm64))") | .p) | map({platform: (.[0].name | capture("_(?<p>(darwin|linux|windows)_(amd64|arm64))") | .p), total: (map(.download_count) | add)}) | sort_by(-.total) | .[] | "\(.total)\t\(.platform)"' /tmp/skiff_releases.json
+jq -r '[.[] | (.assets // [])[] | select(.name | startswith("checksums.txt") | not)] | group_by(.name | capture("_(?<p>(darwin|linux|windows)_(amd64|arm64))") | .p) | map({platform: (.[0].name | capture("_(?<p>(darwin|linux|windows)_(amd64|arm64))") | .p), total: (map(.download_count) | add)}) | sort_by(-.total) | .[] | "\(.total)\t\(.platform)"' /tmp/skiff_releases.json
 
 echo ""
 echo "=== BY VERSION (top 10) ==="
-jq -r '[.[] | {tag: .tag_name, published: .published_at, total: ((.assets // []) | map(select(.name != "checksums.txt") | .download_count) | add // 0)}] | sort_by(-.total) | .[0:10] | .[] | "\(.total)\t\(.tag)\t\(.published)"' /tmp/skiff_releases.json
+jq -r '[.[] | {tag: .tag_name, published: .published_at, total: ((.assets // []) | map(select(.name | startswith("checksums.txt") | not) | .download_count) | add // 0)}] | sort_by(-.total) | .[0:10] | .[] | "\(.total)\t\(.tag)\t\(.published)"' /tmp/skiff_releases.json
 ```
 
 After presenting the summary, briefly call out anything notable (e.g. a release that's an obvious outlier, dominant platform, recent vs. older traction).

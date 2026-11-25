@@ -25,7 +25,7 @@ and `make lint` (gofmt + vet + pinned staticcheck).
 | 010 | Make project-find preview exactly what Replace-All rewrites | P2 | M | 002 (its write step) | DONE |
 | 011 | Make the 10-second refresh tick quiesce when nothing changed | P2 | M | — (coordinates with 004/009) | DONE (37× faster unchanged-merge, 0 allocs; one batched git diff per tick; filterEpoch soundness addition) |
 | 012 | Tighten permissions on per-user state files | P2 | S | — | DONE |
-| 013 | Harden the release pipeline (pins, re-run recovery, signing, dependabot) | P2 | M | — | DONE (signing E2E-provable only on the first real Actions release) |
+| 013 | Harden the release pipeline (pins, re-run recovery, signing, dependabot) | P2 | M | — | DONE (signing proven end to end: `install.sh` verifies v0.2.27's `checksums.txt.cosign.bundle` with cosign) |
 | 014 | Docs truth pass (brew contradiction, stale claims, website decision) | P2 | S-M | — (website step is operator-gated) | DONE (operator chose PUBLISH; pages.yml added — first deploy may need Pages enabled in repo settings) |
 | 015 | Issue templates + CONTRIBUTING + SECURITY | P3 | S | — | DONE (operator: enable private vuln reporting + create `needs-triage` label — two gh one-liners) |
 | 016 | Characterize go-gitignore against real git (investigate-first) | P2 | M | — | DONE (6 divergences pinned; swap recommendation recorded in the plan — operator decision) |
@@ -65,8 +65,12 @@ Recorded so nobody re-audits them:
   cost-free over the wire; not a finding.
 - **`HighlightWindow` full-file style slice**: the doc comment weighs the
   alternative and picks correctly; not worth doing.
-- **Hostile `.gitignore` patterns panicking the editor**: RE2 (no
-  catastrophic backtracking), guarded indexing, byte-equality cache; safe.
+- **Hostile `.gitignore` patterns panicking the editor**: guarded
+  indexing, byte-equality cache; safe. (The RE2 argument made here is
+  obsolete — the matcher is now `internal/gitignore`'s port of git's
+  wildmatch. Its one exponential case, repeated `**/` segments, is
+  memoised per match; see
+  `TestWildmatch_RepeatedStarStarSegmentsTerminate`.)
 - **Symlinked dirs browsing outside the project root**: intentional,
   loop-detected, read-only; same behavior as other editors.
 - **Formatter child inheriting the environment**: inside the recorded
@@ -82,12 +86,10 @@ Recorded so nobody re-audits them:
 ## Follow-ups discovered during execution
 
 - **`drawProjFindBar` width bug** (found by plan 019's draw coverage):
-  the hint/counter fit-checks in `internal/app/projfind.go` compare only
-  against the label's width, never the three mode chips', so at common
-  widths the query field overwrites the match counter and swallows the
-  `.*` chip. Reproducible with ordinary inputs; documented in
-  `projfind_test.go`'s draw test, deliberately not pinned as passing.
-  Needs its own small fix + test.
+  RESOLVED — the bar's fit checks now account for the mode chips and
+  for each other, the query field keeps `minFieldWidth` cells and the
+  labels yield instead. Pinned by
+  `TestProjFindDraw_BarKeepsTheInputAtTheDefaultSize`.
 - **go-gitignore swap decision** (plan 016's findings): RESOLVED — the
   library is gone. `internal/gitignore` is a hand-port of git's own
   pattern parser + wildmatch behind the same two call sites, fenced by

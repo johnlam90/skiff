@@ -514,7 +514,14 @@ project-find sweep — wired in `wireJobs` with one of four policies:
 `Coalesce` (one in flight, one queued follow-up), `Supersede` (every
 start spawns; only the newest landing applies), `Refuse` (busy →
 `Start` returns false), `Concurrent` (every start spawns, every landing
-applies — the formatter and custom actions, which never had a gate). A
+applies — the formatter and custom actions). Custom actions have no gate
+at all. The formatter is concurrent across FILES only: a formatter
+rewrites its file in place, so `execFormatter` keeps one run per path
+and parks a mid-run save's argv in `formatQueued` (one slot, newest
+wins); `handleFormatDone` drops the superseded run's result, writes the
+clean buffer back (the stale run may have overwritten it) and starts the
+follow-up. Don't "simplify" that into a second concurrent run — the
+earlier one can finish last and put old text back. A
 landing the loop's queue refuses is retried from the worker and, if
 still lost, stops counting as in flight, so no gate can strand. The job
 owns the busy/queued/generation
@@ -559,7 +566,8 @@ deleted → set `DiskGone` once.
 mtime. The tick is not the only gate — `saveTab` runs the same check
 (`saveBlockedByDiskChange`) before writing, because a save inside the
 ten-second window would otherwise overwrite the other writer silently;
-the formatter's own rewrite is exempted via `formatInFlight`.
+the formatter's own rewrite is exempted via `formatInFlight`, and
+`reconcileTab` skips a path for the same reason while a run is out.
 
 ### The overlay stack is the routing truth
 Every floating surface (menu, prompt, confirm, pickers, diff, …) lives

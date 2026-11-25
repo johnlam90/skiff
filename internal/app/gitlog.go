@@ -116,9 +116,17 @@ func (a *App) menuFileHistory() {
 // hasFileHistoryTab is the menu enabled-predicate for History of this
 // file: a file-backed tab inside a repo. The file itself may be clean —
 // history is about the past, not the working tree.
+//
+// Single-file mode never loads the whole-repo snapshot, so there the
+// gate is the tab alone: the log is a question about that one path, and
+// a file outside any repo answers it with the "No commit history found"
+// flash rather than a row that is silently dead.
 func (a *App) hasFileHistoryTab() bool {
 	tab := a.activeTabPtr()
-	return tab != nil && tab.Path != "" && !tab.IsImage() && a.gitSnap.Branch != ""
+	if tab == nil || tab.Path == "" || tab.IsImage() {
+		return false
+	}
+	return a.tree == nil || a.gitSnap.IsRepo
 }
 
 // activate opens the selected commit's diff in the diff view. For file

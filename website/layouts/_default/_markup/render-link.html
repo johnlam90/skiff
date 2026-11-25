@@ -1,0 +1,12 @@
+{{- /*
+  Markdown links. A destination written from the site root ("/docs/faq/")
+  is rebased onto the site's base path, so content keeps working when the
+  site is served from a sub-path such as /skiff/. Everything else —
+  absolute URLs, anchors, relative paths — passes through untouched.
+*/ -}}
+{{- $dest := .Destination -}}
+{{- if and (hasPrefix $dest "/") (not (hasPrefix $dest "//")) -}}
+  {{- $dest = strings.TrimPrefix "/" $dest | relURL -}}
+{{- end -}}
+<a href="{{ $dest | safeURL }}"{{ with .Title }} title="{{ . }}"{{ end }}>{{ .Text }}</a>
+{{- /* no trailing newline: one would become a space after the link */ -}}

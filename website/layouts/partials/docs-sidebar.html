@@ -10,7 +10,7 @@
 <aside class="docs-sidebar hidden lg:block" aria-label="Docs navigation">
   <div class="docs-nav-section">Documentation</div>
   <nav class="docs-nav-list">
-    <a href="/docs/" class="docs-nav-link {{ if eq $current "/docs/" }}is-active{{ end }}">Overview</a>
+    <a href="{{ "docs/" | relURL }}" class="docs-nav-link {{ if eq $current ("docs/" | relURL) }}is-active{{ end }}">Overview</a>
     {{ range $docs }}
       <a href="{{ .RelPermalink }}" class="docs-nav-link {{ if eq $current .RelPermalink }}is-active{{ end }}">{{ .Title }}</a>
     {{ end }}
@@ -29,7 +29,7 @@
          style="color: var(--color-muted);">Documentation</label>
   <select id="docs-mobile-select" class="docs-mobile-nav" aria-label="Jump to a docs page">
     <option value="">Jump to a doc…</option>
-    <option value="/docs/" {{ if eq $current "/docs/" }}selected{{ end }}>Overview</option>
+    <option value="{{ "docs/" | relURL }}" {{ if eq $current ("docs/" | relURL) }}selected{{ end }}>Overview</option>
     {{ range $docs }}
       <option value="{{ .RelPermalink }}" {{ if eq $current .RelPermalink }}selected{{ end }}>{{ .Title }}</option>
     {{ end }}

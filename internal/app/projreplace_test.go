@@ -101,6 +101,54 @@ func TestProjReplaceRow_OpenCleanTabSaves(t *testing.T) {
 	}
 }
 
+// TestProjReplaceRow_SaveFailureIsReported: when the clean tab's save
+// fails, that is the line the user has to see — the replacement is in
+// the buffer but not on disk. The success flash used to be written
+// straight over it.
+func TestProjReplaceRow_SaveFailureIsReported(t *testing.T) {
+	root := t.TempDir()
+	p := mkFile(t, root, "sub/a.txt", "old value\n")
+	a := projFindApp(t, root)
+	a.openFile(p)
+	// The folder vanishing under the tab is a save failure that needs
+	// no permission bits, so it fails the same way on every platform.
+	if err := os.RemoveAll(filepath.Join(root, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	a.projFind.query.SetText("old")
+	a.projFind.replace.SetText("new")
+	a.projFind.findMatches = []search.Match{{Path: "sub/a.txt", Line: 1, Col: 0, Text: "old value"}}
+
+	a.projReplaceRowApply(projFindRow{Path: "sub/a.txt", MatchIdx: 0})
+	if !strings.Contains(a.statusMsg, "save failed") || !a.statusErr {
+		t.Fatalf("the save failure should be the flash, as an error; got %q (err=%v)", a.statusMsg, a.statusErr)
+	}
+}
+
+// TestProjReplaceRow_RefreshesMarkdownPreview: a row replace into a tab
+// showing its rendered preview must re-render it, the way replace-all
+// does — otherwise the screen keeps showing text the buffer no longer
+// holds.
+func TestProjReplaceRow_RefreshesMarkdownPreview(t *testing.T) {
+	root := t.TempDir()
+	p := mkFile(t, root, "a.md", "old value\n")
+	a := projFindApp(t, root)
+	a.openFile(p)
+	tab := a.activeTabPtr()
+	a.menuTogglePreviewMarkdown()
+	if a.mdPreview[tab] == nil {
+		t.Fatal("preview should be on")
+	}
+	a.projFind.query.SetText("old")
+	a.projFind.replace.SetText("new")
+	a.projFind.findMatches = []search.Match{{Path: "a.md", Line: 1, Col: 0, Text: "old value"}}
+
+	a.projReplaceRowApply(projFindRow{Path: "a.md", MatchIdx: 0})
+	if got := strings.Join(a.mdPreview[tab].lines, "\n"); !strings.Contains(got, "new value") {
+		t.Fatalf("preview should show the replacement, got %q", got)
+	}
+}
+
 // TestProjReplaceRow_DirtyTabStaysDirty: an open dirty tab gets the
 // replacement in its buffer but the disk file is left alone — the save
 // decision stays with the user.

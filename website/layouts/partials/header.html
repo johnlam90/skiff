@@ -1,15 +1,15 @@
 <header class="site-header">
   <div class="container-page flex items-center justify-between h-16">
-    <a href="/" class="logo-mark" aria-label="Skiff home">
-      <img src="/favicon.svg" alt="" width="28" height="28" class="glyph" aria-hidden="true" />
+    <a href="{{ site.Home.RelPermalink }}" class="logo-mark" aria-label="Skiff home">
+      <img src="{{ "favicon.svg" | relURL }}" alt="" width="28" height="28" class="glyph" aria-hidden="true" />
       <span>Skiff</span>
     </a>
 
     <nav class="hidden lg:flex items-center gap-1" aria-label="Primary">
-      <a href="/docs/" class="nav-link {{ if hasPrefix .RelPermalink "/docs" }}is-active{{ end }}">Docs</a>
-      <a href="/#install" class="nav-link">Install</a>
-      <a href="/#features" class="nav-link">Features</a>
-      <a href="/docs/faq/" class="nav-link">FAQ</a>
+      <a href="{{ "docs/" | relURL }}" class="nav-link {{ if hasPrefix .RelPermalink ("docs/" | relURL) }}is-active{{ end }}">Docs</a>
+      <a href="{{ site.Home.RelPermalink }}#install" class="nav-link">Install</a>
+      <a href="{{ site.Home.RelPermalink }}#features" class="nav-link">Features</a>
+      <a href="{{ "docs/faq/" | relURL }}" class="nav-link">FAQ</a>
     </nav>
 
     <div class="hidden lg:flex items-center gap-3">
@@ -41,12 +41,20 @@
 </header>
 
 <div id="mobile-menu" class="mobile-menu" role="dialog" aria-modal="true" aria-label="Site menu">
+  {{/* The menu covers the whole screen, header toggle included, so it
+       needs its own way out — a touchscreen has no Escape key. */}}
+  <button type="button" class="mobile-menu-close btn btn-ghost" data-mobile-close aria-label="Close menu">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <line x1="5" y1="5" x2="19" y2="19"/>
+      <line x1="19" y1="5" x2="5" y2="19"/>
+    </svg>
+  </button>
   <nav class="nav-list" aria-label="Mobile primary">
-    <a href="/" class="nav-link">Home</a>
-    <a href="/docs/" class="nav-link">Docs</a>
-    <a href="/#install" class="nav-link">Install</a>
-    <a href="/#features" class="nav-link">Features</a>
-    <a href="/docs/faq/" class="nav-link">FAQ</a>
+    <a href="{{ site.Home.RelPermalink }}" class="nav-link">Home</a>
+    <a href="{{ "docs/" | relURL }}" class="nav-link">Docs</a>
+    <a href="{{ site.Home.RelPermalink }}#install" class="nav-link">Install</a>
+    <a href="{{ site.Home.RelPermalink }}#features" class="nav-link">Features</a>
+    <a href="{{ "docs/faq/" | relURL }}" class="nav-link">FAQ</a>
     <a href="{{ site.Params.github_url }}" rel="noopener" target="_blank" class="nav-link">GitHub →</a>
   </nav>
 </div>

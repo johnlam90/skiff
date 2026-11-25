@@ -1,0 +1,9 @@
+{{- /*
+  Markdown images, rebased the same way as links (see render-link.html).
+*/ -}}
+{{- $src := .Destination -}}
+{{- if and (hasPrefix $src "/") (not (hasPrefix $src "//")) -}}
+  {{- $src = strings.TrimPrefix "/" $src | relURL -}}
+{{- end -}}
+<img src="{{ $src | safeURL }}" alt="{{ .PlainText }}"{{ with .Title }} title="{{ . }}"{{ end }} />
+{{- /* no trailing newline */ -}}

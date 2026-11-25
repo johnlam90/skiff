@@ -64,9 +64,11 @@ func (m *Manager) Import(srcs []string, dstDir string, move bool, progress func(
 	return cs, errors.Join(failures...)
 }
 
-// importOne lands a single source in d and returns where it went. The
-// destination name is chosen fresh, so on failure whatever exists under
-// it is this call's own partial output and is safe to remove.
+// importOne lands a single source in d and returns where it went. A
+// failed copy removes its own partial output (see copyTree); nothing
+// is removed here, because a failure can also mean "the copy landed
+// but the original could not be deleted" — and deleting the copy then
+// would leave neither.
 func (m *Manager) importOne(s, d string, move bool, progress func()) (string, error) {
 	if s == m.root {
 		return "", ErrProjectRoot
@@ -88,7 +90,6 @@ func (m *Manager) importOne(s, d string, move bool, progress func()) (string, er
 		err = copyTree(s, dest, progress)
 	}
 	if err != nil {
-		_ = os.RemoveAll(dest)
 		return "", err
 	}
 	return dest, nil

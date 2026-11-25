@@ -1,0 +1,6 @@
+{{- /*
+  relurl rebases a site-root path onto the site's base path, for raw HTML
+  in content that the markdown render hooks never see:
+      <img src="{{< relurl "img/screenshots/x.png" >}}">
+*/ -}}
+{{- .Get 0 | relURL -}}

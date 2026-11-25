@@ -323,3 +323,34 @@ func TestReloadConflictedTab_RerendersMarkdownPreview(t *testing.T) {
 		t.Fatalf("the preview still shows the discarded buffer: %q", a.mdPreviewFor(tab).lines)
 	}
 }
+
+// TestStatusBar_ConflictMarkerReopensThePrompt: the "⚠ disk conflict"
+// marker is the one thing on screen saying the conflict still stands,
+// so pressing it should take the user to the prompt — as the git and
+// markdown chips beside it already act on a press. It was a dead label;
+// the only way back was the ≡ menu row.
+func TestStatusBar_ConflictMarkerReopensThePrompt(t *testing.T) {
+	a, _ := conflictSetup(t, "mine\n", "theirs\n")
+	a.reconcileOpenTabsWithDisk()
+	dirtyOverlay(t, a).HandleKey(tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone))
+	if a.overlays.IsOpen() {
+		t.Fatal("Esc should dismiss the prompt")
+	}
+
+	a.draw()
+	a.screen.Show()
+	bar := []rune(screenLine(a.screen.(tcell.SimulationScreen), a.height-1))
+	x := -1
+	for i, r := range bar {
+		if r == '⚠' {
+			x = i
+		}
+	}
+	if x < 0 {
+		t.Fatalf("the conflict marker should be on the status bar: %q", string(bar))
+	}
+	a.statusBarClick(x + 2)
+	if _, ok := a.overlays.Top().(*overlay.Dirty); !ok {
+		t.Fatalf("a press on the marker should reopen the prompt; top = %T", a.overlays.Top())
+	}
+}

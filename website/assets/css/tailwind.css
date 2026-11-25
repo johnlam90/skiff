@@ -767,6 +767,13 @@
     padding: 5rem 1.5rem 2rem;
   }
   .mobile-menu.is-open { display: block; }
+  /* The overlay sits above the header, so its close button goes where
+     the header's menu button was: same corner, same reach. */
+  .mobile-menu .mobile-menu-close {
+    position: absolute;
+    top: 0.75rem;
+    right: 1rem;
+  }
   .mobile-menu .nav-list {
     display: flex;
     flex-direction: column;
