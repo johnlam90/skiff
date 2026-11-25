@@ -453,3 +453,24 @@ func TestStatusError_ReadableOnEveryTheme(t *testing.T) {
 		t.Errorf("offshore: readable Error was rewritten to %v on %v", fg, bg)
 	}
 }
+
+// TestStatusError_LowColorPaletteIsLeftAlone pins the degraded case. A
+// low-colour palette's surfaces are ColorDefault — "whatever the
+// terminal uses" — which has no RGB to measure, so the contrast walk
+// ran on garbage and handed a monochrome terminal a synthesised 24-bit
+// colour. There the pairing is the palette's own Error over its own
+// status background, and Attrs.Error (applied by the caller) carries
+// the signal.
+func TestStatusError_LowColorPaletteIsLeftAlone(t *testing.T) {
+	for _, colors := range []int{0, 8, 16} {
+		th := Degrade(Default(), colors)
+		if !th.LowColor {
+			t.Fatalf("%d colours should degrade", colors)
+		}
+		fg, bg := th.StatusError()
+		if fg != th.Error || bg != th.StatusBG {
+			t.Errorf("%d colours: StatusError = (%v, %v), want the palette's own (%v, %v)",
+				colors, fg, bg, th.Error, th.StatusBG)
+		}
+	}
+}

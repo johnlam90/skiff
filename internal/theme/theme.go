@@ -129,7 +129,15 @@ func (t Theme) SelectionFg(fg tcell.Color) tcell.Color {
 // with a foreground walked to 4.5:1 against it — which keeps the hue as
 // the signal instead of walking it to a near-black that reads like any
 // other status text.
+//
+// A low-colour palette is returned as it is. Its surfaces are
+// ColorDefault, which has no RGB to measure a contrast against — the
+// walk below would run on garbage and synthesise a 24-bit colour for a
+// terminal that cannot show one. Attrs.Error is the signal there.
 func (t Theme) StatusError() (fg, bg tcell.Color) {
+	if t.LowColor {
+		return t.Error, t.StatusBG
+	}
 	if ContrastRatio(t.Error, t.StatusBG) >= minStatusContrast {
 		return t.Error, t.StatusBG
 	}
