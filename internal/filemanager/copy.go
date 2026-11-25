@@ -80,12 +80,8 @@ func (m *Manager) Duplicate(src string, progress func()) (Changeset, error) {
 // and inside the root, the source present, the destination a real
 // folder, and a folder never pasted into itself or a descendant.
 //
-// The into-itself check compares resolved paths, not the raw strings: a
-// destination that looks unrelated to src by prefix can still symlink
-// to somewhere inside it, and copyTree would then walk into its own
-// growing output. EvalSymlinks falls back to the original on error (a
-// dangling link, permission trouble) — best-effort, same as every other
-// symlink resolution in the editor.
+// The into-itself check is holds: without it copyTree would walk into
+// its own growing output.
 func (m *Manager) pasteGuard(src, dstDir string) (s, d string, isDir bool, err error) {
 	s, err = m.guard(src)
 	if err != nil {
@@ -102,20 +98,51 @@ func (m *Manager) pasteGuard(src, dstDir string) (s, d string, isDir bool, err e
 	if info, err := os.Stat(d); err != nil || !info.IsDir() {
 		return "", "", false, fmt.Errorf("%s is not a folder", filepath.Base(d))
 	}
-	if isDir {
-		rSrc, rDir := s, d
-		if resolved, err := filepath.EvalSymlinks(s); err == nil {
-			rSrc = resolved
-		}
-		if resolved, err := filepath.EvalSymlinks(d); err == nil {
-			rDir = resolved
-		}
-		sep := string(filepath.Separator)
-		if rDir == rSrc || strings.HasPrefix(rDir+sep, rSrc+sep) {
-			return "", "", false, ErrIntoItself
-		}
+	if isDir && holds(s, d) {
+		return "", "", false, ErrIntoItself
 	}
 	return s, d, isDir, nil
+}
+
+// holds reports whether the folder src is dir or one of its ancestors —
+// the into-itself test Move, Copy and Import share.
+//
+// It asks the filesystem, not the strings. dir is resolved first — a
+// destination that looks unrelated to src by prefix can still symlink
+// to somewhere inside it — and then every ancestor of the resolved path
+// is compared with src as a FILE (os.SameFile). Comparing spellings
+// instead misses two real cases: the filesystem root, because "/" plus
+// a separator is a prefix of nothing, and a case-insensitive volume,
+// where ~/projects and ~/Projects are one folder with two names. Either
+// one sends copyTree into its own growing output.
+//
+// Where the filesystem cannot answer — src cannot be stat'ed — it falls
+// back to the spelling, best-effort like every other symlink resolution
+// in the editor.
+func holds(src, dir string) bool {
+	rDir := dir
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		rDir = resolved
+	}
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		rSrc := src
+		if resolved, err := filepath.EvalSymlinks(src); err == nil {
+			rSrc = resolved
+		}
+		sep := string(filepath.Separator)
+		return rDir == rSrc || strings.HasPrefix(rDir+sep, strings.TrimSuffix(rSrc, sep)+sep)
+	}
+	for d := rDir; ; {
+		if info, err := os.Stat(d); err == nil && os.SameFile(srcInfo, info) {
+			return true
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return false
+		}
+		d = parent
+	}
 }
 
 // isDirEntry reports whether path is a directory for naming and guard
