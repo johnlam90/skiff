@@ -436,9 +436,12 @@ func (a *App) reconcileTab(tab *editor.Tab, p tabProbe) {
 			return
 		}
 		// Don't yank an overlay the user is already working in out
-		// from under them; the next tick will prompt instead. Tab
-		// Mtime is left alone so that tick still sees the change.
-		if a.anyModalOpen() {
+		// from under them — or a docked bar: openDiskConflict runs
+		// closeAllModals, which drops the strip and the find query or
+		// replace pair typed into it. The next tick will prompt
+		// instead; tab Mtime is left alone so that tick still sees
+		// the change.
+		if a.landingWouldInterrupt() {
 			return
 		}
 		a.openDiskConflict(tab, p.mtime)
