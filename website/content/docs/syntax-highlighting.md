@@ -16,7 +16,7 @@ When you open a file, Skiff picks a Chroma lexer using these rules, in order:
 2. **By content.** When the filename doesn't match a known lexer, Chroma sniffs the first kilobyte for shebangs, XML prologues, and other magic markers.
 3. **Fallback.** Plain text — no highlighting, no errors.
 
-Tokens map onto the editor's Tokyo Night-inspired palette. Keywords, strings, numbers, comments, operators, types, function names, variables, and tags each get their own color, picked to be readable on the editor's dark background.
+Tokens map onto the active theme's palette. Keywords, strings, numbers, comments, operators, types, function names, variables, and tags each get their own color, tuned to stay readable on that theme's background.
 
 ## Supported languages (the highlight-relevant subset)
 
@@ -42,7 +42,11 @@ If your language isn't on this list, search [Chroma's lexer catalog](https://git
 
 ## The theme
 
-Tokyo Night, baked in. There is no theming config — that's deliberate. A code editor that looks the same on every machine is one less thing to argue about in a PR review. The palette is defined in `internal/theme/theme.go` if you want to fork.
+Tokyo Night is the default, and there are 27 built-in themes in all, light and dark. `≡` → **Theme…** opens a picker that previews each one live as you move through the list; `Enter` keeps it and `Esc` puts the old one back. The choice is saved as the `theme` key in `~/.config/skiff/config.json`.
+
+What there isn't is a theme *format*: no user-defined palettes, no per-token overrides. The palettes live in `internal/theme/` if you want to fork one.
+
+On a terminal with fewer than 256 colors Skiff stops relying on hue and uses bold, underline and reverse video instead, so syntax colors are flattened there by design.
 
 ## Why Chroma instead of tree-sitter
 

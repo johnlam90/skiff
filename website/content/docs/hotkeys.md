@@ -19,6 +19,8 @@ So `Esc` is the leader. Tap `Esc`, then within half a second tap a bound letter.
 | `Esc n`     | New file               | File  |
 | `Esc w`     | Close tab              | File  |
 | `Esc o`     | Reopen closed tab      | File  |
+| `Esc .`     | Next tab               | File  |
+| `Esc ,`     | Previous tab           | File  |
 | `Esc u`     | Undo                   | Edit  |
 | `Esc r`     | Redo                   | Edit  |
 | `Esc c`     | Copy selection         | Edit  |
@@ -28,6 +30,8 @@ So `Esc` is the leader. Tap `Esc`, then within half a second tap a bound letter.
 | `Esc k`     | Move line up           | Edit  |
 | `Esc j`     | Move line down         | Edit  |
 | `Esc d`     | Duplicate line         | Edit  |
+| `Esc a`     | Select all             | Edit  |
+| `Esc L`     | Select line            | Edit  |
 | `Esc f`     | Find in file           | Go    |
 | `Esc F`     | Find in project        | Go    |
 | `Esc l`     | Go to line             | Go    |
@@ -35,6 +39,9 @@ So `Esc` is the leader. Tap `Esc`, then within half a second tap a bound letter.
 | `Esc b`     | Move to previous word  | Go    |
 | `Esc e`     | Move to next word      | Go    |
 | `Esc %`     | Go to matching bracket | Go    |
+| `Esc <`     | Go to start of file    | Go    |
+| `Esc >`     | Go to end of file      | Go    |
+| `Esc ;`     | Find next              | Go    |
 | `Esc g`     | Focus the Git panel    | Git   |
 | `Esc t`     | Toggle sidebar         | View  |
 | `Esc z`     | Toggle line wrap       | View  |

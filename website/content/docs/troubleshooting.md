@@ -26,7 +26,15 @@ OSC 52 is the mechanism. Most terminal emulators ship with OSC 52 writes disable
 
 **Ghostty.** Settings → "OSC 52 clipboard write" → Allow.
 
-**tmux.** Run `tmux show-options -g set-clipboard`. If it's `off`, run `tmux set-option -g set-clipboard on` (default since tmux 3.2). Skiff also wraps OSC 52 in tmux passthrough automatically when `$TMUX` is set, so this should mostly be a non-issue.
+**tmux.** A stock tmux drops the copy, so this one needs a line of config. Inside tmux Skiff sends every copy twice — once as a plain OSC 52 and once wrapped in tmux's passthrough — and tmux forwards whichever its config allows. Out of the box it allows neither: `set-clipboard` defaults to `external`, which ignores OSC 52 from programs running inside tmux, and `allow-passthrough` has defaulted to `off` since tmux 3.3. Turn either one on in `~/.tmux.conf`:
+
+```
+set -g set-clipboard on
+# or
+set -g allow-passthrough on
+```
+
+Then `tmux source-file ~/.tmux.conf` (or restart tmux). `tmux show-options -g set-clipboard` and `tmux show-options -g allow-passthrough` show what is in effect. The outer terminal still has to accept OSC 52 itself — see the entries above.
 
 ## OSC 52 isn't pasting into my local app
 
@@ -110,7 +118,7 @@ Below 256 colors Skiff stops relying on hue and switches to an attribute-based p
 
 So both failures are normal and neither is a bug. A headless box with no fonts installed reports "no Nerd Font" and turns icons off even though your terminal would render them perfectly. A server that happens to have a Nerd Font installed for some unrelated reason turns icons on for a client that can't draw them, and you get tofu boxes.
 
-Auto-detection is structurally incapable of getting this right over SSH, so decide it yourself — on the server, in `~/.config/skiff/config.json`:
+Auto-detection is structurally incapable of getting this right over SSH, so decide it yourself. The quick way is `≡` → **Icons…**: a picker with Auto, On and Off that previews each choice in the file tree as you move, so you can see whether your terminal draws the glyphs before you commit. It writes the same key you can set by hand — on the server, in `~/.config/skiff/config.json`:
 
 ```json
 { "icons": "on" }
