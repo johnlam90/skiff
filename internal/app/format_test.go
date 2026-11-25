@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -1330,5 +1331,22 @@ func TestExecFormatter_MissingBinaryIsNotReportedAsFormatted(t *testing.T) {
 	}
 	if n := a.formatInFlight[target]; n != 0 {
 		t.Fatalf("in-flight count should be retired, got %d", n)
+	}
+}
+
+// TestFormatterErrPreview_CutsOnCharacterBoundary pins the one line of
+// formatter output a failure flash quotes: first line only, at most 80
+// characters, and never cut through the middle of one — the byte slice
+// it replaces could end the flash on half a multi-byte character.
+func TestFormatterErrPreview_CutsOnCharacterBoundary(t *testing.T) {
+	if got := formatterErrPreview([]byte("short\nsecond line")); got != "short" {
+		t.Fatalf("first line only, got %q", got)
+	}
+	got := formatterErrPreview([]byte(strings.Repeat("é", 200)))
+	if !utf8.ValidString(got) {
+		t.Fatalf("preview cut a character in half: %q", got)
+	}
+	if want := strings.Repeat("é", 80) + "…"; got != want {
+		t.Fatalf("preview = %q, want 80 characters and an ellipsis", got)
 	}
 }

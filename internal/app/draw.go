@@ -698,6 +698,15 @@ func (a *App) drawSplitter() {
 	}
 }
 
+// drawCentered paints s centred in the w cells starting at x, shortened
+// with an ellipsis when it does not fit. It measures and advances in
+// cells: the loop it replaces used each rune's BYTE offset as its
+// column, so a "·" or "≡" pushed the rest of the line two cells right.
+func (a *App) drawCentered(x, y, w int, s string, st tcell.Style) {
+	s = textdraw.ClipEllipsis(s, w)
+	textdraw.DrawClipped(a.screen, x+(w-textdraw.Width(s))/2, y, w, s, st)
+}
+
 // emptyEditorHints are the ways out of the "no file open" state, in the
 // order a new user is likely to want them, for the session shape the
 // editor is actually in. The lines used to be one fixed pair that told
@@ -748,11 +757,7 @@ func (a *App) drawEmptyEditor() {
 	bold := tcell.StyleDefault.Background(bg).Foreground(a.theme.Text).Bold(true)
 	textdraw.Fill(a.screen, ex, ey, ew, eh, muted)
 	cy := ey + eh/2
-	title := trimRunes("No file open", ew)
-	cx1 := ex + (ew-runeLen(title))/2
-	for i, r := range title {
-		textdraw.Cell(a.screen, cx1+i, cy-1, r, nil, bold)
-	}
+	a.drawCentered(ex, cy-1, ew, "No file open", bold)
 	// Hints stack downward from one row below the title. Rows that
 	// would fall outside the editor rect are dropped rather than
 	// clipped, so a two-row pane still shows the title cleanly.
@@ -761,11 +766,7 @@ func (a *App) drawEmptyEditor() {
 		if hy >= ey+eh {
 			break
 		}
-		msg := trimRunes(hint, ew)
-		hx := ex + (ew-runeLen(msg))/2
-		for i, r := range msg {
-			textdraw.Cell(a.screen, hx+i, hy, r, nil, muted)
-		}
+		a.drawCentered(ex, hy, ew, hint, muted)
 	}
 	a.screen.HideCursor()
 }

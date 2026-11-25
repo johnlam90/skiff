@@ -650,18 +650,26 @@ func (a *App) execFormatter(tabPath string, argv []string) {
 				err = nil
 				skipped = true
 			case len(out) > 0:
-				preview := string(out)
-				if i := indexNewline(preview); i >= 0 {
-					preview = preview[:i]
-				}
-				if len(preview) > 80 {
-					preview = preview[:80] + "…"
-				}
-				err = fmt.Errorf("%v: %s", err, preview)
+				err = fmt.Errorf("%v: %s", err, formatterErrPreview(out))
 			}
 		}
 		return formatResult{tabPath: tabPath, label: label, skipped: skipped}, err
 	})
+}
+
+// formatterErrPreview is the slice of a failed formatter's output the
+// status flash quotes: its first line, capped at 80 characters. The cap
+// counts runes — cutting at byte 80 could end the flash on half a
+// multi-byte character.
+func formatterErrPreview(out []byte) string {
+	preview := string(out)
+	if i := indexNewline(preview); i >= 0 {
+		preview = preview[:i]
+	}
+	if rs := []rune(preview); len(rs) > 80 {
+		preview = string(rs[:80]) + "…"
+	}
+	return preview
 }
 
 // indexNewline returns the index of the first newline in s, or -1.

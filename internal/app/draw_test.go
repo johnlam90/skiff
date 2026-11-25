@@ -907,6 +907,26 @@ func TestDrawEmptyEditor_ClipsEveryHintRow(t *testing.T) {
 	}
 }
 
+// TestDrawEmptyEditor_HintsPaintWithoutGaps pins that a hint is painted
+// cell by cell as written. The painter used the byte offset of each
+// rune as its column, so everything after a "·" or "≡" (three bytes,
+// one cell) landed two cells too far right and the line came out with
+// holes in it.
+func TestDrawEmptyEditor_HintsPaintWithoutGaps(t *testing.T) {
+	dir := t.TempDir()
+	mkFile(t, dir, "a.txt", "x")
+	a := newTestApp(t, dir)
+	a.draw()
+	a.screen.Show()
+	scr := a.screen.(tcell.SimulationScreen)
+	_, ey, _, eh := a.editorRect()
+	for row, hint := range a.emptyEditorHints() {
+		if line := screenLine(scr, ey+eh/2+1+row); !strings.Contains(line, hint) {
+			t.Errorf("hint row %d: want %q painted intact, got %q", row, hint, strings.TrimSpace(line))
+		}
+	}
+}
+
 // TestDrawStatusBar_DiskConflictMarker pins the persistent conflict
 // warning: dismissing the conflict overlay must not mean forgetting the
 // conflict, so the status bar keeps a marker until the tab is saved or
