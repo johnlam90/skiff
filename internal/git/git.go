@@ -134,6 +134,7 @@ func command(ctx context.Context, root string, args []string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", root}, args...)...)
 	cmd.Env = hardenedEnv()
 	cmd.WaitDelay = time.Second
+	detachCmd(cmd)
 	return cmd
 }
 
